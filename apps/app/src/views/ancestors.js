@@ -377,6 +377,7 @@ export function ancestorsView(app) {
     track.classList.add('no-bar');
     // Ziehen statt Scrollbalken: mit Finger oder Maus direkt am Baum.
     let dragging = false, sx = 0, sy = 0, sl = 0, st = 0, moved = 0;
+  track.addEventListener('dragstart', (e) => e.preventDefault());
     track.addEventListener('pointerdown', (e) => {
       dragging = true; moved = 0;
       sx = e.clientX; sy = e.clientY;

@@ -158,7 +158,9 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .edges path.accent { stroke: var(--accent); stroke-width: 3.5; }
 .edges path.dashed { stroke-dasharray: 6 7; opacity: 0.6; }
 
-.chart { position: relative; }
+/* Dragging the canvas must not sweep a text selection across the nodes.
+   Copying a name belongs in the person view, not here. */
+.chart, .tree-chart { position: relative; user-select: none; -webkit-user-select: none; }
 .graph-dot { border: 0; cursor: pointer; }
 .chart > * { position: absolute; }
 

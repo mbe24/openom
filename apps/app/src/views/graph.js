@@ -351,6 +351,7 @@ export function graphView(app) {
   // --- Pan: Ziehen mit der Maus, Cursor zeigt den Zustand
   let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
   viewport.style.cursor = 'grab';
+  viewport.addEventListener('dragstart', (e) => e.preventDefault());
   viewport.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
     dragging = true;
