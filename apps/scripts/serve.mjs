@@ -27,7 +27,14 @@ const TYPES = {
 
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const path = url.pathname === '/' ? '/' + START : url.pathname;
+  // Umleiten statt ausliefern: die Startseite unter "/" auszugeben laesst alle
+  // relativen Pfade darin gegen die Wurzel aufloesen — die Seite bliebe leer.
+  if (url.pathname === '/') {
+    res.writeHead(302, { location: '/' + START }).end();
+    return;
+  }
+  
+  const path = url.pathname;
   // normalize + Praefixpruefung: kein Ausbrechen aus dem Projektordner.
   const file = join(ROOT, normalize(path).replace(/^(\.\.[/\\])+/, ''));
   if (!file.startsWith(ROOT)) { res.writeHead(403).end('forbidden'); return; }

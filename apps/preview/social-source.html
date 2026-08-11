@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>openom — social previews (render source)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #d9dedb; display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 24px; font-family: Inter, system-ui, sans-serif; }
+  .card { width: 1280px; height: 640px; position: relative; box-sizing: border-box; overflow: hidden; }
+  .lockup { display: flex; align-items: center; gap: 30px; }
+  .tile { width: 100px; height: 100px; border-radius: 29.5px; display: grid; place-items: center; flex: none; }
+  .tile span { font-family: Newsreader, Georgia, serif; font-size: 42px; font-weight: 500; letter-spacing: -.02em; }
+  .word { font-family: Newsreader, Georgia, serif; font-size: 84px; font-weight: 500; letter-spacing: -.03em; display: flex; line-height: 1; }
+</style>
+</head>
+<body>
+
+<!-- 1280×640 — GitHub social preview -->
+<div class="card" id="social-github" style="background:#f8fbf9;display:flex;flex-direction:column;justify-content:center;padding:0 96px">
+  <div style="position:absolute;right:-60px;top:-40px;width:520px;height:520px;border-radius:50%;background:#eaf0ec"></div>
+
+  <div style="position:absolute;right:76px;top:82px;width:276px;height:276px;display:grid;place-items:center">
+    <svg width="244" height="244" viewBox="0 0 28 28" fill="none">
+      <path d="M13.1 27V15.4c0-2.6-2.1-3.5-3-5.4l1.6-.8c.8 1.7 1.4 2.4 1.4 2.4V8.4c0-1.9 1.1-2.8 2.1-4.5l1.4 1.1c-1 1.5-1.7 2.1-1.7 3.4v4.2s1-1.3 2-2.8l1.5 1.1c-1.4 1.9-3.5 3.4-3.5 5.4V27z" fill="#4a6b5d"/>
+      <circle cx="9.2" cy="8" r="2.7" fill="#4a6b5d"/>
+      <circle cx="19.1" cy="8.4" r="2.7" fill="#4a6b5d"/>
+      <circle cx="16.8" cy="3" r="2.7" fill="#4a6b5d"/>
+      <circle cx="5.4" cy="11.6" r="1.9" fill="#8aa89b"/>
+      <circle cx="23" cy="12.1" r="1.9" fill="#8aa89b"/>
+      <circle cx="11.2" cy="2.1" r="1.9" fill="#8aa89b"/>
+      <circle cx="22.3" cy="4.3" r="1.5" fill="#8aa89b"/>
+      <circle cx="3.4" cy="7.2" r="1.5" fill="#8aa89b"/>
+    </svg>
+  </div>
+
+  <div class="lockup" style="position:relative;margin-bottom:28px">
+    <div class="tile" style="background:#4a6b5d"><span style="color:#fff">om</span></div>
+    <div class="word"><span style="color:#1c1c1e">open</span><span style="color:#4a6b5d">om</span></div>
+  </div>
+  <div style="position:relative;font-family:Newsreader,Georgia,serif;font-size:34px;color:#1c1c1e;margin-bottom:14px">Family trees that stay yours.</div>
+  <div style="position:relative;font-size:22px;color:#6e6e73;line-height:1.5">Privacy-first, open source, many languages.<br>Desktop, Android, iOS and the browser — one app.</div>
+</div>
+
+<!-- 1280×640 — web app og:image -->
+<div class="card" id="social-web" style="background:#16211c;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:0 96px">
+
+  <div style="position:relative;width:168px;height:168px;margin-bottom:26px;display:grid;place-items:center">
+    <svg width="168" height="168" viewBox="0 0 28 28" fill="none">
+      <path d="M13.1 27V15.4c0-2.6-2.1-3.5-3-5.4l1.6-.8c.8 1.7 1.4 2.4 1.4 2.4V8.4c0-1.9 1.1-2.8 2.1-4.5l1.4 1.1c-1 1.5-1.7 2.1-1.7 3.4v4.2s1-1.3 2-2.8l1.5 1.1c-1.4 1.9-3.5 3.4-3.5 5.4V27z" fill="#a8c6b6"/>
+      <circle cx="9.2" cy="8" r="2.7" fill="#a8c6b6"/>
+      <circle cx="19.1" cy="8.4" r="2.7" fill="#a8c6b6"/>
+      <circle cx="16.8" cy="3" r="2.7" fill="#a8c6b6"/>
+      <circle cx="5.4" cy="11.6" r="1.9" fill="#6d907f"/>
+      <circle cx="23" cy="12.1" r="1.9" fill="#6d907f"/>
+      <circle cx="11.2" cy="2.1" r="1.9" fill="#6d907f"/>
+      <circle cx="22.3" cy="4.3" r="1.5" fill="#6d907f"/>
+      <circle cx="3.4" cy="7.2" r="1.5" fill="#6d907f"/>
+    </svg>
+  </div>
+
+  <div class="lockup" style="margin-bottom:34px">
+    <div class="tile" style="background:#78a390"><span style="color:#16211c">om</span></div>
+    <div class="word"><span style="color:#f4f6f4">open</span><span style="color:#78a390">om</span></div>
+  </div>
+  <div style="font-family:Newsreader,Georgia,serif;font-size:34px;color:#f4f6f4;margin-bottom:16px">Try it in the browser.</div>
+  <div style="font-size:21px;color:rgba(244,246,244,.62);line-height:1.5">Works without an account. Sync when you want it —<br>encrypted on your device, so the server never sees a name.</div>
+</div>
+
+</body>
+</html>

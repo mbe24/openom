@@ -2,7 +2,7 @@
   "name": "openom",
   "private": true,
   "version": "0.1.0",
-  "description": "openom — local-first family tree (Tauri 2 prototype, no build step)",
+  "description": "openom — privacy-first family tree (Tauri 2 prototype, no build step)",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",

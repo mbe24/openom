@@ -95,6 +95,13 @@ openom/
 └─ README.md
 ```
 
+`app/` ist nicht "das Web" — auf Android laeuft derselbe Ordner. Tauri fuegt
+nichts hinzu ausser Fenster und SQLite-Store.
+
+`openom-store` liegt bewusst weder in der Huelle noch im Server: beide brauchen
+dieselbe Fassung des Vertrags, und die Konformitaetssuite laeuft gegen jede
+Implementierung — auch spaeter gegen S3.
+
 ### The interfaces
 
 The UI knows: `TreeLibrary`, `FamilyTree`, the query functions, `TreeTransfer`,
@@ -186,6 +193,18 @@ The interfaces are in place, the implementations are not.
 ## License
 
 AGPL-3.0-or-later — see `LICENSE`.
+
+## Brand
+
+`apps/app/brand/` holds the mark: `wordmark.svg` (+ dark), `mark.svg` (the
+monogram tile), `tree.svg`, `icon.svg` (tree in a filled disc — app icon),
+`favicon.svg`, and the two 1280 × 640 previews `social-github.png` and
+`social-web.png`. The source for the two PNGs is `apps/preview/social-source.html`;
+re-render it if the wording changes.
+
+Upload `social-github.png` under Settings → Social preview. The web app carries
+`social-web.png` itself through `og:image` — it promises something different
+from the repository.
 
 ## Documents
 

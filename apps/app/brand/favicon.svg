@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28" role="img" aria-label="openom">
+  <defs><clipPath id="d"><circle cx="14" cy="14" r="14"></circle></clipPath></defs>
+  <circle cx="14" cy="14" r="14" fill="#4a6b5d"></circle>
+  <g clip-path="url(#d)"><g transform="translate(0 5.2) scale(1.06) translate(-0.84 -0.84)">
+  <path d="M13.1 27V15.4c0-2.6-2.1-3.5-3-5.4l1.6-.8c.8 1.7 1.4 2.4 1.4 2.4V8.4c0-1.9 1.1-2.8 2.1-4.5l1.4 1.1c-1 1.5-1.7 2.1-1.7 3.4v4.2s1-1.3 2-2.8l1.5 1.1c-1.4 1.9-3.5 3.4-3.5 5.4V27z" fill="#eaf0ec"></path>
+  <circle cx="9.2" cy="8" r="2.7" fill="#eaf0ec"></circle>
+  <circle cx="19.1" cy="8.4" r="2.7" fill="#eaf0ec"></circle>
+  <circle cx="16.8" cy="3" r="2.7" fill="#eaf0ec"></circle>
+  <circle cx="5.4" cy="11.6" r="1.9" fill="#9dbfae"></circle>
+  <circle cx="23" cy="12.1" r="1.9" fill="#9dbfae"></circle>
+  <circle cx="11.2" cy="2.1" r="1.9" fill="#9dbfae"></circle>
+  <circle cx="22.3" cy="4.3" r="1.5" fill="#9dbfae"></circle>
+  <circle cx="3.4" cy="7.2" r="1.5" fill="#9dbfae"></circle>
+  </g></g>
+</svg>
