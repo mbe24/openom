@@ -1,7 +1,7 @@
 name: Deploy to GitHub Pages
 
-# Veroeffentlicht die Webapp auf GitHub Pages. Es gibt nichts zu bauen — der
-# Ordner app/ wird so ausgeliefert, wie Tauri ihn auch laedt.
+# Publishes the web app to GitHub Pages. There is nothing to build — app/ ships
+# exactly as Tauri loads it; only %SITE_URL% is filled in.
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   pages: write
   id-token: write
 
-# Eine Veroeffentlichung zur Zeit; laufende nicht abbrechen.
+# One deployment at a time; never cancel a running one.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -25,11 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/configure-pages@v5
+      - id: pages
+        uses: actions/configure-pages@v5
 
-      # Besucher landen in der App, nicht in einer Vorschauseite. Die
-      # Geraeterahmen liegen unter /preview.html daneben.
-      # .nojekyll: sonst verschluckt Pages Ordner mit fuehrendem Unterstrich.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Visitors land in the app, not in a preview page. The device frames sit
+      # next to it under /preview.html.
+      # .nojekyll: otherwise Pages swallows folders with a leading underscore.
       - name: Prepare site
         run: |
           mkdir -p _site
@@ -37,6 +42,14 @@ jobs:
           cp apps/preview/desktop.html _site/preview.html
           sed -i 's#\.\./app/index.html#index.html#g' _site/preview.html
           touch _site/.nojekyll
+
+      # Absolute origin for the social-preview meta. The deploy knows its own
+      # URL, so .env.demo is only the fallback for local and fork runs.
+      - name: Fill in SITE_URL
+        working-directory: apps
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+        run: node scripts/site-url.mjs ../_site
 
       - uses: actions/upload-pages-artifact@v3
         with:

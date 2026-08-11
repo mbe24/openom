@@ -1,18 +1,22 @@
-// Winziger statischer Server fuer die Entwicklung. Kein Paket noetig — die App
-// besteht aus ES-Modulen, die der Browser direkt laedt; sie braucht nur eine
-// echte Herkunft (file:// verbietet Module und IndexedDB je nach Browser).
+// Tiny static server for development. No package needed — the app is ES modules
+// the browser loads directly; it only needs a real origin (file:// blocks
+// modules and IndexedDB in some browsers).
 //
-//   node scripts/serve.mjs                              → App auf :5173
-//   node scripts/serve.mjs --open preview/desktop.html  → Vorschau statt App
+//   node scripts/serve.mjs                              → app on :5173
+//   node scripts/serve.mjs --open preview/desktop.html  → preview instead
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { siteUrl } from './site-url.mjs';
 
 const PORT = Number(process.env.PORT) || 5173;
 const ROOT = process.cwd();
 const openIdx = process.argv.indexOf('--open');
 const START = openIdx > -1 ? process.argv[openIdx + 1] : 'app/index.html';
+
+// Local runs answer from this server; SITE_URL only matters for a deploy.
+const LOCAL_URL = 'http://localhost:' + PORT + '/';
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -22,27 +26,32 @@ const TYPES = {
   '.json': 'application/json; charset=utf-8',
   '.ftl': 'text/plain; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
   '.woff2': 'font/woff2'
 };
 
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  // Umleiten statt ausliefern: die Startseite unter "/" auszugeben laesst alle
-  // relativen Pfade darin gegen die Wurzel aufloesen — die Seite bliebe leer.
+  // Redirect instead of serving: handing out the start page at "/" makes every
+  // relative path inside it resolve against the root, leaving the page blank.
   if (url.pathname === '/') {
     res.writeHead(302, { location: '/' + START }).end();
     return;
   }
-  
   const path = url.pathname;
-  // normalize + Praefixpruefung: kein Ausbrechen aus dem Projektordner.
+  // normalize + prefix check: no escaping the project folder.
   const file = join(ROOT, normalize(path).replace(/^(\.\.[/\\])+/, ''));
   if (!file.startsWith(ROOT)) { res.writeHead(403).end('forbidden'); return; }
   try {
-    const body = await readFile(file);
+    let body = await readFile(file);
+    // Same substitution the deploy does, so the placeholder never reaches a
+    // browser — locally the origin is this server.
+    if (extname(file) === '.html') {
+      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL);
+    }
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
-      // Entwicklung: nichts zwischenspeichern, sonst sieht man Aenderungen nicht.
+      // Development: never cache, otherwise changes stay invisible.
       'cache-control': 'no-store'
     });
     res.end(body);
