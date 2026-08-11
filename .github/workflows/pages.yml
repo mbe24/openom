@@ -1,11 +1,9 @@
-name: pages
+name: Deploy to GitHub Pages
 
 # Veroeffentlicht die Webapp auf GitHub Pages. Es gibt nichts zu bauen — der
 # Ordner app/ wird so ausgeliefert, wie Tauri ihn auch laedt.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
