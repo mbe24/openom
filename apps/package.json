@@ -1,0 +1,22 @@
+{
+  "name": "openom",
+  "private": true,
+  "version": "0.1.0",
+  "description": "openom — local-first family tree (Tauri 2 prototype, no build step)",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "ios:init": "tauri ios init",
+    "test:store": "cargo test --manifest-path ../Cargo.toml --workspace",
+    "check:locales": "node scripts/check-locales.mjs",
+    "serve": "node scripts/serve.mjs",
+    "serve:preview": "node scripts/serve.mjs --open preview/desktop.html"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  },
+  "type": "module"
+}

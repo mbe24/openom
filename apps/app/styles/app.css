@@ -1,0 +1,598 @@
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--label);
+  font-family: var(--font-ui);
+  font-size: var(--t-body);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { border: 0; background: none; cursor: pointer; }
+a { color: var(--accent-on); text-decoration: none; }
+a:hover { color: var(--accent-pressed); }
+
+/* ---------------------------------------------------------------- shell */
+.shell { display: grid; height: 100%; grid-template-columns: 80px 1fr; }
+.rail {
+  background: var(--raised);
+  border-right: 1px solid var(--hairline);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+}
+.rail-item {
+  width: 60px; height: 52px; border-radius: 15px;
+  display: grid; place-items: center; color: var(--secondary);
+}
+.rail-item[aria-current="true"] { background: var(--card); color: var(--accent-on); box-shadow: var(--shadow-1); }
+.rail-spacer { flex: 0 0 auto; height: 8px; }
+
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.titlebar {
+  flex: none; display: flex; align-items: center; gap: 12px;
+  /* Keine Linie: der Schriftzug traegt die Zeile, ein Strich teilt sie nur.
+     Feste Hoehe, damit sie nicht mit Umschalter oder Symbolknoepfen waechst
+     und die Flaeche darunter beim Reiterwechsel springt. */
+  padding: 0 20px; height: 50px; box-sizing: border-box;
+}
+.title { font-family: var(--font-name); font-size: 22px; font-weight: 500; }
+.title .om { color: var(--accent-on); }
+.title-sub { color: var(--secondary); font-size: var(--t-small); white-space: nowrap; }
+.titlebar-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.icon-button {
+  width: 40px; height: 40px; border-radius: 11px; background: var(--raised);
+  display: grid; place-items: center; color: var(--secondary);
+}
+.icon-button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.segmented { display: flex; gap: 4px; padding: 4px; background: var(--raised); border-radius: 12px; }
+.segmented button { padding: 8px 16px; border-radius: 9px; color: var(--secondary); font-size: var(--t-small); }
+.segmented button[aria-pressed="true"] { background: var(--card); color: var(--label); font-weight: 600; box-shadow: var(--shadow-1); }
+
+.content { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+.pane { --pane-pad: 24px; padding: var(--pane-pad); flex: 1; min-height: 0; }
+/* Auf breiten Bildschirmen mehr Luft, auf schmalen weniger. */
+@media (min-width: 1500px) { .pane { --pane-pad: 48px; padding: 32px var(--pane-pad); } }
+
+/* ---------------------------------------------------------------- cards */
+.person-card {
+  position: relative; display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px; border-radius: var(--r-card);
+  background: var(--card); box-shadow: var(--shadow-2), inset 0 0 0 1px var(--hairline);
+  text-align: left; width: 100%;
+}
+.person-card.compact { background: var(--raised); box-shadow: inset 0 0 0 1px var(--hairline); padding: 10px 14px; }
+.person-card.focus { box-shadow: var(--shadow-2), inset 0 0 0 2px var(--accent); }
+/* Spec, Slide 14: Knoten weiss mit Akzentrand, nur der gewaehlte ist gefuellt. */
+.person-card.graph-node { background: var(--card); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.person-card.graph-node.focus { background: var(--accent); color: #fff; box-shadow: var(--shadow-2); }
+.person-card.compact.graph-node .mono { background: var(--accent-tint); color: var(--accent-tint-text); }
+.person-card.graph-node.focus .mono { background: rgba(255,255,255,.24); color: #fff; }
+.person-card.graph-node.focus .dates { color: rgba(255,255,255,.8); }
+.person-card:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.person-card .mono {
+  width: 44px; height: 44px; flex: none; border-radius: 13px;
+  background: var(--accent-tint); color: var(--accent-tint-text);
+  display: grid; place-items: center; font-family: var(--font-name); font-size: 18px;
+}
+.person-card.compact .mono { width: 36px; height: 36px; border-radius: 11px; background: var(--mono-bg); color: var(--mono-text); font-size: 15px; }
+.person-card .who { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.person-card .name { font-family: var(--font-name); font-size: var(--t-name); line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.person-card.compact .name { font-size: 16px; }
+.person-card .dates { font-size: var(--t-small); color: var(--secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.person-card .anchor-top, .person-card .anchor-bottom {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: 10px; height: 10px; border-radius: 5px; background: var(--anchor);
+}
+.person-card .anchor-top { top: -5px; }
+.person-card .anchor-bottom { bottom: -5px; }
+
+.mono-node {
+  position: relative; width: 44px; height: 44px; border-radius: 13px;
+  background: var(--mono-bg); color: var(--mono-text);
+  display: grid; place-items: center; font-family: var(--font-name); font-size: 17px;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.mono-node .anchor-top {
+  position: absolute; left: 50%; top: -5px; transform: translateX(-50%);
+  width: 10px; height: 10px; border-radius: 5px; background: var(--anchor);
+}
+.mono-node.accent { background: var(--accent-tint); color: var(--accent-tint-text); font-family: var(--font-ui); font-weight: 600; font-size: 14px; }
+.mono-node:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.mono-stack { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.mono-year { font-size: var(--t-tiny); color: var(--secondary); font-variant-numeric: tabular-nums; }
+
+.diamond {
+  width: 13px; height: 13px; border-radius: 4px; background: var(--accent);
+  transform: rotate(45deg); box-shadow: 0 0 0 3px var(--canvas);
+}
+.diamond.soft { background: var(--accent-dark); width: 11px; height: 11px; }
+.diamond.empty { background: var(--card); box-shadow: 0 0 0 2px var(--edge); }
+
+.pill {
+  padding: 6px 12px; border-radius: 11px; background: var(--card);
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--hairline);
+  font-size: var(--t-small); color: var(--accent-on); white-space: nowrap;
+}
+.chip { padding: 7px 14px; border-radius: 16px; background: var(--raised); color: var(--secondary); font-size: var(--t-small); }
+.chip.accent { background: var(--accent-tint); color: var(--accent-tint-text); }
+
+.button-primary { padding: 12px 22px; border-radius: 13px; background: var(--accent); color: #fff; font-weight: 600; }
+.button-secondary { padding: 12px 22px; border-radius: 13px; background: var(--raised); color: var(--label); }
+.button-quiet { padding: 12px 18px; border-radius: 13px; color: var(--accent-on); font-weight: 500; }
+
+.section-label {
+  font-size: var(--t-tiny); letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--secondary); font-weight: 600;
+}
+.card {
+  background: var(--card); border-radius: var(--r-card); padding: 20px 22px;
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--hairline);
+}
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field label { overflow-wrap: anywhere; }
+.field label { font-size: var(--t-small); color: var(--secondary); }
+.field input, .field select, .field textarea {
+  padding: 12px 14px; border: 0; border-radius: var(--r-control);
+  background: var(--raised); color: var(--label); outline: none;
+}
+.field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.field .reading { font-size: var(--t-tiny); color: var(--secondary); }
+input[type="range"] { accent-color: var(--accent); width: 100%; }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.row { display: flex; align-items: center; gap: 12px; }
+.row.between { justify-content: space-between; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.muted { color: var(--secondary); }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Kanten liegen hinter den Karten, Anker sitzen auf der Kartenkante. */
+.edges { position: absolute; inset: 0; pointer-events: none; }
+.edges path { fill: none; stroke: var(--edge); stroke-width: 2.5; stroke-linecap: round; }
+.edges path.accent { stroke: var(--accent); stroke-width: 3.5; }
+.edges path.dashed { stroke-dasharray: 6 7; opacity: 0.6; }
+
+.chart { position: relative; }
+.graph-dot { border: 0; cursor: pointer; }
+.chart > * { position: absolute; }
+
+/* ---------------------------------------------------------------- mobile */
+.tabbar {
+  flex: none; display: none; height: 68px; align-items: center;
+  border-top: 1px solid var(--hairline); background: var(--card);
+}
+.tabbar button { flex: 1; display: grid; place-items: center; height: 56px; color: var(--secondary); }
+.tabbar button[aria-current="true"] { color: var(--accent-on); }
+
+@media (max-width: 820px) {
+  .shell { grid-template-columns: 1fr; }
+  .rail { display: none; }
+  .tabbar { display: flex; }
+  .pane { --pane-pad: 16px; padding: var(--pane-pad); }
+    /* minmax(0,...) statt 1fr: lange Beschriftungen (Arabisch, Ge'ez) wuerden die
+     Spur sonst auf ihre Mindestbreite aufziehen und aus dem Bild schieben. */
+  .grid-2, .grid-3 { grid-template-columns: minmax(0, 1fr); }
+  /* Titelleiste traegt auf 360 px nur das Noetige. */
+  .titlebar { padding: 10px 14px; gap: 8px; border-bottom: none; }
+  .title-sub { display: none; }
+  .titlebar .segmented { order: 3; }
+  .icon-button { min-width: 44px; min-height: 44px; }
+  .tabbar button { height: 56px; min-width: 44px; }
+  /* Eingabezeilen brechen um, statt aus dem Bildschirm zu laufen. */
+  .pane .row { flex-wrap: wrap; }
+  .pane .chart .row, .pane .tabbar .row { flex-wrap: nowrap; }
+  .pane input, .pane .select-wrap { min-width: 0; }
+  /* Karten stehen einzeln untereinander, nie zu zweit in einer Zeile. */
+  .person-card { width: 100%; }
+  .chart .person-card { width: auto; }
+  /* Ahnentafel: pro Ebene gleich breit — die Huelle gibt das Mass vor. */
+  .tree-chart .person-card { width: 100%; }
+}
+
+.command-palette {
+  position: fixed; inset: 0; display: grid; place-items: start center;
+  padding-top: 12vh; background: rgba(16, 24, 32, 0.28); backdrop-filter: blur(6px); z-index: 40;
+}
+.command-panel {
+  width: min(640px, 92vw); background: var(--card); border-radius: var(--r-sheet);
+  box-shadow: var(--shadow-3); padding: 18px; display: flex; flex-direction: column; gap: 12px;
+}
+.command-panel input { padding: 14px 16px; border: 0; border-radius: var(--r-control); background: var(--raised); outline: none; font-size: 18px; }
+.command-results { display: flex; flex-direction: column; gap: 2px; max-height: 46vh; overflow: auto; }
+.command-results button { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: var(--r-control); text-align: left; }
+.command-results button:hover, .command-results button[aria-selected="true"] { background: var(--accent-tint); }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  background: var(--label); color: var(--canvas); padding: 12px 18px; border-radius: 13px;
+  font-size: var(--t-small); box-shadow: var(--shadow-2); z-index: 50;
+}
+.caution { background: var(--caution-bg); color: #8a4f1e; padding: 14px 16px; border-radius: var(--r-card); font-size: var(--t-small); }
+.empty { display: grid; place-items: center; gap: 16px; padding: 60px 20px; text-align: center; }
+
+
+.select-wrap { position: relative; }
+.select-trigger {
+  display: flex; align-items: center; gap: 12px; font: inherit; color: var(--label);
+  background: var(--card); padding: 9px 12px 9px 14px; border: none; border-radius: 12px;
+  box-shadow: inset 0 0 0 1px var(--hairline); cursor: pointer; min-width: 132px;
+  justify-content: space-between; transition: box-shadow .12s ease, background .12s ease;
+}
+.select-trigger:hover { box-shadow: inset 0 0 0 1px var(--edge); }
+.select-trigger[aria-expanded="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.select-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.select-caret {
+  width: 7px; height: 7px; border-right: 1.5px solid var(--secondary);
+  border-bottom: 1.5px solid var(--secondary); border-radius: 1px;
+  transform: rotate(45deg) translate(-2px, -2px); transition: transform .16s ease;
+}
+.select-trigger[aria-expanded="true"] .select-caret {
+  transform: rotate(225deg) translate(-3px, -3px); border-color: var(--accent);
+}
+.menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; min-width: 100%;
+  display: grid; gap: 2px; padding: 6px; border-radius: 14px; background: var(--card);
+  box-shadow: inset 0 0 0 1px var(--hairline), 0 12px 28px -12px rgba(0,0,0,.28);
+  opacity: 0; transform: translateY(-4px) scale(.985); transform-origin: top right;
+  transition: opacity .13s ease, transform .13s ease;
+}
+.menu.is-open { opacity: 1; transform: none; }
+.menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  font: inherit; color: var(--label); background: transparent; border: none;
+  padding: 8px 10px; border-radius: 9px; cursor: pointer; text-align: left; white-space: nowrap;
+}
+.menu-item:hover { background: var(--accent-tint); }
+.menu-item.current { color: var(--accent-tint-text); }
+.menu-tick { color: var(--accent); font-size: var(--t-small); width: 12px; }
+
+.select-trigger.raised {
+  background: var(--raised); box-shadow: none; padding: 12px 14px; border-radius: var(--r-control);
+}
+.select-trigger.raised:hover { box-shadow: inset 0 0 0 1px var(--edge); }
+.select-trigger.raised[aria-expanded="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
+
+/* Waagerecht gezogene Flaechen tragen keinen Balken — gezogen wird am Inhalt. */
+.no-bar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-bar::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/* Hochformat: Baum und Faecher als Symbole — Beschriftungen fressen die Leiste. */
+.segmented.icons button { padding: 0 12px; min-width: 46px; height: 40px; display: grid; place-items: center; }
+.segmented.icons button svg { display: block; }
+
+/* Schwebende Knoepfe ueber dem Graphen — im Hochformat gehoert die Flaeche dem Baum. */
+.graph-fabs { position: absolute; right: 14px; bottom: 14px; display: flex; flex-direction: column; gap: 10px; z-index: 4; }
+.fab {
+  width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--card); color: var(--label); border: none;
+  box-shadow: 0 2px 10px rgba(0,0,0,.14), inset 0 0 0 1px var(--hairline); cursor: pointer;
+}
+.fab.on { background: var(--accent); color: var(--card); box-shadow: 0 2px 10px rgba(0,0,0,.18); }
+.fab:active { transform: scale(.96); }
+.fab.primary { background: var(--accent); color: var(--card); box-shadow: 0 3px 12px rgba(0,0,0,.2); }
+
+.graph-fabs.floating { position: fixed; right: 20px; bottom: 20px; }
+/* Nur wo die Reiterleiste unten liegt, muss der Stapel darueber ausweichen. */
+@media (max-width: 820px) {
+  .graph-fabs.floating { right: 14px; bottom: calc(82px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* Handy: gescrollt wird mit dem Finger — Balken kosten nur Platz und Ruhe.
+   Gilt hoch wie quer; quer sind die Fenster breiter, aber flach. */
+@media (max-width: 820px), (max-height: 520px) {
+  .content, .content *, .pane, .pane * { scrollbar-width: none; -ms-overflow-style: none; }
+  .content::-webkit-scrollbar, .content *::-webkit-scrollbar,
+  .pane::-webkit-scrollbar, .pane *::-webkit-scrollbar { width: 0; height: 0; display: none; }
+}
+.icon-button.small { width: 32px; height: 32px; min-width: 0; padding: 0; border-radius: 10px; display: grid; place-items: center; }
+@media (max-width: 820px) { .icon-button.small { width: 44px; height: 44px; } }
+.icon-button.tiny { width: 26px; height: 26px; min-width: 0; min-height: 0; padding: 0; border-radius: 8px; display: grid; place-items: center; }
+@media (max-width: 820px) { .icon-button.tiny { width: 30px; height: 30px; } }
+.chip.small { padding: 4px 10px; font-size: var(--t-small); }
+.graph-fabs.left { right: auto; left: 14px; }
+/* Sitzt ueber der Lupe, die am Fenster haengt. */
+.graph-fabs.left.fit { position: fixed; left: 14px; bottom: calc(138px + env(safe-area-inset-bottom, 0px)); }
+.fab.accent { background: var(--accent); color: var(--card); }
+.fab.accent-alt { background: var(--accent-dark); color: var(--card); }
+/* Typwahl im Formular: ein Zeichen, quadratisch wie die uebrigen Knoepfe. */
+.select-trigger.glyph { width: 44px; min-width: 44px; height: 44px; padding: 0; display: grid;
+  grid-template-columns: 1fr; place-items: center; font-size: 17px; }
+.select-trigger.glyph .select-caret { display: none; }
+.graph-fabs.floating.left.top { top: 12px; bottom: auto; }
+
+/* Handy: der Baum ist Arbeitsflaeche, die Karten duerfen groesser lesen. */
+@media (max-width: 820px) {
+  .chart .person-card.compact { padding: 12px 16px; }
+  .chart .person-card.compact .name { font-size: 18px; }
+  .chart .person-card.compact .dates { font-size: 14px; }
+  .chart .person-card.compact .mono { width: 42px; height: 42px; border-radius: 13px; font-size: 17px; }
+  .chart .person-card.focus .name { font-size: 20px; }
+}
+
+/* Flache Fenster (Handy quer): die Rahmen duerfen keine Hoehe fressen. */
+@media (max-height: 520px) and (min-width: 821px) {
+  .shell { grid-template-columns: 64px 1fr; }
+  /* Quer gibt es keine Reiterleiste unten, dafuer die Schiene links:
+     die schwebenden Knoepfe muessen an ihr vorbei. */
+  .graph-fabs.floating { bottom: 14px; }
+  .graph-fabs.left, .graph-fabs.floating.left { left: 78px; right: auto; }
+  /* Die Lupe steht auch quer unten links — Fit sitzt eine Knopfhoehe darueber. */
+  .graph-fabs.left.fit, .graph-fabs.floating.left.fit { left: 78px; bottom: 70px; }
+  .rail { padding: 8px 0; gap: 4px; }
+  .rail-item { width: 48px; height: 48px; }
+  /* Nur der Name bleibt stehen: keine Linie, kein Beitext. */
+  .titlebar { padding: 8px 16px; border-bottom: none; }
+  .title-sub { display: none; }
+  .pane { --pane-pad: 16px; padding: 12px var(--pane-pad); }
+  .card { padding: 14px 16px; }
+  .command-results { max-height: 40vh; }
+}
+
+
+/* Vollflaechige Ansichten enden erst am Bildschirmrand — die Titelzeile ist
+   nur Beschriftung, keine Flaeche, und laesst Zeiger hindurch. */
+.canvas-view .main { position: relative; }
+.canvas-view .titlebar {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+  background: none; border-bottom: none; pointer-events: none;
+}
+.canvas-view .titlebar > * { pointer-events: auto; }
+.canvas-view .content { padding-top: 0; }
+.canvas-view .content > .pane:not(:has(.no-bar)) { padding-top: 46px; }
+/* Das Seitenpanel des Graphen beginnt unter der schwebenden Zeile. */
+.canvas-view .content > .pane > .stack:first-child { padding-top: 58px; }
+/* Scrollende Ansichten blenden am oberen Rand aus, statt Text hart hinter dem
+   Schriftzug durchlaufen zu lassen. */
+.fade-top .content {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, transparent 14px, #000 44px);
+  mask-image: linear-gradient(to bottom, transparent 0, transparent 14px, #000 44px);
+}
+/* In den Einstellungen nur ein Hauch: ein langer Verlauf frisst sich sonst in
+   die Farbfelder. */
+.fade-top.view-settings .content {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+}
+
+/* ------------------------------------------------------------- Schalter */
+.switch {
+  width: 52px; height: 32px; border-radius: 16px; border: 0; flex: none; cursor: pointer;
+  background: var(--edge); position: relative; transition: background .18s ease;
+}
+.switch .knob {
+  position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--card); box-shadow: var(--shadow-1); transition: transform .18s ease;
+}
+.switch.on { background: var(--accent); }
+.switch.on .knob { transform: translateX(20px); }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* --------------------------------------------------------- Sperrschirm */
+.lock {
+  position: fixed; inset: 0; z-index: 40; display: grid; justify-items: center;
+  align-content: safe center; overflow: auto;
+  background: #1A211D; color: #F4F6F4; padding: 24px;
+}
+.lock-inner { width: min(360px, 100%); display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.lock-mark { font-family: var(--font-name); font-size: 40px; letter-spacing: -.02em; display: flex; }
+.lock-mark .om { color: #9FC7B4; }
+.lock-title { color: rgba(244,246,244,.62); font-size: var(--t-small); margin-bottom: 6px; }
+.lock-bio {
+  width: 86px; height: 86px; border-radius: 50%; border: 0; cursor: pointer;
+  display: grid; place-items: center; color: #9FC7B4;
+  background: rgba(159,199,180,.14); box-shadow: inset 0 0 0 1.5px rgba(159,199,180,.4);
+}
+.lock-bio:active { transform: scale(.97); }
+.lock-bio.busy { animation: lock-pulse .62s ease; }
+.lock-bio-label { font-size: var(--t-small); color: rgba(244,246,244,.72); }
+.lock-or { font-size: var(--t-tiny); color: rgba(244,246,244,.38); margin-top: 10px; }
+.lock-submit {
+  width: 100%; padding: 14px; border: 0; border-radius: 14px; cursor: pointer;
+  background: #9FC7B4; color: #16211C; font-size: 16px; font-weight: 600;
+}
+.lock-submit:active { transform: scale(.99); }
+@keyframes lock-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-7px); }
+  75% { transform: translateX(7px); }
+}
+@keyframes lock-pulse {
+  0% { box-shadow: inset 0 0 0 1.5px rgba(159,199,180,.4), 0 0 0 0 rgba(159,199,180,.5); }
+  100% { box-shadow: inset 0 0 0 1.5px rgba(159,199,180,.4), 0 0 0 26px rgba(159,199,180,0); }
+}
+
+/* Flache Fenster: der Sperrschirm muss ohne Scrollen ganz hineinpassen. */
+@media (max-height: 520px) {
+  .lock { padding: 14px; }
+  .lock-inner { gap: 8px; }
+  .lock-mark { font-size: 28px; }
+  .lock-title { margin-bottom: 0; }
+  .lock-bio { width: 56px; height: 56px; }
+  .lock-bio svg { width: 28px; height: 28px; }
+  .lock-or { margin-top: 2px; }
+  .lock-submit { padding: 11px; }
+}
+/* Der Typ-Waehler behaelt seine Eigenbreite, statt auf ein Zeichen zu schrumpfen. */
+.select-wrap { flex: none; }
+.select-trigger { white-space: nowrap; }
+
+/* ------------------------------------------------------- Rechts nach links */
+/* Die Tafeln kippen als Ganzes; Karten, Rauten und Punkte kippen zurueck,
+   damit Schrift und Anker richtig herum stehen. */
+/* Rechts-nach-links kehrt in Browsern die Vorzeichen von scrollLeft um. Die
+   Arbeitsflaechen sind aber gespiegelte Koordinaten, kein Text — sie bleiben
+   physisch links-nach-rechts, die Karten darin lesen wieder rechts-nach-links. */
+[dir="rtl"] .no-bar { direction: ltr; }
+[dir="rtl"] .chart { direction: rtl; }
+
+/* Schwebende Knoepfe wandern auf die andere Seite. */
+[dir="rtl"] .graph-fabs { right: auto; left: 14px; }
+[dir="rtl"] .graph-fabs.left { left: auto; right: 14px; }
+
+/* Schriftsysteme: Newsreader deckt weder Ge'ez noch Arabisch ab. */
+[data-script="arabic"] {
+  --font-ui: "Noto Naskh Arabic", "Segoe UI", system-ui, sans-serif;
+  --font-name: "Noto Naskh Arabic", Georgia, serif;
+}
+[data-script="ethiopic"] {
+  --font-ui: "Noto Sans Ethiopic", "Segoe UI", system-ui, sans-serif;
+  --font-name: "Noto Sans Ethiopic", Georgia, serif;
+}
+/* Ge'ez und Arabisch tragen hoehere Buchstaben — etwas mehr Zeilenluft. */
+[data-script="ethiopic"] .person-card .name,
+[data-script="arabic"] .person-card .name { line-height: 1.35; }
+
+/* Rechts nach links: die Geschwisterleiste wandert mit auf die andere Seite. */
+[dir="rtl"] .sib-row { right: auto; left: 16px; }
+
+/* ------------------------------------------------- Pille mit Aufklappliste */
+.pill-action {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  border: 0; font: inherit; font-size: var(--t-small);
+}
+.pill-action .caret {
+  width: 0; height: 0; flex: none;
+  border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid currentColor; opacity: .55;
+}
+.pill-action:hover { box-shadow: inset 0 0 0 1px var(--edge); }
+
+.pop-layer { position: absolute; inset: 0; z-index: 20; }
+.pop-card {
+  position: absolute; display: flex; flex-direction: column;
+  background: var(--card); border-radius: var(--r-card); padding: 10px;
+  box-shadow: var(--shadow-3); overflow: hidden;
+}
+.pop-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.pop-list::-webkit-scrollbar { width: 0; }
+.pop-row {
+  display: flex; align-items: center; gap: 10px; text-align: start;
+  padding: 8px; border: 0; border-radius: 12px; background: transparent;
+  cursor: pointer; font: inherit; color: var(--label); width: 100%;
+}
+.pop-row:hover { background: var(--raised); }
+.pop-row .mono {
+  width: 34px; height: 34px; flex: none; border-radius: 11px;
+  background: var(--mono-bg); color: var(--mono-text);
+  display: grid; place-items: center; font-family: var(--font-name); font-size: 14px;
+}
+.pop-row .who { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pop-row .name { font-family: var(--font-name); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-row .dates { font-size: var(--t-tiny); color: var(--secondary); font-variant-numeric: tabular-nums; }
+.pop-row.current { background: var(--accent-tint); cursor: default; }
+.pop-row.current .mono { background: var(--accent); color: var(--card); }
+
+/* Hilfetext am Fuss einer Einstellungskarte (Design Spec, Folie 19). */
+.note {
+  margin-top: 4px; padding: 14px 16px; border-radius: 14px;
+  background: var(--raised); color: var(--secondary);
+  font-size: var(--t-small); line-height: 1.45; text-wrap: pretty;
+}
+.icon-button.on { background: var(--accent-tint); color: var(--accent-tint-text); }
+
+/* Kleiner Eckknopf: er soll die Karte nicht mitbestimmen. */
+/* Eigene Zeile ueber dem Namen: so bestimmt der Knopf weder Breite noch
+   Zeilenumbruch der Karte. */
+.icon-button.corner {
+  align-self: flex-end; width: 21px; height: 21px; min-width: 0; min-height: 0;
+  border-radius: 7px; color: var(--secondary); flex: none; margin-bottom: -6px;
+  display: grid; place-items: center; padding: 0;
+}
+[dir="rtl"] .icon-button.corner { right: auto; left: 6px; }
+
+/* Der Graph fuellt den ganzen Bildschirm; das Panel schwebt darueber. */
+.graph-panel {
+  position: absolute; left: 20px; top: 58px; bottom: 20px; z-index: 6;
+  width: 286px; overflow-y: auto; scrollbar-width: none;
+}
+.graph-panel::-webkit-scrollbar { width: 0; }
+[dir="rtl"] .graph-panel { left: auto; right: 20px; }
+
+/* Graph-Karten: der Name nimmt die freie Breite, statt auf Inhaltsbreite zu
+   schrumpfen und dann gekuerzt zu werden. */
+.graph-node .who { flex: 1 1 auto; }
+
+/* Zoomstand: nur die Zahl, im Akzent, als Fussnote der Karte. */
+.zoom-stat {
+  align-self: flex-start; border: 0; background: transparent; padding: 0; cursor: pointer;
+  font: inherit; font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--accent-on); font-size: var(--t-small);
+}
+.zoom-stat:hover { text-decoration: underline; }
+
+/* -------------------------------------------------------- Kontextmenue */
+.ctx-layer { position: absolute; inset: 0; z-index: 30; }
+.ctx-card {
+  position: absolute; min-width: 208px; padding: 6px;
+  background: var(--card); border-radius: 14px; box-shadow: var(--shadow-3);
+  display: flex; flex-direction: column; gap: 1px;
+}
+.ctx-item {
+  border: 0; background: transparent; font: inherit; color: var(--label);
+  text-align: start; padding: 9px 12px; border-radius: 9px; cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover { background: var(--raised); }
+.ctx-sep { height: 1px; background: var(--hairline); margin: 4px 6px; }
+
+/* ------------------------------------------------------- Beziehungen */
+.rel-block {
+  padding: 10px 0; border-bottom: 1px solid var(--hairline);
+  display: flex; flex-direction: column; gap: 6px;
+}
+/* Kinder ruecken ein: die Einrueckung sagt, zu welcher Ehe sie gehoeren. */
+.rel-kids {
+  padding-left: 16px; border-left: 1.5px solid var(--edge);
+  margin-left: 2px; display: flex; flex-direction: column; gap: 6px;
+}
+/* Runder Knopf wie der Wisch-Knopf auf dem Handy, nur kleiner: erst ruhig,
+   beim ersten Klick rot gefuellt, der zweite loest. */
+.rel-x {
+  flex: none; width: 34px; height: 34px; border: 0; border-radius: 50%; cursor: pointer;
+  display: grid; place-items: center;
+  background: transparent; color: var(--secondary);
+}
+.rel-x:hover { background: var(--raised); color: var(--delete); }
+.rel-x.armed, .rel-x.armed:hover { background: var(--delete); color: #fff; }
+.rel-x:active { transform: scale(.96); }
+.rel-x:focus-visible { outline: 2px solid var(--delete); outline-offset: 2px; }
+
+/* Flache Fenster: 12vh Kopfabstand plus Ueberschrift schoben die Karte unter
+   die Kante — hier reicht ein schmaler Rand. */
+@media (max-height: 520px) {
+  .command-palette { padding-top: 14px; align-content: safe center; }
+  .command-panel { padding: 14px; gap: 8px; }
+  .command-results { max-height: 34vh; }
+}
+
+/* Wischen zum Loeschen (nur Touch). Die Zeile reicht bis an den Bildschirmrand:
+   der Knopf sitzt dort, wo der Daumen ohnehin endet, und keine Rundung laesst
+   Rot an den Ecken hervorschauen. Der negative Rand hebt das Polster der Pane
+   auf, das Polster im Vordergrund haelt den Text an seinem Platz. */
+.swipe { position: relative; overflow: hidden; }
+.swipe-front {
+  position: relative; z-index: 1; background: var(--canvas);
+  display: flex; align-items: baseline; justify-content: space-between;
+  /* Mindesthoehe: sonst kappt die niedrige Zeile die Rundung des Knopfs. */
+  gap: 10px; padding: 8px 2px; min-height: 42px; touch-action: pan-y;
+}
+/* Ein runder Knopf wie alle anderen, kein Balken: das Wegschieben legt ihn frei. */
+.swipe-del {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  width: 38px; height: 38px; border: 0; border-radius: 50%; cursor: pointer;
+  background: var(--delete); color: #fff; flex: none;
+  display: grid; place-items: center;
+}
+.swipe-del:active { transform: translateY(-50%) scale(.96); }
+.swipe-del:active { background: var(--delete-pressed); }
+
+
+/* Gruppen innerhalb der Beziehungen: leiser als die Abschnittsueberschrift,
+   damit klar ist, wozu das Plus daneben gehoert. */
+.rel-group { font-size: var(--t-small); color: var(--secondary); }

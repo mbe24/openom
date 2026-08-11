@@ -1,0 +1,94 @@
+name: mobile
+
+# Android und iOS. Beide bauen nur auf Anforderung: sie brauchen SDKs, die
+# jeden Lauf teuer machen, und im Alltag aendert sich an ihnen nichts.
+# iOS laeuft ausserdem nur auf macOS-Runnern.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android NDK
+        run: sdkmanager --install "ndk;26.1.10909125"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
+      # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
+      # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
+      - run: pnpm install --no-frozen-lockfile
+        working-directory: apps
+
+      - name: Build
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
+        run: pnpm tauri android build --apk --debug
+        working-directory: apps
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openom-android
+          path: apps/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
+      # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
+      # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
+      - run: pnpm install --no-frozen-lockfile
+        working-directory: apps
+
+      # Ohne Signaturzertifikat nur bis zum Simulator-Build — mehr braucht
+      # eine Pruefung nicht, und Geheimnisse gehoeren nicht in einen Fork.
+      - name: Build (simulator, unsigned)
+        run: pnpm tauri ios build --target aarch64-sim --debug
+        working-directory: apps

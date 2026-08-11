@@ -1,0 +1,72 @@
+/* Tokens aus der Design-Spec. Die Akzent-Ableitungen setzt theme.js zur
+   Laufzeit; hier stehen die Startwerte (Sage, Light) und alles, was nicht
+   von der Akzentfarbe abhaengt. */
+:root {
+  --accent: oklch(49.8% 0.0444 166.4);
+  --accent-pressed: oklch(41.8% 0.0444 166.4);
+  --accent-tint: oklch(94% 0.03 166.4);
+  --accent-tint-text: oklch(39% 0.0444 166.4);
+  --accent-dark: oklch(67.8% 0.054 166.4);
+  --accent-on: var(--accent);
+
+  --canvas: oklch(98.5% 0.004 155);
+  --card: #ffffff;
+  --raised: oklch(96% 0.006 155);
+  --focus-surface: #ffffff;
+  --label: #1c1c1e;
+  --secondary: #6e6e73;
+  --hairline: rgba(16, 24, 32, 0.08);
+  --edge: oklch(84% 0.012 155);
+  --anchor: oklch(78% 0.014 155);
+  --mono-bg: oklch(95% 0.008 155);
+  --mono-text: #8a9a92;
+  --caution: #c2743f;
+  --caution-bg: #faf4ee;
+  /* Loeschen traegt klassisches Rot — die einzige Farbe, die jeder als "weg"
+     liest. #d92d20 haelt 4.83:1 mit weisser Schrift. */
+  --delete: #d92d20;
+  --delete-pressed: #b3241b;
+
+  --r-control: 10px;
+  --r-card: 18px;
+  --r-sheet: 28px;
+  --sp-1: 8px;
+  --sp-2: 16px;
+  --sp-3: 24px;
+  --sp-4: 40px;
+  --sp-5: 64px;
+
+  --shadow-1: 0 1px 2px rgba(16, 24, 32, 0.06);
+  --shadow-2: 0 1px 2px rgba(16, 24, 32, 0.06), 0 10px 24px -16px rgba(16, 24, 32, 0.34);
+  --shadow-3: 0 2px 6px rgba(16, 24, 32, 0.06), 0 30px 60px -30px rgba(16, 24, 32, 0.4);
+
+  --font-ui: -apple-system, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-name: Newsreader, Georgia, serif;
+
+  --t-name: 20px;
+  --t-body: 16px;
+  --t-small: 14px;
+  --t-tiny: 12.5px;
+}
+
+/* Dark Mode folgt dem System, solange der Nutzer nichts waehlt. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mode]) {
+    --canvas: #121214;
+    --card: #1a1a1e;
+    --raised: #26262b;
+    --focus-surface: #2e2e34;
+    --label: #f2f2f5;
+    --secondary: #9a9aa0;
+    --hairline: rgba(255, 255, 255, 0.1);
+    --edge: #3a3a40;
+    --anchor: #4e4e56;
+    --mono-bg: #26262b;
+    --mono-text: #9a9aa0;
+    --accent-on: var(--accent-dark);
+    --accent-tint: oklch(30% 0.035 155);
+    --accent-tint-text: oklch(78% 0.05 155);
+    --delete: #e5342a;
+    --delete-pressed: #c0271e;
+  }
+}

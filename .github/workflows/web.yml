@@ -1,0 +1,29 @@
+name: web
+
+# Die Webapp ist reines ES-Modul-Werk ohne Build: pruefen heisst hier, dass
+# jede Datei laedt und die Uebersetzungen vollstaendig sind.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Syntaxpruefung ohne Bundler: node parst jedes Modul. Dank
+      # "type": "module" in package.json gelten .js-Dateien als ES-Module.
+      - name: Parse every module
+        run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      # Jede Sprache muss dieselben Schluessel tragen wie Englisch.
+      - name: Locales complete
+        run: node scripts/check-locales.mjs
+        working-directory: apps

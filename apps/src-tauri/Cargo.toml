@@ -1,0 +1,26 @@
+[package]
+name = "openom-tauri"
+version = "0.1.0"
+description = "openom — desktop and mobile shell"
+authors = ["openom"]
+license = "AGPL-3.0-or-later"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "openom_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+# Der Store liegt im eigenen Crate: App und Server brauchen dieselbe Fassung.
+openom-store = { path = "../../openom-store" }
+tauri = { version = "2.11.5", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Von tauri-cli beim Erzeugen des Release-Builds gesetzt.
+custom-protocol = ["tauri/custom-protocol"]

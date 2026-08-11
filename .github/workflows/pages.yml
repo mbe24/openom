@@ -1,0 +1,48 @@
+name: pages
+
+# Veroeffentlicht die Webapp auf GitHub Pages. Es gibt nichts zu bauen — der
+# Ordner app/ wird so ausgeliefert, wie Tauri ihn auch laedt.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Eine Veroeffentlichung zur Zeit; laufende nicht abbrechen.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      # Besucher landen in der App, nicht in einer Vorschauseite. Die
+      # Geraeterahmen liegen unter /preview.html daneben.
+      # .nojekyll: sonst verschluckt Pages Ordner mit fuehrendem Unterstrich.
+      - name: Prepare site
+        run: |
+          mkdir -p _site
+          cp -r apps/app/. _site/
+          cp apps/preview/desktop.html _site/preview.html
+          sed -i 's#\.\./app/index.html#index.html#g' _site/preview.html
+          touch _site/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

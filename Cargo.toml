@@ -1,0 +1,12 @@
+# Ein Workspace, drei Rust-Teile: der gemeinsame Store, der Server und die
+# Tauri-Huelle. Der Store liegt bewusst nicht in einem der beiden anderen —
+# App und Server brauchen dieselbe Fassung, sonst driften sie auseinander.
+[workspace]
+resolver = "2"
+members = ["openom-store", "openom", "apps/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+license = "AGPL-3.0-or-later"
+edition = "2021"
+rust-version = "1.77.2"
