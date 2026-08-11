@@ -49,3 +49,20 @@ export function isTouchInput() {
   if (isTouchForced()) return true;
   return window.matchMedia('(pointer: coarse)').matches;
 }
+
+/**
+ * Layout bucket a resize could actually change. Comparing this instead of raw
+ * pixels keeps the app from re-rendering when a phone's virtual keyboard
+ * shrinks the window — a re-render there replaces the focused input and
+ * dismisses the keyboard again.
+ */
+export function layoutBucket() {
+  return [isNarrow(), isShort(), Math.round((window.innerWidth || 1280) / 60)].join(':');
+}
+
+/** True while a text field or editable element has focus. */
+export function isTyping() {
+  const el = document.activeElement;
+  if (!el) return false;
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+}

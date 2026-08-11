@@ -8,7 +8,7 @@ import { loadLocale, t, locale } from './core/i18n.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
-import { isCompact } from './ui/viewport.js';
+import { isCompact, layoutBucket, isTyping } from './ui/viewport.js';
 import { createBlobStore, ingestImage } from './core/blobs.js';
 import { shortDate } from './core/dates.js';
 import { ancestorsView, resetTreeView } from './views/ancestors.js';
@@ -86,7 +86,17 @@ class App {
     this.applyAccent();
     tree.onRevision(() => this.render());
     this.schema.onChange(() => this.render());
-    window.addEventListener('resize', () => this.render());
+    // A resize only matters when the layout bucket changes. On phones the
+    // virtual keyboard shrinks the window, and re-rendering there replaces the
+    // focused input — which dismisses the keyboard the moment it appears.
+    let bucket = layoutBucket();
+    window.addEventListener('resize', () => {
+      const next = layoutBucket();
+      if (next === bucket) return;
+      bucket = next;
+      if (isTyping()) return;
+      this.render();
+    });
     this.watchIdle();
     window.addEventListener('openom:touchmode', () => this.render());
     // Schriften kommen nachtraeglich: danach einmal neu zeichnen, damit
@@ -410,7 +420,7 @@ class App {
     this.render();
   }
   setLockAfter(v) { this.lockAfter = v; this.armIdle(); this.render(); }
-  lock() { if (!this.lockEnabled) return; this.locked = true; this.paletteOpen = false; this.render(); }
+  lock() { if (!this.lockEnabled) return; this.locked = true; this.togglePalette(false); this.render(); }
   unlock() { this.locked = false; this.render(); this.armIdle(); }
   /** Zeitgeber neu stellen; laeuft nur, wenn Sperre und Frist gesetzt sind. */
   armIdle() {
@@ -425,7 +435,14 @@ class App {
     }
   }
 
-  togglePalette(open) { this.paletteOpen = open; this.render(); if (open) setTimeout(() => document.getElementById('palette-input')?.focus(), 0); }
+  togglePalette(open) {
+    this.paletteOpen = open;
+    document.querySelector('.command-palette')?.remove();
+    if (!open) return;
+    const layer = this.renderPalette();
+    document.body.appendChild(layer);
+    layer.querySelector('#palette-input')?.focus();
+  }
 
   // ------------------------------------------------------------ render
   render() {
@@ -445,8 +462,7 @@ class App {
         h('div', { class: 'content' }, view.render(this)),
         this.renderSearchFab(),
         this.renderViewToggleFab(),
-        this.renderTabBar(view)),
-      this.paletteOpen ? this.renderPalette() : null
+        this.renderTabBar(view))
     );
     // Neuzeichnen ersetzt den Inhalt — ohne das hier springt jede Einstellung
     // zurueck an den Anfang der Seite.
