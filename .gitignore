@@ -4,4 +4,7 @@ target/
 apps/src-tauri/gen/
 .DS_Store
 
+# Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
+.env
+
 plan/

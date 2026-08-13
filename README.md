@@ -63,6 +63,27 @@ size, not the shell.
 - Node ≥ 20 with pnpm
 - SQLite is compiled in through the `rusqlite` feature `bundled` — no DLL needed
 
+### Running cargo on a restricted host
+
+Some machines deny executing freshly built binaries — cargo's own build scripts
+fail with `Access is denied (os error 5)` before any of our code runs. `scripts/cargo.mjs`
+wraps `cargo` and runs it either on the host or inside a Linux container, where
+that policy does not apply. The build is unchanged; only the process that runs it
+moves. The repo is bind-mounted at `/work`; the cargo registry and target dir are
+cached in named volumes, so rebuilds stay incremental.
+
+```powershell
+node scripts/cargo.mjs test -p openom-store -p openom   # the conformance suite
+node scripts/cargo.mjs build -p openom                  # the server crate
+```
+
+`pnpm test:store` (from `apps/`) routes through it. Pick where cargo runs with
+`OPENOM_RUNNER` — `auto` (default), `local`, or `docker` — set once in a `.env`
+at the repo root (copy `.env.example`). `docker` skips the host attempt entirely,
+so no policy popup. The Tauri shell is **not** built this way: headless it needs
+the WebKitGTK stack, so it builds through `pnpm tauri dev|build` and the desktop
+CI. This wrapper is for the pure crates — `openom-store` and `openom`.
+
 ### Mobile
 
 ```powershell
@@ -88,7 +109,8 @@ openom/
 │  ├─ preview/            Geraeterahmen zum Ansehen
 │  ├─ scripts/            statischer Server, Sprachpruefung
 │  └─ package.json
-├─ openom-store/          DocStore-Trait + memory + sqlite + Konformitaetssuite
+├─ packages/
+│  └─ openom-store/       DocStore-Trait + memory + sqlite + Konformitaetssuite
 ├─ openom/                Server: S3 hinter demselben Trait
 ├─ docs/                  Handoff, Datenmodell, Designregeln, Svelte-Portierung
 ├─ Cargo.toml             Workspace
@@ -116,7 +138,7 @@ bytes — which is exactly what makes S3 or a zero-knowledge server possible lat
 
 ### Swapping the store
 
-1. Implement `DocStore` (Rust: `openom-store/src/`, JS: `apps/app/src/core/store.js`).
+1. Implement `DocStore` (Rust: `packages/openom-store/src/`, JS: `apps/app/src/core/store.js`).
 2. Run the conformance suite against the new implementation:
 
 ```powershell
