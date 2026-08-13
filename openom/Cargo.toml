@@ -1,13 +1,22 @@
 [package]
 name = "openom"
-version = "0.1.0"
-description = "openom — server: the tree over S3, same DocStore contract"
-license = "AGPL-3.0-or-later"
-edition = "2021"
-rust-version = "1.77.2"
+description = "openom — server: Axum on AWS Lambda (Monolith-on-FaaS)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-openom-store = { path = "../packages/openom-store" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
+# Shared model + crypto (identical to the client's). The server never decrypts
+# trees (zero-knowledge), but it validates and serialises against the same code.
+openom-protocol.workspace = true
+openom-crypto.workspace = true
+
+# The whole HTTP surface in one Lambda: Axum routing over the Lambda runtime.
+axum.workspace = true
+lambda_http.workspace = true
+tokio.workspace = true
+
+# Structured logging (pretty locally, JSON in prod — wired later).
+tracing.workspace = true
+tracing-subscriber.workspace = true

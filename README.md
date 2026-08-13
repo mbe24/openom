@@ -58,7 +58,7 @@ size, not the shell.
 
 ### Prerequisites (Windows)
 
-- Rust ≥ 1.77.2 (`rustup`)
+- Rust ≥ 1.85 (`rustup`)
 - Microsoft C++ Build Tools and WebView2 (present on Windows 11)
 - Node ≥ 20 with pnpm
 - SQLite is compiled in through the `rusqlite` feature `bundled` — no DLL needed

@@ -1,6 +1,13 @@
 //! Persistenz opaker Bytes. Kennt das Datenmodell absichtlich nicht:
 //! Snapshots und Updates sind Blobs, damit dieselbe Schnittstelle später
 //! auch S3 oder einen Zero-Knowledge-Server bedienen kann.
+//!
+//! Dieses Crate wird zum Backend-Client: der Upload-Pfad (serialisieren →
+//! komprimieren → verschluesseln → hochladen) nutzt `openom-protocol` und
+//! `openom-crypto` — dieselben Fassungen, die der Server sieht. Bis dahin sind
+//! sie hier re-exportiert, damit die Verdrahtung sichtbar und geprueft ist.
+pub use openom_crypto;
+pub use openom_protocol;
 
 pub mod memory;
 pub mod sqlite;

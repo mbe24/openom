@@ -1,12 +1,57 @@
-# Ein Workspace, drei Rust-Teile: der gemeinsame Store, der Server und die
-# Tauri-Huelle. Der Store liegt bewusst nicht in einem der beiden anderen —
-# App und Server brauchen dieselbe Fassung, sonst driften sie auseinander.
+# Ein Workspace, fuenf Rust-Teile: die drei geteilten Pakete (Protokoll, Krypto,
+# Store), der Server und die Tauri-Huelle. Die geteilten Pakete liegen bewusst in
+# packages/ — App und Server brauchen dieselbe Fassung, sonst driften sie
+# auseinander. Externe Abhaengigkeiten stehen zentral in [workspace.dependencies],
+# damit prost, die Krypto-Crates usw. ueberall in derselben Version laufen.
 [workspace]
 resolver = "2"
-members = ["packages/openom-store", "openom", "apps/src-tauri"]
+members = [
+    "packages/openom-protocol",
+    "packages/openom-crypto",
+    "packages/openom-store",
+    "openom",
+    "apps/src-tauri",
+]
 
 [workspace.package]
 version = "0.1.0"
 license = "AGPL-3.0-or-later"
 edition = "2021"
-rust-version = "1.77.2"
+# Der einzige unterstuetzte Build-Weg ist der Container (siehe scripts/cargo.mjs),
+# derzeit rustc 1.97. 1.85 als ehrliche Untergrenze laesst den MSRV-bewussten
+# Resolver die jeweils neuesten Abhaengigkeiten waehlen statt sie zurueckzustufen.
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Interne Crates (Pfad relativ zu diesem Wurzel-Manifest).
+openom-protocol = { path = "packages/openom-protocol" }
+openom-crypto = { path = "packages/openom-crypto" }
+openom-store = { path = "packages/openom-store" }
+
+# Protokoll / Serialisierung.
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Server: Axum auf AWS Lambda (Monolith-on-FaaS).
+axum = "0.8"
+lambda_http = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Krypto: dieselben Primitiven auf Client und Server.
+aes-gcm = "0.11"
+chacha20poly1305 = "0.11"
+argon2 = "0.5"
+
+# Store-Client (kommt mit dem Upload-Pfad): komprimieren + hochladen. rustls
+# statt native-tls, damit im Container kein OpenSSL noetig ist. Der genaue
+# rustls-Provider (aws-lc-rs vs. ring) wird festgelegt, wenn der Client steht und
+# ein echter HTTPS-Call getestet werden kann — hier nur vordefiniert.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+zstd = "0.13"
+
+# Fehler / SQLite (nur der Store nutzt rusqlite).
+thiserror = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }

@@ -1,0 +1,10 @@
+[package]
+name = "openom-protocol"
+description = "openom — shared protocol: the protobuf data model (prost), generated via buf"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+prost.workspace = true
