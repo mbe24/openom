@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.77.2"
 
 [dependencies]
-openom-store = { path = "../openom-store" }
+openom-store = { path = "../packages/openom-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

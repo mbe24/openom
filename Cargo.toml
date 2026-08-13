@@ -3,7 +3,7 @@
 # App und Server brauchen dieselbe Fassung, sonst driften sie auseinander.
 [workspace]
 resolver = "2"
-members = ["openom-store", "openom", "apps/src-tauri"]
+members = ["packages/openom-store", "openom", "apps/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

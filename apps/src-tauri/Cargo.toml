@@ -16,7 +16,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 # Der Store liegt im eigenen Crate: App und Server brauchen dieselbe Fassung.
-openom-store = { path = "../../openom-store" }
+openom-store = { path = "../../packages/openom-store" }
 tauri = { version = "2.11.5", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
