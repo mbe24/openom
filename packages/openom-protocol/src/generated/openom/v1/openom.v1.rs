@@ -69,6 +69,12 @@ pub struct Header {
     /// are shared; absent means "not attributed" (V1's communal-DEK trust model).
     #[prost(bytes="vec", tag="14")]
     pub author_signature: ::prost::alloc::vec::Vec<u8>,
+    /// KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
+    /// cannot swap two of a tree's blobs undetected (the AAD otherwise binds only
+    /// tree_id). Empty for tree kinds and throughout V1. Reader-side ciphertext-hash
+    /// verification remains the primary media-integrity check; this is defense in depth.
+    #[prost(bytes="vec", tag="15")]
+    pub blob_id: ::prost::alloc::vec::Vec<u8>,
 }
 /// Per-tree key material: the DEK wrapped for each member, across key generations,
 /// signed by the owner. Stored once per tree; updated only on membership change.
@@ -143,13 +149,16 @@ pub struct KdfParams {
     #[prost(uint32, tag="4")]
     pub parallelism: u32,
 }
-/// Snapshot vs delta.
+/// What the object is. SNAPSHOT/DELTA are append-log entries of a tree; MEDIA is a
+/// single standalone media blob (referenced by the encrypted tree doc, not part of
+/// the log). A MEDIA object leaves the tree-coordination fields above empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum Kind {
     Unspecified = 0,
     Snapshot = 1,
     Delta = 2,
+    Media = 3,
 }
 impl Kind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -161,6 +170,7 @@ impl Kind {
             Self::Unspecified => "KIND_UNSPECIFIED",
             Self::Snapshot => "KIND_SNAPSHOT",
             Self::Delta => "KIND_DELTA",
+            Self::Media => "KIND_MEDIA",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -169,6 +179,7 @@ impl Kind {
             "KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "KIND_SNAPSHOT" => Some(Self::Snapshot),
             "KIND_DELTA" => Some(Self::Delta),
+            "KIND_MEDIA" => Some(Self::Media),
             _ => None,
         }
     }
@@ -182,6 +193,8 @@ pub enum Format {
     OpenomJson = 1,
     /// The JSON op-log entries (delta).
     OpenomOps = 2,
+    /// Opaque bytes — a media blob (image, etc.). The server never interprets it.
+    RawBytes = 4,
 }
 impl Format {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -193,6 +206,7 @@ impl Format {
             Self::Unspecified => "FORMAT_UNSPECIFIED",
             Self::OpenomJson => "FORMAT_OPENOM_JSON",
             Self::OpenomOps => "FORMAT_OPENOM_OPS",
+            Self::RawBytes => "FORMAT_RAW_BYTES",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -201,6 +215,7 @@ impl Format {
             "FORMAT_UNSPECIFIED" => Some(Self::Unspecified),
             "FORMAT_OPENOM_JSON" => Some(Self::OpenomJson),
             "FORMAT_OPENOM_OPS" => Some(Self::OpenomOps),
+            "FORMAT_RAW_BYTES" => Some(Self::RawBytes),
             _ => None,
         }
     }

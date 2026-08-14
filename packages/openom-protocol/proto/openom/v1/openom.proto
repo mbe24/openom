@@ -57,13 +57,22 @@ message Header {
   // Reserved, empty in V1. Per-member signature for change attribution once trees
   // are shared; absent means "not attributed" (V1's communal-DEK trust model).
   bytes author_signature = 14;
+
+  // KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
+  // cannot swap two of a tree's blobs undetected (the AAD otherwise binds only
+  // tree_id). Empty for tree kinds and throughout V1. Reader-side ciphertext-hash
+  // verification remains the primary media-integrity check; this is defense in depth.
+  bytes blob_id = 15;
 }
 
-// Snapshot vs delta.
+// What the object is. SNAPSHOT/DELTA are append-log entries of a tree; MEDIA is a
+// single standalone media blob (referenced by the encrypted tree doc, not part of
+// the log). A MEDIA object leaves the tree-coordination fields above empty.
 enum Kind {
   KIND_UNSPECIFIED = 0;
   KIND_SNAPSHOT = 1;
   KIND_DELTA = 2;
+  KIND_MEDIA = 3;
 }
 
 // Encoding of the decrypted payload.
@@ -75,6 +84,8 @@ enum Format {
   FORMAT_OPENOM_OPS = 2;
   // Tag 3 was YRS_UPDATE; a concrete CRDT format value is added when deltas ship.
   reserved 3;
+  // Opaque bytes — a media blob (image, etc.). The server never interprets it.
+  FORMAT_RAW_BYTES = 4;
 }
 
 // AEAD construction.
