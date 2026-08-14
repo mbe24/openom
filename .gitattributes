@@ -1,0 +1,5 @@
+# Generated protobuf Rust — checked in on purpose (no build script, so `cargo build`
+# needs neither protoc nor buf; regenerate with `cd packages/openom-protocol/proto
+# && buf generate`). Mark it generated so review tools collapse it and language
+# stats ignore it.
+packages/openom-protocol/src/generated/** linguist-generated=true

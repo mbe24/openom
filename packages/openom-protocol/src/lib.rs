@@ -1,20 +1,20 @@
-//! Shared protocol — the protobuf data model used identically by the server and
-//! the Tauri client (through `openom-store`).
+//! Shared protocol — the wire format used identically by the server and the Tauri
+//! client (through `openom-store`).
 //!
-//! The Rust types are generated from `proto/openom.proto` with `buf generate`
-//! (the neoeinstein-prost plugin) into `src/generated/`, **not** by a build
-//! script — so this crate has no build-time `protoc`/`protox` dependency and
-//! nothing executes during `cargo build`. Once the schema exists, the generated
-//! module is `include!`d here. Until then this placeholder keeps the crate and
-//! its `prost` wiring compiling.
+//! The Rust types in [`v1`] are generated from `proto/openom/v1/openom.proto` with
+//! `buf generate` (the neoeinstein-prost plugin) and checked into `src/generated/`.
+//! There is **no build script and no `protoc`**, so nothing executes during
+//! `cargo build` — which is what lets the crate build on a host whose policy blocks
+//! build-script execution. Regenerate with `cd proto && buf generate` after editing
+//! the `.proto`.
 
-/// Bumped whenever the wire schema changes; travels with every update.
-pub const SCHEMA_VERSION: u32 = 1;
-
-/// Placeholder message that exercises the `prost` dependency until the code
-/// generated from `openom.proto` replaces it.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Placeholder {
-    #[prost(string, tag = "1")]
-    pub note: ::prost::alloc::string::String,
+/// Generated types for `package openom.v1` — `Envelope`, `Header`, `Keyring`,
+/// `KeyEpoch`, `KeyWrap`, `KdfParams`, and the `Kind` / `Format` / `Aead` /
+/// `Compression` / `WrapMethod` enums.
+pub mod v1 {
+    include!("generated/openom/v1/openom.v1.rs");
 }
+
+/// The `Envelope.version` this build reads and writes (data-format spec §3). An
+/// envelope carrying a higher version is opened read-only rather than misread.
+pub const ENVELOPE_VERSION: u32 = 1;

@@ -28,7 +28,7 @@ async fn main() -> Result<(), Error> {
 
     // Touch the shared crates so their wiring is verified at compile time.
     tracing::info!(
-        schema_version = openom_protocol::SCHEMA_VERSION,
+        envelope_version = openom_protocol::ENVELOPE_VERSION,
         ciphers = openom_crypto::cipher_suite(),
         "openom starting"
     );

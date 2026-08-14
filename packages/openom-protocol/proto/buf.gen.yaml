@@ -1,0 +1,11 @@
+# Rust codegen for openom-protocol. Runs on the host (buf is a standalone binary,
+# not blocked by the build-script policy), so no protoc and no build.rs — the
+# generated Rust is checked into src/generated/ and `include!`d by lib.rs.
+#
+#   cd packages/openom-protocol/proto && buf generate
+#
+# The plugin version tracks prost: neoeinstein-prost v0.5.0 targets prost 0.14.
+version: v2
+plugins:
+  - remote: buf.build/community/neoeinstein-prost:v0.5.0
+    out: ../src/generated

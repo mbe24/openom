@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package openom.v1;
+
+// One sealed unit in the append-only log: a full snapshot or an incremental delta.
+// The server treats `ciphertext` as opaque; everything it routes on lives in
+// `header`, which is authenticated as AEAD associated data (AAD). The three-field
+// skeleton (version, header, ciphertext) is frozen forever.
+message Envelope {
+  // Wire-format selector. Read first (untrusted) to choose the layout, then
+  // verified because it is covered by the AAD. An older client that sees a newer
+  // version opens read-only rather than misreading.
+  uint32 version = 1;
+  // All metadata. Authenticated as AAD so the server cannot tamper with it.
+  Header header = 2;
+  // AEAD( compress(payload) ) — the sealed body. Opaque to the server.
+  bytes ciphertext = 3;
+}
+
+// All envelope metadata. Plaintext to the server, but bound to the ciphertext via
+// AAD. Deliberately algorithm-agnostic: no CRDT causality and no client wall-clock
+// live here (both are inside the ciphertext).
+message Header {
+  // Full state (KIND_SNAPSHOT) or incremental change (KIND_DELTA).
+  Kind kind = 1;
+  // How the decrypted payload is encoded. Open set; the server stays blind to it.
+  Format format = 2;
+
+  // AEAD construction that sealed the ciphertext.
+  Aead aead = 3;
+  // Whether the payload was compressed before encryption.
+  Compression compression = 4;
+  // Which DEK/epoch sealed this (matches KeyEpoch.key_id). Opaque.
+  bytes key_id = 5;
+  // AEAD nonce. Public.
+  bytes nonce = 6;
+
+  // Opaque tree id (UUID); never a human-readable name.
+  bytes tree_id = 7;
+  // Producing replica: >=128-bit CSPRNG, per-(tree, replica context), with no
+  // machine-stable substring. With replica_counter it forms the idempotency dot.
+  bytes replica_id = 8;
+  // This replica's monotonic operation counter, from 0.
+  uint64 replica_counter = 9;
+  // SHA-256 of `ciphertext`; the keyless server verifies it on upload.
+  bytes ciphertext_hash = 10;
+  // Previous entry's ciphertext_hash from the same replica — a per-replica chain
+  // giving fork/omission evidence. Empty on a replica's first entry.
+  bytes prev_ciphertext_hash = 11;
+
+  // SNAPSHOT only: the highest server seq this snapshot folds in. 0 = empty log.
+  uint64 covers_through_seq = 12;
+  // SNAPSHOT only; reserved, empty in V1. Links a snapshot to the one it replaced
+  // (rollback evidence for the snapshot line).
+  bytes replaces_ciphertext_hash = 13;
+
+  // Reserved, empty in V1. Per-member signature for change attribution once trees
+  // are shared; absent means "not attributed" (V1's communal-DEK trust model).
+  bytes author_signature = 14;
+}
+
+// Snapshot vs delta.
+enum Kind {
+  KIND_UNSPECIFIED = 0;
+  KIND_SNAPSHOT = 1;
+  KIND_DELTA = 2;
+}
+
+// Encoding of the decrypted payload.
+enum Format {
+  FORMAT_UNSPECIFIED = 0;
+  // V1: the full tree as openom JSON (snapshot only).
+  FORMAT_OPENOM_JSON = 1;
+  // The JSON op-log entries (delta).
+  FORMAT_OPENOM_OPS = 2;
+  // Tag 3 was YRS_UPDATE; a concrete CRDT format value is added when deltas ship.
+  reserved 3;
+}
+
+// AEAD construction.
+enum Aead {
+  AEAD_UNSPECIFIED = 0;
+  AEAD_AES_256_GCM = 1;
+  AEAD_XCHACHA20_POLY1305 = 2;
+}
+
+// Payload compression.
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0;
+  COMPRESSION_NONE = 1;
+  COMPRESSION_ZSTD = 2;
+}
+
+// Per-tree key material: the DEK wrapped for each member, across key generations,
+// signed by the owner. Stored once per tree; updated only on membership change.
+message Keyring {
+  // Opaque tree id.
+  bytes tree_id = 1;
+  // Key generations (rotation produces a new epoch).
+  repeated KeyEpoch epochs = 2;
+  // Monotonic anti-rollback counter, bumped on every change. A client refuses a
+  // revision lower than the highest it has seen.
+  uint32 revision = 3;
+  // Owner identity (Ed25519) key id. A hint: the client verifies with its own
+  // trusted/pinned identity, never the key this names.
+  bytes signer_key_id = 4;
+  // Ed25519 signature over a canonical, domain-separated encoding of this keyring.
+  bytes signature = 5;
+}
+
+// One key generation.
+message KeyEpoch {
+  // Matches Header.key_id.
+  bytes key_id = 1;
+  // Generation number, from 0.
+  uint32 epoch = 2;
+  // The DEK wrapped once per member.
+  repeated KeyWrap wraps = 3;
+}
+
+// The DEK sealed for one member.
+message KeyWrap {
+  // Member account id (provider-agnostic).
+  string member_id = 1;
+  // How the DEK was wrapped.
+  WrapMethod wrap_method = 2;
+  // AEAD nonce for the wrap.
+  bytes nonce = 3;
+  // AEAD(DEK); its AAD binds (tree_id, key_id, member_id, wrap_method, epoch).
+  bytes wrapped_dek = 4;
+  // Set for WRAP_METHOD_PASSPHRASE_ARGON2ID.
+  KdfParams kdf_params = 5;
+  // Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
+  bytes ephemeral_public_key = 6;
+}
+
+// Argon2id parameters (explicit so cost can rise later).
+message KdfParams {
+  // Random per-member salt.
+  bytes salt = 1;
+  // Memory cost, KiB.
+  uint32 memory_kib = 2;
+  // Time cost (passes).
+  uint32 iterations = 3;
+  // Parallelism (lanes).
+  uint32 parallelism = 4;
+}
+
+// How a DEK is wrapped for a member.
+enum WrapMethod {
+  WRAP_METHOD_UNSPECIFIED = 0;
+  WRAP_METHOD_PASSPHRASE_ARGON2ID = 1;
+  WRAP_METHOD_X25519_HPKE = 2;
+}
