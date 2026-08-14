@@ -1,0 +1,307 @@
+//! Tree envelope PUT/GET — the V1 write/read path.
+//!
+//! A tree is one encrypted snapshot Envelope stored in R2, pointed at by a Postgres
+//! row. The server is a zero-knowledge blob store: it validates the envelope's
+//! *self-consistency* (hash, kind, tree binding) and enforces the log contract
+//! (§9), but never decrypts. Concurrency is **compare-and-swap on a Postgres-held
+//! opaque version token** (§9.7), surfaced to the client as an HTTP `ETag` +
+//! `If-Match` — deliberately *not* S3 `If-Match`, the least portable S3 feature.
+//!
+//! Write order (§9.7): write the new snapshot to a fresh R2 key, *then* CAS the
+//! pointer. A CAS loss orphans the just-written object, which we delete immediately
+//! (and a sweep would catch anyway).
+
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use openom_protocol::v1::{Envelope, Kind};
+use openom_protocol::{Message, ENVELOPE_VERSION};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::auth::Identity;
+use crate::AppState;
+
+/// Per-object ceiling. The Lambda proxy path tops out around 6 MB (§9.9); tree
+/// snapshots are far smaller, but the limit is enforced so a client can't wedge the
+/// proxy. Media (large) takes the presigned path instead, never this one.
+pub const MAX_OBJECT_BYTES: usize = 6 * 1024 * 1024;
+
+/// The envelope fields the metadata row mirrors, extracted after validation.
+struct Validated {
+    aead: i16,
+    ciphertext_hash: Vec<u8>,
+    covers_through_seq: i64,
+}
+
+/// Validate an uploaded snapshot envelope against the V1 contract (§9.2–§9.6):
+/// decodable, supported version, `KIND_SNAPSHOT`, bound to *this* tree, and a
+/// `ciphertext_hash` the keyless server can — and must — recompute.
+fn validate_snapshot(body: &[u8], tree_id: Uuid) -> Result<Validated, ApiError> {
+    let env = Envelope::decode(body)
+        .map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
+    if env.version != ENVELOPE_VERSION {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",
+            env.version
+        )));
+    }
+    let header = env
+        .header
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
+    if header.kind() != Kind::Snapshot {
+        return Err(ApiError::BadRequest(
+            "V1 accepts only KIND_SNAPSHOT on the tree path".into(),
+        ));
+    }
+    // The header's opaque tree_id (16 raw UUID bytes) must match the URL, or the
+    // client is filing this tree's bytes under another tree's coordinates.
+    if header.tree_id.as_slice() != tree_id.as_bytes() {
+        return Err(ApiError::BadRequest(
+            "header tree_id does not match the url".into(),
+        ));
+    }
+    // ciphertext_hash is a hash of *ciphertext*, so the keyless server verifies it.
+    let computed = Sha256::digest(&env.ciphertext);
+    if header.ciphertext_hash.as_slice() != computed.as_slice() {
+        return Err(ApiError::BadRequest(
+            "ciphertext_hash does not match the ciphertext".into(),
+        ));
+    }
+    Ok(Validated {
+        aead: header.aead as i16,
+        ciphertext_hash: header.ciphertext_hash.clone(),
+        covers_through_seq: header.covers_through_seq as i64,
+    })
+}
+
+/// `PUT /trees/{tree_id}` — upload a new snapshot. `If-Match: "<version>"` names the
+/// snapshot the edit was based on (CAS); its absence means "create, must not exist".
+pub async fn put_tree(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let valid = validate_snapshot(&body, tree_id)?;
+    let expected = if_match(&headers);
+
+    // New opaque version + fresh key; the object is written before the pointer CAS.
+    let version = Uuid::new_v4().to_string();
+    let r2_key = format!("trees/{tree_id}/snapshot/{version}");
+    let size = body.len() as i64;
+
+    state
+        .storage
+        .put_object(&r2_key, body.to_vec())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let outcome = match &expected {
+        None => cas_create(&state, tree_id, identity.member_id, &r2_key, &version, size, &valid).await,
+        Some(exp) => {
+            cas_update(&state, tree_id, identity.member_id, &r2_key, &version, size, &valid, exp).await
+        }
+    };
+
+    match outcome {
+        Ok(()) => Ok((StatusCode::OK, [(ETAG, etag(&version))]).into_response()),
+        Err(err) => {
+            // GC the orphan we wrote before the failed CAS (best effort).
+            if let Err(e) = state.storage.delete_object(&r2_key).await {
+                tracing::warn!(%e, key = %r2_key, "could not delete orphaned snapshot object");
+            }
+            Err(err)
+        }
+    }
+}
+
+/// `GET /trees/{tree_id}` — the current snapshot bytes + its `ETag` version.
+pub async fn get_tree(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let row: Option<(Uuid, String, Option<String>)> =
+        sqlx::query_as("SELECT owner_id, r2_key, snapshot_version FROM trees WHERE id = $1")
+            .bind(tree_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?;
+
+    let (owner_id, r2_key, version) = row.ok_or(ApiError::NotFound)?;
+    if owner_id != identity.member_id {
+        return Err(ApiError::Forbidden);
+    }
+    let version = version.ok_or(ApiError::NotFound)?; // row exists but no snapshot yet
+
+    let bytes = state
+        .storage
+        .get_object(&r2_key)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or(ApiError::NotFound)?; // pointer present, object gone → graceful 404
+
+    Ok((
+        StatusCode::OK,
+        [(ETAG, etag(&version)), (CONTENT_TYPE, "application/octet-stream".to_string())],
+        bytes,
+    )
+        .into_response())
+}
+
+/// First snapshot for a tree: insert the row iff the tree is new *and* the owner is
+/// under their `max_trees` entitlement (§9). 0 rows → disambiguate the reason.
+async fn cas_create(
+    state: &AppState,
+    tree_id: Uuid,
+    owner: Uuid,
+    r2_key: &str,
+    version: &str,
+    size: i64,
+    valid: &Validated,
+) -> Result<(), ApiError> {
+    let res = sqlx::query(
+        "INSERT INTO trees
+             (id, owner_id, r2_key, snapshot_version, envelope_version, aead,
+              size_bytes, ciphertext_hash, covers_through_seq)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+         WHERE (SELECT count(*) FROM trees WHERE owner_id = $2)
+             < (SELECT max_trees FROM accounts WHERE id = $2)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tree_id)
+    .bind(owner)
+    .bind(r2_key)
+    .bind(version)
+    .bind(ENVELOPE_VERSION as i32)
+    .bind(valid.aead)
+    .bind(size)
+    .bind(&valid.ciphertext_hash)
+    .bind(valid.covers_through_seq)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
+    if res.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    // 0 rows: the tree already exists, or the entitlement/account gate blocked it.
+    let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    match existing {
+        // Exists and is ours → the client should have sent If-Match.
+        Some(o) if o == owner => Err(ApiError::Conflict),
+        Some(_) => Err(ApiError::Forbidden),
+        // Doesn't exist → over quota or unknown account.
+        None => Err(ApiError::Forbidden),
+    }
+}
+
+/// Replace an existing snapshot under CAS: match the expected version and never let
+/// `covers_through_seq` regress (§9.6). 0 rows → not found / not owner / stale.
+#[allow(clippy::too_many_arguments)]
+async fn cas_update(
+    state: &AppState,
+    tree_id: Uuid,
+    owner: Uuid,
+    r2_key: &str,
+    version: &str,
+    size: i64,
+    valid: &Validated,
+    expected: &str,
+) -> Result<(), ApiError> {
+    let res = sqlx::query(
+        "UPDATE trees
+            SET r2_key = $1, snapshot_version = $2, envelope_version = $3, aead = $4,
+                size_bytes = $5, ciphertext_hash = $6, covers_through_seq = $7,
+                updated_at = now()
+          WHERE id = $8 AND owner_id = $9 AND snapshot_version = $10
+            AND $7 >= covers_through_seq",
+    )
+    .bind(r2_key)
+    .bind(version)
+    .bind(ENVELOPE_VERSION as i32)
+    .bind(valid.aead)
+    .bind(size)
+    .bind(&valid.ciphertext_hash)
+    .bind(valid.covers_through_seq)
+    .bind(tree_id)
+    .bind(owner)
+    .bind(expected)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
+    if res.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    // Disambiguate the 0-row failure so the client gets a truthful status.
+    let row: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    match row {
+        None => Err(ApiError::NotFound),
+        Some((o,)) if o != owner => Err(ApiError::Forbidden),
+        Some(_) => Err(ApiError::Conflict), // version or covers_through_seq stale
+    }
+}
+
+/// Read `If-Match`, unwrapping the ETag quoting. `None` (or `*`) means "create".
+fn if_match(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(IF_MATCH)?.to_str().ok()?.trim();
+    let v = raw.trim_matches('"');
+    if v.is_empty() || v == "*" {
+        None
+    } else {
+        Some(v.to_string())
+    }
+}
+
+/// A quoted (strong) ETag header value from an opaque version token.
+fn etag(version: &str) -> String {
+    format!("\"{version}\"")
+}
+
+fn internal(e: sqlx::Error) -> ApiError {
+    ApiError::Internal(e.to_string())
+}
+
+/// Handler error → HTTP status. Internal causes are logged, never leaked.
+pub enum ApiError {
+    Forbidden,
+    NotFound,
+    Conflict,
+    BadRequest(String),
+    Internal(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match self {
+            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Conflict => (
+                StatusCode::CONFLICT,
+                "version conflict — pull the current snapshot and retry".to_string(),
+            ),
+            ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            ApiError::Internal(m) => {
+                tracing::error!(error = %m, "tree handler internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+            }
+        };
+        (status, msg).into_response()
+    }
+}

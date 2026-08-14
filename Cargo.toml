@@ -59,6 +59,15 @@ argon2 = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 zstd = "0.13"
 
+# S3 request signing only (no runtime, no OpenSSL): rusty-s3 builds + signs
+# requests and presigned URLs; reqwest (above, rustls) sends the bytes. This pair
+# talks to MinIO (dev) and Cloudflare R2 (prod) identically. Presigning is the
+# media path's core need, which is exactly rusty-s3's competency.
+rusty-s3 = "0.8"
+sha2 = "0.10"
+url = "2"
+base64 = "0.22"
+
 # Errors / SQLite (only the store uses rusqlite).
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }

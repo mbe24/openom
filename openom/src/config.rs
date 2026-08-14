@@ -24,11 +24,16 @@ pub struct Config {
     /// Postgres connection string (Neon in prod, a local container in dev).
     pub database_url: String,
     /// S3-compatible endpoint (Cloudflare R2 in prod, MinIO in dev).
-    #[allow(dead_code)] // used once the blob-store subsystem lands
     pub s3_endpoint: String,
     /// Bucket that holds the encrypted tree envelopes.
-    #[allow(dead_code)]
     pub s3_bucket: String,
+    /// S3 region. MinIO ignores it but still requires a value in the signature;
+    /// R2 uses "auto".
+    pub s3_region: String,
+    /// S3 access key id (MinIO root user in dev, R2 token id in prod).
+    pub s3_access_key: String,
+    /// S3 secret access key.
+    pub s3_secret_key: String,
     /// Supabase JWT secret (HS256). Required in production, unused locally.
     pub jwt_secret: Option<String>,
     /// The account fake-auth maps anonymous local requests to.
@@ -48,6 +53,9 @@ impl Config {
                 .unwrap_or_else(|_| "postgres://openom:openom@localhost:5432/openom".into()),
             s3_endpoint: env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into()),
             s3_bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "openom-trees".into()),
+            s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+            s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),
+            s3_secret_key: env::var("S3_SECRET_KEY").unwrap_or_else(|_| "openompw123".into()),
             jwt_secret: env::var("SUPABASE_JWT_SECRET").ok(),
             local_member_id: env::var("OPENOM_LOCAL_MEMBER_ID")
                 .ok()

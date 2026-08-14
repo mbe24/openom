@@ -18,3 +18,8 @@ pub mod v1 {
 /// The `Envelope.version` this build reads and writes (data-format spec §3). An
 /// envelope carrying a higher version is opened read-only rather than misread.
 pub const ENVELOPE_VERSION: u32 = 1;
+
+/// Re-exported so callers can `decode`/`encode` the generated messages without
+/// taking their own direct `prost` dependency (the server decodes uploaded
+/// envelopes to validate them; see `openom` `trees` module).
+pub use prost::Message;

@@ -7,13 +7,17 @@
 
 mod auth;
 mod config;
+mod storage;
+mod trees;
 
+use axum::extract::DefaultBodyLimit;
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use config::Config;
 use jsonwebtoken::DecodingKey;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
+use storage::S3Store;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,6 +25,8 @@ pub struct AppState {
     config: Arc<Config>,
     /// HS256 key for verifying Supabase JWTs (production). None locally.
     jwt_key: Option<DecodingKey>,
+    /// Blob store (MinIO in dev, R2 in prod).
+    storage: S3Store,
 }
 
 /// Liveness: the process is up.
@@ -50,6 +56,10 @@ fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/whoami", get(whoami))
+        .route("/trees/{tree_id}", get(trees::get_tree).put(trees::put_tree))
+        // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
+        // take the presigned path, never this proxy.
+        .layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES))
         .with_state(state)
 }
 
@@ -88,7 +98,17 @@ async fn main() -> Result<(), lambda_http::Error> {
         .jwt_secret
         .as_ref()
         .map(|s| DecodingKey::from_secret(s.as_bytes()));
-    let state = AppState { db, config: Arc::new(config.clone()), jwt_key };
+
+    let storage = S3Store::from_config(&config)?;
+    // Dev bootstrap: MinIO starts empty, so create the bucket up front. In prod the
+    // bucket is provisioned out of band and this is a cheap already-exists no-op.
+    if config.is_local() {
+        if let Err(err) = storage.ensure_bucket().await {
+            tracing::warn!(%err, "could not ensure local bucket (MinIO not up yet?)");
+        }
+    }
+
+    let state = AppState { db, config: Arc::new(config.clone()), jwt_key, storage };
     let router = app(state);
 
     if config.is_local() {

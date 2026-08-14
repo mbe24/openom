@@ -25,6 +25,9 @@ services:
       DATABASE_URL: postgres://openom:openom@postgres:5432/openom
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: openom-trees
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: openom
+      S3_SECRET_KEY: openompw123
       CARGO_TARGET_DIR: /tmp/target
       RUST_LOG: info,openom=debug
     ports:

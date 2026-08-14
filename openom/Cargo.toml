@@ -21,6 +21,15 @@ tokio.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 
+# Blob store: rusty-s3 signs S3 requests / presigned URLs, reqwest sends the bytes;
+# sha2 hashes ciphertext for the upload-integrity check. MinIO (dev) / R2 (prod).
+rusty-s3.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+url.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+
 # Auth: Supabase JWT validation (prod); fake-token bypass (local).
 jsonwebtoken.workspace = true
 
