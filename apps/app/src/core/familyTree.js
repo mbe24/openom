@@ -4,43 +4,50 @@ import { compareSiblings } from './sort.js';
 import { mergePersonFields, definePersonViews, mergeFamilyFields, defineFamilyViews,
   makeName, makeChildLink, makeTombstone, edgeKey } from './model.js';
 
-/** Rohdaten ohne die abgeleiteten Sichten — Getter ueberleben kein Klonen. */
+/** Raw data without the derived views — getters don't survive cloning. */
 const rawOf = (obj) => JSON.parse(JSON.stringify(obj));
 
-// Eine Fabrik fuer den ganzen Prozess: Geraete-ID plus laufender Zaehler.
+// One factory for the whole process: device id plus a running counter.
 const DEVICE = deviceId();
 const nextId = makeIdFactory(DEVICE);
 
-/** Vorgabe fuer eine neue Person — an einer Stelle, nicht in jedem Aufrufer. */
+/** Default for a new person — in one place, not in every caller. */
 const NEW_PERSON = { given: '', surname: '', sex: 'U', custom: {} };
 
-/** Ab so vielen Log-Eintraegen lohnt ein Snapshot beim naechsten Laden. */
+/** Past this many log entries, a snapshot on the next load pays off. */
 const COMPACT_AT = 200;
 
 /**
- * Der geoeffnete Baum. Haelt Personen und Familien im Speicher, schreibt jede
- * Aenderung als Op in den DocStore und zaehlt "revision" hoch — daran haengt
- * das Rendering, die UI abonniert nichts.
+ * The opened tree. Holds people and families in memory, writes every change as an
+ * op to the DocStore, and bumps `revision` — rendering hangs off that; the UI
+ * subscribes to nothing.
  */
 export class FamilyTree {
   revision = 0;
   people = new Map();
   families = new Map();
-  // Medien liegen als Metadaten im Dokument; die Bytes stehen im BlobStore.
+  // Media live as metadata in the document; the bytes are in the BlobStore.
   media = new Map();       // mediaId -> { id, kind, mime, hash, w, h, caption, source }
   mediaLinks = new Map();  // linkId  -> { id, mediaId, subjectId, role, crop, order }
-  // Grabsteine: heute nur Buchhaltung, spaeter die Grundlage fuers Mergen.
+  // Tombstones: bookkeeping only today, the basis for merging later.
   tombstones = new Map();  // id -> { id, kind, device, at }
   #store;
   #docId;
   #deviceId = DEVICE;
   #lamport = loadClock();
-  /** Gesetzt, wenn die Datei aus einer neueren Fassung stammt — dann nur lesen. */
+  /** Set when the file comes from a newer version — then read-only. */
   readOnly = false;
   readOnlyReason = null;
   #undo = [];
   #logLength = 0;
-  #covered = 0;   // vom Snapshot abgedeckte Log-Eintraege
+  #covered = 0;   // log entries covered by the snapshot
+  /**
+   * The store position (log-entry count) through which this replica has folded
+   * ops into memory. compact() must never cover beyond it without first applying
+   * the tail: a snapshot that claims coverage of entries it never folded in would
+   * drop a concurrent tab's interleaved ops on the next hydrate.
+   */
+  #appliedThrough = 0;
   #redo = [];
   #listeners = new Set();
 
@@ -59,18 +66,18 @@ export class FamilyTree {
     for (const fn of this.#listeners) fn(this.revision);
   }
 
-  // ---------------------------------------------------------------- lesen
+  // ---------------------------------------------------------------- reading
   person(id) { return this.people.get(id); }
   family(id) { return this.families.get(id); }
   allPeople() { return [...this.people.values()]; }
   allFamilies() { return [...this.families.values()]; }
 
-  /** Familien, in denen die Person Ehepartner ist. */
+  /** Families in which the person is a spouse. */
   familiesOf(id) {
     return this.allFamilies().filter((f) => f.spouses.includes(id));
   }
 
-  /** Die Familie, in der die Person Kind ist. */
+  /** The family in which the person is a child. */
   childFamilyOf(id) {
     return this.allFamilies().find((f) => f.children.includes(id));
   }
@@ -79,9 +86,9 @@ export class FamilyTree {
     const fam = this.childFamilyOf(id);
     if (!fam) return { family: null, father: null, mother: null };
     const spouses = fam.spouses.map((s) => this.person(s)).filter(Boolean);
-    // Geschlecht fuehrt, Position ist nur der Rest: seit ein einzelner Elternteil
-    // uebrig bleiben kann, wuerde ein positionaler Rueckfall eine alleinstehende
-    // Mutter in den Vaterslot schieben — und damit auch im Baum verschieben.
+    // Sex leads, position is only the fallback: since a single parent can remain,
+    // a positional fallback would push a lone mother into the father slot — and
+    // thereby move her in the tree too.
     let father = spouses.find((p) => p.sex === 'M') ?? null;
     let mother = spouses.find((p) => p.sex === 'F') ?? null;
     for (const p of spouses) {
@@ -103,35 +110,39 @@ export class FamilyTree {
     return fam.children.filter((c) => c !== id).map((c) => this.person(c)).filter(Boolean).sort(compareSiblings);
   }
 
-  // ---------------------------------------------------------------- schreiben
+  // ---------------------------------------------------------------- writing
   async #commit(ops, { undoable = true, silent = false } = {}) {
-    // Aus der Zukunft geladen: nichts schreiben, sonst ueberschreibt diese
-    // Fassung Aenderungen, die sie nicht lesen konnte.
+    // Loaded from the future: write nothing, or this version overwrites changes it
+    // couldn't read.
     if (this.readOnly) { console.warn('read-only:', this.readOnlyReason); return; }
     const inverse = ops.map((o) => this.#invert(o)).reverse().filter(Boolean);
     this.#apply(ops);
     if (undoable && inverse.length) { this.#undo.push(inverse); this.#redo.length = 0; }
     this.#lamport += 1;
     saveClock(this.#lamport);
-    await this.#store.append(this.#docId, [encodeUpdate(ops, this.#deviceId, this.#lamport)]);
-    // Still schreiben: waehrend des Tippens darf die Ansicht nicht neu gebaut
-    // werden, sonst verliert das Feld den Cursor.
+    const cursor = await this.#store.append(this.#docId, [encodeUpdate(ops, this.#deviceId, this.#lamport)]);
+    // Advance the fold mark only when our single-entry append is contiguous with
+    // what we've already folded (the common single-tab case). If another tab wrote
+    // in between there is a gap, so leave it — compact() folds the gap first.
+    if (cursor === this.#appliedThrough + 1) this.#appliedThrough = cursor;
+    // Silent write: while typing, the view must not be rebuilt, or the field loses
+    // the cursor.
     if (!silent) this.#bump();
   }
 
   /**
-   * Wendet Ops an. `at` ist der Zeitpunkt der Aenderung; er entscheidet gegen
-   * Grabsteine. Eigene Schreibvorgaenge sind per Definition die juengsten.
+   * Applies ops. `at` is the change's timestamp; it decides against tombstones.
+   * One's own writes are, by definition, the newest.
    */
   #apply(ops, at = Date.now()) {
-    // Eine Aenderung, die aelter ist als das Loeschen, darf nichts wiederbeleben.
+    // A change older than the deletion must not resurrect anything.
     const buried = (key) => {
       const t = this.tombstones.get(key);
       return t ? t.at > at : false;
     };
-    // Erst pruefen, dann anwenden: eine gemischte Liste wuerde sonst zur
-    // Haelfte landen und einen halben Stand hinterlassen. Unbekannte Art heisst
-    // neuere Fassung — verschlucken waere stiller Datenverlust.
+    // Check first, then apply: a mixed list would otherwise half-land and leave a
+    // half state. An unknown kind means a newer version — swallowing it would be
+    // silent data loss.
     for (const o of ops) {
       if (!KNOWN_OPS.has(o.type)) throw new FutureVersionError('change', o.type, 'known ops');
     }
@@ -165,16 +176,16 @@ export class FamilyTree {
           if (buried(key)) break;
           this.tombstones.delete(key);
           const f = this.families.get(o.familyId);
-          // Die Art der Kindschaft reist mit — die Oberflaeche zeigt sie noch
-          // nicht, aber ein Import darf sie nicht verlieren.
+          // The kind of parentage travels along — the UI doesn't show it yet, but
+          // an import must not lose it.
           if (f && !f.childLinks.some((c) => c.id === o.personId)) {
             f.childLinks.push(makeChildLink(o.personId, o.pedi ?? 'birth'));
           }
           break;
         }
         case 'unlinkChild': {
-          // Auch eine geloeste Kante braucht einen Grabstein: sonst bringt sie
-          // ein Merge zurueck, weil "nicht vorhanden" wie "nie dagewesen" aussieht.
+          // An unlinked edge needs a tombstone too: otherwise a merge brings it
+          // back, because "absent" looks like "never existed".
           const key = edgeKey('child', o.familyId, o.personId);
           this.tombstones.set(key, makeTombstone(key, 'childLink', this.#deviceId, at));
           const f = this.families.get(o.familyId);
@@ -221,7 +232,7 @@ export class FamilyTree {
           for (const p of this.people.values()) if (p.portraitId === o.id) delete p.portraitId;
           break;
         }
-        default: break;   // von KNOWN_OPS bereits ausgeschlossen
+        default: break;   // already excluded by KNOWN_OPS
       }
     }
   }
@@ -240,12 +251,12 @@ export class FamilyTree {
           ? { type: 'upsertFamily', id: o.id, fields: rawOf(prev) }
           : { type: 'deleteFamily', id: o.id };
       }
-      // Medien folgen demselben Muster wie Personen und Familien.
+      // Media follow the same pattern as people and families.
       case 'upsertMedia': case 'deleteMedia':
       case 'upsertMediaLink': case 'deleteMediaLink':
       case 'deletePerson': case 'deleteFamily':
         return this.#invertRecord(o);
-      // Kanten sind ihr eigenes Gegenteil.
+      // Edges are their own inverse.
       case 'linkChild': return { type: 'unlinkChild', familyId: o.familyId, personId: o.personId };
       case 'unlinkChild': return { type: 'linkChild', familyId: o.familyId, personId: o.personId };
       case 'linkSpouse': return { type: 'unlinkSpouse', familyId: o.familyId, personId: o.personId };
@@ -255,9 +266,9 @@ export class FamilyTree {
   }
 
   /**
-   * Umkehrung fuer alle Datensatz-Arten: war vorher etwas da, stellt die
-   * Umkehrung es wieder her; war nichts da, loescht sie. Sechs Faelle, die sich
-   * nur in Sammlung und Op-Namen unterschieden, liegen jetzt an einer Stelle.
+   * Inverse for all record kinds: if something existed before, the inverse
+   * restores it; if nothing did, it deletes. Six cases that differed only in
+   * collection and op name now live in one place.
    */
   #invertRecord(o) {
     const kind = o.type.replace(/^(upsert|delete)/, '');
@@ -270,7 +281,7 @@ export class FamilyTree {
     return o.type.startsWith('upsert') ? { type: 'delete' + kind, id: o.id } : null;
   }
 
-  /** Person-Op ohne Commit, damit Aktionen atomar bleiben. */
+  /** A person op without a commit, so actions stay atomic. */
   #draftPerson(fields = {}) {
     const id = nextId('p');
     return { id, op: { type: 'upsertPerson', id, fields: { ...NEW_PERSON, ...fields } } };
@@ -282,10 +293,10 @@ export class FamilyTree {
     return this.person(id);
   }
 
-  // -------------------------------------------------------------- Medien
+  // -------------------------------------------------------------- media
   #linkGone(linkId) { return !this.mediaLinks.has(linkId); }
 
-  /** Alle Medien einer Person, Portraet zuerst. */
+  /** All of a person's media, portrait first. */
   mediaOf(subjectId) {
     const links = [...this.mediaLinks.values()].filter((l) => l.subjectId === subjectId);
     const portraitId = this.people.get(subjectId)?.portraitId;
@@ -295,7 +306,7 @@ export class FamilyTree {
       .filter((m) => m.media);
   }
 
-  /** Das bevorzugte Bild einer Person — oder null. */
+  /** A person's preferred image — or null. */
   portraitOf(subjectId) {
     const p = this.people.get(subjectId);
     if (!p) return null;
@@ -307,8 +318,8 @@ export class FamilyTree {
   }
 
   /**
-   * Haengt eine bereits im BlobStore liegende Datei an eine Person.
-   * Das Dokument bekommt nur Hash und Masse — nie die Bytes.
+   * Attaches a file already in the BlobStore to a person. The document gets only
+   * the hash and dimensions — never the bytes.
    */
   async attachMedia(subjectId, { hash, mime, w, h, caption = '', source = '', role = 'portrait', crop = null }) {
     const mediaId = nextId('m_');
@@ -326,7 +337,7 @@ export class FamilyTree {
     await this.#commit([{ type: 'upsertPerson', id: subjectId, fields: { portraitId: linkId } }]);
   }
 
-  /** Loest die Verknuepfung; der Blob bleibt liegen (andere Personen koennen ihn nutzen). */
+  /** Detaches the link; the blob stays (other people may use it). */
   async detachMedia(linkId) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
@@ -336,7 +347,7 @@ export class FamilyTree {
     await this.#commit(ops);
   }
 
-  /** Zuschnitt liegt am Link, nicht in der Datei — nicht zerstoerend. */
+  /** The crop lives on the link, not in the file — non-destructive. */
   async setCrop(linkId, crop) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
@@ -384,8 +395,8 @@ export class FamilyTree {
   }
 
   /**
-   * Eltern anlegen. Familie, Personen und Verknuepfungen gehen in einen
-   * einzigen Commit — ein Undo nimmt die ganze Aktion zurueck.
+   * Create parents. Family, people, and links go into a single commit — one undo
+   * takes the whole action back.
    */
   async addParents(childId, father = null, mother = null) {
     const existing = this.childFamilyOf(childId);
@@ -411,31 +422,31 @@ export class FamilyTree {
   }
 
   /**
-   * Loest eine Ehe. Die Personen bleiben, die Familie verschwindet — Kinder
-   * daraus verlieren ihre Eltern und muessen neu verknuepft werden. Ein Commit,
-   * also nimmt ein Undo alles zusammen zurueck.
+   * Dissolves a marriage. The people stay, the family disappears — children of it
+   * lose their parents and must be re-linked. One commit, so a single undo takes
+   * it all back.
    */
   async removeMarriage(familyId) {
     if (!this.families.has(familyId)) return;
     await this.#commit([{ type: 'deleteFamily', id: familyId }]);
   }
 
-  /** Nimmt ein Kind aus einer Familie, ohne die Person zu loeschen. */
+  /** Removes a child from a family without deleting the person. */
   async unlinkChild(familyId, personId) {
     await this.#commit([{ type: 'unlinkChild', familyId, personId }]);
   }
 
-  /** Nimmt einen Elternteil aus der Familie des Kindes; die Person bleibt. */
+  /** Removes a parent from the child's family; the person stays. */
   async unlinkSpouse(familyId, personId) {
     await this.#commit([{ type: 'unlinkSpouse', familyId, personId }]);
   }
 
-  /** Vorhandene Person als Partner einer bestehenden Ehe eintragen. */
+  /** Add an existing person as a partner in an existing marriage. */
   async linkSpouse(familyId, personId) {
     await this.#commit([{ type: 'linkSpouse', familyId, personId }]);
   }
 
-  /** Alle Vorfahren einer Person — fuer Zyklusschutz beim Verknuepfen. */
+  /** All of a person's ancestors — for cycle protection when linking. */
   ancestorIds(id, seen = new Set()) {
     const { father, mother } = this.parentsOf(id);
     for (const p of [father, mother]) {
@@ -460,26 +471,27 @@ export class FamilyTree {
     counterStack.push(inverse);
     this.#lamport += 1;
     saveClock(this.#lamport);
-    await this.#store.append(this.#docId, [encodeUpdate(ops, this.#deviceId, this.#lamport)]);
-    // Ein Undo zeichnet immer neu: hier gibt es kein stilles Schreiben, das
-    // gilt nur beim Tippen im Editor.
+    const cursor = await this.#store.append(this.#docId, [encodeUpdate(ops, this.#deviceId, this.#lamport)]);
+    if (cursor === this.#appliedThrough + 1) this.#appliedThrough = cursor;
+    // An undo always redraws: there's no silent write here — that applies only
+    // while typing in the editor.
     this.#bump();
   }
 
   async undo() { await this.#replay(this.#undo, this.#redo); }
   async redo() { await this.#replay(this.#redo, this.#undo); }
 
-  // ---------------------------------------------------------------- laden
+  // ---------------------------------------------------------------- loading
   async hydrate() {
-    // Wie viele Log-Eintraege der Snapshot schon enthaelt — alles davor darf
-    // beim Laden uebersprungen werden.
+    // How many log entries the snapshot already contains — everything before that
+    // may be skipped on load.
     let covered = 0;
     const snap = await this.#store.readSnapshot(this.#docId);
     if (snap) {
       const bytes = snap.bytes instanceof Uint8Array ? snap.bytes : new Uint8Array(snap.bytes);
       const data = JSON.parse(new TextDecoder().decode(bytes));
-      // Fehlt die Angabe, stammt die Datei aus der ersten Fassung; eine hoehere
-      // koennen wir nicht lesen und duerfen sie erst recht nicht ueberschreiben.
+      // If the field is missing, the file is from the first version; a higher one
+      // we can't read and certainly must not overwrite.
       const dv = data.version ?? 1;
       covered = data.logCursor ?? 0;
       if (dv > DOC_VERSION) {
@@ -491,7 +503,7 @@ export class FamilyTree {
       this.families = new Map(data.families.map((fam) => [fam.id, defineFamilyViews(mergeFamilyFields(null, fam))]));
       this.tombstones = new Map((data.tombstones ?? []).map((tt) => [tt.id, tt]));
     }
-    const { updates } = await this.#store.readUpdates(this.#docId, covered);
+    const { updates, cursor } = await this.#store.readUpdates(this.#docId, covered);
     try {
       for (const u of updates) {
         const { ops: list, meta } = decodeUpdate(u);
@@ -503,32 +515,56 @@ export class FamilyTree {
         this.readOnlyReason = e.message;
       } else throw e;
     }
-    // Der Zaehler muss ueber allem liegen, was schon im Baum steht — sonst
-    // vergibt ein frischer Speicher eine ID, die es bereits gibt, und
-    // upsertPerson schreibt still auf den vorhandenen Datensatz.
+    // The counter must sit above everything already in the tree — otherwise a
+    // fresh store hands out an id that already exists, and upsertPerson silently
+    // writes onto the existing record.
     nextId.observe([...this.people.keys(), ...this.families.keys(),
       ...this.media.keys(), ...this.mediaLinks.keys()]);
-    // Verdichten, wenn der Log lang geworden ist: sonst waechst er ewig und
-    // wird bei jedem Start vollstaendig abgespielt.
-    // Nur die Eintraege zaehlen, die der Snapshot noch nicht abdeckt.
+    // Compact when the log has grown long: otherwise it grows forever and is fully
+    // replayed on every start. Only the entries the snapshot doesn't yet cover count.
     this.#logLength = covered + updates.length;
     this.#covered = covered;
+    // We have just folded every entry up to the store cursor into memory.
+    this.#appliedThrough = cursor ?? this.#logLength;
     if (updates.length > COMPACT_AT) await this.compact().catch(() => {});
     this.#bump();
   }
 
   /**
-   * Schreibt den aktuellen Stand als Snapshot und leert den Log. Bedingt auf
-   * die Version, die wir gelesen haben — schreibt inzwischen ein anderer Tab,
-   * bricht es ab, statt seine Aenderungen zu ueberschreiben.
+   * Writes the current state as a snapshot, conditional on the version we read —
+   * if another tab wrote in the meantime the CAS aborts, leaving its changes
+   * rather than overwriting them.
+   *
+   * Fold-before-cover: a snapshot must contain every entry its coverage mark
+   * claims. So we first apply any log tail we have not yet folded in (e.g. a
+   * concurrent tab's ops); otherwise those entries would be marked "covered"
+   * while missing from the snapshot, and the next hydrate would skip them —
+   * silent loss. Re-applying our own already-folded ops is harmless: the ops are
+   * idempotent (upserts merge, links check before pushing, deletes/unlinks are
+   * no-ops the second time), and applying with the entry's own `created_at` keeps
+   * tombstone ordering intact.
    */
   async compact() {
     if (this.readOnly) return;
-    // Erst den Stand festhalten, den der Snapshot abdecken wird — was danach
-    // hereinkommt, bleibt im Log und wird beim naechsten Laden nachgespielt.
-    // cursor ist bereits die absolute Zeilenzahl, nicht der Zuwachs: addiert
-    // man #covered dazu, ueberspringt hydrate() spaeter echte Aenderungen.
-    const { cursor: covered } = await this.#store.readUpdates(this.#docId, null);
+    const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#appliedThrough);
+    try {
+      for (const u of updates) {
+        const { ops: list, meta } = decodeUpdate(u);
+        this.#apply(list, meta.created_at ?? Date.now());
+      }
+    } catch (e) {
+      // A future-version entry from another tab: go read-only, don't snapshot.
+      if (e instanceof FutureVersionError) {
+        this.readOnly = true;
+        this.readOnlyReason = e.message;
+        return;
+      }
+      throw e;
+    }
+    this.#appliedThrough = cursor;
+    // `cursor` is the absolute line count, not the increment.
+    const covered = cursor;
+    if (covered <= this.#covered) return;   // nothing new since the last snapshot
     const bytes = new TextEncoder().encode(
       JSON.stringify({ ...this.toJSON(), logCursor: covered }));
     const prev = await this.#store.readSnapshot(this.#docId);
@@ -537,12 +573,13 @@ export class FamilyTree {
       this.#covered = covered;
       this.#logLength = covered;
     } catch (e) {
-      // Ein anderer Tab war schneller: dann gilt sein Snapshot, nicht unserer.
+      // Another tab was faster: its snapshot stands, not ours. Our ops are still in
+      // the log, so the next hydrate replays them onto it.
       if (e?.name !== 'ConflictError') throw e;
     }
   }
 
-  /** Fixture-Daten einspielen, ohne den Undo-Stapel zu fuellen. */
+  /** Load fixture data without filling the undo stack. */
   async seed(ops) {
     await this.#commit(ops, { undoable: false });
     this.#undo.length = 0;
@@ -553,9 +590,10 @@ export class FamilyTree {
     this.people.clear();
     this.families.clear();
     this.tombstones.clear();
-    // Der Store verliert Snapshot und Log — die Zaehler dazu muessen mit.
+    // The store loses snapshot and log — the counters for them must go too.
     this.#covered = 0;
     this.#logLength = 0;
+    this.#appliedThrough = 0;
     this.#undo.length = 0;
     this.#redo.length = 0;
     await this.#store.delete(this.#docId);
@@ -563,10 +601,9 @@ export class FamilyTree {
   }
 
   toJSON() {
-    // Medien reisen als Metadaten mit; die Bytes holt der Empfaenger ueber den
-    // Hash aus seinem BlobStore (oder bekommt sie in einem Paket daneben).
-    // rawOf: die abgeleiteten Sichten sind Getter und gehoeren nicht in die
-    // Datei — geschrieben wird das Modell selbst.
+    // Media travel along as metadata; the recipient fetches the bytes by hash from
+    // its BlobStore (or gets them in a package alongside). rawOf: the derived views
+    // are getters and don't belong in the file — the model itself is written.
     return {
       version: DOC_VERSION,
       people: this.allPeople().map(rawOf),
