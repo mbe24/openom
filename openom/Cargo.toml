@@ -17,6 +17,9 @@ axum.workspace = true
 lambda_http.workspace = true
 tokio.workspace = true
 
-# Structured logging (pretty locally, JSON in prod — wired later).
+# Metadata DB: Postgres (Neon in prod, a local container in dev).
+sqlx.workspace = true
+
+# Structured logging: pretty locally, JSON in prod.
 tracing.workspace = true
 tracing-subscriber.workspace = true

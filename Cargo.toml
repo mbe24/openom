@@ -1,8 +1,8 @@
-# Ein Workspace, fuenf Rust-Teile: die drei geteilten Pakete (Protokoll, Krypto,
-# Store), der Server und die Tauri-Huelle. Die geteilten Pakete liegen bewusst in
-# packages/ — App und Server brauchen dieselbe Fassung, sonst driften sie
-# auseinander. Externe Abhaengigkeiten stehen zentral in [workspace.dependencies],
-# damit prost, die Krypto-Crates usw. ueberall in derselben Version laufen.
+# One workspace, five Rust parts: the three shared packages (protocol, crypto,
+# store), the server, and the Tauri shell. The shared packages live in packages/
+# on purpose — app and server need the same version, or they drift apart. External
+# dependencies are centralized in [workspace.dependencies] so prost, the crypto
+# crates, etc. run at the same version everywhere.
 [workspace]
 resolver = "2"
 members = [
@@ -17,41 +17,44 @@ members = [
 version = "0.1.0"
 license = "AGPL-3.0-or-later"
 edition = "2021"
-# Der einzige unterstuetzte Build-Weg ist der Container (siehe scripts/cargo.mjs),
-# derzeit rustc 1.97. 1.85 als ehrliche Untergrenze laesst den MSRV-bewussten
-# Resolver die jeweils neuesten Abhaengigkeiten waehlen statt sie zurueckzustufen.
+# The only supported build path is the container (see scripts/cargo.mjs), currently
+# rustc 1.97. 1.85 as an honest floor lets the MSRV-aware resolver pick the newest
+# dependencies rather than downgrading them.
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Interne Crates (Pfad relativ zu diesem Wurzel-Manifest).
+# Internal crates (path relative to this root manifest).
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-store = { path = "packages/openom-store" }
 
-# Protokoll / Serialisierung.
+# Protocol / serialization.
 prost = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Server: Axum auf AWS Lambda (Monolith-on-FaaS).
+# Server: Axum on AWS Lambda (Monolith-on-FaaS).
 axum = "0.8"
 lambda_http = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Metadata DB: Neon (serverless Postgres) in prod, a local container in dev.
+# ring, not aws-lc-rs, to avoid a cmake/C build in the container.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres"] }
 
-# Krypto: dieselben Primitiven auf Client und Server.
+# Crypto: the same primitives on client and server.
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 argon2 = "0.5"
 
-# Store-Client (kommt mit dem Upload-Pfad): komprimieren + hochladen. rustls
-# statt native-tls, damit im Container kein OpenSSL noetig ist. Der genaue
-# rustls-Provider (aws-lc-rs vs. ring) wird festgelegt, wenn der Client steht und
-# ein echter HTTPS-Call getestet werden kann — hier nur vordefiniert.
+# Store client (arrives with the upload path): compress + upload. rustls instead
+# of native-tls, so no OpenSSL is needed in the container. The exact rustls
+# provider (aws-lc-rs vs. ring) is decided once the client exists and a real HTTPS
+# call can be tested — here only predefined.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 zstd = "0.13"
 
-# Fehler / SQLite (nur der Store nutzt rusqlite).
+# Errors / SQLite (only the store uses rusqlite).
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
