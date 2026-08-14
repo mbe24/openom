@@ -37,8 +37,10 @@ services:
       - openom-server-cargo:/usr/local/cargo/registry
       - openom-server-target:/tmp/target
     depends_on:
-      - postgres
-      - minio
+      postgres:
+        condition: service_healthy   # migrations run at startup — wait for the DB
+      minio:
+        condition: service_started
 
   postgres:
     image: postgres:17-alpine
@@ -50,6 +52,11 @@ services:
       - "5432:5432"
     volumes:
       - openom-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openom -d openom"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   minio:
     image: minio/minio:latest

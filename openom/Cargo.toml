@@ -19,6 +19,14 @@ tokio.workspace = true
 
 # Metadata DB: Postgres (Neon in prod, a local container in dev).
 sqlx.workspace = true
+uuid.workspace = true
+
+# Auth: Supabase JWT validation (prod); fake-token bypass (local).
+jsonwebtoken.workspace = true
+
+# JSON claims + responses.
+serde.workspace = true
+serde_json.workspace = true
 
 # Structured logging: pretty locally, JSON in prod.
 tracing.workspace = true

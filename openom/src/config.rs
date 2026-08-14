@@ -6,6 +6,7 @@
 //! a few middlewares differ.
 
 use std::env;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
@@ -28,6 +29,10 @@ pub struct Config {
     /// Bucket that holds the encrypted tree envelopes.
     #[allow(dead_code)]
     pub s3_bucket: String,
+    /// Supabase JWT secret (HS256). Required in production, unused locally.
+    pub jwt_secret: Option<String>,
+    /// The account fake-auth maps anonymous local requests to.
+    pub local_member_id: Uuid,
 }
 
 impl Config {
@@ -43,6 +48,11 @@ impl Config {
                 .unwrap_or_else(|_| "postgres://openom:openom@localhost:5432/openom".into()),
             s3_endpoint: env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into()),
             s3_bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "openom-trees".into()),
+            jwt_secret: env::var("SUPABASE_JWT_SECRET").ok(),
+            local_member_id: env::var("OPENOM_LOCAL_MEMBER_ID")
+                .ok()
+                .and_then(|s| Uuid::parse_str(&s).ok())
+                .unwrap_or_else(|| Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()),
         }
     }
 

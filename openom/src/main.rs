@@ -2,22 +2,25 @@
 //!
 //! One binary, two run modes (see [`config`]): under `RUN_MODE=local` it serves a
 //! plain HTTP listener against a local MinIO + Postgres stack; in production the
-//! same Axum app runs on AWS Lambda through `lambda_http`. Auth, storage and the
-//! tree PUT/GET routes land on top of this skeleton in the following steps.
+//! same Axum app runs on AWS Lambda through `lambda_http`. Storage and the tree
+//! PUT/GET routes land on top of this skeleton in the following steps.
 
+mod auth;
 mod config;
 
-use axum::{extract::State, http::StatusCode, routing::get, Router};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use config::Config;
+use jsonwebtoken::DecodingKey;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     db: PgPool,
-    #[allow(dead_code)] // used once storage/routes land
     config: Arc<Config>,
+    /// HS256 key for verifying Supabase JWTs (production). None locally.
+    jwt_key: Option<DecodingKey>,
 }
 
 /// Liveness: the process is up.
@@ -37,10 +40,16 @@ async fn ready(State(state): State<AppState>) -> (StatusCode, &'static str) {
     }
 }
 
+/// Echoes the authenticated caller — proves the auth wiring end to end.
+async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "member_id": id.member_id }))
+}
+
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route("/whoami", get(whoami))
         .with_state(state)
 }
 
@@ -56,10 +65,30 @@ async fn main() -> Result<(), lambda_http::Error> {
         "openom starting"
     );
 
-    // Lazy pool: the server starts even if Postgres is briefly unavailable (e.g.
-    // the DB container is still coming up); /ready reports the live state.
+    // Lazy pool: the server process starts even if Postgres is briefly slow; the
+    // migration below is the first thing that actually needs a connection.
     let db = PgPoolOptions::new().connect_lazy(&config.database_url)?;
-    let state = AppState { db, config: Arc::new(config.clone()) };
+
+    // Migrations are idempotent and advisory-locked, so running them on every
+    // start is safe (already-applied ones are a quick no-op).
+    sqlx::migrate!("./migrations").run(&db).await?;
+    tracing::info!("migrations applied");
+
+    // Locally there is no Supabase to create accounts, so seed the fake-auth
+    // member — otherwise its future tree writes would fail the owner_id foreign key.
+    if config.is_local() {
+        sqlx::query("INSERT INTO accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING")
+            .bind(config.local_member_id)
+            .execute(&db)
+            .await?;
+        tracing::info!(member_id = %config.local_member_id, "seeded local account");
+    }
+
+    let jwt_key = config
+        .jwt_secret
+        .as_ref()
+        .map(|s| DecodingKey::from_secret(s.as_bytes()));
+    let state = AppState { db, config: Arc::new(config.clone()), jwt_key };
     let router = app(state);
 
     if config.is_local() {
