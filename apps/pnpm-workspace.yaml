@@ -1,0 +1,20 @@
+# pnpm 11 reads config settings from here (no longer from the package.json "pnpm"
+# field). This is a single-package project, not a monorepo — the file exists only
+# for the two settings below.
+#
+# supportedArchitectures: record every platform's optional binaries (esbuild's in
+#   particular) in the committed lockfile, so the Linux test container can
+#   frozen-install its own binary from the same lockfile the Windows host uses.
+# allowBuilds: esbuild's postinstall is intentionally skipped — its binary ships
+#   via the optional platform package, so no build step is needed. Declaring it
+#   false acknowledges that, so pnpm 11 does not treat the ignored build as fatal.
+supportedArchitectures:
+  os:
+    - win32
+    - linux
+    - darwin
+  cpu:
+    - x64
+    - arm64
+allowBuilds:
+  esbuild: false

@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "openom — privacy-first family tree (Tauri 2 prototype, no build step)",
+  "packageManager": "pnpm@11.20.0",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
@@ -11,12 +12,14 @@
     "android:dev": "tauri android dev",
     "ios:init": "tauri ios init",
     "test:store": "node ../scripts/cargo.mjs test -p openom-store -p openom",
+    "test:core": "node ../scripts/vitest.mjs",
     "check:locales": "node scripts/check-locales.mjs",
     "serve": "node scripts/serve.mjs",
     "serve:preview": "node scripts/serve.mjs --open preview/desktop.html"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "^2.11.4",
+    "vitest": "^3"
   },
   "type": "module"
 }

@@ -8,3 +8,6 @@ apps/src-tauri/gen/
 .env
 
 plan/
+
+# Stray local pnpm store (host artifact); the real store lives in a Docker volume.
+.pnpm-store/
