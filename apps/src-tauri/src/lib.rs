@@ -17,8 +17,8 @@ use std::sync::Arc;
 use openom_store::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
-    CoOwnerChanged, MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed,
-    Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
+    AcceptedKeyring, CoOwnerChanged, MemberAdded, MemberProvisioned, MemberRemoved, Provisioned,
+    Recovered, Rekeyed, Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -314,6 +314,18 @@ async fn vault_remove_co_owner(
     .map_err(join_err)?
 }
 
+/// Accept a keyring run pulled from the network (the chain-walk read-side). Sync: it's pure
+/// verification (signatures + hashes), no Argon2, so it won't stall the UI thread meaningfully.
+#[tauri::command]
+fn vault_accept_remote_keyring(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    hops: Vec<Vec<u8>>,
+) -> Result<AcceptedKeyring, VaultError> {
+    state.accept_remote_keyring(&tree_key, &tree_id, hops)
+}
+
 // ----------------------------------------------------------------- sealer (cheap: sync is fine)
 
 #[tauri::command]
@@ -392,6 +404,7 @@ pub fn run() {
             vault_remove_member_as_co_owner,
             vault_add_co_owner,
             vault_remove_co_owner,
+            vault_accept_remote_keyring,
             sealer_dev,
             sealer_seal_entry,
             sealer_open_entry,

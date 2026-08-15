@@ -46,6 +46,18 @@ pub enum VaultErrorCode {
     TreeMismatch,
     /// The keyring bytes don't decode / are structurally invalid.
     BadKeyring,
+    /// A network-served keyring run rewrites accepted history — its `prev_keyring_hash` doesn't
+    /// chain onto the anchor (a fork). An attack, not availability.
+    KeyringFork,
+    /// A network-served keyring run isn't a contiguous advance from the anchor — a withheld hop
+    /// (gap) or an old revision (rollback). Availability or replay.
+    KeyringNonSequential,
+    /// A network-served keyring carries an unendorsed change — an ordinary revision by a
+    /// non-signer, or a signer-set change without the founder / prior-set unanimity. Tampering.
+    KeyringUnendorsed,
+    /// A network-served keyring is malformed as a successor — bad structure, an incomplete wrap
+    /// set (silent lock-out), a too-new layout, or a failed bootstrap.
+    KeyringMalformed,
     /// The keyring's Argon2id params are outside the runnable window.
     BadKdfParams,
     /// No wrap in the keyring matches the expected (member, method).
@@ -221,6 +233,13 @@ pub struct MemberRemoved {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoOwnerChanged {
+    pub revision: u32,
+}
+
+/// Result of accepting a keyring run pulled from the network: the revision now anchored locally.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedKeyring {
     pub revision: u32,
 }
 
@@ -592,6 +611,44 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(CoOwnerChanged { revision })
     }
 
+    /// Accept a keyring run pulled from the **untrusted network** — the read-side of the
+    /// chain-walk, and its primary purpose. `hops` are the encoded keyring revisions after the
+    /// locally-anchored one, in ascending order with no gaps (revision N+1, N+2, …). Each is
+    /// validated as a legitimate successor of the last (`verify_walk`) against the locally
+    /// stored keyring as the anchor — a fork, rollback, withheld hop, rogue-signer injection, or
+    /// unendorsed set change is refused and NOTHING is persisted. On success the head keyring is
+    /// stored and the revision floor advances, atomically.
+    ///
+    /// This updates keyring state only; it does not touch live sealers. A caller that needs to
+    /// read content under a newly-rotated epoch re-unlocks. A first-sight member (no local
+    /// anchor) bootstraps out-of-band first (a separate path); here an anchor must already exist.
+    pub fn accept_remote_keyring(&self, tree_key: &str, tree_id: &[u8], hops: Vec<Vec<u8>>) -> Result<AcceptedKeyring> {
+        let anchor_bytes = self.require_keyring(tree_key)?;
+        let anchor_keyring = decode_keyring(&anchor_bytes)?;
+        if anchor_keyring.tree_id != tree_id {
+            return Err(VaultError::new(VaultErrorCode::TreeMismatch, "anchor keyring is for a different tree"));
+        }
+        // An empty run is "already up to date" — a no-op at the current revision.
+        if hops.is_empty() {
+            return Ok(AcceptedKeyring { revision: anchor_keyring.revision });
+        }
+        let decoded: Vec<Keyring> = hops
+            .iter()
+            .map(|b| {
+                Keyring::decode(b.as_slice())
+                    .map_err(|e| VaultError::new(VaultErrorCode::BadKeyring, format!("served keyring failed to decode: {e}")))
+            })
+            .collect::<Result<_>>()?;
+        let new_anchor = openom_crypto::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+            .map_err(remote_chain_err)?;
+        // Persist the validated head (the last hop) + advance the floor, atomically.
+        let head = hops.last().expect("non-empty run");
+        self.store
+            .commit_keyring(tree_key, head, new_anchor.revision)
+            .map_err(VaultError::storage)?;
+        Ok(AcceptedKeyring { revision: new_anchor.revision })
+    }
+
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
     /// well-known key — no keyring, no unlock.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
@@ -711,6 +768,24 @@ fn decode_keyring(bytes: &[u8]) -> Result<Keyring> {
 /// matchable user-facing code: the fix is our code, not the caller's input.
 fn self_check_failed(e: ChainError) -> VaultError {
     VaultError::new(VaultErrorCode::Internal, format!("produced keyring failed the chain-walk self-check: {e}"))
+}
+
+/// A keyring served by the untrusted network was refused by the chain-walk. Unlike
+/// [`self_check_failed`], this is the *counterparty's* fault, not ours — mapped to a granular,
+/// user-facing code so the JS side can react (fork = attack, gap = availability, unendorsed =
+/// tampering) rather than a blanket internal error.
+fn remote_chain_err(e: ChainError) -> VaultError {
+    use ChainError as E;
+    use VaultErrorCode as C;
+    let code = match e {
+        E::TreeMismatch => C::TreeMismatch,
+        E::RevisionOverflow => C::RevisionOverflow,
+        E::NonSequential => C::KeyringNonSequential,
+        E::Fork => C::KeyringFork,
+        E::UnendorsedOrdinaryChange | E::UnendorsedSetChange => C::KeyringUnendorsed,
+        E::LayoutAhead | E::BadStructure(_) | E::WrapIncomplete | E::BadBootstrap => C::KeyringMalformed,
+    };
+    VaultError::new(code, e.to_string())
 }
 
 fn fresh_replica() -> Result<Vec<u8>> {
@@ -1063,6 +1138,115 @@ mod tests {
         assert_eq!(err.code, VaultErrorCode::Internal);
         // ...and nothing was persisted: the stored keyring is untouched.
         assert_eq!(h.store.load_keyring(KEY).unwrap().unwrap(), prior_bytes);
+    }
+
+    /// Device A produces a run of keyring revisions; each successive head is captured as the
+    /// bytes a syncing device would pull. Returns (rev1, rev2, rev3).
+    fn produce_three_revisions(a: &VaultHost<MemStore>) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        a.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap(); // rev1
+        let rev1 = a.store.load_keyring(KEY).unwrap().unwrap();
+        let m2 = a.provision_member("m2 pass".into()).unwrap();
+        a.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &m2.hpke_public, &m2.author_public).unwrap();
+        let rev2 = a.store.load_keyring(KEY).unwrap().unwrap();
+        let m3 = a.provision_member("m3 pass".into()).unwrap();
+        a.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER3, "viewer", &m3.hpke_public, &m3.author_public).unwrap();
+        let rev3 = a.store.load_keyring(KEY).unwrap().unwrap();
+        (rev1, rev2, rev3)
+    }
+
+    #[test]
+    fn a_device_accepts_a_validated_remote_keyring_run() {
+        let a = host();
+        let (rev1, rev2, rev3) = produce_three_revisions(&a);
+
+        // Device B is anchored at rev1 (as if it had synced/bootstrapped the genesis), then pulls
+        // and accepts the rev2..rev3 run.
+        let b = host();
+        b.store.commit_keyring(KEY, &rev1, 1).unwrap();
+        let accepted = b.accept_remote_keyring(KEY, TREE, vec![rev2.clone(), rev3.clone()]).unwrap();
+        assert_eq!(accepted.revision, 3);
+        assert_eq!(b.store.load_keyring(KEY).unwrap().unwrap(), rev3);
+        assert_eq!(b.store.keyring_watermark(KEY).unwrap(), 3);
+
+        // An empty run is a no-op at the current revision.
+        assert_eq!(b.accept_remote_keyring(KEY, TREE, vec![]).unwrap().revision, 3);
+        // Replaying the old run now rolls backward → refused, store untouched.
+        assert_eq!(
+            b.accept_remote_keyring(KEY, TREE, vec![rev2]).unwrap_err().code,
+            VaultErrorCode::KeyringNonSequential
+        );
+        assert_eq!(b.store.load_keyring(KEY).unwrap().unwrap(), rev3);
+    }
+
+    #[test]
+    fn a_withheld_hop_in_the_run_is_refused() {
+        let a = host();
+        let (rev1, _rev2, rev3) = produce_three_revisions(&a);
+        let b = host();
+        b.store.commit_keyring(KEY, &rev1, 1).unwrap();
+        // Skipping rev2 (a server withholding a hop) breaks the contiguous walk.
+        assert_eq!(
+            b.accept_remote_keyring(KEY, TREE, vec![rev3]).unwrap_err().code,
+            VaultErrorCode::KeyringNonSequential
+        );
+        assert_eq!(b.store.keyring_watermark(KEY).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
+        use openom_crypto::{generate_identity, keyring_hash, sign_keyring};
+        use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
+
+        let a = host();
+        let (rev1, _rev2, _rev3) = produce_three_revisions(&a);
+        let anchor = Keyring::decode(rev1.as_slice()).unwrap();
+
+        // A forged rev2: injects a rogue co-owner and is signed only by that rogue.
+        let rogue = generate_identity().unwrap();
+        let rogue_pub = rogue.verifying_key().to_bytes().to_vec();
+        let mut bad = anchor.clone();
+        bad.revision = 2;
+        bad.prev_keyring_hash = keyring_hash(&anchor).to_vec();
+        bad.members.push(Member {
+            member_id: "rogue".into(),
+            role: MemberRole::CoOwner as i32,
+            author_public_key: rogue_pub.clone(),
+            hpke_public_key: vec![9; 32],
+        });
+        bad.epochs[0].wraps.push(KeyWrap {
+            member_id: "rogue".into(),
+            wrap_method: openom_protocol::v1::WrapMethod::X25519Hpke as i32,
+            nonce: vec![],
+            wrapped_dek: vec![1],
+            kdf_params: None,
+            ephemeral_public_key: vec![],
+        });
+        bad.authorized_signers.push(AuthorizedSigner {
+            public_key: rogue_pub,
+            member_id: "rogue".into(),
+            role: openom_protocol::v1::SignerRole::CoOwner as i32,
+        });
+        bad.signatures.clear();
+        sign_keyring(&mut bad, &rogue);
+
+        let b = host();
+        b.store.commit_keyring(KEY, &rev1, 1).unwrap();
+        assert_eq!(
+            b.accept_remote_keyring(KEY, TREE, vec![bad.encode_to_vec()]).unwrap_err().code,
+            VaultErrorCode::KeyringUnendorsed
+        );
+        // Store untouched — still anchored at rev1.
+        assert_eq!(b.store.load_keyring(KEY).unwrap().unwrap(), rev1);
+        assert_eq!(b.store.keyring_watermark(KEY).unwrap(), 1);
+    }
+
+    #[test]
+    fn accept_without_a_local_anchor_is_no_keyring() {
+        let h = host();
+        assert_eq!(
+            h.accept_remote_keyring(KEY, TREE, vec![vec![1, 2, 3]]).unwrap_err().code,
+            VaultErrorCode::NoKeyring
+        );
     }
 
     #[test]

@@ -14,8 +14,8 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
-use openom_crypto::{Key32, VerifyingKey, KEY_LEN};
-use openom_protocol::v1::{Aead, Compression, Format, KdfParams, MemberRole};
+use openom_crypto::{verify_walk, Key32, KeyringAnchor, VerifyingKey, KEY_LEN};
+use openom_protocol::v1::{Aead, Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::{vault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
@@ -604,6 +604,59 @@ pub fn remove_co_owner(
     )
     .map_err(to_js)?;
     Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: None })
+}
+
+/// Accept a keyring run pulled from the **untrusted network** — the chain-walk read-side (its
+/// primary purpose). `anchor` is the caller's currently-trusted keyring (its stored head);
+/// `hops` is the concatenation of the successor revisions, each framed as a 4-byte big-endian
+/// length followed by its bytes, in ascending revision order with no gaps. Each is validated as
+/// a legitimate successor of the last ([`verify_walk`]); a fork, rollback, withheld hop,
+/// rogue-signer injection, or unendorsed change throws and the caller persists nothing. On
+/// success returns the validated head keyring to store + its revision (no sealer — keyring state
+/// only; re-unlock to read a newly-rotated epoch). An empty run is a no-op at the current head.
+#[wasm_bindgen(js_name = acceptRemoteKeyring)]
+pub fn accept_remote_keyring(anchor: &[u8], tree_id: &[u8], hops: &[u8]) -> Result<VaultResult, JsError> {
+    let anchor_keyring = Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
+    if anchor_keyring.tree_id != tree_id {
+        return Err(JsError::new("anchor keyring is for a different tree"));
+    }
+    let raw = split_length_prefixed(hops)?;
+    if raw.is_empty() {
+        return Ok(VaultResult { keyring: Vec::new(), recovery_code: String::new(), revision: anchor_keyring.revision, sealer: None });
+    }
+    let decoded = raw
+        .iter()
+        .map(|b| Keyring::decode(*b).map_err(|e| JsError::new(&format!("bad served keyring: {e}"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let new_anchor = verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(VaultResult {
+        keyring: raw.last().expect("non-empty run").to_vec(),
+        recovery_code: String::new(),
+        revision: new_anchor.revision,
+        sealer: None,
+    })
+}
+
+/// Split a buffer of `[u32-be length][bytes]…` frames into slices. The framing keeps a list of
+/// variable-length keyrings marshallable over the plain-wasm-bindgen boundary (no serde).
+fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, JsError> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < buf.len() {
+        if i + 4 > buf.len() {
+            return Err(JsError::new("truncated length prefix in hops buffer"));
+        }
+        let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+        i += 4;
+        let end = i.checked_add(len).ok_or_else(|| JsError::new("length prefix overflow"))?;
+        if end > buf.len() {
+            return Err(JsError::new("length prefix overruns hops buffer"));
+        }
+        out.push(&buf[i..end]);
+        i = end;
+    }
+    Ok(out)
 }
 
 fn parse_member_role(s: &str) -> Result<MemberRole, JsError> {
