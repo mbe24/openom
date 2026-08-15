@@ -36,11 +36,13 @@ pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 
+mod envelope;
 mod kdf;
 mod keyring;
 mod recovery;
 mod seal;
 mod wrap;
+pub use envelope::{open_envelope, seal_envelope, SealParams};
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
