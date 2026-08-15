@@ -19,18 +19,12 @@ thiserror.workspace = true
 [features]
 # The web binding. Off by default so native builds (Tauri, cargo test) never pull the
 # wasm-bindgen glue. Build with: --no-default-features --features wasm --target wasm32-...
+# The veneer marshals with plain wasm-bindgen (string enums, explicit params, Vec<u8> ↔
+# Uint8Array) — no serde-wasm-bindgen, so no u64-as-BigInt or byte-array serialization
+# quirks to reason about.
 default = []
-wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies.wasm-bindgen]
 version = "0.2"
-optional = true
-
-[dependencies.serde]
-version = "1"
-features = ["derive"]
-optional = true
-
-[dependencies.serde-wasm-bindgen]
-version = "0.6"
 optional = true

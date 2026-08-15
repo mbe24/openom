@@ -92,3 +92,17 @@ base64 = "0.22"
 # Errors / SQLite (only the store uses rusqlite).
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# The wasm sealer's build profile. MUST live in this ROOT manifest — Cargo ignores
+# `[profile.*]` in member manifests. `scripts/build-sealer.mjs` builds with
+# `--profile wasm-release`. Tuned for a small, fast-to-download module: size-level opt
+# (the crypto stays plenty fast), fat LTO + one codegen unit to inline across the
+# openom-crypto/protocol boundary, abort-on-panic (no unwinding tables in wasm), and
+# strip (wasm-bindgen + wasm-opt trim the rest).
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
