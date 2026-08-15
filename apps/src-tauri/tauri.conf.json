@@ -19,7 +19,6 @@
       }
     ],
     "security": {
-      "_comment": "Invoke-only: crypto runs in the Rust host, so no WASM in the webview and no 'wasm-unsafe-eval' is needed. Fonts are vendored, so no Google origins. connect-src is 'self' (Tauri appends its own IPC allowance); the sync server origin is added when that path lands.",
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:"
     }
   },
