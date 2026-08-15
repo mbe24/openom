@@ -15,6 +15,10 @@ pub mod v1 {
     include!("generated/openom/v1/openom.v1.rs");
 }
 
+/// Canonical, length-prefixed AAD encoding of a `Header` (data-format spec §5) — the
+/// byte string a Rust and a WASM/JS build must produce identically.
+pub mod aad;
+
 /// The `Envelope.version` this build reads and writes (data-format spec §3). An
 /// envelope carrying a higher version is opened read-only rather than misread.
 pub const ENVELOPE_VERSION: u32 = 1;
