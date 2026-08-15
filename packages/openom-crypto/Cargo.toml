@@ -7,6 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Header type + the canonical §5 AAD encoder (seal/open bind the whole header).
+openom-protocol.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
 argon2.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true

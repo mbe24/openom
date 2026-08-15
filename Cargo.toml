@@ -61,6 +61,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 argon2 = "0.5"
+# Best-effort scrub of key material (KEK/DEK buffers) on drop.
+zeroize = { version = "1", features = ["derive"] }
 
 # Store client (arrives with the upload path): compress + upload. rustls instead
 # of native-tls, so no OpenSSL is needed in the container. The exact rustls

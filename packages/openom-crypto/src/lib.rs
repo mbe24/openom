@@ -28,3 +28,29 @@ pub const KEY_LEN: usize = 32;
 pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
+
+mod seal;
+pub use seal::{open, seal};
+
+/// A crypto operation failed. `Open` deliberately does not distinguish a bad key from
+/// a bad tag from a tampered header — all are "this ciphertext didn't authenticate".
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoError {
+    /// `Header.aead` is `AEAD_UNSPECIFIED` or a value this build doesn't implement.
+    #[error("unsupported or unspecified AEAD ({0})")]
+    UnsupportedAead(i32),
+    /// The DEK is not [`KEY_LEN`] bytes.
+    #[error("wrong DEK length")]
+    KeyLength,
+    /// The header's nonce is the wrong length for the selected AEAD (24 for XChaCha20,
+    /// 12 for AES-256-GCM).
+    #[error("wrong nonce length for the selected AEAD")]
+    NonceLength,
+    /// Encryption failed (should not happen with valid inputs).
+    #[error("AEAD seal failed")]
+    Seal,
+    /// Decryption/authentication failed — bad key, nonce, tag, or a tampered
+    /// header/AAD. Intentionally opaque.
+    #[error("AEAD open failed")]
+    Open,
+}

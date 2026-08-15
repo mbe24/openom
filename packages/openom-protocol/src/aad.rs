@@ -19,9 +19,11 @@ use crate::v1::Header;
 ///
 /// Field order matches the proto: version, then `kind, format, aead, compression`
 /// (each a 4-byte big-endian enum), `key_id, nonce, tree_id, replica_id` (each a
-/// 4-byte big-endian length then bytes), `replica_counter` (8-byte BE), `ciphertext_hash,
-/// prev_ciphertext_hash` (framed bytes), `covers_through_seq` (8-byte BE), then
+/// 4-byte big-endian length then bytes), `replica_counter` (8-byte BE),
+/// `prev_ciphertext_hash` (framed bytes), `covers_through_seq` (8-byte BE), then
 /// `replaces_ciphertext_hash, author_signature, blob_id` (framed bytes).
+/// `ciphertext_hash` is **excluded** (it derives from the ciphertext the AEAD tag
+/// already authenticates — binding it would be circular; see below).
 pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
     let mut out = Vec::with_capacity(160);
     put_u32(&mut out, version);
@@ -34,7 +36,10 @@ pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
     put_bytes(&mut out, &header.tree_id);
     put_bytes(&mut out, &header.replica_id);
     put_u64(&mut out, header.replica_counter);
-    put_bytes(&mut out, &header.ciphertext_hash);
+    // `ciphertext_hash` is deliberately NOT in the AAD: it's SHA-256(ciphertext), and
+    // the ciphertext is produced by the AEAD *using* this AAD — binding it would be
+    // circular. It's also redundant (the AEAD tag already authenticates the ciphertext)
+    // and is verified keylessly by the server on upload / by the reader on open.
     put_bytes(&mut out, &header.prev_ciphertext_hash);
     put_u64(&mut out, header.covers_through_seq);
     put_bytes(&mut out, &header.replaces_ciphertext_hash);
@@ -101,7 +106,7 @@ mod tests {
         framed(&mut want, &[0x11; 16]); // tree_id
         framed(&mut want, &[0x22; 4]); // replica_id
         want.extend_from_slice(&5u64.to_be_bytes()); // replica_counter
-        framed(&mut want, &[0x33; 32]); // ciphertext_hash
+        // ciphertext_hash is excluded from the AAD (circular + redundant).
         framed(&mut want, &[]); // prev_ciphertext_hash
         want.extend_from_slice(&0u64.to_be_bytes()); // covers_through_seq
         framed(&mut want, &[]); // replaces_ciphertext_hash
