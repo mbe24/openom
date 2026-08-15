@@ -159,7 +159,7 @@ pub struct KeyringSignature {
     /// always against the client's pinned/trusted set, never this claim.
     #[prost(bytes="vec", tag="1")]
     pub signer_public_key: ::prost::alloc::vec::Vec<u8>,
-    /// Ed25519 signature over keyring_signing_bytes (the v2 canonical encoding).
+    /// Ed25519 signature over the keyring's canonical signing bytes.
     #[prost(bytes="vec", tag="2")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }

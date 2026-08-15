@@ -70,16 +70,18 @@ pub fn wrap_aad(
 }
 
 /// The canonical, domain-separated byte string an authorized signer's Ed25519 key
-/// signs over the keyring (§4, v2 multi-signer layout): every keyring field **except
-/// `signatures`**, length- and count-prefixed so a signature can't be replayed onto a
-/// different keyring or another structure. `layout_version` is first (after the tag),
-/// making v2 byte-disjoint. Covered: `revision`/`prev_keyring_hash` (anti-rollback +
-/// history chain), the `authorized_signers` trust set, the `members` role/key manifest,
-/// and the epochs/wraps. `signatures` is excluded (like the old single `signature`), so
-/// every signer signs identical bytes and their signatures collect independently.
+/// signs over the keyring (§4): every keyring field **except `signatures`**, length- and
+/// count-prefixed so a signature can't be replayed onto a different keyring or another
+/// structure. The `openom:keyring` tag separates this from the header/wrap AAD;
+/// `layout_version` is first (after the tag) and is the sole version axis — a
+/// fail-closed forward selector, like `Envelope.version` — so any future keyring layout
+/// is byte-disjoint from this one. Covered: `revision`/`prev_keyring_hash` (anti-rollback
+/// + history chain), the `authorized_signers` trust set, the `members` role/key manifest,
+/// and the epochs/wraps. `signatures` is excluded, so every signer signs identical bytes
+/// and their signatures collect independently.
 pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
     let mut out = Vec::with_capacity(256);
-    put_bytes(&mut out, b"openom:keyring:v2");
+    put_bytes(&mut out, b"openom:keyring");
     put_u32(&mut out, keyring.layout_version);
     put_bytes(&mut out, &keyring.tree_id);
     put_u32(&mut out, keyring.revision);

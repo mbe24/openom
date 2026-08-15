@@ -171,7 +171,7 @@ message KeyringSignature {
   // Which authorized_signers[] entry produced this — a hint only; verification is
   // always against the client's pinned/trusted set, never this claim.
   bytes signer_public_key = 1;
-  // Ed25519 signature over keyring_signing_bytes (the v2 canonical encoding).
+  // Ed25519 signature over the keyring's canonical signing bytes.
   bytes signature = 2;
 }
 

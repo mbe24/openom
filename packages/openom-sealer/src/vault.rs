@@ -268,7 +268,7 @@ struct Built {
 /// keyring at `revision`, chained onto `prev_keyring_hash` (empty at genesis). Shared by
 /// provision, recover, and change_passphrase.
 ///
-/// This builds the **degenerate single-owner v2 keyring**: one authorized signer (the
+/// This builds the **degenerate single-owner keyring**: one authorized signer (the
 /// founder = the passphrase-derived identity), one member (the owner), one signature.
 /// Sharing extends this — additional `authorized_signers`, `members`, HPKE wraps, and
 /// signatures — but the *shape* is frozen here. Two things a multi-member successor MUST
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn provisioned_keyring_is_a_v2_genesis_single_owner() {
+    fn provisioned_keyring_is_a_genesis_single_owner() {
         let p = provision(b"pass", TREE, MEMBER, b"r").unwrap();
         let k = Keyring::decode(p.keyring.as_slice()).unwrap();
         assert_eq!(k.layout_version, 1);
