@@ -37,12 +37,16 @@ pub fn cipher_suite() -> &'static str {
 }
 
 mod kdf;
+mod keyring;
 mod recovery;
 mod seal;
 mod wrap;
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
+};
+pub use keyring::{
+    generate_identity, sign_keyring, verify_keyring, Signature, SigningKey, VerifyingKey,
 };
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,
@@ -83,4 +87,8 @@ pub enum CryptoError {
     /// A recovery code's checksum doesn't match — almost certainly a typo.
     #[error("recovery code checksum mismatch (likely a typo)")]
     RecoveryChecksum,
+    /// Keyring signature verification failed, or the signature isn't the right length
+    /// (§4).
+    #[error("keyring signature invalid")]
+    Signature,
 }

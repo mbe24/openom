@@ -61,6 +61,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 argon2 = "0.5"
+# Ed25519 — the owner identity that signs the keyring (§4). `zeroize` scrubs the
+# signing seed on drop.
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 # Best-effort scrub of key material (KEK/DEK buffers) on drop.
 zeroize = { version = "1", features = ["derive"] }
 # CSPRNG for DEKs / salts / nonces. On wasm32 this needs the `wasm_js` backend cfg

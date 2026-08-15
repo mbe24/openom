@@ -13,7 +13,7 @@
 //! the header + plaintext and build the AAD internally, so no JS twin of this encoder
 //! can drift from it (openom-crypto owns the only call sites).
 
-use crate::v1::Header;
+use crate::v1::{Header, Keyring};
 
 /// Build the canonical AAD for an envelope with wire `version` and `header` (§5).
 ///
@@ -66,6 +66,50 @@ pub fn wrap_aad(
     put_bytes(&mut out, member_id.as_bytes());
     put_u32(&mut out, wrap_method as u32);
     put_u32(&mut out, epoch);
+    out
+}
+
+/// The canonical, domain-separated byte string the owner's Ed25519 key signs over the
+/// keyring (§4): every keyring field **except `signature`**, length- and count-prefixed
+/// so a signature can't be replayed onto a different keyring or another structure. The
+/// `revision` (anti-rollback) and `signer_key_id` are covered.
+pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    put_bytes(&mut out, b"openom:keyring:v1");
+    put_bytes(&mut out, &keyring.tree_id);
+    put_u32(&mut out, keyring.revision);
+    put_bytes(&mut out, &keyring.signer_key_id);
+    put_u32(&mut out, keyring.epochs.len() as u32);
+    for epoch in &keyring.epochs {
+        put_bytes(&mut out, &epoch.key_id);
+        put_u32(&mut out, epoch.epoch);
+        put_u32(&mut out, epoch.wraps.len() as u32);
+        for w in &epoch.wraps {
+            put_bytes(&mut out, w.member_id.as_bytes());
+            put_u32(&mut out, w.wrap_method as u32);
+            put_bytes(&mut out, &w.nonce);
+            put_bytes(&mut out, &w.wrapped_dek);
+            // kdf_params: a presence flag then its four fields, always encoded (zeros
+            // when absent) so the layout stays branchless.
+            match &w.kdf_params {
+                Some(k) => {
+                    put_u32(&mut out, 1);
+                    put_bytes(&mut out, &k.salt);
+                    put_u32(&mut out, k.memory_kib);
+                    put_u32(&mut out, k.iterations);
+                    put_u32(&mut out, k.parallelism);
+                }
+                None => {
+                    put_u32(&mut out, 0);
+                    put_bytes(&mut out, &[]);
+                    put_u32(&mut out, 0);
+                    put_u32(&mut out, 0);
+                    put_u32(&mut out, 0);
+                }
+            }
+            put_bytes(&mut out, &w.ephemeral_public_key);
+        }
+    }
     out
 }
 
@@ -189,5 +233,38 @@ mod tests {
     fn wrap_aad_is_disjoint_from_header_aad() {
         // The domain tag prevents a header AAD from ever colliding with a wrap AAD.
         assert_ne!(wrap_aad(b"", b"", "", 0, 0), header_aad(0, &Header::default()));
+    }
+
+    #[test]
+    fn keyring_signing_bytes_covers_and_ignores_signature() {
+        use crate::v1::{KeyEpoch, KeyWrap, KdfParams};
+        let mut kr = Keyring {
+            tree_id: vec![0x11; 16],
+            revision: 1,
+            signer_key_id: vec![0xAB; 4],
+            signature: vec![0xFF; 64], // must NOT affect the signed bytes
+            epochs: vec![KeyEpoch {
+                key_id: vec![1, 2, 3],
+                epoch: 0,
+                wraps: vec![KeyWrap {
+                    member_id: "acct".into(),
+                    wrap_method: 1,
+                    nonce: vec![7; 24],
+                    wrapped_dek: vec![9; 48],
+                    kdf_params: Some(KdfParams {
+                        salt: vec![5; 16],
+                        memory_kib: 19456,
+                        iterations: 2,
+                        parallelism: 1,
+                    }),
+                    ephemeral_public_key: vec![],
+                }],
+            }],
+        };
+        let a = keyring_signing_bytes(&kr);
+        kr.signature = vec![0x00; 64];
+        assert_eq!(a, keyring_signing_bytes(&kr), "signature is excluded from signed bytes");
+        kr.revision = 2;
+        assert_ne!(a, keyring_signing_bytes(&kr), "revision is covered (anti-rollback)");
     }
 }
