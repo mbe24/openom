@@ -56,6 +56,8 @@ pub enum VaultErrorCode {
     MemberNotFound,
     /// Sharing: the owner/founder can't be removed (transfer ownership instead).
     CannotRemoveOwner,
+    /// Sharing: the caller isn't authorized for this administrative action.
+    NotAuthorized,
     /// No keyring is stored for this tree yet (provision first).
     NoKeyring,
     /// An envelope wouldn't decode / had no header.
@@ -120,6 +122,7 @@ impl From<SealerError> for VaultError {
             E::MemberExists => C::MemberExists,
             E::MemberNotFound => C::MemberNotFound,
             E::CannotRemoveOwner => C::CannotRemoveOwner,
+            E::NotAuthorized => C::NotAuthorized,
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
             E::RevisionOverflow => C::RevisionOverflow,

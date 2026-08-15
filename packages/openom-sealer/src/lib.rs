@@ -163,6 +163,11 @@ pub enum SealerError {
     /// ownership instead (a future flow).
     #[error("the owner cannot be removed")]
     CannotRemoveOwner,
+    /// The caller isn't authorized for this administrative action — e.g. a member who isn't a
+    /// co-owner trying to add/remove members, or a co-owner trying to change the signer set
+    /// (founder-only).
+    #[error("not authorized for this action")]
+    NotAuthorized,
     /// The keyring is for a different tree than the caller expected (the caller supplies the
     /// trusted `tree_id`; it is never read from the untrusted keyring for the AEAD context).
     #[error("keyring is for a different tree")]
