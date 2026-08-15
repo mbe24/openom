@@ -44,6 +44,38 @@ export function localeInfo(id = current) {
   return LOCALES.find((l) => l.id === id) ?? LOCALES[0];
 }
 
+const LOCALE_KEY = 'openom.locale';
+
+/**
+ * The locale to start in: a previously-chosen one (persisted), else the best match from the
+ * browser's languages, else English. Runs before any UI — including the pre-unlock gate,
+ * which is why the choice can't live in the (locked) tree and must be in localStorage.
+ */
+export function detectLocale() {
+  try {
+    const saved = localStorage.getItem(LOCALE_KEY);
+    if (saved && LOCALES.some((l) => l.id === saved)) return saved;
+  } catch {
+    /* no storage — fall through to the browser preference */
+  }
+  const prefs = navigator.languages?.length ? navigator.languages : [navigator.language || 'en'];
+  for (const pref of prefs) {
+    const base = String(pref).toLowerCase().split('-')[0];
+    const hit = LOCALES.find((l) => l.id === base);
+    if (hit) return hit.id;
+  }
+  return 'en';
+}
+
+/** Remember the chosen locale across launches. */
+export function persistLocale(id) {
+  try {
+    localStorage.setItem(LOCALE_KEY, id);
+  } catch {
+    /* ephemeral */
+  }
+}
+
 export function isRTL() {
   return localeInfo().dir === 'rtl';
 }

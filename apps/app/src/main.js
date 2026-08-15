@@ -1,12 +1,12 @@
 import { createStore } from './core/store.js';
 import { TreeLibrary, dataset } from './core/library.js';
 import { composeStore } from './core/storeStack.js';
-import { createLibrarySealer } from './core/sealer/index.js';
+import { createLibrarySealer, createAppVault } from './core/sealer/index.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, LocalOnlyAuth, syncStatus } from './core/session.js';
 import { applyTheme, PRESETS } from './core/theme.js';
-import { loadLocale, t, locale } from './core/i18n.js';
+import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
@@ -23,6 +23,16 @@ import { settingsView } from './views/settings.js';
 import { transferView } from './views/transfer.js';
 import { onboardingView } from './views/onboarding.js';
 import { lockView } from './views/lock.js';
+import { gateView } from './views/gate.js';
+
+// The single real (passphrase-protected) tree for V1; the demo uses the seed datasets. A
+// stable 16-byte tree id derived from the doc id (matches the sealer's own derivation).
+const REAL_DOC = 'my-tree';
+const MEMBER = 'local-owner';
+async function realTreeIdBytes() {
+  const data = new TextEncoder().encode('openom-tree:' + REAL_DOC);
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', data)).slice(0, 16);
+}
 
 const VIEWS = {
   tree: { render: ancestorsView, title: 'view-ancestors', tab: 'tree' },
@@ -62,6 +72,14 @@ class App {
   focusReturnId = null;
   paletteOpen = false;
   history = [];
+  // Pre-unlock gate: null (in the app) | 'welcome' | 'provision' | 'recovery' | 'unlock'.
+  gate = null;
+  gateError = '';
+  gateBusy = false;
+  gateRecoveryCode = '';
+  pendingSession = null;
+  vault = null;
+  realTreeId = null;
 
   constructor(root) {
     this.root = root;
@@ -74,41 +92,122 @@ class App {
   }
 
   async boot() {
-    // Erst hier, weil nur ein Oeffnungsversuch verraet, ob IndexedDB im
-    // aktuellen Browsermodus wirklich benutzbar ist.
-    // Local, end-to-end-encrypted store: every snapshot is sealed by the WASM sealer before
-    // it reaches the durable cache — no server needed. The dev key (§16) lets this run with
-    // no unlock flow yet, for fast UI iteration; the bytes at rest are still real ciphertext.
+    // Order matters (the gate is the first screen for every session): pick + load the locale,
+    // wire the (gate-guarded) global listeners, warm the crypto worker, THEN decide the gate.
+    // The store/tree are NOT built here — that happens in enterApp() after the gate resolves.
+    this.locale = detectLocale();
+    await loadLocale(this.locale);
+    this.applyAccent();
+    this.bindKeys();
+    this.bindResize();
+    this.realTreeId = await realTreeIdBytes();
+    this.vault = await createAppVault();
+    this.showGate((await this.vault.hasKeyring(REAL_DOC)) ? 'unlock' : 'welcome');
+  }
+
+  // The gate owns its DOM: renderGate() mounts it on explicit transitions/actions, while the
+  // global render() early-returns during the gate — so a font-load or resize never remounts
+  // (and never wipes) a half-typed passphrase.
+  showGate(name) {
+    this.gate = name;
+    this.gateError = '';
+    this.gateBusy = false;
+    this.renderGate();
+  }
+  renderGate() {
+    mount(this.root, gateView(this));
+  }
+
+  startCreate() {
+    this.showGate('provision');
+  }
+
+  async startDemo() {
+    // Demo = the seed datasets under the dev key (clearly not the user's real, protected tree).
+    await this.enterApp({ sealer: createLibrarySealer({ dev: true }), seedDataset: this.datasetId });
+  }
+
+  async doProvision(passphrase, confirm) {
+    if (!passphrase || passphrase.length < 8) { this.gateError = 'Use at least 8 characters.'; this.renderGate(); return; }
+    if (passphrase !== confirm) { this.gateError = 'Passphrases do not match.'; this.renderGate(); return; }
+    this.gateBusy = true;
+    this.gateError = '';
+    this.renderGate();
+    try {
+      const { session, recoveryCode } = await this.vault.provision(REAL_DOC, this.realTreeId, passphrase, MEMBER);
+      this.pendingSession = session;
+      this.gateRecoveryCode = recoveryCode;
+      this.showGate('recovery');
+    } catch (e) {
+      this.gateBusy = false;
+      this.gateError = 'Could not create your tree. ' + (e?.message ?? '');
+      this.renderGate();
+    }
+  }
+
+  async gateContinue() {
+    // After the recovery-code screen: enter the app with the just-provisioned session.
+    const session = this.pendingSession;
+    this.pendingSession = null;
+    this.gateRecoveryCode = '';
+    await this.enterApp({ sealer: session, docId: REAL_DOC });
+  }
+
+  async doUnlock(passphrase) {
+    if (!passphrase) { this.gateError = 'Enter your passphrase.'; this.renderGate(); return; }
+    this.gateBusy = true;
+    this.gateError = '';
+    this.renderGate();
+    try {
+      const { session } = await this.vault.unlock(REAL_DOC, this.realTreeId, passphrase, MEMBER);
+      await this.enterApp({ sealer: session, docId: REAL_DOC });
+    } catch (e) {
+      this.gateBusy = false;
+      // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
+      this.gateError = /rollback/i.test(e?.message ?? '')
+        ? 'This tree looks out of date or tampered — refusing to open it.'
+        : 'Wrong passphrase.';
+      this.renderGate();
+    }
+  }
+
+  // Compose the store around the resolved sealer, open the tree, and switch to the app.
+  async enterApp({ sealer, seedDataset, docId }) {
     const base = await createStore();
-    const sealer = createLibrarySealer({ dev: true });
     const { store } = await composeStore({ mode: 'local', sealer, local: base.store });
     this.storeKind = 'sealed / ' + base.kind;
     this.library = new TreeLibrary(store);
-    await loadLocale(this.locale);
     let opened;
-    try {
-      opened = await this.library.openSeeded(this.datasetId);
-    } catch (e) {
-      // Pre-encryption local data can't be opened by the sealer. This local/dev path
-      // re-seeds, so reset the incompatible doc and start fresh instead of crashing. (A real
-      // plaintext → encrypted migration for existing users is a separate, later concern.)
-      console.warn('[openom] resetting unreadable local tree (likely pre-encryption data):', e);
-      const doc = dataset(this.datasetId).doc;
-      this.library.close(doc);
-      await store.delete(doc);
-      opened = await this.library.openSeeded(this.datasetId);
+    if (seedDataset) {
+      try {
+        opened = await this.library.openSeeded(seedDataset);
+      } catch (e) {
+        console.warn('[openom] resetting unreadable local tree (likely pre-encryption data):', e);
+        const doc = dataset(seedDataset).doc;
+        this.library.close(doc);
+        await store.delete(doc);
+        opened = await this.library.openSeeded(seedDataset);
+      }
+      this.datasetId = seedDataset;
+    } else {
+      const tree = await this.library.open(docId); // hydrates; empty on first provision
+      opened = { tree, focusId: null };
     }
     const { tree, focusId } = opened;
     this.tree = tree;
-    tree.blobs = this.blobs;   // Bytes bleiben getrennt, aber erreichbar
+    tree.blobs = this.blobs;
     this.focusId = focusId;
     this.transfer = new TreeTransfer(tree);
-    this.applyAccent();
     tree.onRevision(() => this.render());
     this.schema.onChange(() => this.render());
-    // A resize only matters when the layout bucket changes. On phones the
-    // virtual keyboard shrinks the window, and re-rendering there replaces the
-    // focused input — which dismisses the keyboard the moment it appears.
+    this.watchIdle();
+    this.gate = null;
+    this.render();
+  }
+
+  // Global listeners, attached once. Each routes through render(), which early-returns while
+  // the gate is up — so none can remount the gate (or its focused passphrase field).
+  bindResize() {
     let bucket = layoutBucket();
     window.addEventListener('resize', () => {
       const next = layoutBucket();
@@ -117,16 +216,15 @@ class App {
       if (isTyping()) return;
       this.render();
     });
-    this.watchIdle();
     window.addEventListener('openom:touchmode', () => this.render());
-    // Schriften kommen nachtraeglich: danach einmal neu zeichnen, damit
-    // Namenskuerzung und Layout mit den echten Metriken rechnen.
     if (document.fonts) {
       document.fonts.addEventListener?.('loadingdone', () => this.render());
       document.fonts.ready.then(() => this.render());
     }
-    this.bindKeys();
-    this.render();
+    // A dead crypto worker: keys are gone from this session — send the user back to unlock.
+    window.addEventListener('openom:worker-error', () => {
+      if (!this.gate) this.showGate('unlock');
+    });
   }
 
   get generations() {
@@ -213,7 +311,12 @@ class App {
     this.applyAccent();
     this.render();
   }
-  async setLocale(id) { this.locale = await loadLocale(id); this.render(); }
+  async setLocale(id) {
+    this.locale = await loadLocale(id);
+    persistLocale(id);
+    if (this.gate) this.renderGate();
+    else this.render();
+  }
 
   async updatePerson(patch, opts) { await this.tree.updatePerson(this.focusId, patch, opts); }
 
@@ -384,6 +487,7 @@ class App {
   // ------------------------------------------------------------ keyboard
   bindKeys() {
     window.addEventListener('keydown', async (e) => {
+      if (this.gate) return; // no tree yet — the gate handles its own keys
       const meta = e.metaKey || e.ctrlKey;
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName ?? '');
       if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); this.togglePalette(true); return; }
@@ -466,6 +570,11 @@ class App {
 
   // ------------------------------------------------------------ render
   render() {
+    // While a gate is up it owns its DOM (mounted via renderGate); the global render path is a
+    // no-op so font-load/resize can't remount and wipe a half-typed passphrase. `!this.tree`
+    // also covers the boot window before any tree exists (a cached-font `fonts.ready` can fire
+    // mid-boot, before the gate is even shown).
+    if (this.gate || !this.tree) return;
     if (this.locked) { mount(this.root, lockView(this)); return; }
     const view = VIEWS[this.view] ?? VIEWS.tree;
     const portrait = (window.innerWidth || 1280) <= 820;
