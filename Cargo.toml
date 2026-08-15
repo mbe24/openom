@@ -9,6 +9,7 @@ members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
     "packages/openom-sealer",
+    "packages/openom-vault-host",
     "packages/openom-store",
     "openom",
     "apps/src-tauri",

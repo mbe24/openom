@@ -1,0 +1,14 @@
+[package]
+name = "openom-vault-host"
+description = "openom — the native (Tauri) key-custody host: keeps live Sealer sessions and the keyring/watermark storage in Rust, so the DEK never enters the webview. The Tauri #[command]s are thin wrappers over this; the logic is plain, cargo-tested Rust."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openom-sealer = { path = "../openom-sealer" }
+openom-crypto.workspace = true
+openom-protocol.workspace = true
+serde = { workspace = true }
+zeroize.workspace = true
