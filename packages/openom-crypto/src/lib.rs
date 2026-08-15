@@ -54,6 +54,7 @@ pub fn cipher_suite() -> &'static str {
 }
 
 mod envelope;
+mod hpke_wrap;
 mod kdf;
 mod keyring;
 mod recovery;
@@ -61,6 +62,9 @@ mod root;
 mod seal;
 mod wrap;
 pub use envelope::{open_envelope, seal_envelope, SealParams};
+pub use hpke_wrap::{
+    derive_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
+};
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
@@ -113,4 +117,8 @@ pub enum CryptoError {
     /// (§4).
     #[error("keyring signature invalid")]
     Signature,
+    /// An HPKE seal/open failed — a malformed member public/secret/encapsulated key, or
+    /// a wrap that didn't authenticate (wrong recipient, tampered context). Opaque.
+    #[error("HPKE wrap/unwrap failed")]
+    Hpke,
 }

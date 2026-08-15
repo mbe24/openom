@@ -1,39 +1,47 @@
-//! Root-key derivation: turn a passphrase into the two keys the unlock flow needs — the
-//! **KEK** that wraps the DEK, and the **Ed25519 owner identity** that signs the keyring.
+//! Root-key derivation: turn a passphrase into the keys the unlock flow needs — the
+//! **KEK** that wraps the DEK, the **Ed25519 identity** that signs the keyring, and the
+//! **X25519 HPKE keypair** that receives a shared DEK wrap when this account is a member
+//! of someone else's tree.
 //!
 //! One Argon2id run (the single slow, memory-hard step) produces a 256-bit master; HKDF-
-//! SHA256 then expands it into two independent 32-byte keys under distinct `info` labels.
-//! They are **siblings** — neither is derived from the other — so a KEK compromise can never
-//! yield the signing key. Argon2id output is already uniform, so HKDF-Expand is the textbook
-//! way to split it; a second Argon2id would only double the ~1s cost for no security gain.
+//! SHA256 then expands it into independent 32-byte keys under distinct `info` labels.
+//! They are **siblings** — none is derived from another — so a KEK compromise can never
+//! yield the signing or HPKE key. Argon2id output is already uniform, so HKDF-Expand is the
+//! textbook way to split it; a second Argon2id would only double the ~1s cost for no gain.
 //!
 //! ## Frozen construction (a second implementation must reproduce this byte-for-byte)
 //! - master = Argon2id(passphrase, params)  — 32 bytes (same as [`derive_kek`]).
 //! - HKDF-SHA256 with **Extract salt = empty** (`Hkdf::new(None, master)`).
-//! - Expand two 32-byte outputs with the exact ASCII labels below.
+//! - Expand 32-byte outputs with the exact ASCII labels below; the HPKE output is the IKM
+//!   fed to the KEM's DeriveKeyPair (`derive_hpke_keypair`).
 
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{derive_kek, CryptoError, Key32, KEY_LEN};
+use crate::{derive_hpke_keypair, derive_kek, CryptoError, Key32, HPKE_PUBLIC_LEN, KEY_LEN};
 use openom_protocol::v1::KdfParams;
 
 /// HKDF `info` label for the KEK. **Frozen.**
 const HKDF_KEK_INFO: &[u8] = b"openom:kek:v1";
 /// HKDF `info` label for the owner identity seed. **Frozen.**
 const HKDF_IDENTITY_INFO: &[u8] = b"openom:identity:v1";
+/// HKDF `info` label for the HPKE keypair IKM. **Frozen.**
+const HKDF_HPKE_INFO: &[u8] = b"openom:hpke:v1";
 
-/// The two keys a passphrase unlocks: the DEK-wrapping KEK and the keyring-signing identity.
+/// The keys a passphrase unlocks: the DEK-wrapping KEK, the keyring-signing identity, and
+/// the X25519 HPKE keypair (secret + public) for receiving a shared DEK wrap.
 pub struct RootKeys {
     pub kek: Key32,
     pub identity: SigningKey,
+    pub hpke_secret: Zeroizing<[u8; 32]>,
+    pub hpke_public: [u8; HPKE_PUBLIC_LEN],
 }
 
 /// Derive [`RootKeys`] from a passphrase (see the module docs for the frozen construction).
 /// The passphrase should already be a [`Zeroizing`] buffer at the call site; this scrubs
-/// every intermediate (the master and the identity seed) on the way out.
+/// every intermediate (the master, the identity seed, and the HPKE IKM) on the way out.
 pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, CryptoError> {
     // The Argon2id output is the HKDF master (derive_kek is exactly that Argon2id step).
     let master = derive_kek(passphrase, params)?;
@@ -48,7 +56,12 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
         .map_err(|_| CryptoError::Kdf("hkdf expand (identity)".into()))?;
     let identity = SigningKey::from_bytes(&seed);
 
-    Ok(RootKeys { kek, identity })
+    let mut hpke_ikm = Zeroizing::new([0u8; 32]);
+    hk.expand(HKDF_HPKE_INFO, hpke_ikm.as_mut_slice())
+        .map_err(|_| CryptoError::Kdf("hkdf expand (hpke)".into()))?;
+    let (hpke_secret, hpke_public) = derive_hpke_keypair(&hpke_ikm);
+
+    Ok(RootKeys { kek, identity, hpke_secret: Zeroizing::new(hpke_secret), hpke_public })
 }
 
 // Compile-time confirmation (not an assumption) that the derived owner identity scrubs its
@@ -104,6 +117,25 @@ mod tests {
         // Siblings: the KEK bytes and the identity seed must not coincide.
         let r = derive_root(b"whatever", &params()).unwrap();
         assert_ne!(r.kek.as_slice(), &r.identity.to_bytes());
+    }
+
+    #[test]
+    fn the_hpke_keypair_is_deterministic_independent_and_usable() {
+        use crate::{hpke_unwrap_dek, hpke_wrap_dek};
+        let a = derive_root(b"member pass", &params()).unwrap();
+        let b = derive_root(b"member pass", &params()).unwrap();
+        assert_eq!(*a.hpke_secret, *b.hpke_secret, "same passphrase => same HPKE key");
+        assert_eq!(a.hpke_public, b.hpke_public);
+        // Independent from the KEK and the identity seed (siblings).
+        assert_ne!(a.kek.as_slice(), a.hpke_secret.as_slice());
+        assert_ne!(&a.identity.to_bytes(), &*a.hpke_secret);
+        // The derived public/secret actually form a working HPKE pair.
+        let w = hpke_wrap_dek(&a.hpke_public, &[9u8; KEY_LEN], b"info").unwrap();
+        let out = hpke_unwrap_dek(&*a.hpke_secret, &w.encapped_key, &w.ciphertext, b"info").unwrap();
+        assert_eq!(&*out, &[9u8; KEY_LEN]);
+
+        let c = derive_root(b"other pass", &params()).unwrap();
+        assert_ne!(a.hpke_public, c.hpke_public, "different passphrase => different HPKE key");
     }
 
     #[test]

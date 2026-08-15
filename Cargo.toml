@@ -73,9 +73,19 @@ zeroize = { version = "1", features = ["derive"] }
 getrandom = "0.3"
 # Base32 for the printable recovery code (grouped, checksummed).
 data-encoding = "2"
-# HKDF-SHA256: expands the one Argon2id output into two independent keys (the KEK that
-# wraps the DEK, and the Ed25519 owner identity that signs the keyring). See derive_root.
+# HKDF-SHA256: expands the one Argon2id output into three independent keys (the KEK that
+# wraps the DEK, the Ed25519 owner identity that signs the keyring, and the X25519 HPKE
+# key that receives a shared DEK wrap). See derive_root.
 hkdf = "0.12"
+# RFC 9180 HPKE — wraps the tree DEK to a member's X25519 public key when sharing
+# (WRAP_METHOD_X25519_HPKE). Suite: DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 +
+# ChaCha20Poly1305. Only the X25519 KEM is enabled (no P-256), to keep the dep and the
+# wasm bundle small.
+hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
+# rand_core traits so HPKE's seal can draw its ephemeral key from a getrandom-backed
+# CSPRNG (same OS/browser entropy the rest of the crate uses). 0.6 unifies with the
+# version hpke and ed25519-dalek already pull in.
+rand_core = "0.6"
 
 # Store client (arrives with the upload path): compress + upload. rustls instead
 # of native-tls, so no OpenSSL is needed in the container. The exact rustls
