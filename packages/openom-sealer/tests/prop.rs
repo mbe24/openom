@@ -1,0 +1,81 @@
+//! Property + fuzz-style tests for the sealer core. Beyond the plain round-trip, these pin
+//! the scope/kind guards (a blob for another tree or of another kind is refused before the
+//! AEAD) and the fuzz surface: opening arbitrary bytes never panics — it returns an error.
+
+use openom_protocol::v1::{Compression, Format};
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
+use proptest::prelude::*;
+
+fn sealer(tree: &[u8]) -> Sealer {
+    Sealer::from_unwrapped(
+        1,
+        openom_crypto::generate_dek().unwrap(),
+        tree.to_vec(),
+        b"epoch-0".to_vec(),
+        b"replica-0".to_vec(),
+    )
+}
+
+fn ctx(kind: EntryKind, counter: u64) -> SealContext {
+    SealContext {
+        kind,
+        format: Format::OpenomJson,
+        compression: Compression::None,
+        replica_counter: counter,
+        prev_ciphertext_hash: Vec::new(),
+        covers_through_seq: 0,
+        blob_id: Vec::new(),
+    }
+}
+
+fn kind() -> impl Strategy<Value = EntryKind> {
+    prop_oneof![
+        Just(EntryKind::Snapshot),
+        Just(EntryKind::Delta),
+        Just(EntryKind::Media),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn seal_open_round_trips(
+        plaintext in proptest::collection::vec(any::<u8>(), 0..2048),
+        counter in any::<u64>(),
+        kind in kind(),
+    ) {
+        let s = sealer(b"tree-uuid-16byte");
+        let out = s.seal_entry(&ctx(kind, counter), &plaintext).unwrap();
+        prop_assert_eq!(s.open_entry(kind, &out.envelope).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn opening_arbitrary_bytes_errors_never_panics(
+        bytes in proptest::collection::vec(any::<u8>(), 0..4096),
+        kind in kind(),
+    ) {
+        let s = sealer(b"tree-uuid-16byte");
+        // Random bytes are never a valid sealed entry for this scope — an error, not a panic.
+        prop_assert!(s.open_entry(kind, &bytes).is_err());
+    }
+
+    #[test]
+    fn another_trees_blob_is_rejected(plaintext in proptest::collection::vec(any::<u8>(), 0..512)) {
+        let a = sealer(b"tree-uuid-16byte");
+        let b = sealer(b"other-tree-16byt");
+        let out = a.seal_entry(&ctx(EntryKind::Snapshot, 0), &plaintext).unwrap();
+        prop_assert!(matches!(
+            b.open_entry(EntryKind::Snapshot, &out.envelope),
+            Err(SealerError::WrongScope)
+        ));
+    }
+
+    #[test]
+    fn the_wrong_kind_is_rejected(plaintext in proptest::collection::vec(any::<u8>(), 0..512)) {
+        let s = sealer(b"tree-uuid-16byte");
+        let out = s.seal_entry(&ctx(EntryKind::Snapshot, 0), &plaintext).unwrap();
+        prop_assert!(matches!(
+            s.open_entry(EntryKind::Delta, &out.envelope),
+            Err(SealerError::WrongKind)
+        ));
+    }
+}

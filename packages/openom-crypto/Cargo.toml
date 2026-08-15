@@ -20,6 +20,9 @@ thiserror.workspace = true
 data-encoding.workspace = true
 sha2.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 # WASM (the web sealer) needs getrandom's browser backend enabled — only for wasm32;
 # native uses the OS RNG directly. Several getrandom majors reach this crate
 # transitively (via the crypto deps), each with its own wasm feature, so enable all of
