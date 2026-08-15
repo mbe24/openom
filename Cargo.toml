@@ -13,6 +13,7 @@ members = [
     "packages/openom-store",
     "packages/commute",
     "packages/openom-treelog",
+    "packages/openom-sync",
     "openom",
     "apps/src-tauri",
 ]

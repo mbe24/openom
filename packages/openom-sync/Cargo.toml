@@ -1,0 +1,18 @@
+[package]
+name = "openom-sync"
+description = "openom — the client sync loop: seal treelog deltas to the store and merge peers' deltas back (E2EE, multi-device)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+commute = { path = "../commute" }
+openom-treelog = { path = "../openom-treelog" }
+openom-sealer = { path = "../openom-sealer" }
+openom-store = { path = "../openom-store" }
+openom-protocol = { path = "../openom-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+openom-crypto = { path = "../openom-crypto" }

@@ -61,3 +61,29 @@ pub trait DocStore: Send + Sync {
     fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> Result<String>;
     fn delete(&self, doc: &str) -> Result<()>;
 }
+
+/// Delegating impl so one store can be shared — e.g. across several sync clients, or between the
+/// sync loop and a background task — through an `Arc`.
+impl<T: DocStore + ?Sized> DocStore for std::sync::Arc<T> {
+    fn caps(&self) -> Caps {
+        (**self).caps()
+    }
+    fn list(&self) -> Result<Vec<String>> {
+        (**self).list()
+    }
+    fn read_snapshot(&self, doc: &str) -> Result<Option<Snapshot>> {
+        (**self).read_snapshot(doc)
+    }
+    fn read_updates(&self, doc: &str, since: Option<u64>) -> Result<(Vec<Update>, u64)> {
+        (**self).read_updates(doc, since)
+    }
+    fn append(&self, doc: &str, updates: &[Update]) -> Result<u64> {
+        (**self).append(doc, updates)
+    }
+    fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> Result<String> {
+        (**self).put_snapshot(doc, bytes, expected)
+    }
+    fn delete(&self, doc: &str) -> Result<()> {
+        (**self).delete(doc)
+    }
+}
