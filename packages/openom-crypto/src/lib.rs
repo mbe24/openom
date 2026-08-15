@@ -31,6 +31,23 @@ pub const SALT_LEN: usize = 16;
 /// `[u8; KEY_LEN]`, so it passes straight to [`seal`]/[`open`] as `&*key`.
 pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
 
+/// The reserved `Header.key_id` for local development (§16). Local dev / demo seal with
+/// a well-known fixed DEK ([`dev_dek`]) so a developer can inspect payloads — but the
+/// bytes on disk / in MinIO are still real ciphertext, sealed and AAD-bound exactly
+/// like production. **Production MUST refuse any envelope carrying this `key_id`**, so a
+/// dev key can never seal real user data even by misconfiguration.
+pub const DEV_KEY_ID: &[u8] = b"openom-dev-key-v1";
+
+/// The well-known fixed dev DEK — SHA-256 of a constant label. Not secret (dev
+/// inspection only); never valid for real data, since the server refuses [`DEV_KEY_ID`]
+/// under `RUN_MODE=production`.
+pub fn dev_dek() -> Key32 {
+    use sha2::{Digest, Sha256};
+    let mut key = [0u8; KEY_LEN];
+    key.copy_from_slice(&Sha256::digest(DEV_KEY_ID));
+    zeroize::Zeroizing::new(key)
+}
+
 /// Human-readable cipher-suite name, for logs and diagnostics.
 pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"

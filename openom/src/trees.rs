@@ -39,7 +39,11 @@ struct Validated {
 /// Validate an uploaded snapshot envelope against the V1 contract (§9.2–§9.6):
 /// decodable, supported version, `KIND_SNAPSHOT`, bound to *this* tree, and a
 /// `ciphertext_hash` the keyless server can — and must — recompute.
-fn validate_snapshot(body: &[u8], tree_id: Uuid) -> Result<Validated, ApiError> {
+fn validate_snapshot(
+    body: &[u8],
+    tree_id: Uuid,
+    reject_dev_key: bool,
+) -> Result<Validated, ApiError> {
     let env = Envelope::decode(body)
         .map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
     if env.version != ENVELOPE_VERSION {
@@ -62,6 +66,13 @@ fn validate_snapshot(body: &[u8], tree_id: Uuid) -> Result<Validated, ApiError> 
     if header.tree_id.as_slice() != tree_id.as_bytes() {
         return Err(ApiError::BadRequest(
             "header tree_id does not match the url".into(),
+        ));
+    }
+    // §16: the reserved dev key_id can never seal real user data. Refuse it in
+    // production so a misconfigured dev client can't write with the well-known dev DEK.
+    if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
+        return Err(ApiError::BadRequest(
+            "dev key_id refused under RUN_MODE=production (§16)".into(),
         ));
     }
     // ciphertext_hash is a hash of *ciphertext*, so the keyless server verifies it.
@@ -87,7 +98,7 @@ pub async fn put_tree(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let valid = validate_snapshot(&body, tree_id)?;
+    let valid = validate_snapshot(&body, tree_id, !state.config.is_local())?;
     let expected = if_match(&headers);
 
     // New opaque version + fresh key; the object is written before the pointer CAS.
@@ -336,5 +347,37 @@ impl IntoResponse for ApiError {
             }
         };
         (status, msg).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openom_protocol::v1::Header;
+
+    // A validly-hashed snapshot envelope sealed under the reserved dev key_id (§16).
+    fn dev_envelope(tree: Uuid) -> Vec<u8> {
+        let ciphertext = b"opaque-dev-ciphertext".to_vec();
+        let header = Header {
+            kind: Kind::Snapshot as i32,
+            tree_id: tree.as_bytes().to_vec(),
+            key_id: openom_crypto::DEV_KEY_ID.to_vec(),
+            ciphertext_hash: Sha256::digest(&ciphertext).to_vec(),
+            ..Default::default()
+        };
+        Envelope { version: ENVELOPE_VERSION, header: Some(header), ciphertext }.encode_to_vec()
+    }
+
+    #[test]
+    fn dev_key_refused_in_production_only() {
+        let tree = Uuid::new_v4();
+        let body = dev_envelope(tree);
+        // Production (reject_dev_key = true) refuses the dev key_id.
+        assert!(matches!(
+            validate_snapshot(&body, tree, true),
+            Err(ApiError::BadRequest(_))
+        ));
+        // Local dev (reject_dev_key = false) accepts it.
+        assert!(validate_snapshot(&body, tree, false).is_ok());
     }
 }

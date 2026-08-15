@@ -147,4 +147,17 @@ mod tests {
         let other = generate_dek().unwrap();
         assert!(matches!(open_envelope(&other, &env), Err(CryptoError::Open)));
     }
+
+    #[test]
+    fn dev_key_seals_real_ciphertext() {
+        // §16: the dev key produces real ciphertext (inspectable, but not plaintext),
+        // tagged with the reserved DEV_KEY_ID the server refuses in production.
+        let dek = crate::dev_dek();
+        let mut p = params(Aead::Xchacha20Poly1305);
+        p.key_id = crate::DEV_KEY_ID;
+        let env = seal_envelope(&dek, &p, b"local dev tree").unwrap();
+        assert_ne!(env.ciphertext.as_slice(), b"local dev tree".as_slice());
+        assert_eq!(env.header.as_ref().unwrap().key_id, crate::DEV_KEY_ID);
+        assert_eq!(open_envelope(&dek, &env).unwrap(), b"local dev tree");
+    }
 }
