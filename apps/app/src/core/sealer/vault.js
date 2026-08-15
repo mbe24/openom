@@ -1,77 +1,78 @@
-// The passphrase lifecycle, JS side: orchestrates the WASM vault (provision/unlock/recover/
+// The passphrase lifecycle, JS side: orchestrates the crypto WORKER (provision/unlock/recover/
 // changePassphrase) with keyring storage and the anti-rollback watermark, and hands back a
-// ready SealerSession. The WASM module is INJECTED (not imported) so this stays unit-testable
-// without running Argon2id; the app passes the real module.
+// ready SealerSession whose core proxies seal/open to the worker. Keys stay in the worker.
 //
-// Watermarking (SERVER-DATA-FORMAT §8a/§10): every flow observes the keyring `revision`, so a
-// server replaying a pre-change keyring is refused. recover/changePassphrase also feed the
-// current watermark down as `min_revision`, so the WASM core refuses a rolled-back keyring
-// before unwrapping (recovery skips the signature, so this is its only rollback guard).
+// The `worker` is INJECTED (the Comlink proxy, or a fake for tests) so orchestration is
+// unit-testable without a real Worker/Argon2id. It returns plain values + a `sealerId`; the
+// session is built from `workerCore(worker, sealerId)`.
 //
-// Passphrases/recovery codes are handed straight to WASM and not retained here; the UI layer
-// is responsible for minimising their lifetime in JS (they can't be scrubbed once GC owns
-// them).
+// Watermarking (§8a/§10): every flow observes the keyring `revision` (refusing a replayed
+// pre-change keyring). recover/changePassphrase pass the current watermark down as
+// `min_revision`; unlock passes it too, and the worker refuses a rolled-back keyring BEFORE
+// exposing a sealer id. A FRESH replica id is minted per unlock (a memoized one would let
+// lock -> re-unlock reuse (replica_id, 0) and fork the log).
 
 import { SealerSession } from './session.js';
+import { workerCore } from './workerSealer.js';
+
+function freshReplicaId() {
+  const id = new Uint8Array(16);
+  crypto.getRandomValues(id);
+  return id;
+}
 
 /**
  * @param {object} deps
- * @param {object} deps.wasm          the WASM module: { provision, unlock, recover, changePassphrase }
- * @param {object} deps.keyringStore  { load(treeKey)->Promise<Uint8Array|null>, save(treeKey,bytes)->Promise }
- * @param {object} deps.watermarks    a Watermarks instance (observe/current)
+ * @param {object} deps.worker         the crypto worker proxy (provision/unlock/recover/changePassphrase/sealEntry/openEntry/lock)
+ * @param {object} deps.keyringStore   { load(treeKey), save(treeKey, bytes) }
+ * @param {object} deps.watermarks     a Watermarks instance
+ * @param {() => Uint8Array} [deps.makeReplicaId]  fresh replica id per unlock (default: CSPRNG)
  */
-export function createVault({ wasm, keyringStore, watermarks }) {
-  if (!wasm || !keyringStore || !watermarks) {
-    throw new Error('createVault needs { wasm, keyringStore, watermarks }');
+export function createVault({ worker, keyringStore, watermarks, makeReplicaId = freshReplicaId }) {
+  if (!worker || !keyringStore || !watermarks) {
+    throw new Error('createVault needs { worker, keyringStore, watermarks }');
   }
 
-  async function requireKeyring(treeKey) {
+  const requireKeyring = async (treeKey) => {
     const keyring = await keyringStore.load(treeKey);
     if (!keyring) throw new Error(`no keyring stored for tree ${treeKey} — provision first`);
     return keyring;
-  }
+  };
+  const sessionFor = (sealerId) => new SealerSession(workerCore(worker, sealerId));
 
   return {
-    /** Whether this tree already has a keyring (→ unlock) or needs provisioning. */
     async hasKeyring(treeKey) {
       return (await keyringStore.load(treeKey)) != null;
     },
 
-    /** Create a new encrypted tree. Returns { session, recoveryCode } — show the code once. */
-    async provision(treeKey, treeId, passphrase, memberId, replicaId) {
-      const r = wasm.provision(passphrase, treeId, memberId, replicaId);
+    async provision(treeKey, treeId, passphrase, memberId) {
+      const r = await worker.provision(passphrase, treeId, memberId, makeReplicaId());
       await keyringStore.save(treeKey, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: new SealerSession(r.takeSealer()), recoveryCode: r.recoveryCode };
+      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
     },
 
-    /** Open an existing tree with a passphrase. Returns { session }. */
-    async unlock(treeKey, treeId, passphrase, memberId, replicaId) {
-      const keyring = await requireKeyring(treeKey);
-      const r = wasm.unlock(keyring, passphrase, treeId, memberId, replicaId);
-      // Observe BEFORE taking the sealer: a rollback throws here and the sealer is dropped.
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: new SealerSession(r.takeSealer()) };
-    },
-
-    /** Recover with the code + a new passphrase. Returns { session, recoveryCode } (new code). */
-    async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId, replicaId) {
+    async unlock(treeKey, treeId, passphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
       const min = watermarks.current(treeKey).keyringRevision;
-      const r = wasm.recover(keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, min);
-      await keyringStore.save(treeKey, r.keyring);
+      const r = await worker.unlock(keyring, passphrase, treeId, memberId, makeReplicaId(), min);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: new SealerSession(r.takeSealer()), recoveryCode: r.recoveryCode };
+      return { session: sessionFor(r.sealerId) };
     },
 
-    /**
-     * Change the passphrase (rotates the recovery code). Returns { recoveryCode } — the DEK is
-     * unchanged, so the caller's existing session keeps working; no new session is made.
-     */
+    async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {
+      const keyring = await requireKeyring(treeKey);
+      const min = watermarks.current(treeKey).keyringRevision;
+      const r = await worker.recover(keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), min);
+      await keyringStore.save(treeKey, r.keyring);
+      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
+    },
+
     async changePassphrase(treeKey, treeId, oldPassphrase, newPassphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
       const min = watermarks.current(treeKey).keyringRevision;
-      const r = wasm.changePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, min);
+      const r = await worker.changePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, min);
       await keyringStore.save(treeKey, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { recoveryCode: r.recoveryCode };

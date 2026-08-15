@@ -14,6 +14,7 @@ import { replicaId } from '../identity.js';
 import { Watermarks } from '../watermarks.js';
 import { createVault } from './vault.js';
 import { indexedDbKeyringStore } from './keyringStore.js';
+import { cryptoWorker } from './workerSealer.js';
 
 const registry = new Map(); // treeKey -> SealerSession
 
@@ -79,9 +80,9 @@ export async function createSealer(opts) {
  * @returns {Promise<object>} a vault (see createVault)
  */
 export async function createAppVault() {
-  const { loadModule } = await import('./wasm.js');
-  const wasm = await loadModule();
-  return createVault({ wasm, keyringStore: indexedDbKeyringStore(), watermarks: new Watermarks() });
+  const worker = cryptoWorker();
+  await worker.warm(); // pre-warm the WASM so only the KDF is visible at submit
+  return createVault({ worker, keyringStore: indexedDbKeyringStore(), watermarks: new Watermarks() });
 }
 
 // A stable 16-byte tree id derived from a doc id. Real trees carry a UUID; for the dev/local

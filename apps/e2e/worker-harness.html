@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>crypto worker harness</title>
+<!--
+  Loads the real crypto worker path (workerSealer + vault + a real Web Worker running the WASM)
+  — no app. Exercises the whole worker boundary: provision in the worker, seal/open proxied to
+  it, a second "device" unlock, and lock. Keys live only in the worker; this page only ever
+  sees ciphertext and a recovery code.
+-->
+<body>
+  <div id="status">loading…</div>
+  <script type="module">
+    import { cryptoWorker } from '../app/src/core/sealer/workerSealer.js';
+    import { createVault } from '../app/src/core/sealer/vault.js';
+    import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
+    import { Watermarks } from '../app/src/core/watermarks.js';
+
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+    const memKV = () => {
+      const m = new Map();
+      return {
+        getItem: (k) => (m.has(k) ? m.get(k) : null),
+        setItem: (k, v) => m.set(k, v),
+        removeItem: (k) => m.delete(k),
+      };
+    };
+
+    const worker = cryptoWorker();
+    await worker.warm(); // real WASM init inside the worker
+
+    window.__worker = {
+      async roundTrip() {
+        const store = memoryKeyringStore(); // shared between the two "devices"
+        const treeId = new Uint8Array(16).fill(3);
+
+        // Device A: provision + seal.
+        const vaultA = createVault({ worker, keyringStore: store, watermarks: new Watermarks(memKV()) });
+        const { session: sa, recoveryCode } = await vaultA.provision('tree-1', treeId, 'correct horse', 'local-owner');
+        const sealed = await sa.seal(enc.encode('hello worker'), 'tree-1', { kind: 'snapshot' });
+        const opened = dec.decode(await sa.open(sealed, 'tree-1', { kind: 'snapshot' }));
+
+        // Device B: unlock the same keyring, open A's data (same DEK, derived in the worker).
+        const vaultB = createVault({ worker, keyringStore: store, watermarks: new Watermarks(memKV()) });
+        const { session: sb } = await vaultB.unlock('tree-1', treeId, 'correct horse', 'local-owner');
+        const opened2 = dec.decode(await sb.open(sealed, 'tree-1', { kind: 'snapshot' }));
+
+        // The sealed bytes are ciphertext — the plaintext never appears on this thread's wire.
+        const leaks = new TextDecoder('latin1').decode(sealed).includes('hello worker');
+
+        // Wrong passphrase is rejected.
+        let wrongRejected = false;
+        try {
+          await vaultB.unlock('tree-1', treeId, 'WRONG', 'local-owner');
+        } catch {
+          wrongRejected = true;
+        }
+
+        return {
+          recoveryCodeLen: recoveryCode.length,
+          opened,
+          roundTrip: opened === 'hello worker',
+          crossDevice: opened2 === 'hello worker',
+          leaks,
+          wrongRejected,
+        };
+      },
+    };
+    document.getElementById('status').textContent = 'ready';
+    window.__ready = true;
+  </script>
+</body>

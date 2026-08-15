@@ -13,7 +13,8 @@
     "ios:init": "tauri ios init",
     "test:store": "node ../scripts/cargo.mjs test -p openom-store -p openom",
     "test:core": "node ../scripts/vitest.mjs",
-    "test:e2e": "playwright test",
+    "test:e2e": "playwright test --grep-invert @integration",
+    "test:e2e:full": "playwright test",
     "check:locales": "node scripts/check-locales.mjs",
     "serve": "node scripts/serve.mjs",
     "serve:preview": "node scripts/serve.mjs --open preview/desktop.html"
