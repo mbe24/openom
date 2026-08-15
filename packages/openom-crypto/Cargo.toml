@@ -19,3 +19,13 @@ thiserror.workspace = true
 # Recovery code: base32 encoding + a SHA-256-derived checksum byte for typo detection.
 data-encoding.workspace = true
 sha2.workspace = true
+
+# WASM (the web sealer) needs getrandom's browser backend enabled — only for wasm32;
+# native uses the OS RNG directly. Several getrandom majors reach this crate
+# transitively (via the crypto deps), each with its own wasm feature, so enable all of
+# them (renamed, so the same crate can appear more than once). Pair with
+# RUSTFLAGS=--cfg getrandom_backend="wasm_js" at the wasm build step.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
