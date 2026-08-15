@@ -189,3 +189,19 @@ gate-err-tampered = ይህ ዛፍ ጊዜው ያለፈበት ወይም የተጭ�
 gate-err-enter-code = የመልሶ ማግኛ ኮድዎን ያስገቡ።
 gate-err-min-new = ለአዲሱ የይለፍ ሐረግ ቢያንስ 8 ቁምፊዎችን ይጠቀሙ።
 gate-err-recover = መልሶ ማግኘት አልተቻለም። የመልሶ ማግኛ ኮድዎን ያረጋግጡ እና እንደገና ይሞክሩ።
+
+# --- የይለፍ ሐረግ መቀየር + የደህንነት ካርድ — መገምገም ይፈልጋል / NEEDS NATIVE REVIEW ---
+gate-change-title = የይለፍ ሐረግዎን ይቀይሩ። የመልሶ ማግኛ ኮድዎም ይተካል።
+gate-current-pass = አሁን ያለ የይለፍ ሐረግ
+gate-change = የይለፍ ሐረግ ቀይር
+gate-changing = በመቀየር ላይ…
+gate-err-enter-current = አሁን ያለውን የይለፍ ሐረግዎን ያስገቡ።
+gate-err-change = የይለፍ ሐረግ መቀየር አልተቻለም። አሁን ያለውን የይለፍ ሐረግዎን ያረጋግጡ እና እንደገና ይሞክሩ።
+gate-err-same = ከአሁኑ የተለየ አዲስ የይለፍ ሐረግ ይምረጡ።
+security-encrypted = ከጫፍ እስከ ጫፍ የተመሰጠረ
+security-on-device = በዚህ መሣሪያ ላይ
+security-encrypted-hint = ዛፍዎ በይለፍ ሐረግዎ ታሽጓል። አገልጋዩ ውሂብዎንም ቁልፍዎንም አያይም።
+security-passphrase = የይለፍ ሐረግ
+security-change = ቀይር
+security-change-hint = አዲስ የይለፍ ሐረግ ያዘጋጁ። አዲስ የመልሶ ማግኛ ኮድም ይሰጣል።
+security-planned = የታቀደ

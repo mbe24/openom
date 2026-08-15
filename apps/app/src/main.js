@@ -22,7 +22,6 @@ import { peopleView } from './views/people.js';
 import { settingsView } from './views/settings.js';
 import { transferView } from './views/transfer.js';
 import { onboardingView } from './views/onboarding.js';
-import { lockView } from './views/lock.js';
 import { gateView } from './views/gate.js';
 
 // The single real (passphrase-protected) tree for V1; the demo uses the seed datasets. A
@@ -55,10 +54,6 @@ class App {
   peopleFilter = null;
   viewStack = [];
   datasetId = 'bach';
-  // Sperre: im Mockup eine Attrappe, aber mit echtem Ablauf.
-  lockEnabled = false;
-  lockAfter = 'never';       // 'never' | 5 | 30 (Minuten)
-  locked = false;
   graphPanel = true;
   graphZoom = 'fit';
   graphAnchor = null;
@@ -72,7 +67,8 @@ class App {
   focusReturnId = null;
   paletteOpen = false;
   history = [];
-  // Pre-unlock gate: null (in the app) | 'welcome' | 'provision' | 'recovery' | 'unlock'.
+  // Gate: null (in the app) | 'welcome' | 'provision' | 'recovery' | 'recover' | 'unlock' |
+  // 'change' ('change' is opened from Settings while the app is already unlocked).
   gate = null;
   gateError = '';
   gateBusy = false;
@@ -158,11 +154,23 @@ class App {
   }
 
   async gateContinue() {
-    // After the recovery-code screen: enter the app with the just-provisioned session.
+    // After the recovery-code screen. From provision/recover there's a pending session to enter
+    // the app with; from an in-app change-passphrase there isn't — just close the gate.
     const session = this.pendingSession;
     this.pendingSession = null;
     this.gateRecoveryCode = '';
-    await this.enterApp({ sealer: session, docId: REAL_DOC });
+    if (session) await this.enterApp({ sealer: session, docId: REAL_DOC });
+    else { this.gate = null; this.render(); }
+  }
+
+  // Leave a gate that was opened from within the app (change-passphrase) without changing anything.
+  cancelGate() {
+    this.gate = null;
+    this.gateError = '';
+    this.gateBusy = false;
+    this.pendingSession = null;
+    this.gateRecoveryCode = '';
+    this.render();
   }
 
   async doUnlock(passphrase) {
@@ -204,6 +212,32 @@ class App {
     }
   }
 
+  // Opened from Settings. The running session keeps working (same DEK); this only re-wraps the
+  // passphrase and issues a fresh recovery code, so there's no session to enter — gateContinue
+  // returns to the app.
+  startChangePassphrase() {
+    this.showGate('change');
+  }
+
+  async doChangePassphrase(current, next, confirm) {
+    if (!current) { this.gateError = t('gate-err-enter-current'); this.renderGate(); return; }
+    if (!next || next.length < 8) { this.gateError = t('gate-err-min-new'); this.renderGate(); return; }
+    if (next !== confirm) { this.gateError = t('gate-err-mismatch'); this.renderGate(); return; }
+    if (next === current) { this.gateError = t('gate-err-same'); this.renderGate(); return; }
+    this.gateBusy = true;
+    this.gateError = '';
+    this.renderGate();
+    try {
+      const { recoveryCode } = await this.vault.changePassphrase(REAL_DOC, this.realTreeId, current, next, MEMBER);
+      this.gateRecoveryCode = recoveryCode; // a fresh code — the old one no longer works
+      this.showGate('recovery');
+    } catch (e) {
+      this.gateBusy = false;
+      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-change');
+      this.renderGate();
+    }
+  }
+
   // Compose the store around the resolved sealer, open the tree, and switch to the app.
   async enterApp({ sealer, seedDataset, docId }) {
     const base = await createStore();
@@ -233,7 +267,6 @@ class App {
     this.transfer = new TreeTransfer(tree);
     tree.onRevision(() => this.render());
     this.schema.onChange(() => this.render());
-    this.watchIdle();
     // A freshly-provisioned tree is empty → the "start with yourself" onboarding.
     this.view = tree.allPeople().length === 0 ? 'onboarding' : 'tree';
     this.gate = null;
@@ -572,28 +605,6 @@ class App {
     this.render();
   }
 
-  setLockEnabled(on) {
-    this.lockEnabled = on;
-    if (!on) { this.locked = false; this.lockAfter = 'never'; }
-    this.armIdle();
-    this.render();
-  }
-  setLockAfter(v) { this.lockAfter = v; this.armIdle(); this.render(); }
-  lock() { if (!this.lockEnabled) return; this.locked = true; this.togglePalette(false); this.render(); }
-  unlock() { this.locked = false; this.render(); this.armIdle(); }
-  /** Zeitgeber neu stellen; laeuft nur, wenn Sperre und Frist gesetzt sind. */
-  armIdle() {
-    clearTimeout(this._idle);
-    if (!this.lockEnabled || this.lockAfter === 'never' || this.locked) return;
-    this._idle = setTimeout(() => this.lock(), this.lockAfter * 60000);
-  }
-  watchIdle() {
-    const bump = () => { if (!this.locked) this.armIdle(); };
-    for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
-      window.addEventListener(ev, bump, { passive: true });
-    }
-  }
-
   togglePalette(open) {
     this.paletteOpen = open;
     document.querySelector('.command-palette')?.remove();
@@ -610,7 +621,6 @@ class App {
     // also covers the boot window before any tree exists (a cached-font `fonts.ready` can fire
     // mid-boot, before the gate is even shown).
     if (this.gate || !this.tree) return;
-    if (this.locked) { mount(this.root, lockView(this)); return; }
     const view = VIEWS[this.view] ?? VIEWS.tree;
     const portrait = (window.innerWidth || 1280) <= 820;
     const sub = ['detail', 'editor', 'transfer', 'onboarding'].includes(this.view);

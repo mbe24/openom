@@ -69,6 +69,8 @@ export function gateView(app) {
       return recoveryScreen(app);
     case 'recover':
       return recoverScreen(app);
+    case 'change':
+      return changeScreen(app);
     case 'unlock':
       return unlockScreen(app);
     default:
@@ -115,6 +117,22 @@ function unlockScreen(app) {
     form(submit, p, errorLine(app),
       primary(app.gateBusy ? t('gate-unlocking') : t('gate-unlock'), { disabled: app.gateBusy })),
     ghost(t('gate-forgot'), () => app.startRecover()));
+}
+
+// Reached from Settings while the app is open (a session already exists). On success it shows the
+// fresh recovery code, then returns to the app — it does not re-enter or rebuild the store (the
+// DEK is unchanged; only the passphrase wrap and recovery code are replaced).
+function changeScreen(app) {
+  const cur = passField('gate-current', t('gate-current-pass'), 'current-password');
+  const p1 = passField('gate-pass', t('gate-new-pass'), 'new-password');
+  const p2 = passField('gate-pass2', t('gate-confirm-new-pass'), 'new-password');
+  const submit = () => app.doChangePassphrase(cur.pass.value, p1.pass.value, p2.pass.value);
+  return shell(
+    mark(),
+    title(t('gate-change-title')),
+    form(submit, cur, p1, p2, errorLine(app),
+      primary(app.gateBusy ? t('gate-changing') : t('gate-change'), { disabled: app.gateBusy })),
+    ghost(t('action-cancel'), () => app.cancelGate()));
 }
 
 function recoverScreen(app) {

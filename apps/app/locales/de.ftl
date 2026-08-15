@@ -198,3 +198,20 @@ gate-err-tampered = Dieser Stammbaum wirkt veraltet oder manipuliert — er wird
 gate-err-enter-code = Gib deinen Wiederherstellungscode ein.
 gate-err-min-new = Verwende mindestens 8 Zeichen für die neue Passphrase.
 gate-err-recover = Wiederherstellung fehlgeschlagen. Prüfe deinen Wiederherstellungscode und versuche es erneut.
+
+# --- Passphrase ändern (aus den Einstellungen) ---
+gate-change-title = Ändere deine Passphrase. Dein Wiederherstellungscode wird ebenfalls ersetzt.
+gate-current-pass = Aktuelle Passphrase
+gate-change = Passphrase ändern
+gate-changing = Wird geändert…
+gate-err-enter-current = Gib deine aktuelle Passphrase ein.
+gate-err-change = Passphrase konnte nicht geändert werden. Prüfe deine aktuelle Passphrase und versuche es erneut.
+gate-err-same = Wähle eine neue Passphrase, die sich von deiner aktuellen unterscheidet.
+# --- Sicherheitskarte (an das Vorhandene angeglichen) ---
+security-encrypted = Ende-zu-Ende-verschlüsselt
+security-on-device = Auf diesem Gerät
+security-encrypted-hint = Dein Stammbaum ist mit deiner Passphrase versiegelt. Der Server sieht weder deine Daten noch deinen Schlüssel.
+security-passphrase = Passphrase
+security-change = Ändern
+security-change-hint = Lege eine neue Passphrase fest. Dabei entsteht auch ein neuer Wiederherstellungscode.
+security-planned = Geplant

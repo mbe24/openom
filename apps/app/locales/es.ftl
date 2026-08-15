@@ -189,3 +189,20 @@ gate-err-tampered = Este árbol parece desactualizado o manipulado — no se abr
 gate-err-enter-code = Introduce tu código de recuperación.
 gate-err-min-new = Usa al menos 8 caracteres para la nueva frase de contraseña.
 gate-err-recover = No se pudo recuperar. Verifica tu código de recuperación e inténtalo de nuevo.
+
+# --- Cambiar la frase de contraseña (desde ajustes) ---
+gate-change-title = Cambia tu frase de contraseña. Tu código de recuperación también se reemplazará.
+gate-current-pass = Frase de contraseña actual
+gate-change = Cambiar la frase de contraseña
+gate-changing = Cambiando…
+gate-err-enter-current = Introduce tu frase de contraseña actual.
+gate-err-change = No se pudo cambiar tu frase de contraseña. Verifica tu frase de contraseña actual e inténtalo de nuevo.
+gate-err-same = Elige una nueva frase de contraseña distinta de la actual.
+# --- Tarjeta de seguridad (ajustada a lo que existe) ---
+security-encrypted = Cifrado de extremo a extremo
+security-on-device = En este dispositivo
+security-encrypted-hint = Tu árbol está sellado con tu frase de contraseña. El servidor nunca ve tus datos ni tu clave.
+security-passphrase = Frase de contraseña
+security-change = Cambiar
+security-change-hint = Establece una nueva frase de contraseña. También se emite un nuevo código de recuperación.
+security-planned = Previsto

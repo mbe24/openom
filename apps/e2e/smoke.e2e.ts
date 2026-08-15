@@ -43,6 +43,43 @@ test('start → passphrase → recovery code → onboarding → reload → unloc
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('settings → change passphrase → old rejected, new unlocks @integration', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/app/index.html');
+  await page.getByRole('button', { name: /start your family tree/i }).click();
+  await page.locator('#gate-pass').fill('first passphrase aaa');
+  await page.locator('#gate-pass2').fill('first passphrase aaa');
+  await page.getByRole('button', { name: /^create$/i }).click();
+  await expect(page.locator('#gate-recovery-code')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: /i saved it/i }).click();
+  await expect(page.locator('#first-name')).toBeVisible();
+
+  // Settings → Change passphrase.
+  await page.getByRole('button', { name: /^settings$/i }).click();
+  await page.getByRole('button', { name: /^change$/i }).click();
+  await page.locator('#gate-current').fill('first passphrase aaa');
+  await page.locator('#gate-pass').fill('second passphrase bbb');
+  await page.locator('#gate-pass2').fill('second passphrase bbb');
+  await page.getByRole('button', { name: /^change passphrase$/i }).click();
+  await expect(page.locator('#gate-recovery-code')).toBeVisible({ timeout: 20_000 }); // rotated code
+  await page.getByRole('button', { name: /i saved it/i }).click();
+  // Back in the app, not re-provisioned.
+  await expect(page.getByText(/end-to-end encrypted/i)).toBeVisible();
+
+  // Reload → the NEW passphrase unlocks; the OLD one does not.
+  await page.reload();
+  await page.locator('#gate-pass').fill('first passphrase aaa');
+  await page.getByRole('button', { name: /^unlock$/i }).click();
+  await expect(page.getByText(/wrong passphrase/i)).toBeVisible();
+  await page.locator('#gate-pass').fill('second passphrase bbb');
+  await page.getByRole('button', { name: /^unlock$/i }).click();
+  await expect(page.locator('#first-name')).toBeVisible({ timeout: 20_000 });
+
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('forgot passphrase → recover with the code → new passphrase works @integration', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

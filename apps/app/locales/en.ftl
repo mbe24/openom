@@ -198,3 +198,20 @@ gate-err-tampered = This tree looks out of date or tampered — refusing to open
 gate-err-enter-code = Enter your recovery code.
 gate-err-min-new = Use at least 8 characters for the new passphrase.
 gate-err-recover = Could not recover. Check your recovery code and try again.
+
+# --- Change passphrase (opened from Settings) ---
+gate-change-title = Change your passphrase. Your recovery code will be replaced too.
+gate-current-pass = Current passphrase
+gate-change = Change passphrase
+gate-changing = Changing…
+gate-err-enter-current = Enter your current passphrase.
+gate-err-change = Could not change your passphrase. Check your current passphrase and try again.
+gate-err-same = Choose a new passphrase that differs from your current one.
+# --- Security card (reconciled to what actually exists) ---
+security-encrypted = End-to-end encrypted
+security-on-device = On this device
+security-encrypted-hint = Your tree is sealed with your passphrase. The server never sees your data or your key.
+security-passphrase = Passphrase
+security-change = Change
+security-change-hint = Set a new passphrase. This also issues a fresh recovery code.
+security-planned = Planned

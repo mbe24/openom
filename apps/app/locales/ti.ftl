@@ -189,3 +189,19 @@ gate-err-tampered = እዚ ገረብ ግዜኡ ዝሓለፎ ወይ እተበላ�
 gate-err-enter-code = ናይ ምምላስ ኮድካ ኣእቱ።
 gate-err-min-new = ነቲ ሓድሽ ናይ መሕለፊ ሓረግ እንተ ወሓደ 8 ፊደላት ተጠቐም።
 gate-err-recover = ክምለስ ኣይተኻእለን። ናይ ምምላስ ኮድካ ኣረጋግጽ እሞ ደጊምካ ፈትን።
+
+# --- ናይ መሕለፊ ሓረግ ምቕያር + ናይ ድሕንነት ካርድ — ክግምገም የድሊ / NEEDS NATIVE REVIEW ---
+gate-change-title = ናይ መሕለፊ ሓረግካ ቀይር። ናይ ምምላስ ኮድካ እውን ክትካእ እዩ።
+gate-current-pass = ህሉው ናይ መሕለፊ ሓረግ
+gate-change = ናይ መሕለፊ ሓረግ ቀይር
+gate-changing = ይቕየር ኣሎ…
+gate-err-enter-current = ህሉው ናይ መሕለፊ ሓረግካ ኣእቱ።
+gate-err-change = ናይ መሕለፊ ሓረግ ክቕየር ኣይተኻእለን። ህሉው ናይ መሕለፊ ሓረግካ ኣረጋግጽ እሞ ደጊምካ ፈትን።
+gate-err-same = ካብቲ ህሉው ዝፍለ ሓድሽ ናይ መሕለፊ ሓረግ ምረጽ።
+security-encrypted = ካብ ወሰን ናብ ወሰን እተመስጠረ
+security-on-device = ኣብዚ መሳርሒ
+security-encrypted-hint = ገረብካ በቲ ናይ መሕለፊ ሓረግካ ተሸጊሩ ኣሎ። እቲ ሰርቨር ንዳታኻን ቁልፍኻን ኣይርእን።
+security-passphrase = ናይ መሕለፊ ሓረግ
+security-change = ቀይር
+security-change-hint = ሓድሽ ናይ መሕለፊ ሓረግ ኣዳሉ። ሓድሽ ናይ ምምላስ ኮድ እውን ይወሃብ።
+security-planned = እተመደበ

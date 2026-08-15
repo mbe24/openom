@@ -189,3 +189,19 @@ gate-err-tampered = تبدو هذه الشجرة قديمة أو تم العبث
 gate-err-enter-code = أدخل رمز الاسترداد.
 gate-err-min-new = استخدم 8 أحرف على الأقل لعبارة المرور الجديدة.
 gate-err-recover = تعذّر الاسترداد. تحقق من رمز الاسترداد وحاول مرة أخرى.
+
+# --- تغيير عبارة المرور + بطاقة الأمان — تحتاج مراجعة / NEEDS NATIVE REVIEW ---
+gate-change-title = غيّر عبارة المرور الخاصة بك. سيتم استبدال رمز الاسترداد أيضًا.
+gate-current-pass = عبارة المرور الحالية
+gate-change = تغيير عبارة المرور
+gate-changing = يتم التغيير…
+gate-err-enter-current = أدخل عبارة المرور الحالية.
+gate-err-change = تعذّر تغيير عبارة المرور. تحقق من عبارة المرور الحالية وحاول مرة أخرى.
+gate-err-same = اختر عبارة مرور جديدة تختلف عن الحالية.
+security-encrypted = مشفّر من طرف إلى طرف
+security-on-device = على هذا الجهاز
+security-encrypted-hint = شجرتك مختومة بعبارة المرور الخاصة بك. لا يرى الخادم بياناتك ولا مفتاحك.
+security-passphrase = عبارة المرور
+security-change = تغيير
+security-change-hint = عيّن عبارة مرور جديدة. يصدر أيضًا رمز استرداد جديد.
+security-planned = مخطط له

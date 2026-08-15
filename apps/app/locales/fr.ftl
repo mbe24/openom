@@ -189,3 +189,20 @@ gate-err-tampered = Cet arbre semble obsolète ou altéré — ouverture refusé
 gate-err-enter-code = Saisissez votre code de récupération.
 gate-err-min-new = Utilisez au moins 8 caractères pour la nouvelle phrase secrète.
 gate-err-recover = Échec de la récupération. Vérifiez votre code de récupération et réessayez.
+
+# --- Changer la phrase secrète (depuis les réglages) ---
+gate-change-title = Changez votre phrase secrète. Votre code de récupération sera également remplacé.
+gate-current-pass = Phrase secrète actuelle
+gate-change = Changer la phrase secrète
+gate-changing = Changement…
+gate-err-enter-current = Saisissez votre phrase secrète actuelle.
+gate-err-change = Impossible de changer votre phrase secrète. Vérifiez votre phrase secrète actuelle et réessayez.
+gate-err-same = Choisissez une nouvelle phrase secrète différente de l'actuelle.
+# --- Carte Sécurité (alignée sur ce qui existe) ---
+security-encrypted = Chiffré de bout en bout
+security-on-device = Sur cet appareil
+security-encrypted-hint = Votre arbre est scellé par votre phrase secrète. Le serveur ne voit ni vos données ni votre clé.
+security-passphrase = Phrase secrète
+security-change = Changer
+security-change-hint = Définissez une nouvelle phrase secrète. Un nouveau code de récupération est également émis.
+security-planned = Prévu

@@ -168,32 +168,21 @@ export function settingsView(app) {
 
     h('div', { class: 'card stack' },
       h('div', { class: 'section-label' }, t('settings-security')),
-      line(t('security-lock'), h('button', {
-        class: 'switch' + (app.lockEnabled ? ' on' : ''), type: 'button', role: 'switch',
-        'aria-checked': String(app.lockEnabled), 'aria-label': t('security-lock'),
-        onClick: () => app.setLockEnabled(!app.lockEnabled)
-      }, h('span', { class: 'knob' })), t('security-lock-hint')),
-      line(t('security-autolock'), picker({
-        items: [
-          { id: 'never', label: t('security-never') },
-          { id: 5, label: t('security-minutes', { count: 5 }) },
-          { id: 30, label: t('security-minutes', { count: 30 }) }
-        ],
-        value: app.lockAfter, ariaLabel: t('security-autolock'), minWidth: 128,
-        onPick: (v) => app.setLockAfter(v)
-      }), t('security-autolock-hint')),
-      line(t('security-biometrics'), h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } },
-        t('security-biometrics-note')), t('security-biometrics-hint')),
-      line(t('security-pin'), h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } },
-        t('security-unsupported')), t('security-pin-hint')),
-      app.lockEnabled
-        ? h('button', { class: 'button-secondary', style: { alignSelf: 'flex-start' },
-            onClick: () => app.lock() }, t('security-lock-now'))
-        : null,
-      line(t('security-master'), h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } },
-        t('security-unsupported')), t('security-master-hint')),
-      // Hilfebox wie auf Folie 19: sie erklaert, was Biometrie hier bedeutet.
-      h('div', { class: 'note' }, t('security-note'))
+      // Reality: the tree is sealed with the passphrase. Biometrics/PIN aren't built yet, so
+      // they're labelled "planned" rather than dressed up as working controls.
+      line(t('security-encrypted'),
+        h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } }, t('security-on-device')),
+        t('security-encrypted-hint')),
+      line(t('security-passphrase'),
+        h('button', { class: 'button-secondary', style: { flex: 'none' },
+          onClick: () => app.startChangePassphrase() }, t('security-change')),
+        t('security-change-hint')),
+      line(t('security-autolock'),
+        h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } }, t('security-planned')),
+        t('security-autolock-hint')),
+      line(t('security-biometrics'),
+        h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } }, t('security-planned')),
+        t('security-biometrics-hint'))
     ),
 
     h('div', { class: 'card stack' },
