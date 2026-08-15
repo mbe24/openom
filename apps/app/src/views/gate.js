@@ -1,4 +1,5 @@
 import { h, svg } from '../ui/dom.js';
+import { t } from '../core/i18n.js';
 
 // The pre-unlock gate: welcome / provision / recovery-code / recover / unlock.
 //
@@ -10,7 +11,8 @@ import { h, svg } from '../ui/dom.js';
 //  - Each screen is a real <form>: password managers only recognise input + submit inside one,
 //    and a native submit gives Enter-to-submit and the on-screen keyboard's "go" for free.
 //  - Colours come from the design tokens, so the gate follows the app's light/dark mode.
-//  - Copy is English here; the i18n pass swaps the literals for t() keys.
+//  - All copy is translated via t() (the gate-* keys); the security-sensitive strings are
+//    reviewed for de/fr/es and flagged for native review in ar/am/ti.
 
 const revealIcon = (shown) =>
   shown
@@ -32,12 +34,12 @@ function passField(id, label, autocomplete) {
     autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', class: 'lock-input',
   });
   const toggle = h('button', {
-    type: 'button', class: 'lock-reveal', 'aria-label': 'Show passphrase', 'aria-pressed': 'false',
+    type: 'button', class: 'lock-reveal', 'aria-label': t('gate-show-pass'), 'aria-pressed': 'false',
     onClick: () => {
       const shown = input.type === 'text';
       input.type = shown ? 'password' : 'text';
       toggle.setAttribute('aria-pressed', String(!shown));
-      toggle.setAttribute('aria-label', shown ? 'Show passphrase' : 'Hide passphrase');
+      toggle.setAttribute('aria-label', shown ? t('gate-show-pass') : t('gate-hide-pass'));
       toggle.replaceChildren(revealIcon(!shown));
       input.focus();
     },
@@ -77,57 +79,57 @@ export function gateView(app) {
 function welcomeScreen(app) {
   const kids = [
     mark(),
-    title('Your private, end-to-end-encrypted family tree'),
-    primary('Start your family tree', { type: 'button', onClick: () => app.startCreate() }),
+    title(t('gate-welcome-title')),
+    primary(t('gate-start'), { type: 'button', onClick: () => app.startCreate() }),
   ];
   // The demo is dev/marketing only (build-time flag); a production user never sees it.
-  if (app.demoEnabled) kids.push(ghost('Explore a demo', () => app.startDemo()));
+  if (app.demoEnabled) kids.push(ghost(t('gate-demo'), () => app.startDemo()));
   return shell(...kids);
 }
 
 function provisionScreen(app) {
-  const p1 = passField('gate-pass', 'Choose a passphrase', 'new-password');
-  const p2 = passField('gate-pass2', 'Confirm passphrase', 'new-password');
+  const p1 = passField('gate-pass', t('gate-choose-pass'), 'new-password');
+  const p2 = passField('gate-pass2', t('gate-confirm-pass'), 'new-password');
   const submit = () => app.doProvision(p1.pass.value, p2.pass.value);
   return shell(
     mark(),
-    title('Create a passphrase — it encrypts your tree. If you forget it, only your recovery code can restore access.'),
+    title(t('gate-provision-title')),
     form(submit, p1, p2, errorLine(app),
-      primary(app.gateBusy ? 'Securing…' : 'Create', { disabled: app.gateBusy })));
+      primary(app.gateBusy ? t('gate-securing') : t('gate-create'), { disabled: app.gateBusy })));
 }
 
 function recoveryScreen(app) {
   return shell(
     mark(),
-    title('Save your recovery code. It is the ONLY way back if you forget your passphrase — we cannot recover it for you.'),
+    title(t('gate-recovery-title')),
     h('div', { id: 'gate-recovery-code', class: 'lock-code' }, app.gateRecoveryCode || ''),
-    primary('I saved it — continue', { type: 'button', onClick: () => app.gateContinue() }));
+    primary(t('gate-saved-continue'), { type: 'button', onClick: () => app.gateContinue() }));
 }
 
 function unlockScreen(app) {
-  const p = passField('gate-pass', 'Enter your passphrase', 'current-password');
+  const p = passField('gate-pass', t('gate-enter-pass'), 'current-password');
   const submit = () => app.doUnlock(p.pass.value);
   return shell(
     mark(),
-    title('Unlock your tree'),
+    title(t('gate-unlock-title')),
     form(submit, p, errorLine(app),
-      primary(app.gateBusy ? 'Unlocking…' : 'Unlock', { disabled: app.gateBusy })),
-    ghost('Forgot your passphrase?', () => app.startRecover()));
+      primary(app.gateBusy ? t('gate-unlocking') : t('gate-unlock'), { disabled: app.gateBusy })),
+    ghost(t('gate-forgot'), () => app.startRecover()));
 }
 
 function recoverScreen(app) {
   const code = h('input', {
-    id: 'gate-code', type: 'text', placeholder: 'Recovery code', 'aria-label': 'Recovery code',
+    id: 'gate-code', type: 'text', placeholder: t('gate-recovery-code-label'), 'aria-label': t('gate-recovery-code-label'),
     autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', class: 'lock-input',
     // The recovery code is ASCII base32; keep it LTR + isolated even under a RTL locale.
     style: { direction: 'ltr', unicodeBidi: 'isolate', padding: '14px 16px', fontFamily: 'ui-monospace, monospace', letterSpacing: '.06em' },
   });
-  const p1 = passField('gate-pass', 'New passphrase', 'new-password');
-  const p2 = passField('gate-pass2', 'Confirm new passphrase', 'new-password');
+  const p1 = passField('gate-pass', t('gate-new-pass'), 'new-password');
+  const p2 = passField('gate-pass2', t('gate-confirm-new-pass'), 'new-password');
   const submit = () => app.doRecover(code.value, p1.pass.value, p2.pass.value);
   return shell(
     mark(),
-    title('Enter your recovery code and choose a new passphrase.'),
+    title(t('gate-recover-title')),
     form(submit, code, p1, p2, errorLine(app),
-      primary(app.gateBusy ? 'Recovering…' : 'Recover', { disabled: app.gateBusy })));
+      primary(app.gateBusy ? t('gate-recovering') : t('gate-recover'), { disabled: app.gateBusy })));
 }

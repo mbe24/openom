@@ -140,8 +140,8 @@ class App {
   }
 
   async doProvision(passphrase, confirm) {
-    if (!passphrase || passphrase.length < 8) { this.gateError = 'Use at least 8 characters.'; this.renderGate(); return; }
-    if (passphrase !== confirm) { this.gateError = 'Passphrases do not match.'; this.renderGate(); return; }
+    if (!passphrase || passphrase.length < 8) { this.gateError = t('gate-err-min'); this.renderGate(); return; }
+    if (passphrase !== confirm) { this.gateError = t('gate-err-mismatch'); this.renderGate(); return; }
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
@@ -152,7 +152,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = 'Could not create your tree. ' + (e?.message ?? '');
+      this.gateError = t('gate-err-create') + ' ' + (e?.message ?? '');
       this.renderGate();
     }
   }
@@ -166,7 +166,7 @@ class App {
   }
 
   async doUnlock(passphrase) {
-    if (!passphrase) { this.gateError = 'Enter your passphrase.'; this.renderGate(); return; }
+    if (!passphrase) { this.gateError = t('gate-err-enter-pass'); this.renderGate(); return; }
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
@@ -176,9 +176,7 @@ class App {
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
-      this.gateError = /rollback/i.test(e?.message ?? '')
-        ? 'This tree looks out of date or tampered — refusing to open it.'
-        : 'Wrong passphrase.';
+      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-wrong');
       this.renderGate();
     }
   }
@@ -188,9 +186,9 @@ class App {
   }
 
   async doRecover(recoveryCode, newPassphrase, confirm) {
-    if (!recoveryCode?.trim()) { this.gateError = 'Enter your recovery code.'; this.renderGate(); return; }
-    if (!newPassphrase || newPassphrase.length < 8) { this.gateError = 'Use at least 8 characters for the new passphrase.'; this.renderGate(); return; }
-    if (newPassphrase !== confirm) { this.gateError = 'Passphrases do not match.'; this.renderGate(); return; }
+    if (!recoveryCode?.trim()) { this.gateError = t('gate-err-enter-code'); this.renderGate(); return; }
+    if (!newPassphrase || newPassphrase.length < 8) { this.gateError = t('gate-err-min-new'); this.renderGate(); return; }
+    if (newPassphrase !== confirm) { this.gateError = t('gate-err-mismatch'); this.renderGate(); return; }
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
@@ -201,9 +199,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = /rollback/i.test(e?.message ?? '')
-        ? 'This tree looks out of date or tampered — refusing to open it.'
-        : 'Could not recover. Check your recovery code and try again.';
+      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-recover');
       this.renderGate();
     }
   }

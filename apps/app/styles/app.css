@@ -386,7 +386,8 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .lock-inner { width: min(360px, 100%); display: flex; flex-direction: column; align-items: center; gap: 14px; }
 /* Ein echtes <form>: Passwort-Manager erkennen Eingabe + Absenden nur so. */
 .lock-form { width: 100%; display: flex; flex-direction: column; gap: 12px; }
-.lock-mark { font-family: var(--font-name); font-size: 40px; letter-spacing: -.02em; display: flex; }
+/* Der Wortmarke ist ein lateinischer Name: unter RTL bleibt sie LTR ("openom", nicht "omopen"). */
+.lock-mark { font-family: var(--font-name); font-size: 40px; letter-spacing: -.02em; display: flex; direction: ltr; }
 .lock-mark .om { color: var(--accent-on); }
 .lock-title { color: var(--secondary); font-size: var(--t-small); margin-bottom: 6px; text-align: center; text-wrap: balance; }
 /* Feld + eingelassener Zeige/Verbergen-Schalter. Symmetrische Innenabstaende,
