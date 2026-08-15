@@ -88,11 +88,15 @@ export class TauriStore {
 
   async readUpdates(doc, since) {
     const res = await this.#read(doc, since);
-    return { updates: res.updates, cursor: res.cursor };
+    // Rust returns each update as a JSON number array; hand back Uint8Arrays like the other stores.
+    return { updates: res.updates.map((u) => new Uint8Array(u)), cursor: res.cursor };
   }
 
   async append(doc, updates) {
-    return this.#invoke('store_append', { args: { doc, updates } });
+    // Each update is a raw envelope Uint8Array; serde decodes Vec<Vec<u8>> from number arrays,
+    // never from a Uint8Array (which JSON-stringifies to an index-keyed object).
+    const encoded = updates.map((u) => Array.from(u));
+    return this.#invoke('store_append', { args: { doc, updates: encoded } });
   }
 
   async putSnapshot(doc, bytes, expected = null) {
