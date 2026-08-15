@@ -14,7 +14,7 @@ import { replicaId } from '../identity.js';
 import { Watermarks } from '../watermarks.js';
 import { createVault } from './vault.js';
 import { indexedDbKeyringStore } from './keyringStore.js';
-import { cryptoWorker } from './workerSealer.js';
+import { cryptoWorker, workerCore } from './workerSealer.js';
 
 const registry = new Map(); // treeKey -> SealerSession
 
@@ -99,17 +99,25 @@ async function treeIdBytes(docId) {
  * dispatching each call to the per-tree SealerSession for that doc id. One SealedStore over
  * the shared library store can then serve every tree, while each tree keeps its own scoped
  * session (its own tree id, replica, and chain).
+ * Routes through the SAME crypto worker as the real vault, so the demo exercises the identical
+ * encryption path as production — it differs only in the KEY (the reserved dev key vs. a
+ * passphrase-derived one). The demo is therefore real ciphertext at rest, just under a
+ * well-known (non-private) key.
  * @param {object} [opts]
- * @param {boolean} [opts.dev]  build dev-key sessions (serverless UI, no unlock) — see createSealer
+ * @param {boolean} [opts.dev]  build dev-key sessions (the demo path; the only mode here)
  */
 export function createLibrarySealer({ dev = false } = {}) {
+  if (!dev) throw new Error('createLibrarySealer only supports the dev demo path');
+  const worker = cryptoWorker();
   const byDoc = new Map(); // docId -> Promise<SealerSession>
   const sessionFor = (docId) => {
     let p = byDoc.get(docId);
     if (!p) {
       p = (async () => {
+        await worker.warm();
         const treeId = await treeIdBytes(docId);
-        return createSealer({ treeKey: docId, treeId, replicaId: replicaId(docId), dev });
+        const { sealerId } = await worker.dev(treeId, replicaId(docId));
+        return new SealerSession(workerCore(worker, sealerId));
       })();
       byDoc.set(docId, p);
     }
