@@ -3097,10 +3097,23 @@ name = "openom-tauri"
 version = "0.1.0"
 dependencies = [
  "openom-store",
+ "openom-vault-host",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "openom-vault-host"
+version = "0.1.0"
+dependencies = [
+ "openom-crypto",
+ "openom-protocol",
+ "openom-sealer",
+ "rusqlite",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]
