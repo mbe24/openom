@@ -158,6 +158,11 @@ pub enum SealerError {
     /// ownership instead (a future flow).
     #[error("the owner cannot be removed")]
     CannotRemoveOwner,
+    /// Change-passphrase / recover rebuild the owner's wraps and would drop other members
+    /// and co-signers; they are refused on a shared keyring until the member-preserving
+    /// (and signing-continuity) versions land. Single-owner trees are unaffected.
+    #[error("this flow isn't supported on a shared tree yet")]
+    SharedTreeUnsupported,
     /// The keyring is for a different tree than the caller expected (the caller supplies the
     /// trusted `tree_id`; it is never read from the untrusted keyring for the AEAD context).
     #[error("keyring is for a different tree")]

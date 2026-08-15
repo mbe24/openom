@@ -54,6 +54,9 @@ pub enum VaultErrorCode {
     MemberNotFound,
     /// Sharing: the owner/founder can't be removed (transfer ownership instead).
     CannotRemoveOwner,
+    /// The requested flow isn't supported on a shared tree yet (e.g. change-passphrase /
+    /// recover before the member-preserving versions land).
+    Unsupported,
     /// No keyring is stored for this tree yet (provision first).
     NoKeyring,
     /// An envelope wouldn't decode / had no header.
@@ -114,6 +117,7 @@ impl From<SealerError> for VaultError {
             E::MemberExists => C::MemberExists,
             E::MemberNotFound => C::MemberNotFound,
             E::CannotRemoveOwner => C::CannotRemoveOwner,
+            E::SharedTreeUnsupported => C::Unsupported,
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
             E::RevisionOverflow => C::RevisionOverflow,

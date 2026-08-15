@@ -143,6 +143,9 @@ pub fn recover(
     if keyring.revision < min_revision {
         return Err(SealerError::RevisionRollback { have: min_revision, got: keyring.revision });
     }
+    if is_shared(&keyring) {
+        return Err(SealerError::SharedTreeUnsupported);
+    }
     let (epoch_key_id, epoch, wrap) = find_wrap(&keyring, member_id, RECOVERY)?;
     let kdf = wrap
         .kdf_params
@@ -198,6 +201,9 @@ pub fn change_passphrase(
     min_revision: u32,
 ) -> Result<Rekeyed, SealerError> {
     let opened = open_with_passphrase(keyring_bytes, old_passphrase, tree_id, member_id)?;
+    if is_shared(&opened.keyring) {
+        return Err(SealerError::SharedTreeUnsupported);
+    }
     let new_revision = min_revision
         .max(opened.revision)
         .checked_add(1)
@@ -627,6 +633,12 @@ fn decode_keyring(bytes: &[u8]) -> Result<Keyring, SealerError> {
     Keyring::decode(bytes).map_err(|e| SealerError::BadKeyring(e.to_string()))
 }
 
+/// A keyring is "shared" once it names more than one member or more than one signer — the
+/// point past which the single-owner rebuild in [`build_keyring`] would drop other members.
+fn is_shared(keyring: &Keyring) -> bool {
+    keyring.members.len() > 1 || keyring.authorized_signers.len() > 1
+}
+
 /// Find the wrap for `(member_id, method)` in the latest epoch. Returns `(key_id, epoch, wrap)`.
 fn find_wrap<'a>(
     keyring: &'a Keyring,
@@ -937,10 +949,23 @@ mod tests {
 
         // The owner still unlocks with their passphrase (identity/KEK preserved across re-key).
         assert!(unlock(&removed.keyring, b"owner pass", TREE, MEMBER, b"r").is_ok());
+    }
 
-        // The re-key rotated the recovery code: the new one opens, the original no longer does.
-        assert!(recover(&removed.keyring, &removed.recovery_code, b"x", TREE, MEMBER, b"r", 0).is_ok());
-        assert!(recover(&removed.keyring, &owner.recovery_code, b"x", TREE, MEMBER, b"r", 0).is_err());
+    #[test]
+    fn change_passphrase_and_recover_refuse_a_shared_keyring() {
+        // Adding a member makes the keyring shared; the single-owner rebuild flows must
+        // refuse rather than silently drop the member.
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let m = provision_member(b"member pass").unwrap();
+        let shared = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).unwrap();
+        assert!(matches!(
+            change_passphrase(&shared.keyring, b"owner pass", b"new", TREE, MEMBER, 0),
+            Err(SealerError::SharedTreeUnsupported)
+        ));
+        assert!(matches!(
+            recover(&shared.keyring, &owner.recovery_code, b"new", TREE, MEMBER, b"r", 0),
+            Err(SealerError::SharedTreeUnsupported)
+        ));
     }
 
     #[test]
