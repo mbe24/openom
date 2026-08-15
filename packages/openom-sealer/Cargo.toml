@@ -1,0 +1,36 @@
+[package]
+name = "openom-sealer"
+description = "openom — the client sealer: a stateful session that holds the unlocked DEK and seals/opens envelopes. Pure-Rust core + wasm-bindgen veneer (web) + used directly by Tauri (native)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+# rlib for native (Tauri) + cargo test; cdylib for the wasm-bindgen build.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+openom-protocol.workspace = true
+openom-crypto.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[features]
+# The web binding. Off by default so native builds (Tauri, cargo test) never pull the
+# wasm-bindgen glue. Build with: --no-default-features --features wasm --target wasm32-...
+default = []
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+optional = true
+
+[dependencies.serde-wasm-bindgen]
+version = "0.6"
+optional = true

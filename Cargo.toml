@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
+    "packages/openom-sealer",
     "packages/openom-store",
     "openom",
     "apps/src-tauri",
