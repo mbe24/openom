@@ -30,6 +30,11 @@ services:
       S3_SECRET_KEY: openompw123
       CARGO_TARGET_DIR: /tmp/target
       RUST_LOG: info,openom=debug
+      # Observability (opt-in). The exporter only runs when OPENOM_OTEL=1 *and* the
+      # `lgtm` service is up (COMPOSE_PROFILES=observability); otherwise the server
+      # just logs to stdout. Endpoint targets the bundled collector's OTLP/HTTP port.
+      OPENOM_OTEL: "${OPENOM_OTEL:-0}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4318
     ports:
       # Host port from .env (OPENOM_HTTP_PORT); default 6060.
       - "${OPENOM_HTTP_PORT:-6060}:${OPENOM_HTTP_PORT:-6060}"
@@ -72,6 +77,19 @@ services:
       - "9001:9001"   # web console
     volumes:
       - openom-minio:/data
+
+  # Local observability, opt-in to spare the machine. grafana/otel-lgtm is an
+  # all-in-one image: one OTLP endpoint (4317 gRPC / 4318 HTTP) feeding Grafana +
+  # Loki (logs) + Tempo (traces) + Prometheus/Mimir (metrics). It does NOT start by
+  # default — enable it by setting COMPOSE_PROFILES=observability in .env (and
+  # OPENOM_OTEL=1 so the server actually exports). Data is ephemeral by design.
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles: ["observability"]
+    ports:
+      - "${OPENOM_GRAFANA_PORT:-3000}:3000"   # Grafana UI
+      - "4317:4317"                           # OTLP gRPC
+      - "4318:4318"                           # OTLP HTTP
 
 volumes:
   openom-server-cargo:

@@ -38,6 +38,16 @@ pub struct Config {
     pub jwt_secret: Option<String>,
     /// The account fake-auth maps anonymous local requests to.
     pub local_member_id: Uuid,
+
+    /// Export spans over OTLP (opt-in). Off by default so a plain local run stays
+    /// cheap and needs no collector; `OPENOM_OTEL=1` turns it on.
+    pub otel_enabled: bool,
+    /// OTLP/HTTP base endpoint (grafana/otel-lgtm in dev, Better Stack in prod).
+    /// The traces path (`/v1/traces`) is appended if absent.
+    pub otlp_endpoint: String,
+    /// Extra OTLP headers as `k1=v1,k2=v2` (e.g. a Better Stack source token). The
+    /// value is a secret — never logged.
+    pub otlp_headers: Option<String>,
 }
 
 impl Config {
@@ -61,6 +71,10 @@ impl Config {
                 .ok()
                 .and_then(|s| Uuid::parse_str(&s).ok())
                 .unwrap_or_else(|| Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()),
+            otel_enabled: matches!(env::var("OPENOM_OTEL").as_deref(), Ok("1") | Ok("true")),
+            otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:4318".into()),
+            otlp_headers: env::var("OTEL_EXPORTER_OTLP_HEADERS").ok(),
         }
     }
 

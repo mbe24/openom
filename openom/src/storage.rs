@@ -252,9 +252,20 @@ pub enum StorageError {
     #[error("bucket config: {0}")]
     Bucket(#[from] rusty_s3::BucketError),
     #[error("http transport: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
     #[error("backend: {0}")]
     Backend(String),
+}
+
+impl From<reqwest::Error> for StorageError {
+    fn from(e: reqwest::Error) -> Self {
+        // A reqwest error's Display embeds the request URL — and for a presigned
+        // media URL that URL carries the SigV4 signature + credential in its query
+        // string. `warn!(%err)` would then write an access grant into the logs (and
+        // on to a third-party aggregator). `without_url()` strips it at the source,
+        // so no caller can leak it by accident. See SERVER-DATA-FORMAT §7 discipline.
+        StorageError::Http(e.without_url().to_string())
+    }
 }
 
 #[cfg(test)]

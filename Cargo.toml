@@ -39,6 +39,16 @@ lambda_http = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Observability export: the `tracing` macros stay the only instrumentation API;
+# these turn spans into OTLP (HTTP/protobuf over reqwest+rustls — no gRPC/tonic, no
+# OpenSSL) for grafana/otel-lgtm locally and Better Stack in prod. Only active when
+# OPENOM_OTEL is set; otherwise the server just logs to stdout.
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-client", "reqwest-rustls"] }
+tracing-opentelemetry = "0.33"
+# HTTP request tracing (per-request root span with safe fields only).
+tower-http = { version = "0.6", features = ["trace"] }
 # Metadata DB: Neon (serverless Postgres) in prod, a local container in dev.
 # ring, not aws-lc-rs, to avoid a cmake/C build in the container.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "migrate", "macros"] }

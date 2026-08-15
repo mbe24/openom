@@ -199,10 +199,31 @@ async fn cas_create(
         .map_err(internal)?;
     match existing {
         // Exists and is ours → the client should have sent If-Match.
-        Some(o) if o == owner => Err(ApiError::Conflict),
+        Some(o) if o == owner => {
+            tracing::info!(event = "snapshot_cas_conflict", reason = "exists_no_if_match");
+            Err(ApiError::Conflict)
+        }
         Some(_) => Err(ApiError::Forbidden),
-        // Doesn't exist → over quota or unknown account.
-        None => Err(ApiError::Forbidden),
+        // Doesn't exist → the entitlement gate blocked it. Separate over-quota (a
+        // countable product signal, §9.9) from an unknown account.
+        None => {
+            let limits: Option<(i64, i32)> = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM trees WHERE owner_id = $1), a.max_trees
+                   FROM accounts a WHERE a.id = $1",
+            )
+            .bind(owner)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?;
+            match limits {
+                Some((count, max)) if count >= max as i64 => {
+                    tracing::info!(event = "quota_rejected", resource = "trees", %owner);
+                    Err(ApiError::QuotaExceeded)
+                }
+                None => Err(ApiError::Forbidden), // unknown account
+                Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
+            }
+        }
     }
 }
 
@@ -254,7 +275,12 @@ async fn cas_update(
     match row {
         None => Err(ApiError::NotFound),
         Some((o,)) if o != owner => Err(ApiError::Forbidden),
-        Some(_) => Err(ApiError::Conflict), // version or covers_through_seq stale
+        Some(_) => {
+            // The common concurrency case: someone else advanced the snapshot, or a
+            // covers_through_seq regression. A rising rate here is contention (§9.7).
+            tracing::info!(event = "snapshot_cas_conflict", reason = "stale_version");
+            Err(ApiError::Conflict)
+        }
     }
 }
 
@@ -283,6 +309,7 @@ pub enum ApiError {
     Forbidden,
     NotFound,
     Conflict,
+    QuotaExceeded,
     BadRequest(String),
     Internal(String),
 }
@@ -296,6 +323,12 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 "version conflict — pull the current snapshot and retry".to_string(),
             ),
+            // 403 (not 402): entitlement is an authorization decision, not a payment
+            // handshake. A distinct variant so it's a countable signal, not a generic
+            // Forbidden (§9.9).
+            ApiError::QuotaExceeded => {
+                (StatusCode::FORBIDDEN, "account resource limit reached".to_string())
+            }
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => {
                 tracing::error!(error = %m, "tree handler internal error");
