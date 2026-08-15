@@ -206,6 +206,30 @@ pub fn bootstrap_from_oob(
     Ok(KeyringAnchor::from_keyring(head))
 }
 
+/// Validate a keyring that establishes a **new anchor on its own terms** — a genesis (revision
+/// 1), or a recovery / succession reset whose new founder identity deliberately carries no
+/// endorsement from the old one (the §6 owner-succession boundary, where the old signing key is
+/// presumed lost). Unlike [`verify_transition`] it does not chain onto a prior anchor: it checks
+/// the keyring is structurally sound, wrap-complete, and self-signed by one of its own current
+/// authorized signers. The trust that this reset is *legitimate* comes from the CALLER — the
+/// founder's own passphrase produced it, or a member re-verified it out-of-band — never from a
+/// prior chain link. This is the writer's self-check for the provision and recover flows, whose
+/// output is a valid keyring but (for recover) intentionally not a valid transition.
+pub fn verify_reset(keyring: &Keyring) -> Result<KeyringAnchor, ChainError> {
+    if keyring.layout_version > KEYRING_LAYOUT_VERSION {
+        return Err(ChainError::LayoutAhead);
+    }
+    check_structure(keyring)?;
+    // Self-consistency: signed by one of its own signers (non-circular here because the caller,
+    // not a signature, supplies the trust that this reset is authorized).
+    verify_keyring_any(keyring, &signer_keys(&keyring.authorized_signers))
+        .map_err(|_| ChainError::BadBootstrap)?;
+    if !wrap_complete(keyring) {
+        return Err(ChainError::WrapIncomplete);
+    }
+    Ok(KeyringAnchor::from_keyring(keyring))
+}
+
 // ---- structural + policy helpers ----
 
 fn check_structure(k: &Keyring) -> Result<(), ChainError> {
@@ -537,6 +561,36 @@ mod tests {
             k.authorized_signers.push(signer(&carol, "carol", FOUNDER));
         }, &[&f]);
         assert!(matches!(verify_transition(&a, &two), Err(ChainError::BadStructure(_))));
+    }
+
+    #[test]
+    fn verify_reset_accepts_a_genesis_and_a_reset_but_not_an_unsigned_one() {
+        let f = key();
+        let g = genesis(&f, &[], &[]);
+        // A genesis validates on its own terms.
+        assert_eq!(verify_reset(&g).unwrap().revision, 1);
+
+        // A recovery-style reset: a later revision, a fresh (unendorsed) founder identity, self-
+        // signed only by that new key — verify_transition would reject it, verify_reset accepts.
+        let f2 = key();
+        let mut reset = g.clone();
+        reset.revision = 5;
+        reset.prev_keyring_hash = vec![9; 32];
+        reset.authorized_signers[0].public_key = pubv(&f2);
+        reset.members[0].author_public_key = pubv(&f2);
+        reset.signatures.clear();
+        sign_keyring(&mut reset, &f2);
+        assert_eq!(verify_reset(&reset).unwrap().revision, 5);
+        assert_eq!(
+            verify_transition(&anchor(&g), &reset).unwrap_err(),
+            ChainError::NonSequential // (and even at the right revision it's an UnendorsedSetChange)
+        );
+
+        // A keyring signed by nobody in its own signer set is not a valid reset.
+        let mut unsigned = g.clone();
+        unsigned.signatures.clear();
+        sign_keyring(&mut unsigned, &key());
+        assert_eq!(verify_reset(&unsigned), Err(ChainError::BadBootstrap));
     }
 
     // --- Differential oracle -------------------------------------------------------------

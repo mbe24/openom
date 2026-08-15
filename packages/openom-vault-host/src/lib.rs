@@ -18,10 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use openom_crypto::VerifyingKey;
+use openom_crypto::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 use openom_sealer::vault;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
-use openom_protocol::v1::{Compression, Format, KdfParams, MemberRole};
+use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::Message;
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -142,11 +142,16 @@ type Result<T> = std::result::Result<T, VaultError>;
 /// keyring-revision floor.
 pub trait VaultStore: Send + Sync {
     fn load_keyring(&self, tree_key: &str) -> std::result::Result<Option<Vec<u8>>, String>;
-    fn save_keyring(&self, tree_key: &str, bytes: &[u8]) -> std::result::Result<(), String>;
     /// The highest keyring revision verified for this tree (0 if none).
     fn keyring_watermark(&self, tree_key: &str) -> std::result::Result<u32, String>;
-    /// Record a freshly-verified revision. Monotonic: never lowers the stored floor.
+    /// Record a freshly-verified revision without changing the keyring (the unlock path, which
+    /// only re-asserts the floor). Monotonic: never lowers the stored floor.
     fn observe_keyring_revision(&self, tree_key: &str, revision: u32) -> std::result::Result<(), String>;
+    /// **Atomically** persist a newly-accepted keyring and raise the revision floor to
+    /// `revision`, in ONE durable transaction — so a crash can never leave the stored keyring
+    /// and its floor disagreeing. `revision` is the new keyring's revision; the floor is raised
+    /// monotonically (a lower value never lowers it).
+    fn commit_keyring(&self, tree_key: &str, bytes: &[u8], revision: u32) -> std::result::Result<(), String>;
 }
 
 // ---------------------------------------------------------------- outputs (wire shapes)
@@ -271,10 +276,9 @@ impl<S: VaultStore> VaultHost<S> {
         let passphrase = Zeroizing::new(passphrase);
         let replica = fresh_replica()?;
         let p = vault::provision(passphrase.as_bytes(), tree_id, member_id, &replica)?;
-        self.store.save_keyring(tree_key, &p.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, 1).map_err(VaultError::storage)?;
+        let revision = self.commit_reset(tree_key, &p.keyring)?;
         let id = self.register(p.sealer)?;
-        Ok(Provisioned { sealer_id: id, revision: 1, recovery_code: p.recovery_code })
+        Ok(Provisioned { sealer_id: id, revision, recovery_code: p.recovery_code })
     }
 
     /// Open the stored keyring with a passphrase. Mirrors the worker's refuse-before-expose:
@@ -323,10 +327,11 @@ impl<S: VaultStore> VaultHost<S> {
             &replica,
             floor,
         )?;
-        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        // Recovery installs a fresh founder identity with no endorsement from the old chain —
+        // a deliberate anchor reset (the §6 owner-succession boundary), not a transition.
+        let revision = self.commit_reset(tree_key, &r.keyring)?;
         let id = self.register(r.sealer)?;
-        Ok(Recovered { sealer_id: id, revision: r.revision, recovery_code: r.recovery_code })
+        Ok(Recovered { sealer_id: id, revision, recovery_code: r.recovery_code })
     }
 
     /// Change the passphrase: re-wrap the same DEK under a new passphrase, rotate the recovery
@@ -351,9 +356,8 @@ impl<S: VaultStore> VaultHost<S> {
             member_id,
             floor,
         )?;
-        self.store.save_keyring(tree_key, &re.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, re.revision).map_err(VaultError::storage)?;
-        Ok(Rekeyed { revision: re.revision, recovery_code: re.recovery_code })
+        let revision = self.commit_transition(tree_key, &keyring, &re.keyring)?;
+        Ok(Rekeyed { revision, recovery_code: re.recovery_code })
     }
 
     /// Provision a member identity from a passphrase (stateless — no tree touched): returns
@@ -399,9 +403,8 @@ impl<S: VaultStore> VaultHost<S> {
             member_hpke_public,
             member_author_public,
         )?;
-        self.store.save_keyring(tree_key, &added.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, added.revision).map_err(VaultError::storage)?;
-        Ok(MemberAdded { revision: added.revision })
+        let revision = self.commit_transition(tree_key, &keyring, &added.keyring)?;
+        Ok(MemberAdded { revision })
     }
 
     /// Unlock a shared tree AS A MEMBER: verify against the caller's pinned signer keys
@@ -464,10 +467,9 @@ impl<S: VaultStore> VaultHost<S> {
             remove_member_id,
             &replica,
         )?;
-        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
         let id = self.register(r.sealer)?;
-        Ok(MemberRemoved { sealer_id: id, revision: r.revision })
+        Ok(MemberRemoved { sealer_id: id, revision })
     }
 
     /// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
@@ -505,9 +507,8 @@ impl<S: VaultStore> VaultHost<S> {
             member_hpke_public,
             member_author_public,
         )?;
-        self.store.save_keyring(tree_key, &added.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, added.revision).map_err(VaultError::storage)?;
-        Ok(MemberAdded { revision: added.revision })
+        let revision = self.commit_transition(tree_key, &keyring, &added.keyring)?;
+        Ok(MemberAdded { revision })
     }
 
     /// Remove an ordinary member **as a co-owner** (any-of): re-keys under the new epoch,
@@ -541,10 +542,9 @@ impl<S: VaultStore> VaultHost<S> {
             remove_member_id,
             &replica,
         )?;
-        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
         let id = self.register(r.sealer)?;
-        Ok(MemberRemoved { sealer_id: id, revision: r.revision })
+        Ok(MemberRemoved { sealer_id: id, revision })
     }
 
     /// Promote an existing member to co-owner (founder action). Persists + watermarks the
@@ -561,9 +561,8 @@ impl<S: VaultStore> VaultHost<S> {
         let keyring = self.require_keyring(tree_key)?;
         let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
         let r = vault::add_co_owner(&keyring, founder_passphrase.as_bytes(), tree_id, founder_member_id, floor, target_member_id)?;
-        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
-        Ok(CoOwnerChanged { revision: r.revision })
+        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
+        Ok(CoOwnerChanged { revision })
     }
 
     /// Demote a co-owner to an ordinary role (founder action). Revokes signing authority,
@@ -589,9 +588,8 @@ impl<S: VaultStore> VaultHost<S> {
             target_member_id,
             parse_member_role(new_role)?,
         )?;
-        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
-        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
-        Ok(CoOwnerChanged { revision: r.revision })
+        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
+        Ok(CoOwnerChanged { revision })
     }
 
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
@@ -655,6 +653,35 @@ impl<S: VaultStore> VaultHost<S> {
             .ok_or_else(|| VaultError::new(VaultErrorCode::NoKeyring, format!("no keyring for tree {tree_key}")))
     }
 
+    /// Writer self-check + atomic persist for a flow that advanced the chain: the keyring the
+    /// flow produced MUST validate as a legitimate successor of `prior_bytes` under the same
+    /// chain-walk a remote client would apply (`verify_transition`). A failure is OUR bug, not
+    /// the user's — we refuse to persist a keyring our own verifier would later reject, and
+    /// surface it as Internal. On success the keyring + floor advance in one store transaction.
+    fn commit_transition(&self, tree_key: &str, prior_bytes: &[u8], produced_bytes: &[u8]) -> Result<u32> {
+        let prior = decode_keyring(prior_bytes)?;
+        let produced = decode_keyring(produced_bytes)?;
+        let new_anchor = verify_transition(&KeyringAnchor::from_keyring(&prior), &produced)
+            .map_err(self_check_failed)?;
+        self.store
+            .commit_keyring(tree_key, produced_bytes, new_anchor.revision)
+            .map_err(VaultError::storage)?;
+        Ok(new_anchor.revision)
+    }
+
+    /// Writer self-check + atomic persist for a flow that establishes a **new anchor** — a
+    /// genesis (provision) or a recovery reset, whose new founder identity deliberately carries
+    /// no endorsement from the old chain (`verify_reset`, not `verify_transition`). Same
+    /// refuse-our-own-bug discipline as [`commit_transition`].
+    fn commit_reset(&self, tree_key: &str, produced_bytes: &[u8]) -> Result<u32> {
+        let produced = decode_keyring(produced_bytes)?;
+        let new_anchor = verify_reset(&produced).map_err(self_check_failed)?;
+        self.store
+            .commit_keyring(tree_key, produced_bytes, new_anchor.revision)
+            .map_err(VaultError::storage)?;
+        Ok(new_anchor.revision)
+    }
+
     fn sealer(&self, id: &str) -> Result<Arc<SealerSet>> {
         self.registry
             .get(id)
@@ -671,6 +698,20 @@ impl<S: VaultStore> VaultHost<S> {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// Decode a keyring we ourselves produced or previously stored. A failure is an internal
+/// invariant break (our bytes should always decode), never a user-facing error.
+fn decode_keyring(bytes: &[u8]) -> Result<Keyring> {
+    Keyring::decode(bytes)
+        .map_err(|e| VaultError::new(VaultErrorCode::Internal, format!("keyring failed to decode: {e}")))
+}
+
+/// A flow produced a keyring its own chain-walk rejects — a construction bug in this crate,
+/// caught before persistence. Deliberately Internal (with the ChainError for the log), never a
+/// matchable user-facing code: the fix is our code, not the caller's input.
+fn self_check_failed(e: ChainError) -> VaultError {
+    VaultError::new(VaultErrorCode::Internal, format!("produced keyring failed the chain-walk self-check: {e}"))
+}
 
 fn fresh_replica() -> Result<Vec<u8>> {
     // A fresh replica id per unlock (CSPRNG). Persisting it would let lock→re-unlock reuse
@@ -756,14 +797,17 @@ mod tests {
         fn load_keyring(&self, tree_key: &str) -> std::result::Result<Option<Vec<u8>>, String> {
             Ok(self.keyrings.lock().unwrap().get(tree_key).cloned())
         }
-        fn save_keyring(&self, tree_key: &str, bytes: &[u8]) -> std::result::Result<(), String> {
-            self.keyrings.lock().unwrap().insert(tree_key.to_string(), bytes.to_vec());
-            Ok(())
-        }
         fn keyring_watermark(&self, tree_key: &str) -> std::result::Result<u32, String> {
             Ok(self.floors.lock().unwrap().get(tree_key).copied().unwrap_or(0))
         }
         fn observe_keyring_revision(&self, tree_key: &str, revision: u32) -> std::result::Result<(), String> {
+            let mut f = self.floors.lock().unwrap();
+            let e = f.entry(tree_key.to_string()).or_insert(0);
+            *e = (*e).max(revision);
+            Ok(())
+        }
+        fn commit_keyring(&self, tree_key: &str, bytes: &[u8], revision: u32) -> std::result::Result<(), String> {
+            self.keyrings.lock().unwrap().insert(tree_key.to_string(), bytes.to_vec());
             let mut f = self.floors.lock().unwrap();
             let e = f.entry(tree_key.to_string()).or_insert(0);
             *e = (*e).max(revision);
@@ -972,6 +1016,53 @@ mod tests {
             .unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, vec![old_founder])
             .unwrap();
         assert_eq!(h.open_entry(&u.sealer_id, "snapshot", &sealed).unwrap(), b"shared");
+    }
+
+    #[test]
+    fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
+        use openom_crypto::{generate_identity, keyring_hash, sign_keyring};
+        use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
+
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let prior_bytes = h.store.load_keyring(KEY).unwrap().unwrap();
+        let prior = Keyring::decode(prior_bytes.as_slice()).unwrap();
+
+        // A structurally-valid successor that injects a rogue co-owner into the signer set and
+        // is signed only by that rogue — the exact substitution the chain-walk exists to catch.
+        let rogue = generate_identity().unwrap();
+        let rogue_pub = rogue.verifying_key().to_bytes().to_vec();
+        let mut bad = prior.clone();
+        bad.revision += 1;
+        bad.prev_keyring_hash = keyring_hash(&prior).to_vec();
+        bad.members.push(Member {
+            member_id: "rogue".into(),
+            role: MemberRole::CoOwner as i32,
+            author_public_key: rogue_pub.clone(),
+            hpke_public_key: vec![9; 32],
+        });
+        bad.epochs[0].wraps.push(KeyWrap {
+            member_id: "rogue".into(),
+            wrap_method: openom_protocol::v1::WrapMethod::X25519Hpke as i32,
+            nonce: vec![],
+            wrapped_dek: vec![1],
+            kdf_params: None,
+            ephemeral_public_key: vec![],
+        });
+        bad.authorized_signers.push(AuthorizedSigner {
+            public_key: rogue_pub,
+            member_id: "rogue".into(),
+            role: openom_protocol::v1::SignerRole::CoOwner as i32,
+        });
+        bad.signatures.clear();
+        sign_keyring(&mut bad, &rogue);
+        let bad_bytes = bad.encode_to_vec();
+
+        // The self-check rejects it as an internal fault (a keyring our own verifier refuses)...
+        let err = h.commit_transition(KEY, &prior_bytes, &bad_bytes).unwrap_err();
+        assert_eq!(err.code, VaultErrorCode::Internal);
+        // ...and nothing was persisted: the stored keyring is untouched.
+        assert_eq!(h.store.load_keyring(KEY).unwrap().unwrap(), prior_bytes);
     }
 
     #[test]

@@ -63,8 +63,8 @@ mod root;
 mod seal;
 mod wrap;
 pub use chain::{
-    bootstrap_from_genesis, bootstrap_from_oob, verify_transition, verify_walk, ChainError,
-    KeyringAnchor,
+    bootstrap_from_genesis, bootstrap_from_oob, verify_reset, verify_transition, verify_walk,
+    ChainError, KeyringAnchor,
 };
 pub use envelope::{open_envelope, seal_envelope, SealParams};
 pub use hpke_wrap::{
