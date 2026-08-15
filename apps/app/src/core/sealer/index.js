@@ -11,6 +11,9 @@
 
 import { SealerSession } from './session.js';
 import { replicaId } from '../identity.js';
+import { Watermarks } from '../watermarks.js';
+import { createVault } from './vault.js';
+import { indexedDbKeyringStore } from './keyringStore.js';
 
 const registry = new Map(); // treeKey -> SealerSession
 
@@ -67,6 +70,18 @@ export async function createSealer(opts) {
     ? () => import('./native.js').then((m) => m.createNativeCore(opts))
     : () => import('./wasm.js').then((m) => m.createWasmCore(opts));
   return getSealer(treeKey, makeCore);
+}
+
+/**
+ * The real passphrase vault for the app: the WASM module + the durable IndexedDB keyring
+ * store + a persisted anti-rollback watermark. The UI drives provision/unlock/recover/
+ * changePassphrase on it. (Web only for now; the native binding is a later step.)
+ * @returns {Promise<object>} a vault (see createVault)
+ */
+export async function createAppVault() {
+  const { loadModule } = await import('./wasm.js');
+  const wasm = await loadModule();
+  return createVault({ wasm, keyringStore: indexedDbKeyringStore(), watermarks: new Watermarks() });
 }
 
 // A stable 16-byte tree id derived from a doc id. Real trees carry a UUID; for the dev/local

@@ -14,7 +14,7 @@
 // built into src/vendor/sealer by scripts/build-sealer.mjs and served over HTTP; the dynamic
 // import keeps it out of the load path until a sealer is actually needed.
 let modPromise = null;
-function loadModule() {
+export function loadModule() {
   if (!modPromise) {
     modPromise = import('../../vendor/sealer/openom_sealer.js').then(async (mod) => {
       await mod.default(); // wasm-bindgen --target web init (fetches the _bg.wasm)
