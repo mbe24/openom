@@ -2,6 +2,8 @@ import { createStore } from './core/store.js';
 import { TreeLibrary, dataset } from './core/library.js';
 import { composeStore } from './core/storeStack.js';
 import { createLibrarySealer, createAppVault } from './core/sealer/index.js';
+import { resetCryptoWorker } from './core/sealer/workerSealer.js';
+import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, LocalOnlyAuth, syncStatus } from './core/session.js';
@@ -31,6 +33,19 @@ const MEMBER = 'local-owner';
 async function realTreeIdBytes() {
   const data = new TextEncoder().encode('openom-tree:' + REAL_DOC);
   return new Uint8Array(await crypto.subtle.digest('SHA-256', data)).slice(0, 16);
+}
+
+// Auto-lock window (minutes; 0 = off) is a device preference — like the locale, it lives in
+// localStorage so it survives reloads and is available before any tree is open.
+const AUTOLOCK_KEY = 'openom.autolock';
+function loadAutoLock() {
+  try {
+    const v = Number(localStorage.getItem(AUTOLOCK_KEY));
+    return [0, 5, 30].includes(v) ? v : 0;
+  } catch { return 0; }
+}
+function saveAutoLock(min) {
+  try { localStorage.setItem(AUTOLOCK_KEY, String(min)); } catch { /* ephemeral */ }
 }
 
 const VIEWS = {
@@ -76,10 +91,18 @@ class App {
   pendingSession = null;
   vault = null;
   realTreeId = null;
+  // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
+  // and "Lock now" act on this; the demo never sets it (there'd be no keyring to re-unlock).
+  sealer = null;
+  autoLockMinutes = 0;
+  lockPolicy = null;
 
   constructor(root) {
     this.root = root;
     this.schema = new SchemaRegistry();
+    // Attached once here (not per enterApp) so a lock → re-unlock cycle doesn't pile up render
+    // subscriptions on the app-level schema.
+    this.schema.onChange(() => this.render());
     const { blobs, kind: blobKind } = createBlobStore();
     this.blobs = blobs;
     this.blobKind = blobKind;
@@ -96,6 +119,11 @@ class App {
     this.applyAccent();
     this.bindKeys();
     this.bindResize();
+    // Auto-lock: the policy watches for idle/visibility and calls lockNow. It only counts once a
+    // lockable session is armed (in enterApp), so it's inert at the gate and during the demo.
+    this.autoLockMinutes = loadAutoLock();
+    this.lockPolicy = createLockPolicy({ onLock: (reason) => this.lockNow(reason) });
+    this.lockPolicy.setIdleMinutes(this.autoLockMinutes);
     // The demo is not part of the product — dev / marketing only. It's enabled by a build-time
     // flag substituted into index.html (%DEMO% → false in production, true locally and on a demo
     // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
@@ -159,7 +187,7 @@ class App {
     const session = this.pendingSession;
     this.pendingSession = null;
     this.gateRecoveryCode = '';
-    if (session) await this.enterApp({ sealer: session, docId: REAL_DOC });
+    if (session) await this.enterApp({ sealer: session, docId: REAL_DOC, lockable: true });
     else { this.gate = null; this.render(); }
   }
 
@@ -173,6 +201,36 @@ class App {
     this.render();
   }
 
+  // Lock: free the key in the worker and drop every trace of decrypted data from the main
+  // thread, then re-gate. Re-unlock re-derives the key and rebuilds the tree via enterApp.
+  // A no-op unless a real, lockable session is open (guards the demo and the gate).
+  async lockNow(_reason = 'manual') {
+    if (!this.sealer || !this.tree || this.gate) return;
+    const sealer = this.sealer;
+    this.sealer = null;
+    this.lockPolicy?.disarm();
+    this.togglePalette(false);
+    // DRAIN in-flight seals then free the key. Best-effort: even if teardown throws we still
+    // drop the plaintext below and re-gate.
+    try { await sealer.lock(); } catch (e) { console.warn('[openom] lock teardown', e); }
+    // Drop decrypted material: the tree (every plaintext record), the library/transfer wrappers
+    // built over it, and the image bytes + object URLs.
+    this.tree = null;
+    this.library = null;
+    this.transfer = null;
+    this.focusId = null;
+    this.viewStack = [];
+    try { await this.blobs?.lock?.(); } catch { /* revoking is best-effort */ }
+    this.showGate('unlock');
+  }
+
+  setAutoLock(minutes) {
+    this.autoLockMinutes = minutes;
+    saveAutoLock(minutes);
+    this.lockPolicy?.setIdleMinutes(minutes);
+    this.render();
+  }
+
   async doUnlock(passphrase) {
     if (!passphrase) { this.gateError = t('gate-err-enter-pass'); this.renderGate(); return; }
     this.gateBusy = true;
@@ -180,7 +238,7 @@ class App {
     this.renderGate();
     try {
       const { session } = await this.vault.unlock(REAL_DOC, this.realTreeId, passphrase, MEMBER);
-      await this.enterApp({ sealer: session, docId: REAL_DOC });
+      await this.enterApp({ sealer: session, docId: REAL_DOC, lockable: true });
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
@@ -239,7 +297,11 @@ class App {
   }
 
   // Compose the store around the resolved sealer, open the tree, and switch to the app.
-  async enterApp({ sealer, seedDataset, docId }) {
+  async enterApp({ sealer, seedDataset, docId, lockable = false }) {
+    // Only the real passphrase session is lockable — the demo has no keyring to re-unlock, so
+    // auto-lock/"Lock now" must not touch it (else the user would be stranded at a passphrase
+    // screen for a throwaway demo).
+    this.sealer = lockable ? sealer : null;
     const base = await createStore();
     const { store } = await composeStore({ mode: 'local', sealer, local: base.store });
     this.storeKind = 'sealed / ' + base.kind;
@@ -258,7 +320,9 @@ class App {
       this.datasetId = seedDataset;
     } else {
       const tree = await this.library.open(docId); // hydrates; empty on first provision
-      opened = { tree, focusId: null };
+      // Anchor on the first person (from "start with yourself" onboarding, that's you) so a
+      // re-open — reload or unlock — lands on the tree, not an "Unknown" placeholder.
+      opened = { tree, focusId: tree.allPeople()[0]?.id ?? null };
     }
     const { tree, focusId } = opened;
     this.tree = tree;
@@ -266,10 +330,11 @@ class App {
     this.focusId = focusId;
     this.transfer = new TreeTransfer(tree);
     tree.onRevision(() => this.render());
-    this.schema.onChange(() => this.render());
     // A freshly-provisioned tree is empty → the "start with yourself" onboarding.
     this.view = tree.allPeople().length === 0 ? 'onboarding' : 'tree';
     this.gate = null;
+    // Start the idle clock only for the real, lockable session.
+    if (this.sealer) this.lockPolicy?.arm();
     this.render();
   }
 
@@ -289,9 +354,25 @@ class App {
       document.fonts.addEventListener?.('loadingdone', () => this.render());
       document.fonts.ready.then(() => this.render());
     }
-    // A dead crypto worker: keys are gone from this session — send the user back to unlock.
-    window.addEventListener('openom:worker-error', () => {
-      if (!this.gate) this.showGate('unlock');
+    // A dead crypto worker: keys are gone from this session and every in-flight Comlink call is
+    // wedged (it never rejects on worker death). Tear down like a lock, then rebuild a fresh
+    // worker+vault so the next unlock can succeed — otherwise the vault keeps calling the corpse.
+    window.addEventListener('openom:worker-error', async () => {
+      this.sealer = null;
+      this.lockPolicy?.disarm();
+      this.togglePalette(false);
+      this.tree = null;
+      this.library = null;
+      this.transfer = null;
+      try { await this.blobs?.lock?.(); } catch { /* best-effort */ }
+      resetCryptoWorker();
+      try {
+        this.vault = await createAppVault();
+      } catch (e) {
+        console.error('[openom] could not rebuild crypto worker', e);
+      }
+      const next = (await this.vault?.hasKeyring(REAL_DOC).catch(() => false)) ? 'unlock' : 'welcome';
+      this.showGate(next);
     });
   }
 

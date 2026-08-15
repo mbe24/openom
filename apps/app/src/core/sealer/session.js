@@ -36,6 +36,7 @@ export class SealerSession {
   #counter = 0;
   #prev = EMPTY;
   #queue = Promise.resolve();
+  #locked = false;
 
   constructor(core) {
     if (!core || typeof core.sealEntry !== 'function' || typeof core.openEntry !== 'function') {
@@ -50,6 +51,7 @@ export class SealerSession {
    * seal on this session so the chain stays linear. Returns the wire-ready envelope bytes.
    */
   seal(plaintext, _docId, { kind = 'snapshot' } = {}) {
+    if (this.#locked) return Promise.reject(new Error('sealer is locked'));
     const run = this.#queue.then(() => this.#doSeal(plaintext, kind));
     // Keep the queue chained but don't let one rejection poison the next seal.
     this.#queue = run.then(
@@ -82,7 +84,27 @@ export class SealerSession {
    * belongs to this tree/key) before decrypting. `kind` defaults to 'snapshot'.
    */
   async open(sealed, _docId, { kind = 'snapshot' } = {}) {
+    if (this.#locked) throw new Error('sealer is locked');
     return this.#core.openEntry(kind, sealed);
+  }
+
+  /**
+   * Free the key. DRAIN-then-free: chain onto the same queue as seal() so any in-flight or
+   * queued seal completes (its ciphertext lands durably) BEFORE the core frees the key —
+   * a lock racing a seal would otherwise drop that write while in-memory state moved on.
+   * Idempotent; once locked, seal/open reject rather than hit a freed core.
+   */
+  async lock() {
+    if (this.#locked) return;
+    this.#locked = true;
+    const done = this.#queue.then(() => this.#core.lock?.());
+    // Keep the queue resolvable so a late seal()'s rejection path stays clean.
+    this.#queue = done.then(() => {}, () => {});
+    await done;
+  }
+
+  get locked() {
+    return this.#locked;
   }
 
   /** The next counter this session will assign — for tests/introspection, not the wire. */

@@ -59,6 +59,14 @@ export class MemoryBlobStore {
   }
 
   async list() { return [...this.#blobs.keys()]; }
+
+  /** On lock: drop the decrypted image bytes and their object URLs. In-memory only, so this
+      is the same clean slate a reload gives — nothing durable is lost. */
+  async lock() {
+    for (const url of this.#urls.values()) URL.revokeObjectURL(url);
+    this.#urls.clear();
+    this.#blobs.clear();
+  }
 }
 
 /** Rust-Seite: blobs(hash TEXT PRIMARY KEY, mime, w, h, bytes BLOB, created). */
@@ -101,6 +109,13 @@ export class TauriBlobStore {
   }
 
   async list() { return this.#invoke('blob_list'); }
+
+  /** On lock: drop the object URLs only. The bytes stay in durable SQLite and are re-fetched
+      after unlock — nothing to clear here. */
+  async lock() {
+    for (const url of this.#urls.values()) URL.revokeObjectURL(url);
+    this.#urls.clear();
+  }
 }
 
 export function createBlobStore() {

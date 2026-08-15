@@ -80,6 +80,37 @@ test('settings → change passphrase → old rejected, new unlocks @integration'
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('add a person → Lock now → unlock → the write survived @integration', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/app/index.html');
+  await page.getByRole('button', { name: /start your family tree/i }).click();
+  await page.locator('#gate-pass').fill('lock test passphrase');
+  await page.locator('#gate-pass2').fill('lock test passphrase');
+  await page.getByRole('button', { name: /^create$/i }).click();
+  await expect(page.locator('#gate-recovery-code')).toBeVisible({ timeout: 20_000 });
+  await page.getByRole('button', { name: /i saved it/i }).click();
+
+  // Onboarding → add yourself, then the tree shows the person.
+  await page.locator('#first-name').fill('Ada Lovelace');
+  await page.getByRole('button', { name: /new person/i }).click();
+  await expect(page.getByRole('button', { name: /Ada Lovelace/ })).toBeVisible({ timeout: 20_000 });
+
+  // Settings → Lock now → the unlock gate (key freed, plaintext dropped).
+  await page.getByRole('button', { name: /^settings$/i }).click();
+  await page.getByRole('button', { name: /lock now/i }).click();
+  await expect(page.getByText(/unlock your tree/i)).toBeVisible();
+
+  // Unlock → the person (added just before lock) is still there: drain-then-free flushed the
+  // write and the tree re-hydrated, anchored on the first person rather than "Unknown".
+  await page.locator('#gate-pass').fill('lock test passphrase');
+  await page.getByRole('button', { name: /^unlock$/i }).click();
+  await expect(page.getByRole('button', { name: /Ada Lovelace/ })).toBeVisible({ timeout: 20_000 });
+
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('forgot passphrase → recover with the code → new passphrase works @integration', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

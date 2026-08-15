@@ -177,9 +177,20 @@ export function settingsView(app) {
         h('button', { class: 'button-secondary', style: { flex: 'none' },
           onClick: () => app.startChangePassphrase() }, t('security-change')),
         t('security-change-hint')),
-      line(t('security-autolock'),
-        h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } }, t('security-planned')),
-        t('security-autolock-hint')),
+      line(t('security-autolock'), picker({
+        items: [
+          { id: 0, label: t('security-never') },
+          { id: 5, label: t('security-minutes', { count: 5 }) },
+          { id: 30, label: t('security-minutes', { count: 30 }) }
+        ],
+        value: app.autoLockMinutes, ariaLabel: t('security-autolock'), minWidth: 128,
+        onPick: (v) => app.setAutoLock(v)
+      }), t('security-autolock-hint')),
+      app.sealer
+        ? h('button', { class: 'button-secondary', style: { alignSelf: 'flex-start' },
+            onClick: () => app.lockNow('manual') }, t('security-lock-now'))
+        : null,
+      // Planned, not built — labelled honestly rather than shown as a working control.
       line(t('security-biometrics'),
         h('span', { class: 'muted', style: { fontSize: 'var(--t-small)', flex: 'none' } }, t('security-planned')),
         t('security-biometrics-hint'))

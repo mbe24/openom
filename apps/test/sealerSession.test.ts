@@ -108,3 +108,61 @@ describe('SealerSession (§8a chain state)', () => {
     expect(core.seals[1].prev).toEqual(core.seals[0].ciphertextHash);
   });
 });
+
+// A core whose sealEntry blocks on a gate the test releases, plus a lock() spy — so we can
+// interleave a lock() with an in-flight seal and assert the ordering.
+function gatedCore() {
+  const order: string[] = [];
+  let open: () => void = () => {};
+  const gate = new Promise<void>((r) => { open = r; });
+  const core = {
+    treeId: b(1),
+    async sealEntry(_k: string, _f: string, _c: string, counter: number) {
+      order.push('seal:start:' + counter);
+      await gate;
+      order.push('seal:end:' + counter);
+      return { envelope: b(counter), ciphertextHash: b(counter) };
+    },
+    openEntry: () => b(),
+    lock() { order.push('core:lock'); },
+    order,
+    release: () => open(),
+  };
+  return core;
+}
+
+describe('SealerSession lock (drain-then-free)', () => {
+  it('waits for an in-flight seal to finish before freeing the core', async () => {
+    const core = gatedCore();
+    const s = new SealerSession(core);
+    const sealP = s.seal(b(1), 'tree');   // starts, blocks on the gate
+    await Promise.resolve();               // let it reach the gate
+    const lockP = s.lock();                // must not free until the seal completes
+    await new Promise((r) => setTimeout(r, 0));
+    expect(core.order).toEqual(['seal:start:0']); // core NOT locked yet
+    core.release();
+    await sealP;
+    await lockP;
+    expect(core.order).toEqual(['seal:start:0', 'seal:end:0', 'core:lock']);
+  });
+
+  it('rejects seal and open once locked, instead of hitting a freed core', async () => {
+    const core = gatedCore();
+    core.release();                        // don't block
+    const s = new SealerSession(core);
+    await s.seal(b(1), 'tree');
+    await s.lock();
+    expect(s.locked).toBe(true);
+    await expect(s.seal(b(2), 'tree')).rejects.toThrow(/locked/);
+    await expect(s.open(b(), 'tree')).rejects.toThrow(/locked/);
+  });
+
+  it('is idempotent — a second lock frees nothing more', async () => {
+    const core = gatedCore();
+    core.release();
+    const s = new SealerSession(core);
+    await s.lock();
+    await s.lock();
+    expect(core.order.filter((e) => e === 'core:lock')).toHaveLength(1);
+  });
+});
