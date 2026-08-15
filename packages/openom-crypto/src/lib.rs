@@ -24,12 +24,24 @@ pub type Kdf<'a> = argon2::Argon2<'a>;
 /// Symmetric key length in bytes — XChaCha20 and AES-256 both use 256-bit keys.
 pub const KEY_LEN: usize = 32;
 
+/// Argon2id salt length in bytes.
+pub const SALT_LEN: usize = 16;
+
+/// 256-bit key material (a DEK or KEK) that **zeroizes on drop**. Derefs to
+/// `[u8; KEY_LEN]`, so it passes straight to [`seal`]/[`open`] as `&*key`.
+pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
+
 /// Human-readable cipher-suite name, for logs and diagnostics.
 pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 
+mod kdf;
 mod seal;
+pub use kdf::{
+    default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
+    DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
+};
 pub use seal::{open, seal};
 
 /// A crypto operation failed. `Open` deliberately does not distinguish a bad key from
@@ -53,4 +65,10 @@ pub enum CryptoError {
     /// header/AAD. Intentionally opaque.
     #[error("AEAD open failed")]
     Open,
+    /// Argon2id key derivation failed (invalid params or salt).
+    #[error("KDF failed: {0}")]
+    Kdf(String),
+    /// The system CSPRNG failed.
+    #[error("RNG failed: {0}")]
+    Rng(String),
 }
