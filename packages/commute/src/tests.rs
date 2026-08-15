@@ -149,5 +149,69 @@ proptest! {
             for &i in &order { d.merge_op(&ops[i]); }
             prop_assert_eq!(d.checkpoint(), reference.clone());
         }
+
+        // Byte-level convergence: a fresh replica rebuilt from any replica's snapshot must produce
+        // byte-identical snapshots — the canonical-encoding guarantee.
+        let mut ref_doc = Doc::new(rid(0));
+        for op in &ops { ref_doc.merge_op(op); }
+        let snap = ref_doc.snapshot();
+        let rebuilt = Doc::from_snapshot(rid(9), &snap).unwrap();
+        prop_assert_eq!(rebuilt.snapshot(), snap);
+    }
+}
+
+// --- codec + sync ------------------------------------------------------------------------------
+
+#[test]
+fn snapshot_round_trips() {
+    let mut a = Doc::new(rid(1));
+    a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::Text("hi".into()) });
+    a.apply_local(OpIntent::AddElement { cell: cell(1), elem: elem(0), value: Value::I64(5) });
+    a.apply_local(OpIntent::RemoveElement { cell: cell(1), elem: elem(0) });
+    let snap = a.snapshot();
+    let b = Doc::from_snapshot(rid(2), &snap).unwrap();
+    assert_eq!(a.checkpoint(), b.checkpoint());
+    assert_eq!(a.snapshot(), b.snapshot());
+}
+
+#[test]
+fn delta_since_ships_only_the_missing_ops() {
+    let mut a = Doc::new(rid(1));
+    let mut b = Doc::new(rid(2));
+    // b catches up to a's first edit, then a makes a second — the delta carries only the second.
+    let first = a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1) });
+    b.merge_op(&first);
+    a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(2) });
+    let delta_ops = codec::decode_ops(&a.delta_since(&b.version())).unwrap();
+    assert_eq!(delta_ops.len(), 1, "only the op b hasn't seen");
+    b.merge_bytes(&a.delta_since(&b.version())).unwrap();
+    assert_eq!(a.checkpoint(), b.checkpoint());
+}
+
+#[test]
+fn merge_bytes_on_junk_is_a_clean_error_not_a_panic() {
+    let mut d = Doc::new(rid(1));
+    assert!(d.merge_bytes(&[]).is_err());
+    assert!(d.merge_bytes(&[9, 9, 9]).is_err()); // bad layout byte
+    assert!(matches!(d.merge_bytes(&[0]), Err(DecodeError::BadLayout)));
+}
+
+proptest! {
+    #[test]
+    fn decode_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+        // The untrusted-input boundary: any bytes decode to Ok or a typed Err, never a panic/OOM.
+        let _ = codec::decode_ops(&bytes);
+    }
+
+    #[test]
+    fn encode_decode_round_trips(
+        actions in prop::collection::vec(action_strat(3), 0..40),
+    ) {
+        let mut d = Doc::new(rid(1));
+        for a in &actions { d.apply_local(a.intent.clone()); }
+        let bytes = d.snapshot();
+        let ops = codec::decode_ops(&bytes).unwrap();
+        // Re-encoding the decoded ops is a byte-for-byte fixpoint (canonical form is stable).
+        prop_assert_eq!(codec::encode_ops(&ops), bytes);
     }
 }

@@ -25,8 +25,15 @@
 
 use std::collections::BTreeMap;
 
+pub mod codec;
+pub use codec::DecodeError;
+
 /// A replica's stable identity — the tiebreaker in the Lamport order. Opaque 16 bytes.
 pub type ReplicaId = [u8; 16];
+
+/// Per-replica high-water mark (max lamport seen from each replica) — a document's version. Used to
+/// request "everything after what I already have" for coarse, log-based sync.
+pub type VersionVector = BTreeMap<ReplicaId, u64>;
 /// An opaque cell address. The domain layer chooses the addressing scheme (e.g. entity+field).
 pub type CellId = Vec<u8>;
 /// An element's stable identity within a set — the CRDT merge key (never positional).
@@ -97,6 +104,7 @@ impl SetEntry {
 pub struct Doc {
     replica: ReplicaId,
     lamport: u64,
+    vv: VersionVector,
     registers: BTreeMap<CellId, (Stamp, Value)>,
     sets: BTreeMap<CellId, BTreeMap<ElemId, SetEntry>>,
 }
@@ -104,7 +112,14 @@ pub struct Doc {
 impl Doc {
     /// A fresh, empty document for `replica`.
     pub fn new(replica: ReplicaId) -> Self {
-        Doc { replica, lamport: 0, registers: BTreeMap::new(), sets: BTreeMap::new() }
+        Doc { replica, lamport: 0, vv: VersionVector::new(), registers: BTreeMap::new(), sets: BTreeMap::new() }
+    }
+
+    /// Reconstruct a document from a snapshot (or any op run) produced by [`Doc::snapshot`].
+    pub fn from_snapshot(replica: ReplicaId, bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut d = Doc::new(replica);
+        d.merge_bytes(bytes)?;
+        Ok(d)
     }
 
     /// Apply a **local** edit: the engine stamps `intent` with `(lamport+1, replica)`, integrates
@@ -129,6 +144,10 @@ impl Doc {
     /// The order-independent core: every cell keeps only max-stamped state, so applying ops in any
     /// order (or twice) converges to the same result.
     fn integrate(&mut self, op: &Op) {
+        let hw = self.vv.entry(op.stamp.replica).or_insert(0);
+        if op.stamp.lamport > *hw {
+            *hw = op.stamp.lamport;
+        }
         match &op.intent {
             OpIntent::SetRegister { cell, value } => match self.registers.get(cell) {
                 Some((s, _)) if *s >= op.stamp => {}
@@ -166,6 +185,67 @@ impl Doc {
             .filter(|(_, e)| e.live())
             .filter_map(|(id, e)| e.add.as_ref().map(|(_, v)| (id, v)))
             .collect()
+    }
+
+    /// This document's version — the high-water mark per replica. Hand it to a peer's
+    /// [`Doc::delta_since`] to fetch only what this replica is missing.
+    pub fn version(&self) -> VersionVector {
+        self.vv.clone()
+    }
+
+    fn covered(vv: &VersionVector, s: &Stamp) -> bool {
+        vv.get(&s.replica).is_some_and(|&l| l >= s.lamport)
+    }
+
+    /// Reconstruct the ops whose state is newer than `vv`, in canonical order (registers then sets,
+    /// each in id order). Because every cell keeps only its max-stamped state, this is a compacted
+    /// delta — the state *is* the log. With an empty `vv` it is the full snapshot.
+    fn ops_since(&self, vv: &VersionVector) -> Vec<Op> {
+        let mut ops = Vec::new();
+        for (cell, (s, v)) in &self.registers {
+            if !Self::covered(vv, s) {
+                ops.push(Op { stamp: *s, intent: OpIntent::SetRegister { cell: cell.clone(), value: v.clone() } });
+            }
+        }
+        for (cell, elems) in &self.sets {
+            for (elem, e) in elems {
+                if let Some((s, v)) = &e.add {
+                    if !Self::covered(vv, s) {
+                        ops.push(Op { stamp: *s, intent: OpIntent::AddElement { cell: cell.clone(), elem: elem.clone(), value: v.clone() } });
+                    }
+                }
+                if let Some(s) = &e.tomb {
+                    if !Self::covered(vv, s) {
+                        ops.push(Op { stamp: *s, intent: OpIntent::RemoveElement { cell: cell.clone(), elem: elem.clone() } });
+                    }
+                }
+            }
+        }
+        ops
+    }
+
+    /// The full state as canonical bytes — for first sync or after a peer compacted. Two converged
+    /// replicas produce byte-identical snapshots.
+    pub fn snapshot(&self) -> Vec<u8> {
+        codec::encode_ops(&self.ops_since(&VersionVector::new()))
+    }
+
+    /// Just the state newer than `vv`, as canonical bytes — the coarse "everything after" delta.
+    pub fn delta_since(&self, vv: &VersionVector) -> Vec<u8> {
+        codec::encode_ops(&self.ops_since(vv))
+    }
+
+    /// Integrate a snapshot or delta produced by [`Doc::snapshot`]/[`Doc::delta_since`]. Idempotent
+    /// and commutative like [`Doc::merge_op`]. On a decode error nothing is applied.
+    pub fn merge_bytes(&mut self, bytes: &[u8]) -> Result<(), DecodeError> {
+        let ops = codec::decode_ops(bytes)?;
+        for op in &ops {
+            self.integrate(op);
+            if op.stamp.lamport > self.lamport {
+                self.lamport = op.stamp.lamport;
+            }
+        }
+        Ok(())
     }
 
     /// A **canonical, replica-independent** projection of the merge state. Two replicas that have
