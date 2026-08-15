@@ -23,8 +23,14 @@ pub struct Config {
     pub http_addr: String,
     /// Postgres connection string (Neon in prod, a local container in dev).
     pub database_url: String,
-    /// S3-compatible endpoint (Cloudflare R2 in prod, MinIO in dev).
+    /// S3-compatible endpoint the *server* uses for proxy ops (R2 in prod, MinIO in
+    /// dev). In-cluster hostname (e.g. `http://minio:9000`).
     pub s3_endpoint: String,
+    /// Endpoint baked into *presigned URLs handed to clients* — must be
+    /// client-reachable. Same as `s3_endpoint` for R2; for local MinIO it's the
+    /// host-published address (`http://localhost:9000`), since the SigV4 signature
+    /// binds the host and can't be rewritten after signing.
+    pub s3_public_endpoint: String,
     /// Bucket that holds the encrypted tree envelopes.
     pub s3_bucket: String,
     /// S3 region. MinIO ignores it but still requires a value in the signature;
@@ -56,12 +62,17 @@ impl Config {
             "production" | "prod" => RunMode::Production,
             _ => RunMode::Local,
         };
+        let s3_endpoint =
+            env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into());
+        let s3_public_endpoint =
+            env::var("S3_PUBLIC_ENDPOINT").unwrap_or_else(|_| s3_endpoint.clone());
         Self {
             run_mode,
             http_addr: env::var("OPENOM_HTTP_ADDR").unwrap_or_else(|_| "0.0.0.0:6060".into()),
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://openom:openom@localhost:5432/openom".into()),
-            s3_endpoint: env::var("S3_ENDPOINT").unwrap_or_else(|_| "http://localhost:9000".into()),
+            s3_endpoint,
+            s3_public_endpoint,
             s3_bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "openom-trees".into()),
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
             s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),

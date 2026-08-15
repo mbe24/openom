@@ -25,16 +25,18 @@ use std::time::Duration;
 use base64::Engine as _;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
-use url::Url;
 
 use crate::config::Config;
 
 /// A signed-request builder + HTTP client bound to one bucket.
 #[derive(Clone)]
 pub struct S3Store {
+    /// Internal endpoint — server-side proxy ops (put/get/head/copy/delete).
     bucket: Bucket,
-    /// Used by `copy_object` to build `x-amz-copy-source` (media path, M3).
-    #[allow(dead_code)]
+    /// Client-reachable endpoint — presigned URLs handed out to clients. Same
+    /// credentials/bucket, different host (§ config `s3_public_endpoint`).
+    public_bucket: Bucket,
+    /// Used by `copy_object` to build `x-amz-copy-source`.
     bucket_name: String,
     credentials: Credentials,
     http: reqwest::Client,
@@ -49,16 +51,13 @@ const CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
 /// What a HEAD surfaces without a download (§12 graceful-absence: `None` = gone).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // media confirm path (M3)
 pub struct ObjectHead {
     pub size: u64,
-    pub etag: Option<String>,
 }
 
 /// A presigned upload URL plus the headers the client MUST echo verbatim — the
 /// signed `x-amz-checksum-sha256` among them, or the signature won't match.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // media upload path (M3); also built by the checksum test
 pub struct PresignedUpload {
     pub url: String,
     pub required_headers: Vec<(String, String)>,
@@ -66,11 +65,16 @@ pub struct PresignedUpload {
 
 impl S3Store {
     pub fn from_config(config: &Config) -> Result<Self, StorageError> {
-        let endpoint: Url = config.s3_endpoint.parse()?;
         // Path-style (`host/bucket/key`) — MinIO's default and what R2 accepts;
         // virtual-host style needs per-bucket DNS we don't control in dev.
         let bucket = Bucket::new(
-            endpoint,
+            config.s3_endpoint.parse()?,
+            UrlStyle::Path,
+            config.s3_bucket.clone(),
+            config.s3_region.clone(),
+        )?;
+        let public_bucket = Bucket::new(
+            config.s3_public_endpoint.parse()?,
             UrlStyle::Path,
             config.s3_bucket.clone(),
             config.s3_region.clone(),
@@ -79,6 +83,7 @@ impl S3Store {
             Credentials::new(config.s3_access_key.clone(), config.s3_secret_key.clone());
         Ok(Self {
             bucket,
+            public_bucket,
             bucket_name: config.s3_bucket.clone(),
             credentials,
             http: reqwest::Client::new(),
@@ -160,9 +165,8 @@ impl S3Store {
     }
 }
 
-/// Media path (`SERVER-DATA-FORMAT.md` §12) — wired in M3. `presign_put` is also
-/// exercised now by the `checksum_enforced_by_backend` test.
-#[allow(dead_code)]
+/// Media path (`SERVER-DATA-FORMAT.md` §12): HEAD/copy for the confirm step, presign
+/// for client upload/download.
 impl S3Store {
     /// HEAD for size/etag. `None` if absent (§12 graceful-404). Used by the media
     /// confirm step (size ≤ cap) — integrity was already enforced at the PUT.
@@ -184,12 +188,7 @@ impl S3Store {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        let etag = resp
-            .headers()
-            .get(reqwest::header::ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim_matches('"').to_string());
-        Ok(Some(ObjectHead { size, etag }))
+        Ok(Some(ObjectHead { size }))
     }
 
     /// Server-side copy `from` → `to` (media confirm: staging → final, §12). S3
@@ -222,7 +221,7 @@ impl S3Store {
         object_sha256_b64: &str,
         ttl: Duration,
     ) -> PresignedUpload {
-        let mut action = self.bucket.put_object(Some(&self.credentials), key);
+        let mut action = self.public_bucket.put_object(Some(&self.credentials), key);
         action.headers_mut().insert(CHECKSUM_HEADER, object_sha256_b64);
         let url = action.sign(ttl);
         PresignedUpload {
@@ -233,7 +232,7 @@ impl S3Store {
 
     /// Presign a client media download (membership-gated at mint time, §12).
     pub fn presign_get(&self, key: &str, ttl: Duration) -> String {
-        self.bucket
+        self.public_bucket
             .get_object(Some(&self.credentials), key)
             .sign(ttl)
             .to_string()

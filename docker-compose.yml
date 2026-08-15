@@ -24,6 +24,9 @@ services:
       OPENOM_HTTP_ADDR: 0.0.0.0:${OPENOM_HTTP_PORT:-6060}
       DATABASE_URL: postgres://openom:openom@postgres:5432/openom
       S3_ENDPOINT: http://minio:9000
+      # Presigned URLs handed to clients must be reachable from the host/browser, not
+      # the in-cluster minio hostname (the SigV4 signature binds the host).
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
       S3_BUCKET: openom-trees
       S3_REGION: us-east-1
       S3_ACCESS_KEY: openom

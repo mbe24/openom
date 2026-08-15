@@ -7,12 +7,18 @@
 
 mod auth;
 mod config;
+mod media;
 mod storage;
 mod telemetry;
 mod trees;
 
 use axum::extract::DefaultBodyLimit;
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::Level;
@@ -61,6 +67,11 @@ fn app(state: AppState) -> Router {
         .route("/ready", get(ready))
         .route("/whoami", get(whoami))
         .route("/trees/{tree_id}", get(trees::get_tree).put(trees::put_tree))
+        // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
+        // traverse the server, so the body limit below doesn't apply to them.
+        .route("/trees/{tree_id}/media/intent", post(media::intent))
+        .route("/trees/{tree_id}/media/{blob_id}", get(media::get_media))
+        .route("/trees/{tree_id}/media/{blob_id}/confirm", post(media::confirm))
         // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
         // take the presigned path, never this proxy.
         .layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES))
