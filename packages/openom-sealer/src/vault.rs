@@ -260,7 +260,7 @@ pub fn add_member(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<MemberAdded, SealerError> {
-    let Opened { dek, key_id, epoch, revision, prev_hash, identity, mut keyring } =
+    let Opened { dek, key_id, epoch, revision, prev_hash, identity, mut keyring, .. } =
         open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
 
     if new_member_id == owner_member_id
@@ -350,6 +350,116 @@ pub fn unlock_as_member(
     Ok(Unlocked { sealer, revision: keyring.revision })
 }
 
+/// Result of [`remove_member`]: the re-keyed keyring to publish, a NEW recovery code (a
+/// re-key rotates it), the new revision, and a sealer scoped to the **new** epoch so the
+/// caller can re-seal the tree snapshot under the new key.
+pub struct MemberRemoved {
+    pub keyring: Vec<u8>,
+    pub recovery_code: String,
+    pub revision: u32,
+    pub sealer: Sealer,
+}
+
+/// Remove a member with **forward-secure revocation**: mint a fresh DEK under a new epoch,
+/// wrap it only for those who remain (the owner via passphrase + a fresh recovery code,
+/// each other member via HPKE to their pinned key), drop the removed member from the
+/// member list and signer set, and re-sign at the next chained revision. Old epochs stay
+/// so remaining members can still read pre-removal content; the removed member — who never
+/// receives a new-epoch wrap — cannot read anything sealed after removal. The owner's
+/// identity/KEK are preserved (only the DEK rotates), so pinned members stay valid.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_member(
+    keyring_bytes: &[u8],
+    owner_passphrase: &[u8],
+    tree_id: &[u8],
+    owner_member_id: &str,
+    min_revision: u32,
+    remove_member_id: &str,
+    replica_id: &[u8],
+) -> Result<MemberRemoved, SealerError> {
+    let Opened { key_id: _old_key_id, epoch: old_epoch, revision, prev_hash, identity, kek, owner_kdf, mut keyring, .. } =
+        open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
+
+    if remove_member_id == owner_member_id {
+        return Err(SealerError::CannotRemoveOwner);
+    }
+    if !keyring.members.iter().any(|m| m.member_id == remove_member_id) {
+        return Err(SealerError::MemberNotFound);
+    }
+    let new_revision = min_revision
+        .max(revision)
+        .checked_add(1)
+        .ok_or(SealerError::RevisionOverflow)?;
+
+    // Forward-secure re-key: a fresh DEK under a new epoch, wrapped only for those remaining.
+    let new_dek = generate_dek()?;
+    let new_key_id = generate_salt()?.to_vec();
+    let new_epoch = old_epoch.checked_add(1).ok_or(SealerError::RevisionOverflow)?;
+
+    let mut wraps: Vec<KeyWrap> = Vec::new();
+
+    // Owner: passphrase wrap under the SAME KEK/kdf (identity stays stable) + a fresh
+    // recovery wrap. Re-keying necessarily rotates the recovery code — the old code only
+    // ever unwrapped the old DEK, and we don't hold its entropy here to reuse it.
+    let pass_ctx = WrapContext { tree_id, key_id: &new_key_id, member_id: owner_member_id, wrap_method: PASSPHRASE, epoch: new_epoch };
+    let pass = wrap_dek(&kek, &new_dek, &pass_ctx)?;
+    wraps.push(KeyWrap {
+        member_id: owner_member_id.to_string(),
+        wrap_method: PASSPHRASE,
+        nonce: pass.nonce,
+        wrapped_dek: pass.wrapped_dek,
+        kdf_params: Some(owner_kdf),
+        ephemeral_public_key: Vec::new(),
+    });
+
+    let recovery_code = generate_recovery_code()?;
+    let entropy = parse_recovery_code(&recovery_code)?;
+    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
+    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
+    let rec_ctx = WrapContext { tree_id, key_id: &new_key_id, member_id: owner_member_id, wrap_method: RECOVERY, epoch: new_epoch };
+    let rec = wrap_dek(&recovery_kek, &new_dek, &rec_ctx)?;
+    wraps.push(KeyWrap {
+        member_id: owner_member_id.to_string(),
+        wrap_method: RECOVERY,
+        nonce: rec.nonce,
+        wrapped_dek: rec.wrapped_dek,
+        kdf_params: Some(recovery_kdf),
+        ephemeral_public_key: Vec::new(),
+    });
+
+    // Each remaining non-owner member: HPKE-wrap the new DEK to their pinned public key.
+    for m in &keyring.members {
+        if m.member_id == owner_member_id || m.member_id == remove_member_id {
+            continue;
+        }
+        let info = wrap_aad(tree_id, &new_key_id, &m.member_id, HPKE, new_epoch);
+        let w = hpke_wrap_dek(&m.hpke_public_key, new_dek.as_slice(), &info)?;
+        wraps.push(KeyWrap {
+            member_id: m.member_id.clone(),
+            wrap_method: HPKE,
+            nonce: Vec::new(),
+            wrapped_dek: w.ciphertext,
+            kdf_params: None,
+            ephemeral_public_key: w.encapped_key,
+        });
+    }
+
+    // Append the new epoch (old epochs stay so remaining members can still read old
+    // content), then drop the removed member from the member list and the signer set.
+    keyring.epochs.push(KeyEpoch { key_id: new_key_id.clone(), epoch: new_epoch, wraps });
+    keyring.members.retain(|m| m.member_id != remove_member_id);
+    keyring.authorized_signers.retain(|s| s.member_id != remove_member_id);
+
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &identity);
+
+    let sealer =
+        Sealer::from_unwrapped(ENVELOPE_VERSION, new_dek, tree_id.to_vec(), new_key_id, replica_id.to_vec());
+    Ok(MemberRemoved { keyring: keyring.encode_to_vec(), recovery_code, revision: new_revision, sealer })
+}
+
 // ---- internals ----
 
 struct Opened {
@@ -363,6 +473,12 @@ struct Opened {
     /// The opener's derived signing identity — to re-sign a mutated keyring (e.g. adding a
     /// member). For a single owner this is the founder key already in the signer set.
     identity: openom_crypto::SigningKey,
+    /// The opener's passphrase KEK — to wrap a *new* epoch's DEK under the same passphrase
+    /// (a re-key must keep the owner's identity/KEK stable, not mint a fresh salt).
+    kek: Key32,
+    /// The KDF params of the opener's existing passphrase wrap (same salt → same KEK and
+    /// identity), stored in a re-keyed passphrase wrap so unlock re-derives them.
+    owner_kdf: KdfParams,
     /// The decoded prior keyring, so a mutating flow preserves its signers/members/epochs.
     keyring: Keyring,
 }
@@ -385,6 +501,7 @@ fn open_with_passphrase(
         .as_ref()
         .ok_or_else(|| SealerError::BadKeyring("passphrase wrap missing kdf_params".into()))?;
     validate_kdf_params(kdf)?;
+    let owner_kdf = kdf.clone();
     let root = derive_root(passphrase, kdf)?;
     // §4a V1 (single owner): the trusted signer set is our OWN derived identity — verify
     // the keyring carries a valid signature from it, ignoring the untrusted signer hints.
@@ -401,7 +518,17 @@ fn open_with_passphrase(
     let dek = unwrap_dek(&root.kek, &wrap.nonce, &wrap.wrapped_dek, &ctx)?;
     let prev_hash = keyring_hash(&keyring).to_vec();
     let revision = keyring.revision;
-    Ok(Opened { dek, key_id: epoch_key_id, epoch, revision, prev_hash, identity: root.identity, keyring })
+    Ok(Opened {
+        dek,
+        key_id: epoch_key_id,
+        epoch,
+        revision,
+        prev_hash,
+        identity: root.identity,
+        kek: root.kek,
+        owner_kdf,
+        keyring,
+    })
 }
 
 struct Built {
@@ -537,8 +664,8 @@ const _: () = assert!(KEY_ID_LEN == 16);
 #[cfg(test)]
 mod tests {
     use super::{
-        add_member, change_passphrase, provision, provision_member, recover, unlock,
-        unlock_as_member,
+        add_member, change_passphrase, provision, provision_member, recover, remove_member,
+        unlock, unlock_as_member,
     };
     use crate::{EntryKind, SealContext, Sealer, SealerError};
     use openom_crypto::{generate_recovery_code, keyring_hash, VerifyingKey};
@@ -775,5 +902,57 @@ mod tests {
         let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
         let m = provision_member(b"member pass").unwrap();
         assert!(add_member(&owner.keyring, b"WRONG", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).is_err());
+    }
+
+    const MEMBER3: &str = "acct-3";
+
+    #[test]
+    fn removing_a_member_re_keys_and_denies_them_new_content() {
+        // Owner with two members, A (to be removed) and B (stays).
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let a = provision_member(b"a pass").unwrap();
+        let b = provision_member(b"b pass").unwrap();
+        let k1 = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &a.hpke_public, &a.author_public).unwrap();
+        let k2 = add_member(&k1.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER3, MemberRole::Viewer, &b.hpke_public, &b.author_public).unwrap();
+        assert_eq!(k2.revision, 3);
+        let pinned = founder_key(&owner.keyring);
+
+        // Remove A → a re-key (new epoch), a new recovery code, revision 4.
+        let removed = remove_member(&k2.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, b"r-owner2").unwrap();
+        assert_eq!(removed.revision, 4);
+        assert_ne!(removed.recovery_code, owner.recovery_code);
+
+        // The owner seals NEW content under the new epoch.
+        let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
+
+        // Forward secrecy: the removed member has no wrap in the new epoch and cannot unlock.
+        assert!(matches!(
+            unlock_as_member(&removed.keyring, b"a pass", &a.kdf_params, TREE, MEMBER2, &[pinned], b"r", 0),
+            Err(SealerError::MissingWrap)
+        ));
+
+        // B (remaining) unlocks the new epoch and reads the owner's post-removal content.
+        let bu = unlock_as_member(&removed.keyring, b"b pass", &b.kdf_params, TREE, MEMBER3, &[pinned], b"r-b", 0).unwrap();
+        assert_eq!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret");
+
+        // The owner still unlocks with their passphrase (identity/KEK preserved across re-key).
+        assert!(unlock(&removed.keyring, b"owner pass", TREE, MEMBER, b"r").is_ok());
+
+        // The re-key rotated the recovery code: the new one opens, the original no longer does.
+        assert!(recover(&removed.keyring, &removed.recovery_code, b"x", TREE, MEMBER, b"r", 0).is_ok());
+        assert!(recover(&removed.keyring, &owner.recovery_code, b"x", TREE, MEMBER, b"r", 0).is_err());
+    }
+
+    #[test]
+    fn the_owner_cannot_be_removed_and_a_non_member_is_rejected() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        assert!(matches!(
+            remove_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER, b"r"),
+            Err(SealerError::CannotRemoveOwner)
+        ));
+        assert!(matches!(
+            remove_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, "nobody", b"r"),
+            Err(SealerError::MemberNotFound)
+        ));
     }
 }

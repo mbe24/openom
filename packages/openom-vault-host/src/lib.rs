@@ -48,6 +48,12 @@ pub enum VaultErrorCode {
     BadKdfParams,
     /// No wrap in the keyring matches the expected (member, method).
     MissingWrap,
+    /// Sharing: a member with this id is already in the keyring.
+    MemberExists,
+    /// Sharing: no member with this id is in the keyring.
+    MemberNotFound,
+    /// Sharing: the owner/founder can't be removed (transfer ownership instead).
+    CannotRemoveOwner,
     /// No keyring is stored for this tree yet (provision first).
     NoKeyring,
     /// An envelope wouldn't decode / had no header.
@@ -105,6 +111,9 @@ impl From<SealerError> for VaultError {
             E::BadKeyring(_) => C::BadKeyring,
             E::BadKdfParams => C::BadKdfParams,
             E::MissingWrap => C::MissingWrap,
+            E::MemberExists => C::MemberExists,
+            E::MemberNotFound => C::MemberNotFound,
+            E::CannotRemoveOwner => C::CannotRemoveOwner,
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
             E::RevisionOverflow => C::RevisionOverflow,

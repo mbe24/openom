@@ -151,6 +151,13 @@ pub enum SealerError {
     /// should update or remove first).
     #[error("member already present in the keyring")]
     MemberExists,
+    /// No member with the given id is in the keyring (e.g. asked to remove a non-member).
+    #[error("member not found in the keyring")]
+    MemberNotFound,
+    /// The owner/founder cannot be removed — they are the keyring's root of trust. Transfer
+    /// ownership instead (a future flow).
+    #[error("the owner cannot be removed")]
+    CannotRemoveOwner,
     /// The keyring is for a different tree than the caller expected (the caller supplies the
     /// trusted `tree_id`; it is never read from the untrusted keyring for the AEAD context).
     #[error("keyring is for a different tree")]
