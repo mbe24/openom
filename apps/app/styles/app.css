@@ -376,15 +376,45 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* --------------------------------------------------------- Sperrschirm */
+/* Der Sperrschirm (Boot-Gate und Leerlauf-Sperre) folgt den Tokens, also dem
+   Hell/Dunkel-Modus der App — keine feste Palette mehr. */
 .lock {
   position: fixed; inset: 0; z-index: 40; display: grid; justify-items: center;
   align-content: safe center; overflow: auto;
-  background: #1A211D; color: #F4F6F4; padding: 24px;
+  background: var(--canvas); color: var(--label); padding: 24px;
 }
 .lock-inner { width: min(360px, 100%); display: flex; flex-direction: column; align-items: center; gap: 14px; }
+/* Ein echtes <form>: Passwort-Manager erkennen Eingabe + Absenden nur so. */
+.lock-form { width: 100%; display: flex; flex-direction: column; gap: 12px; }
 .lock-mark { font-family: var(--font-name); font-size: 40px; letter-spacing: -.02em; display: flex; }
-.lock-mark .om { color: #9FC7B4; }
-.lock-title { color: rgba(244,246,244,.62); font-size: var(--t-small); margin-bottom: 6px; }
+.lock-mark .om { color: var(--accent-on); }
+.lock-title { color: var(--secondary); font-size: var(--t-small); margin-bottom: 6px; text-align: center; text-wrap: balance; }
+/* Feld + eingelassener Zeige/Verbergen-Schalter. Symmetrische Innenabstaende,
+   damit der zentrierte Text trotz des Schalters mittig bleibt. */
+.lock-field { position: relative; display: flex; }
+.lock-input {
+  width: 100%; padding: 14px 44px; border-radius: 14px; border: 1px solid var(--edge);
+  background: var(--card); color: var(--label); font-size: 17px; text-align: center;
+}
+.lock-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lock-reveal {
+  position: absolute; inset-inline-end: 6px; inset-block: 0; margin-block: auto;
+  width: 36px; height: 36px; display: grid; place-items: center; color: var(--secondary);
+  border-radius: 9px;
+}
+.lock-reveal:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lock-error { min-height: 20px; color: var(--delete); text-align: center; font-size: var(--t-small); }
+/* Der Wiederherstellungscode ist ASCII-Base32: unter RTL zwingend LTR + isoliert. */
+.lock-code {
+  direction: ltr; unicode-bidi: isolate; font-family: ui-monospace, "SFMono-Regular", monospace;
+  font-size: 18px; letter-spacing: .06em; padding: 14px 16px; background: var(--mono-bg);
+  color: var(--label); border-radius: 12px; user-select: all; text-align: center;
+  word-break: break-all; width: 100%;
+}
+.lock-ghost {
+  width: 100%; padding: 13px; border-radius: 14px; cursor: pointer;
+  background: transparent; color: var(--label); border: 1px solid var(--edge); font-size: 15px;
+}
 .lock-bio {
   width: 86px; height: 86px; border-radius: 50%; border: 0; cursor: pointer;
   display: grid; place-items: center; color: #9FC7B4;
@@ -396,9 +426,14 @@ input[type="range"] { accent-color: var(--accent); width: 100%; }
 .lock-or { font-size: var(--t-tiny); color: rgba(244,246,244,.38); margin-top: 10px; }
 .lock-submit {
   width: 100%; padding: 14px; border: 0; border-radius: 14px; cursor: pointer;
-  background: #9FC7B4; color: #16211C; font-size: 16px; font-weight: 600;
+  background: var(--accent); color: #fff; font-size: 16px; font-weight: 600;
 }
 .lock-submit:active { transform: scale(.99); }
+.lock-submit:disabled { opacity: .6; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .lock-submit:active { transform: none; }
+  .lock-bio.busy { animation: none; }
+}
 @keyframes lock-shake {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-7px); }

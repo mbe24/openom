@@ -125,6 +125,9 @@ class App {
   }
   renderGate() {
     mount(this.root, gateView(this));
+    // Focus the first field so a returning user can just type (autofocus doesn't fire for
+    // dynamically-mounted DOM). Skipped while busy — we don't want to yank focus mid-submit.
+    if (!this.gateBusy) this.root.querySelector('.lock-input, .lock-code')?.focus();
   }
 
   startCreate() {
