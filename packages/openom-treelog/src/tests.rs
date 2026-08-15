@@ -36,22 +36,28 @@ fn competing_claims_both_survive() {
     let mut a = Tree::new(rid(1));
     let mut b = Tree::new(rid(2));
     a.apply(TreeOp::AddPerson { id: pid(1) });
-    let oa = a.apply(TreeOp::AddClaim {
-        person: pid(1),
-        field: "birth.date".into(),
-        claim: cid(1),
-        value: "1901".into(),
-        source: Some("gravestone".into()),
-    });
+    let oa = a
+        .apply(TreeOp::AddClaim {
+            person: pid(1),
+            field: "birth.date".into(),
+            claim: cid(1),
+            value: "1901".into(),
+            source: Some("gravestone".into()),
+        })
+        .pop()
+        .unwrap();
     // b independently learns of the person and records a different date.
     b.doc_mut().merge_op(&a.persons_add_op(&pid(1))); // (helper below reconstructs the add)
-    let ob = b.apply(TreeOp::AddClaim {
-        person: pid(1),
-        field: "birth.date".into(),
-        claim: cid(2),
-        value: "1903".into(),
-        source: Some("parish record".into()),
-    });
+    let ob = b
+        .apply(TreeOp::AddClaim {
+            person: pid(1),
+            field: "birth.date".into(),
+            claim: cid(2),
+            value: "1903".into(),
+            source: Some("parish record".into()),
+        })
+        .pop()
+        .unwrap();
 
     a.doc_mut().merge_op(&ob);
     b.doc_mut().merge_op(&oa);
@@ -86,6 +92,74 @@ fn retracting_a_claim_removes_it() {
     let fact = t.fact(&pid(1), "name.given");
     assert_eq!(fact.claims.len(), 1);
     assert_eq!(fact.claims[0].value, "John");
+}
+
+fn fid(i: u8) -> FamilyId {
+    vec![0xF0 | i]
+}
+
+#[test]
+fn a_marriage_added_as_one_batch_lands_atomically() {
+    // "Add a marriage" spans records: a family, two spouses, a child. One batch, one action.
+    let mut t = Tree::new(rid(1));
+    let ops = t.apply_batch(vec![
+        TreeOp::AddFamily { id: fid(0) },
+        TreeOp::LinkSpouse { family: fid(0), person: pid(1) },
+        TreeOp::LinkSpouse { family: fid(0), person: pid(2) },
+        TreeOp::LinkChild { family: fid(0), person: pid(3), pedi: Pedigree::Birth },
+    ]);
+    assert_eq!(ops.len(), 4, "four self-contained ops, sealed together");
+    assert_eq!(t.families(), vec![fid(0)]);
+    assert_eq!(t.spouses_of(&fid(0)), vec![pid(1), pid(2)]);
+    assert_eq!(t.children_of(&fid(0)), vec![(pid(3), Pedigree::Birth)]);
+}
+
+#[test]
+fn concurrent_relationship_edits_both_survive() {
+    // M3: device A adds a child to a family; device B adds a spouse to the same family.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    let setup = a.apply(TreeOp::AddFamily { id: fid(0) });
+    b.doc_mut().merge_op(&setup[0]);
+
+    let child = a.apply(TreeOp::LinkChild { family: fid(0), person: pid(3), pedi: Pedigree::Adopted });
+    let spouse = b.apply(TreeOp::LinkSpouse { family: fid(0), person: pid(1) });
+    for o in &spouse {
+        a.doc_mut().merge_op(o);
+    }
+    for o in &child {
+        b.doc_mut().merge_op(o);
+    }
+    assert_eq!(a.children_of(&fid(0)), vec![(pid(3), Pedigree::Adopted)]);
+    assert_eq!(a.spouses_of(&fid(0)), vec![pid(1)]);
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+}
+
+#[test]
+fn move_child_reparents_and_survives_a_concurrent_edit() {
+    // M4: A re-parents a child F0 -> F1; B concurrently edits the child's name. Both survive.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    let setup = a.apply_batch(vec![
+        TreeOp::AddFamily { id: fid(0) },
+        TreeOp::AddFamily { id: fid(1) },
+        TreeOp::LinkChild { family: fid(0), person: pid(3), pedi: Pedigree::Birth },
+    ]);
+    for o in &setup {
+        b.doc_mut().merge_op(o);
+    }
+    let mv = a.apply(TreeOp::MoveChild { person: pid(3), from: fid(0), to: fid(1), pedi: Pedigree::Birth });
+    let edit = b.apply(TreeOp::AddClaim { person: pid(3), field: "name.given".into(), claim: cid(1), value: "Mary".into(), source: None });
+    for o in &mv {
+        b.doc_mut().merge_op(o);
+    }
+    for o in &edit {
+        a.doc_mut().merge_op(o);
+    }
+    assert!(a.children_of(&fid(0)).is_empty(), "left the source family");
+    assert_eq!(a.children_of(&fid(1)), vec![(pid(3), Pedigree::Birth)], "joined the destination");
+    assert_eq!(a.fact(&pid(3), "name.given").preferred.unwrap().value, "Mary", "the concurrent edit survived");
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
 }
 
 // A tiny helper for the M2 test: reconstruct the person-add op so replica b can learn the person
@@ -146,7 +220,7 @@ proptest! {
         let mut authors: Vec<Tree> = (0..n).map(|i| Tree::new(rid(i as u8))).collect();
         let mut ops: Vec<Op> = Vec::new();
         for (r, op) in &script {
-            ops.push(authors[*r].apply(op.clone()));
+            ops.extend(authors[*r].apply(op.clone()));
         }
         let reference = {
             let mut d = commute::Doc::new(rid(0));
