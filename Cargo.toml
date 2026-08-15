@@ -11,6 +11,7 @@ members = [
     "packages/openom-sealer",
     "packages/openom-vault-host",
     "packages/openom-store",
+    "packages/commute",
     "openom",
     "apps/src-tauri",
 ]

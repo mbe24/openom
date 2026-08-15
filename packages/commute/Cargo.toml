@@ -1,0 +1,12 @@
+[package]
+name = "commute"
+description = "A small, self-contained operation-based CRDT: Lamport-ordered, self-contained ops merged into typed convergent cells (LWW register, OR-set, tombstones). Domain-agnostic; you choose the merge policy per cell."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
