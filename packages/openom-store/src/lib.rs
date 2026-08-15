@@ -28,21 +28,12 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateMeta {
-    pub device_id: String,
-    pub lamport: u64,
-    pub created_at: i64,
-    pub schema_version: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Update {
-    /// Opake Nutzlast. Im Prototyp JSON-Ops, später ein Yrs-Update in einem
-    /// Protobuf-Rahmen — der Store sieht in beiden Fällen nur Bytes.
-    pub bytes: Vec<u8>,
-    pub meta: UpdateMeta,
-}
+/// Ein Log-Eintrag ist ein OPAKER Blob — die versiegelte Envelope. Seit der
+/// Verschlüsselung liegt jede Metadatenspalte (device_id, lamport, …) INNEN im
+/// Chiffrat; der Store (und ein späterer Zero-Knowledge-Server) sieht nur Bytes
+/// plus die vergebene `seq`. Das JS-Modell ist identisch: IndexedDbStore und die
+/// SealedStore-Kette reichen rohe Envelope-Bytes durch, ohne Rahmenstruktur.
+pub type Update = Vec<u8>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {

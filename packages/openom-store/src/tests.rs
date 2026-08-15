@@ -6,15 +6,7 @@ use super::sqlite::SqliteStore;
 use super::*;
 
 fn update(n: u64) -> Update {
-    Update {
-        bytes: format!("op-{n}").into_bytes(),
-        meta: UpdateMeta {
-            device_id: "test".into(),
-            lamport: n,
-            created_at: 0,
-            schema_version: 1,
-        },
-    }
+    format!("op-{n}").into_bytes()
 }
 
 fn suite(store: &dyn DocStore) {
@@ -30,7 +22,7 @@ fn suite(store: &dyn DocStore) {
     store.append(doc, &[update(1), update(2)]).unwrap();
     let (updates, cursor) = store.read_updates(doc, None).unwrap();
     assert_eq!(updates.len(), 2);
-    assert_eq!(updates[0].bytes, b"op-1");
+    assert_eq!(updates[0], b"op-1");
     store.append(doc, &[update(3)]).unwrap();
     let (tail, _) = store.read_updates(doc, Some(cursor)).unwrap();
     assert_eq!(tail.len(), 1, "nur Updates nach dem Cursor");
@@ -65,6 +57,30 @@ fn memory_store_conforms() {
 #[test]
 fn sqlite_store_conforms() {
     suite(&SqliteStore::in_memory().unwrap());
+}
+
+#[test]
+fn sqlite_open_survives_a_reopen() {
+    // A durable, file-backed store must return committed data after being dropped and reopened —
+    // the property in_memory can't have and the whole point of `open(path)`.
+    let path = std::env::temp_dir().join(format!("openom-store-durable-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let store = SqliteStore::open(&path).unwrap();
+        store.append("d", &[b"one".to_vec(), b"two".to_vec()]).unwrap();
+        store.put_snapshot("d", b"snap", None).unwrap();
+    } // dropped: connection closed
+    {
+        let store = SqliteStore::open(&path).unwrap();
+        let (updates, cursor) = store.read_updates("d", None).unwrap();
+        assert_eq!(updates, vec![b"one".to_vec(), b"two".to_vec()]);
+        assert_eq!(cursor, 2);
+        assert_eq!(store.read_snapshot("d").unwrap().unwrap().bytes, b"snap");
+    }
+    // WAL leaves -wal/-shm siblings; clean them all up.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));
+    }
 }
 
 #[test]

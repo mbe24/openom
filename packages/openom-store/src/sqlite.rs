@@ -1,32 +1,46 @@
 use super::*;
 use rusqlite::{params, Connection};
+use std::path::Path;
 use std::sync::Mutex;
 
-/// SQLite im Speicher — flüchtig, aber mit demselben Schema und derselben
-/// CAS-Logik wie ein späterer Datei- oder Server-Store.
+// One schema for both constructors. `updates` carries only opaque bytes now — the metadata
+// that used to sit in a `meta` column moved inside the sealed envelope (see `Update`).
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS docs (
+       doc_id   TEXT PRIMARY KEY,
+       snapshot BLOB,
+       version  TEXT,
+       counter  INTEGER NOT NULL DEFAULT 0
+     );
+     CREATE TABLE IF NOT EXISTS updates (
+       doc_id TEXT NOT NULL,
+       seq    INTEGER NOT NULL,
+       bytes  BLOB NOT NULL,
+       PRIMARY KEY (doc_id, seq)
+     );";
+
+/// SQLite: dieselbe CAS-Logik und dasselbe Schema, ob flüchtig im Speicher (Tests) oder
+/// dauerhaft in einer Datei (Tauri-App).
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
 
 impl SqliteStore {
+    /// Flüchtig — für Tests und den früheren Prototyp.
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = MEMORY;
-             CREATE TABLE IF NOT EXISTS docs (
-               doc_id   TEXT PRIMARY KEY,
-               snapshot BLOB,
-               version  TEXT,
-               counter  INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS updates (
-               doc_id TEXT NOT NULL,
-               seq    INTEGER NOT NULL,
-               bytes  BLOB NOT NULL,
-               meta   TEXT NOT NULL,
-               PRIMARY KEY (doc_id, seq)
-             );",
-        )
+        conn.execute_batch(&format!("PRAGMA journal_mode = MEMORY;\n{SCHEMA}"))
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(Self { conn: Mutex::new(conn) })
+    }
+
+    /// Dauerhaft, dateigestützt. WAL + `synchronous = NORMAL`, weil der Crash-Retry-Entwurf
+    /// den dauerhaften lokalen Commit zum Write-Ahead-Punkt macht — ein `MEMORY`-Journal
+    /// würde genau die Zusage brechen, dass ein bestätigter Append einen Neustart überlebt.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open(path).map_err(|e| StoreError::Backend(e.to_string()))?;
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"
+        ))
         .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(Self { conn: Mutex::new(conn) })
     }
@@ -75,23 +89,20 @@ impl DocStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let from = since.unwrap_or(0) as i64;
         let mut stmt = conn
-            .prepare("SELECT bytes, meta, seq FROM updates WHERE doc_id = ?1 AND seq > ?2 ORDER BY seq")
+            .prepare("SELECT bytes, seq FROM updates WHERE doc_id = ?1 AND seq > ?2 ORDER BY seq")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let rows = stmt
             .query_map(params![doc, from], |r| {
                 let bytes: Vec<u8> = r.get(0)?;
-                let meta: String = r.get(1)?;
-                let seq: i64 = r.get(2)?;
-                Ok((bytes, meta, seq))
+                let seq: i64 = r.get(1)?;
+                Ok((bytes, seq))
             })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let mut out = Vec::new();
         let mut last = from as u64;
         for row in rows {
-            let (bytes, meta, seq) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
-            let meta: UpdateMeta =
-                serde_json::from_str(&meta).map_err(|e| StoreError::Backend(e.to_string()))?;
-            out.push(Update { bytes, meta });
+            let (bytes, seq) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
+            out.push(bytes);
             last = seq as u64;
         }
         Ok((out, last))
@@ -103,12 +114,11 @@ impl DocStore for SqliteStore {
         let mut seq: i64 = conn
             .query_row("SELECT counter FROM docs WHERE doc_id = ?1", params![doc], |r| r.get(0))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        for u in updates {
+        for bytes in updates {
             seq += 1;
-            let meta = serde_json::to_string(&u.meta).map_err(|e| StoreError::Backend(e.to_string()))?;
             conn.execute(
-                "INSERT INTO updates (doc_id, seq, bytes, meta) VALUES (?1, ?2, ?3, ?4)",
-                params![doc, seq, u.bytes, meta],
+                "INSERT INTO updates (doc_id, seq, bytes) VALUES (?1, ?2, ?3)",
+                params![doc, seq, bytes],
             )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         }
