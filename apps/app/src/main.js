@@ -48,6 +48,11 @@ function saveAutoLock(min) {
   try { localStorage.setItem(AUTOLOCK_KEY, String(min)); } catch { /* ephemeral */ }
 }
 
+// A rollback/tamper signal, not a "wrong passphrase". The Tauri host reports a structured
+// `code`; the web worker throws a message — and the message differs by path ("rollback" from
+// the JS unlock check, "rolled back" from the Rust recover path), so match both spellings.
+const isRollback = (e) => e?.code === 'revision_rollback' || /roll(?:ed)? ?back/i.test(e?.message ?? '');
+
 const VIEWS = {
   tree: { render: ancestorsView, title: 'view-ancestors', tab: 'tree' },
   fan: { render: fanView, title: 'view-fan', tab: 'tree' },
@@ -242,7 +247,7 @@ class App {
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
-      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-wrong');
+      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-wrong');
       this.renderGate();
     }
   }
@@ -265,7 +270,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-recover');
+      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-recover');
       this.renderGate();
     }
   }
@@ -291,7 +296,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = /rollback/i.test(e?.message ?? '') ? t('gate-err-tampered') : t('gate-err-change');
+      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-change');
       this.renderGate();
     }
   }
@@ -357,6 +362,10 @@ class App {
     // A dead crypto worker: keys are gone from this session and every in-flight Comlink call is
     // wedged (it never rejects on worker death). Tear down like a lock, then rebuild a fresh
     // worker+vault so the next unlock can succeed — otherwise the vault keeps calling the corpse.
+    // The Tauri host freed our sealer underneath us (a mobile background-lock or a window
+    // teardown cleared its registry) — a seal/open came back `unknown_sealer`. Same response as
+    // a lock: drop the plaintext and re-gate. (lockNow's sealer.lock() is a harmless no-op then.)
+    window.addEventListener('openom:sealer-locked', () => this.lockNow('evicted'));
     window.addEventListener('openom:worker-error', async () => {
       this.sealer = null;
       this.lockPolicy?.disarm();

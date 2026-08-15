@@ -1,30 +1,37 @@
-// The sealer entry point. Two real paths, both routing through the crypto WORKER so key
-// material never reaches the main thread:
+// The sealer entry point. The passphrase vault and the demo sealer, each behind whichever
+// backend the runtime provides:
 //   - createAppVault(): the passphrase vault (provision/unlock/recover/changePassphrase).
 //   - createLibrarySealer({dev:true}): the demo, sealing under the reserved dev key (§16).
 // Everything above this (SealedStore, composeStore) just receives a `sealer` with seal/open
-// and never learns which path produced it.
+// and never learns which backend produced it.
 //
-// A future Tauri build swaps the Web Worker for an `invoke` backend that exposes the SAME
-// flat API — so the DEK lives in the Rust core, never the webview. That swap point is the
-// vault's injected `worker` (selected here inside createAppVault), NOT a main-thread sealer
-// core: an unwrapped DEK must never cross into main-thread JS.
+// Backend-select: on WEB, crypto runs in a Web Worker + JS keyring/watermark stores (vault.js).
+// On TAURI, it runs in the Rust host over `invoke` (invokeSealer.js) — the DEK lives in the
+// Rust core and never enters the webview, and the keyring/watermark live in Rust storage, not
+// the evictable webview one. Both expose the identical vault surface.
 
 import { SealerSession } from './session.js';
 import { replicaId } from '../identity.js';
 import { Watermarks } from '../watermarks.js';
 import { createVault } from './vault.js';
+import { createInvokeVault } from './invokeSealer.js';
 import { indexedDbKeyringStore } from './keyringStore.js';
 import { cryptoWorker, workerCore } from './workerSealer.js';
 
+// The Tauri invoke entry point when running inside the Tauri webview, else undefined (web).
+function tauriInvoke() {
+  return globalThis.__TAURI__?.core?.invoke;
+}
+
 /**
- * The real passphrase vault for the app: the crypto worker + the durable IndexedDB keyring
- * store + a persisted anti-rollback watermark. The UI drives provision/unlock/recover/
- * changePassphrase on it. (Web only for now; a Tauri invoke backend is a later step and
- * would be selected here in place of the worker.)
- * @returns {Promise<object>} a vault (see createVault)
+ * The real passphrase vault. On Tauri, the Rust host (openom-vault-host) over `invoke`; on web,
+ * the crypto worker + the IndexedDB keyring store + a persisted anti-rollback watermark. The UI
+ * drives provision/unlock/recover/changePassphrase on it, unaware which backend answered.
+ * @returns {Promise<object>} a vault (see createVault / createInvokeVault)
  */
 export async function createAppVault() {
+  const invoke = tauriInvoke();
+  if (invoke) return createInvokeVault(invoke);
   const worker = cryptoWorker();
   await worker.warm(); // pre-warm the WASM so only the KDF is visible at submit
   return createVault({ worker, keyringStore: indexedDbKeyringStore(), watermarks: new Watermarks() });
