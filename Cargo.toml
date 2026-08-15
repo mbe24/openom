@@ -12,6 +12,7 @@ members = [
     "packages/openom-vault-host",
     "packages/openom-store",
     "packages/commute",
+    "packages/openom-treelog",
     "openom",
     "apps/src-tauri",
 ]
@@ -30,6 +31,7 @@ rust-version = "1.85"
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-store = { path = "packages/openom-store" }
+commute = { path = "packages/commute" }
 
 # Protocol / serialization.
 prost = "0.14"

@@ -1,0 +1,13 @@
+[package]
+name = "openom-treelog"
+description = "openom — the family-tree domain layer: sourced-claim facts and relationships composed over the commute op-based CRDT"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+commute.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
