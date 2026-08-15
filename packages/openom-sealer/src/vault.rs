@@ -710,8 +710,17 @@ fn open_as_co_owner(
     if keyring.tree_id != tree_id {
         return Err(SealerError::TreeMismatch);
     }
-    // Trust anchor: a signature from a key the co-owner pinned out-of-band.
-    verify_keyring_any(&keyring, trusted_signers)?;
+    // Anti-substitution anchor: the keyring's founder entry must match a key the co-owner
+    // pinned out-of-band, so the server can't swap the whole signer set. The revision itself
+    // may have been signed by any current authorized signer (a co-owner did an ordinary
+    // change), so verify any-of over the current set — hardened later by the chain-walk.
+    let founder_pinned = keyring.authorized_signers.iter().any(|s| {
+        s.role == FOUNDER && trusted_signers.iter().any(|t| s.public_key.as_slice() == &t.to_bytes()[..])
+    });
+    if !founder_pinned {
+        return Err(CryptoError::Signature.into());
+    }
+    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))?;
     validate_kdf_params(kdf)?;
     let root = derive_root(passphrase, kdf)?;
     // Authority: the caller must be a current co-owner signer whose registered key is theirs.
