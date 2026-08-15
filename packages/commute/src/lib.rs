@@ -224,6 +224,28 @@ impl Doc {
         ops
     }
 
+    /// The set of cells whose state is newer than `vv` — i.e. cells touched since that version.
+    /// A domain layer uses this to detect that a fact moved out from under a stale proposal.
+    pub fn changed_cells_since(&self, vv: &VersionVector) -> std::collections::BTreeSet<CellId> {
+        let mut out = std::collections::BTreeSet::new();
+        for (cell, (s, _)) in &self.registers {
+            if !Self::covered(vv, s) {
+                out.insert(cell.clone());
+            }
+        }
+        for (cell, elems) in &self.sets {
+            for (_, e) in elems {
+                let newer = e.add.as_ref().is_some_and(|(s, _)| !Self::covered(vv, s))
+                    || e.tomb.is_some_and(|s| !Self::covered(vv, &s));
+                if newer {
+                    out.insert(cell.clone());
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     /// The full state as canonical bytes — for first sync or after a peer compacted. Two converged
     /// replicas produce byte-identical snapshots.
     pub fn snapshot(&self) -> Vec<u8> {

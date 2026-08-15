@@ -220,6 +220,64 @@ fn a_long_offline_replica_catches_up_in_one_delta() {
     assert_eq!(b.persons().len(), 12);
 }
 
+// --- proposal / approval flow -------------------------------------------------------------------
+
+#[test]
+fn propose_review_commit_happy_path() {
+    let mut owner = Tree::new(rid(1));
+    owner.apply(TreeOp::AddPerson { id: pid(1) });
+    // An editor drafts a proposal against the owner's current version.
+    let proposal = Proposal {
+        base: owner.version_cursor(),
+        ops: vec![TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) }],
+    };
+    let review = owner.review(&proposal);
+    assert!(review.conflicts.is_empty());
+    assert_eq!(review.changes.len(), 1);
+    assert!(matches!(&review.changes[0], Change::ClaimAdded { value, current_preferred: None, .. } if value == "1901"));
+
+    let snap_before = owner.doc().snapshot();
+    owner.review(&proposal);
+    assert_eq!(owner.doc().snapshot(), snap_before, "review is read-only");
+
+    owner.commit_proposal(&proposal);
+    assert_eq!(owner.fact(&pid(1), "birth.date").preferred.unwrap().value, "1901");
+}
+
+#[test]
+fn a_stale_proposal_on_a_moved_fact_is_flagged_and_keeps_both() {
+    // M8: the editor drafts against a base; the head then advances the SAME fact. Review flags the
+    // conflict; committing anyway keeps every claim (the claim model never silently drops one).
+    let mut owner = Tree::new(rid(1));
+    owner.apply(TreeOp::AddPerson { id: pid(1) });
+    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
+    let proposal = Proposal {
+        base: owner.version_cursor(),
+        ops: vec![TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(2), value: "1903".into(), source: None }],
+    };
+    // The head moves the same fact after the proposal was drafted.
+    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
+
+    let review = owner.review(&proposal);
+    assert_eq!(review.conflicts, vec![Conflict { person: pid(1), field: "birth.date".into() }]);
+
+    owner.commit_proposal(&proposal);
+    assert_eq!(owner.fact(&pid(1), "birth.date").claims.len(), 3, "all three competing claims retained");
+}
+
+#[test]
+fn a_proposal_on_an_untouched_fact_has_no_conflict() {
+    let mut owner = Tree::new(rid(1));
+    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
+    let proposal = Proposal {
+        base: owner.version_cursor(),
+        ops: vec![TreeOp::AddClaim { person: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None }],
+    };
+    // The head moves a DIFFERENT fact — no conflict for the proposal's field.
+    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
+    assert!(owner.review(&proposal).conflicts.is_empty());
+}
+
 // A tiny helper for the M2 test: reconstruct the person-add op so replica b can learn the person
 // without a full sync round. (In real use this rides normal delta sync.)
 impl Tree {

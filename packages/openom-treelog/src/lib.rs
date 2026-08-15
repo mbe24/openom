@@ -119,6 +119,50 @@ pub struct Fact {
     pub preferred: Option<Claim>,
 }
 
+/// A staged bundle of edits drafted against a base version, awaiting approval. The op bundle is
+/// self-contained (each op names its own target), so approving it is apply-all and rejecting it is a
+/// clean discard — nothing dangles.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Proposal {
+    /// The proposer's version when they drafted this — lets [`Tree::review`] flag facts that moved
+    /// since (staleness / concurrent edits the approver must adjudicate).
+    pub base: commute::VersionVector,
+    pub ops: Vec<TreeOp>,
+}
+
+/// One human-renderable change a proposal would make, described against the CURRENT head (so the
+/// approver sees "add 1903 — current preferred is 1901", not a base-relative diff).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Change {
+    PersonAdded(PersonId),
+    PersonRemoved(PersonId),
+    ClaimAdded { person: PersonId, field: FieldKey, value: String, source: Option<String>, current_preferred: Option<String> },
+    PreferredChanged { person: PersonId, field: FieldKey, claim: ClaimId },
+    ClaimRetracted { person: PersonId, field: FieldKey, claim: ClaimId },
+    FamilyAdded(FamilyId),
+    FamilyRemoved(FamilyId),
+    ChildLinked { family: FamilyId, person: PersonId, pedi: Pedigree },
+    ChildUnlinked { family: FamilyId, person: PersonId },
+    ChildMoved { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
+    SpouseLinked { family: FamilyId, person: PersonId },
+    SpouseUnlinked { family: FamilyId, person: PersonId },
+}
+
+/// A fact the proposal edits that ALSO moved since the proposal's base — the approver decides
+/// whether to apply anyway (in the claim model that usually means "keep both").
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Conflict {
+    pub person: PersonId,
+    pub field: FieldKey,
+}
+
+/// The approver's view of a proposal: the changes it makes and the facts it collides with.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Review {
+    pub changes: Vec<Change>,
+    pub conflicts: Vec<Conflict>,
+}
+
 /// A typed family-tree edit. Each maps to exactly one self-contained `commute` op (batched actions
 /// come later). `AddClaim` carries its own `claim` id — every op names the ids it creates, so a
 /// retried op is idempotent.
@@ -210,6 +254,58 @@ impl Tree {
         ops.into_iter().flat_map(TreeOp::into_intents).map(|i| self.doc.apply_local(i)).collect()
     }
 
+    /// Capture the current version — a proposer stamps their [`Proposal`] with this as its `base`.
+    pub fn version_cursor(&self) -> commute::VersionVector {
+        self.doc.version()
+    }
+
+    /// Describe what `proposal` would do, against the current head, flagging any fact it edits that
+    /// also moved since the proposal's `base`. Read-only — no state changes.
+    pub fn review(&self, proposal: &Proposal) -> Review {
+        let changed = self.doc.changed_cells_since(&proposal.base);
+        let mut review = Review::default();
+        for op in &proposal.ops {
+            if let Some((person, field)) = fact_target(op) {
+                let touched = changed.contains(&fact_claims_cell(&person, &field)) || changed.contains(&fact_preferred_cell(&person, &field));
+                if touched {
+                    let c = Conflict { person, field };
+                    if !review.conflicts.contains(&c) {
+                        review.conflicts.push(c);
+                    }
+                }
+            }
+            review.changes.push(self.describe(op));
+        }
+        review
+    }
+
+    /// Apply an approved proposal as the committing (approver) replica; returns the sealed ops.
+    /// Rejecting a proposal needs no method — just drop it; because its ops are self-contained,
+    /// nothing in the tree ever depended on it.
+    pub fn commit_proposal(&mut self, proposal: &Proposal) -> Vec<Op> {
+        self.apply_batch(proposal.ops.clone())
+    }
+
+    fn describe(&self, op: &TreeOp) -> Change {
+        match op.clone() {
+            TreeOp::AddPerson { id } => Change::PersonAdded(id),
+            TreeOp::RemovePerson { id } => Change::PersonRemoved(id),
+            TreeOp::AddClaim { person, field, value, source, .. } => {
+                let current_preferred = self.fact(&person, &field).preferred.map(|c| c.value);
+                Change::ClaimAdded { person, field, value, source, current_preferred }
+            }
+            TreeOp::SetPreferredClaim { person, field, claim } => Change::PreferredChanged { person, field, claim },
+            TreeOp::RetractClaim { person, field, claim } => Change::ClaimRetracted { person, field, claim },
+            TreeOp::AddFamily { id } => Change::FamilyAdded(id),
+            TreeOp::RemoveFamily { id } => Change::FamilyRemoved(id),
+            TreeOp::LinkChild { family, person, pedi } => Change::ChildLinked { family, person, pedi },
+            TreeOp::UnlinkChild { family, person } => Change::ChildUnlinked { family, person },
+            TreeOp::MoveChild { person, from, to, pedi } => Change::ChildMoved { person, from, to, pedi },
+            TreeOp::LinkSpouse { family, person } => Change::SpouseLinked { family, person },
+            TreeOp::UnlinkSpouse { family, person } => Change::SpouseUnlinked { family, person },
+        }
+    }
+
     /// The underlying document — for sync (`snapshot`/`delta_since`/`merge_bytes`/`version`).
     pub fn doc(&self) -> &Doc {
         &self.doc
@@ -277,6 +373,16 @@ impl Tree {
             .or_else(|| claims.last().cloned());
 
         Fact { claims, preferred }
+    }
+}
+
+/// The (person, field) a fact op targets, for conflict detection. `None` for non-fact ops.
+fn fact_target(op: &TreeOp) -> Option<(PersonId, FieldKey)> {
+    match op {
+        TreeOp::AddClaim { person, field, .. }
+        | TreeOp::SetPreferredClaim { person, field, .. }
+        | TreeOp::RetractClaim { person, field, .. } => Some((person.clone(), field.clone())),
+        _ => None,
     }
 }
 
