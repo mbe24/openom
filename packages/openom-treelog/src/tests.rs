@@ -278,6 +278,43 @@ fn a_proposal_on_an_untouched_fact_has_no_conflict() {
     assert!(owner.review(&proposal).conflicts.is_empty());
 }
 
+#[test]
+fn proposal_encodes_and_decodes() {
+    let mut base = commute::VersionVector::new();
+    base.insert(rid(1), 7);
+    let proposal = Proposal {
+        base,
+        ops: vec![
+            TreeOp::AddPerson { id: pid(1) },
+            TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) },
+            TreeOp::MoveChild { person: pid(1), from: fid(0), to: fid(1), pedi: Pedigree::Adopted },
+        ],
+    };
+    let bytes = proposal.encode();
+    assert_eq!(Proposal::decode(&bytes).unwrap(), proposal);
+}
+
+#[test]
+fn proposal_decode_never_panics_on_junk() {
+    assert!(Proposal::decode(&[]).is_err());
+    assert!(matches!(Proposal::decode(&[9]), Err(ProposalError::BadLayout)));
+    assert!(Proposal::decode(&[1, 0, 0, 0, 0, 0, 0, 0, 255]).is_err()); // forged base count
+}
+
+proptest! {
+    #[test]
+    fn proposal_round_trips_the_whole_vocabulary(ops in prop::collection::vec(treeop_strat(), 0..40)) {
+        let proposal = Proposal { base: commute::VersionVector::new(), ops };
+        let bytes = proposal.encode();
+        prop_assert_eq!(Proposal::decode(&bytes).unwrap(), proposal);
+    }
+
+    #[test]
+    fn proposal_decode_on_arbitrary_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+        let _ = Proposal::decode(&bytes);
+    }
+}
+
 // A tiny helper for the M2 test: reconstruct the person-add op so replica b can learn the person
 // without a full sync round. (In real use this rides normal delta sync.)
 impl Tree {

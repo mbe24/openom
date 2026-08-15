@@ -21,6 +21,9 @@
 
 use commute::{CellId, Doc, Op, OpIntent, ReplicaId, Value};
 
+mod wire;
+pub use wire::ProposalError;
+
 /// A caller-minted person id (opaque; the merge key for a person).
 pub type PersonId = Vec<u8>;
 /// A caller-minted family id (opaque; the merge key for a family/union).
@@ -128,6 +131,18 @@ pub struct Proposal {
     /// since (staleness / concurrent edits the approver must adjudicate).
     pub base: commute::VersionVector,
     pub ops: Vec<TreeOp>,
+}
+
+impl Proposal {
+    /// Encode this proposal to the canonical bytes sealed as a `KIND_PROPOSAL` bundle.
+    pub fn encode(&self) -> Vec<u8> {
+        wire::encode(self)
+    }
+
+    /// Decode a proposal bundle. Never panics on arbitrary/corrupt input.
+    pub fn decode(bytes: &[u8]) -> Result<Proposal, ProposalError> {
+        wire::decode(bytes)
+    }
 }
 
 /// One human-renderable change a proposal would make, described against the CURRENT head (so the
