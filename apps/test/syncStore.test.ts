@@ -112,4 +112,75 @@ describe('SyncStore', () => {
     await put(s, 't', bytes(1));
     await expect(s.putSnapshot('t', bytes(2), 'stale-version')).rejects.toBeInstanceOf(ConflictError);
   });
+
+  // §8a durability: the sync bookkeeping survives a reload, and pull() never clobbers a
+  // committed-but-unpushed local edit. A "reload" = a new SyncStore over the SAME durable
+  // local store and the SAME persisted bookkeeping (localStorage in the browser).
+  const memKV = () => {
+    const m = new Map<string, string>();
+    return {
+      getItem: (k: string) => (m.has(k) ? m.get(k)! : null),
+      setItem: (k: string, v: string) => void m.set(k, v),
+      removeItem: (k: string) => void m.delete(k),
+    };
+  };
+
+  it('does NOT fast-forward over an unpushed local edit after a reload (persisted dirty)', async () => {
+    const remote = new MemoryStore();
+    const local = new MemoryStore(); // durable — survives the "reload"
+    const persist = memKV(); // durable — survives the "reload"
+
+    const s1 = new SyncStore(local, remote, { persist });
+    await put(s1, 't', bytes(1, 1, 1)); // committed locally, never pushed
+
+    // Meanwhile another device advances the remote.
+    const other = device(remote);
+    await put(other, 't', bytes(9, 9));
+    await other.pushSnapshot('t');
+
+    // Reload: a fresh instance over the same durable local + persisted bookkeeping.
+    const s2 = new SyncStore(local, remote, { persist });
+    expect(s2.isDirty('t')).toBe(true); // the dirty flag survived
+    const r = await s2.pull('t');
+    expect(r.status).toBe('conflict'); // surfaced for merge, NOT fast-forwarded
+    expect(Array.from((await s2.readSnapshot('t'))!.bytes)).toEqual([1, 1, 1]); // local intact
+  });
+
+  it('DOES fast-forward after a reload when the local was cleanly synced', async () => {
+    const remote = new MemoryStore();
+    const local = new MemoryStore();
+    const persist = memKV();
+
+    const s1 = new SyncStore(local, remote, { persist });
+    await put(s1, 't', bytes(1));
+    await s1.pushSnapshot('t'); // synced — remoteVersion recorded, dirty cleared (persisted)
+
+    const other = device(remote);
+    await other.pull('t');
+    await put(other, 't', bytes(2));
+    await other.pushSnapshot('t'); // remote advances
+
+    const s2 = new SyncStore(local, remote, { persist }); // reload
+    const r = await s2.pull('t');
+    expect(r.status).toBe('fastForward'); // provably clean → safe to adopt
+    expect(Array.from((await s2.readSnapshot('t'))!.bytes)).toEqual([2]);
+  });
+
+  it('does NOT clobber local content that differs from remote when the sync record is missing', async () => {
+    // Belt-and-suspenders: even if the dirty flag were lost (persist cleared but the
+    // durable local survived), a differing local snapshot is surfaced as a conflict, not
+    // overwritten — fast-forward requires POSITIVE evidence the local was disposable.
+    const remote = new MemoryStore();
+    const local = new MemoryStore();
+    await local.putSnapshot('t', bytes(1, 2, 3), null); // local content, no sync record at all
+
+    const other = device(remote);
+    await put(other, 't', bytes(7, 7));
+    await other.pushSnapshot('t');
+
+    const s = new SyncStore(local, remote, { persist: memKV() });
+    const r = await s.pull('t');
+    expect(r.status).toBe('conflict');
+    expect(Array.from((await s.readSnapshot('t'))!.bytes)).toEqual([1, 2, 3]);
+  });
 });
