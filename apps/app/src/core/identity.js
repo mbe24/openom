@@ -20,6 +20,24 @@ export function deviceId() {
   }
 }
 
+// Per-(JS-context, tree) replica id for the sync log's idempotency dot (§8). It is a
+// >=128-bit CSPRNG value, minted fresh per context — NOT derived from `deviceId()`.
+// deviceId is machine-stable, which would (a) let the server correlate every tree
+// edited from one machine and (b) collide across two tabs of the same origin (which
+// are independent writers). A fresh random id per session, paired with the replica
+// counter from 0, keeps every dot unique without any persistence.
+const replicaIds = new Map();
+
+export function replicaId(treeId) {
+  let id = replicaIds.get(treeId);
+  if (!id) {
+    id = new Uint8Array(16);
+    crypto.getRandomValues(id); // WebCrypto CSPRNG (browser + Node 18+), never Math.random
+    replicaIds.set(treeId, id);
+  }
+  return id;
+}
+
 export function loadClock() {
   try { return Number(localStorage.getItem(CLOCK_KEY)) || 0; } catch { return 0; }
 }
