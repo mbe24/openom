@@ -38,6 +38,8 @@ const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
 /// and the owner is its sole member (§4 multi-signer; V1 builds the degenerate case).
 const FOUNDER: i32 = SignerRole::Founder as i32;
 const OWNER: i32 = MemberRole::Owner as i32;
+const CO_OWNER_SIGNER: i32 = SignerRole::CoOwner as i32;
+const CO_OWNER_MEMBER: i32 = MemberRole::CoOwner as i32;
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
@@ -507,6 +509,105 @@ pub fn remove_member(
     Ok(MemberRemoved { keyring: keyring.encode_to_vec(), revision: new_revision, sealer })
 }
 
+/// Result of a co-owner promotion / demotion: the new keyring + revision. No new sealer or
+/// recovery code — this changes signing authority, not keys.
+pub struct CoOwnerChanged {
+    pub keyring: Vec<u8>,
+    pub revision: u32,
+}
+
+/// Promote an existing member to **co-owner** — add them to the authorized-signer set so
+/// they can administer the tree (rotate keys, add/remove ordinary members). Changing the
+/// signer set is founder-authorized ("founder-or-unanimity"): the new keyring is signed by
+/// the founder's identity. The member's own author key — pinned and OOB-verified when they
+/// were added — becomes their signer key, so no new key exchange is needed.
+pub fn add_co_owner(
+    keyring_bytes: &[u8],
+    founder_passphrase: &[u8],
+    tree_id: &[u8],
+    founder_member_id: &str,
+    min_revision: u32,
+    target_member_id: &str,
+) -> Result<CoOwnerChanged, SealerError> {
+    let Opened { revision, prev_hash, identity, mut keyring, .. } =
+        open_with_passphrase(keyring_bytes, founder_passphrase, tree_id, founder_member_id)?;
+
+    // Already a signer (this also rejects re-adding the founder).
+    if keyring.authorized_signers.iter().any(|s| s.member_id == target_member_id) {
+        return Err(SealerError::MemberExists);
+    }
+    let author_pub = {
+        let m = keyring
+            .members
+            .iter()
+            .find(|m| m.member_id == target_member_id)
+            .ok_or(SealerError::MemberNotFound)?;
+        if m.author_public_key.is_empty() {
+            return Err(SealerError::BadKeyring("member has no author key to sign with".into()));
+        }
+        m.author_public_key.clone()
+    };
+    let new_revision = min_revision.max(revision).checked_add(1).ok_or(SealerError::RevisionOverflow)?;
+
+    if let Some(m) = keyring.members.iter_mut().find(|m| m.member_id == target_member_id) {
+        m.role = CO_OWNER_MEMBER;
+    }
+    keyring.authorized_signers.push(AuthorizedSigner {
+        public_key: author_pub,
+        member_id: target_member_id.to_string(),
+        role: CO_OWNER_SIGNER,
+    });
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &identity); // founder signs — authorizes the signer-set change
+    Ok(CoOwnerChanged { keyring: keyring.encode_to_vec(), revision: new_revision })
+}
+
+/// Demote a co-owner to an ordinary role, removing them from the authorized-signer set
+/// (founder-authorized). This revokes their signing/administration authority but NOT their
+/// read access — they keep their per-epoch member wraps (forward-secrecy bound). To also
+/// revoke read, remove them entirely with [`remove_member`]. `new_role` must be a non-signer
+/// role (admin/editor/viewer).
+#[allow(clippy::too_many_arguments)]
+pub fn remove_co_owner(
+    keyring_bytes: &[u8],
+    founder_passphrase: &[u8],
+    tree_id: &[u8],
+    founder_member_id: &str,
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: MemberRole,
+) -> Result<CoOwnerChanged, SealerError> {
+    if matches!(new_role, MemberRole::Unspecified | MemberRole::Owner | MemberRole::CoOwner) {
+        return Err(SealerError::BadKeyring("demote target must be admin/editor/viewer".into()));
+    }
+    let Opened { revision, prev_hash, identity, mut keyring, .. } =
+        open_with_passphrase(keyring_bytes, founder_passphrase, tree_id, founder_member_id)?;
+
+    if target_member_id == founder_member_id {
+        return Err(SealerError::CannotRemoveOwner);
+    }
+    let is_co_owner = keyring
+        .authorized_signers
+        .iter()
+        .any(|s| s.member_id == target_member_id && s.role == CO_OWNER_SIGNER);
+    if !is_co_owner {
+        return Err(SealerError::MemberNotFound);
+    }
+    let new_revision = min_revision.max(revision).checked_add(1).ok_or(SealerError::RevisionOverflow)?;
+
+    keyring.authorized_signers.retain(|s| s.member_id != target_member_id);
+    if let Some(m) = keyring.members.iter_mut().find(|m| m.member_id == target_member_id) {
+        m.role = new_role as i32;
+    }
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &identity); // founder signs
+    Ok(CoOwnerChanged { keyring: keyring.encode_to_vec(), revision: new_revision })
+}
+
 // ---- internals ----
 
 struct Opened {
@@ -744,12 +845,12 @@ const _: () = assert!(KEY_ID_LEN == 16);
 #[cfg(test)]
 mod tests {
     use super::{
-        add_member, change_passphrase, provision, provision_member, recover, remove_member,
-        unlock, unlock_as_member,
+        add_co_owner, add_member, change_passphrase, provision, provision_member, recover,
+        remove_co_owner, remove_member, unlock, unlock_as_member,
     };
     use crate::{EntryKind, SealContext, SealerError, SealerSet};
-    use openom_crypto::{generate_recovery_code, keyring_hash, VerifyingKey};
-    use openom_protocol::v1::{Keyring, MemberRole, SignerRole};
+    use openom_crypto::{derive_root, generate_recovery_code, keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
+    use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
 
     /// The founder's verify key, as a member would pin it out-of-band from an invite.
@@ -1109,6 +1210,58 @@ mod tests {
         let pinned = founder_key(&owner.keyring);
         let u = unlock_as_member(&added.keyring, b"m pass", &m.kdf_params, TREE, MEMBER2, &[pinned], b"r-m", 0).unwrap();
         assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &pre).unwrap(), b"pre-join photo");
+    }
+
+    #[test]
+    fn founder_promotes_and_demotes_a_co_owner() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let co = provision_member(b"co pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &co.hpke_public, &co.author_public).unwrap();
+
+        // Promote to co-owner: added to the signer set, member role bumped, founder-signed.
+        let promoted = add_co_owner(&added.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2).unwrap();
+        let k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
+        assert!(k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
+            && s.role == SignerRole::CoOwner as i32
+            && s.public_key == co.author_public));
+        assert!(k.members.iter().any(|m| m.member_id == MEMBER2 && m.role == MemberRole::CoOwner as i32));
+        let founder = founder_key(&owner.keyring);
+        verify_keyring(&k, &founder).unwrap(); // the signer-set change is founder-authorized
+
+        // Adding an already-signer, or a non-member, is rejected.
+        assert!(matches!(add_co_owner(&promoted.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2), Err(SealerError::MemberExists)));
+        assert!(matches!(add_co_owner(&promoted.keyring, b"owner pass", TREE, MEMBER, 0, "nobody"), Err(SealerError::MemberNotFound)));
+
+        // Demote back to viewer: removed from signers, role changed.
+        let demoted = remove_co_owner(&promoted.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Viewer).unwrap();
+        let k2 = Keyring::decode(demoted.keyring.as_slice()).unwrap();
+        assert!(!k2.authorized_signers.iter().any(|s| s.member_id == MEMBER2));
+        assert!(k2.members.iter().any(|m| m.member_id == MEMBER2 && m.role == MemberRole::Viewer as i32));
+        // Demoting a non-co-owner is rejected.
+        assert!(matches!(remove_co_owner(&demoted.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Viewer), Err(SealerError::MemberNotFound)));
+    }
+
+    #[test]
+    fn a_signer_set_change_not_signed_by_the_founder_is_rejected() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let co = provision_member(b"co pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &co.hpke_public, &co.author_public).unwrap();
+        let promoted = add_co_owner(&added.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2).unwrap();
+        let founder = founder_key(&owner.keyring);
+
+        // A rogue co-owner appends a signer and signs ONLY with their own identity.
+        let co_identity = derive_root(b"co pass", &co.kdf_params).unwrap().identity;
+        let mut k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
+        k.authorized_signers.push(AuthorizedSigner { public_key: vec![9u8; 32], member_id: "acct-rogue".into(), role: SignerRole::CoOwner as i32 });
+        k.revision += 1;
+        k.signatures.clear();
+        sign_keyring(&mut k, &co_identity);
+
+        // The founder-gate: a signer-set change must carry the founder's signature — it does
+        // not, so the change is rejected even though the co-owner (a valid any-of signer for
+        // ORDINARY revisions) did sign it.
+        assert!(verify_keyring(&k, &founder).is_err());
+        verify_keyring(&k, &co_identity.verifying_key()).unwrap();
     }
 
     #[test]

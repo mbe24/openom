@@ -71,8 +71,8 @@ pub use kdf::{
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
 pub use keyring::{
-    generate_identity, keyring_hash, sign_keyring, verify_keyring, verify_keyring_any, Signature,
-    SigningKey, VerifyingKey,
+    generate_identity, keyring_hash, sign_keyring, verify_keyring, verify_keyring_all,
+    verify_keyring_any, Signature, SigningKey, VerifyingKey,
 };
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,

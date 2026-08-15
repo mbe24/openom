@@ -83,6 +83,20 @@ pub fn verify_keyring(
     verify_keyring_any(keyring, std::slice::from_ref(verifying_key)).map(|_| ())
 }
 
+/// Verify the keyring carries a valid signature from **every** key in `required` (unanimity).
+/// This is the "founder-or-unanimity" rule's unanimity arm — used to authorize a change to
+/// the authorized-signer set when no founder remains, so no single surviving signer can
+/// unilaterally expel the others. Fails as [`CryptoError::Signature`] if any is missing.
+pub fn verify_keyring_all(keyring: &Keyring, required: &[VerifyingKey]) -> Result<(), CryptoError> {
+    if required.is_empty() {
+        return Err(CryptoError::Signature);
+    }
+    for key in required {
+        verify_keyring(keyring, key)?;
+    }
+    Ok(())
+}
+
 /// SHA-256 of a keyring's canonical signing bytes — the value the *next* revision
 /// records as its `prev_keyring_hash`, chaining the revision history (§4). Hashing the
 /// signing bytes (not the non-canonical protobuf) keeps the chain reproducible.
@@ -210,6 +224,24 @@ mod tests {
         let mut kr = sample_keyring();
         kr.signatures = vec![KeyringSignature { signer_public_key: vec![], signature: vec![0u8; 10] }];
         assert!(matches!(verify_keyring(&kr, &id.verifying_key()), Err(CryptoError::Signature)));
+    }
+
+    #[test]
+    fn verify_all_requires_every_signature() {
+        let a = generate_identity().unwrap();
+        let b = generate_identity().unwrap();
+        let mut kr = sample_keyring();
+        sign_keyring(&mut kr, &a);
+        // Only `a` signed: unanimity of [a] holds, of [a, b] does not.
+        verify_keyring_all(&kr, &[a.verifying_key()]).unwrap();
+        assert!(matches!(
+            verify_keyring_all(&kr, &[a.verifying_key(), b.verifying_key()]),
+            Err(CryptoError::Signature)
+        ));
+        sign_keyring(&mut kr, &b);
+        verify_keyring_all(&kr, &[a.verifying_key(), b.verifying_key()]).unwrap();
+        // No required keys is not "vacuously true" — there must be a trust anchor.
+        assert!(matches!(verify_keyring_all(&kr, &[]), Err(CryptoError::Signature)));
     }
 
     #[test]
