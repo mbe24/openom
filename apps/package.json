@@ -13,11 +13,13 @@
     "ios:init": "tauri ios init",
     "test:store": "node ../scripts/cargo.mjs test -p openom-store -p openom",
     "test:core": "node ../scripts/vitest.mjs",
+    "test:e2e": "playwright test",
     "check:locales": "node scripts/check-locales.mjs",
     "serve": "node scripts/serve.mjs",
     "serve:preview": "node scripts/serve.mjs --open preview/desktop.html"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "^2.11.4",
     "fast-check": "^3",
     "vitest": "^3"
