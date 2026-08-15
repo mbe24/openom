@@ -162,6 +162,64 @@ fn move_child_reparents_and_survives_a_concurrent_edit() {
     assert_eq!(a.doc().snapshot(), b.doc().snapshot());
 }
 
+#[test]
+fn disjoint_fields_both_survive() {
+    // M1: two devices edit different fields of the same person; neither clobbers the other.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    let oa = a.apply(TreeOp::AddClaim { person: pid(1), field: "birth.place".into(), claim: cid(1), value: "London".into(), source: None });
+    let ob = b.apply(TreeOp::AddClaim { person: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None });
+    for o in &ob {
+        a.doc_mut().merge_op(o);
+    }
+    for o in &oa {
+        b.doc_mut().merge_op(o);
+    }
+    assert_eq!(a.fact(&pid(1), "birth.place").preferred.unwrap().value, "London");
+    assert_eq!(a.fact(&pid(1), "death.date").preferred.unwrap().value, "1970");
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+}
+
+#[test]
+fn delete_wins_but_the_concurrent_edit_is_not_lost() {
+    // M5: A removes a person; B concurrently records a fact about them. The person leaves the
+    // roster (delete wins), but the edit survives as an orphaned claim — never silently destroyed,
+    // never a resurrection of the person.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    let add = a.apply(TreeOp::AddPerson { id: pid(1) });
+    for o in &add {
+        b.doc_mut().merge_op(o);
+    }
+    let del = a.apply(TreeOp::RemovePerson { id: pid(1) });
+    let edit = b.apply(TreeOp::AddClaim { person: pid(1), field: "note".into(), claim: cid(1), value: "was here".into(), source: None });
+    for o in &edit {
+        a.doc_mut().merge_op(o);
+    }
+    for o in &del {
+        b.doc_mut().merge_op(o);
+    }
+    assert!(!a.has_person(&pid(1)), "delete wins: the person is off the roster");
+    assert_eq!(a.fact(&pid(1), "note").claims.len(), 1, "the concurrent edit survives as an orphaned claim");
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+}
+
+#[test]
+fn a_long_offline_replica_catches_up_in_one_delta() {
+    // M7: B is offline while A makes many edits, then catches up with a single delta.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    for i in 0..12u8 {
+        a.apply(TreeOp::AddPerson { id: pid(i) });
+        a.apply(TreeOp::AddClaim { person: pid(i), field: "name.given".into(), claim: cid(0), value: format!("p{i}"), source: None });
+    }
+    let vv = b.doc().version();
+    let delta = a.doc().delta_since(&vv);
+    b.doc_mut().merge_bytes(&delta).unwrap();
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+    assert_eq!(b.persons().len(), 12);
+}
+
 // A tiny helper for the M2 test: reconstruct the person-add op so replica b can learn the person
 // without a full sync round. (In real use this rides normal delta sync.)
 impl Tree {
@@ -176,27 +234,37 @@ impl Tree {
 
 // --- convergence through the op vocabulary ------------------------------------------------------
 
+fn field_of(f: u8) -> FieldKey {
+    if f == 0 {
+        "birth.date".into()
+    } else {
+        "name.given".into()
+    }
+}
+fn pedi_of(p: u8) -> Pedigree {
+    match p % 3 {
+        0 => Pedigree::Birth,
+        1 => Pedigree::Adopted,
+        _ => Pedigree::Step,
+    }
+}
+
 fn treeop_strat() -> impl Strategy<Value = TreeOp> {
+    // Small fixed pools (persons 0..3, families 0..2, fields 0..2, claims 0..4) so concurrent ops
+    // collide, exercising every merge path — including MoveChild, which expands to two ops.
     prop_oneof![
         (0u8..3).prop_map(|p| TreeOp::AddPerson { id: pid(p) }),
         (0u8..3).prop_map(|p| TreeOp::RemovePerson { id: pid(p) }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::AddClaim {
-            person: pid(p),
-            field: if f == 0 { "birth.date".into() } else { "name.given".into() },
-            claim: cid(c),
-            value: format!("v{c}"),
-            source: None,
-        }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::SetPreferredClaim {
-            person: pid(p),
-            field: if f == 0 { "birth.date".into() } else { "name.given".into() },
-            claim: cid(c),
-        }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::RetractClaim {
-            person: pid(p),
-            field: if f == 0 { "birth.date".into() } else { "name.given".into() },
-            claim: cid(c),
-        }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::AddClaim { person: pid(p), field: field_of(f), claim: cid(c), value: format!("v{c}"), source: None }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::SetPreferredClaim { person: pid(p), field: field_of(f), claim: cid(c) }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::RetractClaim { person: pid(p), field: field_of(f), claim: cid(c) }),
+        (0u8..2).prop_map(|x| TreeOp::AddFamily { id: fid(x) }),
+        (0u8..2).prop_map(|x| TreeOp::RemoveFamily { id: fid(x) }),
+        (0u8..2, 0u8..3, 0u8..3).prop_map(|(x, p, pe)| TreeOp::LinkChild { family: fid(x), person: pid(p), pedi: pedi_of(pe) }),
+        (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::UnlinkChild { family: fid(x), person: pid(p) }),
+        (0u8..2, 0u8..2, 0u8..3, 0u8..3).prop_map(|(f1, f2, p, pe)| TreeOp::MoveChild { person: pid(p), from: fid(f1), to: fid(f2), pedi: pedi_of(pe) }),
+        (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::LinkSpouse { family: fid(x), person: pid(p) }),
+        (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::UnlinkSpouse { family: fid(x), person: pid(p) }),
     ]
 }
 
