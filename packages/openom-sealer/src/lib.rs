@@ -49,6 +49,9 @@ pub enum EntryKind {
     /// An encrypted media blob (photo/document), uploaded out-of-band and referenced by
     /// `blob_id`.
     Media,
+    /// A staged bundle of edits awaiting approval — sealed under the tree DEK but kept in a
+    /// separate proposals channel, never on the append/log path.
+    Proposal,
 }
 
 impl EntryKind {
@@ -57,6 +60,7 @@ impl EntryKind {
             EntryKind::Snapshot => Kind::Snapshot,
             EntryKind::Delta => Kind::Delta,
             EntryKind::Media => Kind::Media,
+            EntryKind::Proposal => Kind::Proposal,
         }
     }
 
@@ -65,6 +69,7 @@ impl EntryKind {
             Kind::Snapshot => Some(EntryKind::Snapshot),
             Kind::Delta => Some(EntryKind::Delta),
             Kind::Media => Some(EntryKind::Media),
+            Kind::Proposal => Some(EntryKind::Proposal),
             Kind::Unspecified => None,
         }
     }
@@ -393,6 +398,32 @@ mod tests {
         let out = s.seal_entry(&ctx, b"the family tree").unwrap();
         assert!(!out.ciphertext_hash.is_empty());
         assert_eq!(s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"the family tree");
+    }
+
+    #[test]
+    fn round_trips_a_treelog_delta_and_a_proposal() {
+        // The commute op-based encoding flows through the header as a delta and as a proposal —
+        // the seal path for the treelog engine's sync + proposal bundles.
+        let s = sealer();
+        let delta = SealContext {
+            kind: EntryKind::Delta,
+            format: Format::OpenomTreelog,
+            ..SealContext::snapshot(1, Vec::new(), 0)
+        };
+        let out = s.seal_entry(&delta, b"commute-delta-bytes").unwrap();
+        let env = Envelope::decode(out.envelope.as_slice()).unwrap();
+        assert_eq!(env.header.unwrap().format, Format::OpenomTreelog as i32);
+        assert_eq!(s.open_entry(EntryKind::Delta, &out.envelope).unwrap(), b"commute-delta-bytes");
+
+        let proposal = SealContext {
+            kind: EntryKind::Proposal,
+            format: Format::OpenomTreelog,
+            ..SealContext::snapshot(2, out.ciphertext_hash.clone(), 0)
+        };
+        let pout = s.seal_entry(&proposal, b"proposal-op-bundle").unwrap();
+        assert_eq!(s.open_entry(EntryKind::Proposal, &pout.envelope).unwrap(), b"proposal-op-bundle");
+        // A proposal must not open as a delta (domain separation via the kind AAD binding).
+        assert!(matches!(s.open_entry(EntryKind::Delta, &pout.envelope), Err(SealerError::WrongKind)));
     }
 
     #[test]

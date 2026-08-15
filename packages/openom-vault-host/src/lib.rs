@@ -807,6 +807,7 @@ fn parse_kind(s: &str) -> Result<EntryKind> {
         "snapshot" => Ok(EntryKind::Snapshot),
         "delta" => Ok(EntryKind::Delta),
         "media" => Ok(EntryKind::Media),
+        "proposal" => Ok(EntryKind::Proposal),
         other => Err(VaultError::new(VaultErrorCode::BadRequest, format!("unknown kind: {other}"))),
     }
 }
@@ -814,6 +815,9 @@ fn parse_kind(s: &str) -> Result<EntryKind> {
 fn parse_format(s: &str) -> Result<Format> {
     match s {
         "openom-json" => Ok(Format::OpenomJson),
+        "openom-ops" => Ok(Format::OpenomOps),
+        "openom-treelog" => Ok(Format::OpenomTreelog),
+        "raw-bytes" => Ok(Format::RawBytes),
         other => Err(VaultError::new(VaultErrorCode::BadRequest, format!("unknown format: {other}"))),
     }
 }

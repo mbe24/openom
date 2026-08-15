@@ -144,6 +144,7 @@ fn parse_kind(s: &str) -> Result<EntryKind, JsError> {
         "snapshot" => Ok(EntryKind::Snapshot),
         "delta" => Ok(EntryKind::Delta),
         "media" => Ok(EntryKind::Media),
+        "proposal" => Ok(EntryKind::Proposal),
         other => Err(JsError::new(&format!("unknown kind: {other}"))),
     }
 }
@@ -151,6 +152,9 @@ fn parse_kind(s: &str) -> Result<EntryKind, JsError> {
 fn parse_format(s: &str) -> Result<Format, JsError> {
     match s {
         "openom-json" => Ok(Format::OpenomJson),
+        "openom-ops" => Ok(Format::OpenomOps),
+        "openom-treelog" => Ok(Format::OpenomTreelog),
+        "raw-bytes" => Ok(Format::RawBytes),
         other => Err(JsError::new(&format!("unknown format: {other}"))),
     }
 }
