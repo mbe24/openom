@@ -69,6 +69,20 @@ pub fn wrap_aad(
     out
 }
 
+/// Domain-separated AAD for a **recovery-root-key private-key wrap** (§4). Unlike a
+/// per-epoch DEK wrap, the recovery root key is tree-scoped, not epoch-scoped, so it binds
+/// only `(tree_id, member_id, wrap_method)` under its own `openom:rrk:v1` tag — byte-
+/// disjoint from `wrap_aad` (so an RRK wrap can never be reinterpreted as an epoch-DEK
+/// wrap even when it reuses the passphrase/recovery `wrap_method` values).
+pub fn rrk_wrap_aad(tree_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48);
+    put_bytes(&mut out, b"openom:rrk:v1");
+    put_bytes(&mut out, tree_id);
+    put_bytes(&mut out, member_id.as_bytes());
+    put_u32(&mut out, wrap_method as u32);
+    out
+}
+
 /// The canonical, domain-separated byte string an authorized signer's Ed25519 key
 /// signs over the keyring (§4): every keyring field **except `signatures`**, length- and
 /// count-prefixed so a signature can't be replayed onto a different keyring or another
@@ -108,32 +122,48 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
         put_u32(&mut out, epoch.epoch);
         put_u32(&mut out, epoch.wraps.len() as u32);
         for w in &epoch.wraps {
-            put_bytes(&mut out, w.member_id.as_bytes());
-            put_u32(&mut out, w.wrap_method as u32);
-            put_bytes(&mut out, &w.nonce);
-            put_bytes(&mut out, &w.wrapped_dek);
-            // kdf_params: a presence flag then its four fields, always encoded (zeros
-            // when absent) so the layout stays branchless.
-            match &w.kdf_params {
-                Some(k) => {
-                    put_u32(&mut out, 1);
-                    put_bytes(&mut out, &k.salt);
-                    put_u32(&mut out, k.memory_kib);
-                    put_u32(&mut out, k.iterations);
-                    put_u32(&mut out, k.parallelism);
-                }
-                None => {
-                    put_u32(&mut out, 0);
-                    put_bytes(&mut out, &[]);
-                    put_u32(&mut out, 0);
-                    put_u32(&mut out, 0);
-                    put_u32(&mut out, 0);
-                }
-            }
-            put_bytes(&mut out, &w.ephemeral_public_key);
+            put_wrap(&mut out, w);
+        }
+    }
+
+    put_u32(&mut out, keyring.recovery_keys.len() as u32);
+    for rk in &keyring.recovery_keys {
+        put_bytes(&mut out, &rk.public_key);
+        put_bytes(&mut out, rk.member_id.as_bytes());
+        put_u32(&mut out, rk.wraps.len() as u32);
+        for w in &rk.wraps {
+            put_wrap(&mut out, w);
         }
     }
     out
+}
+
+/// Encode one `KeyWrap` into the keyring signing bytes: `member_id, wrap_method, nonce,
+/// wrapped_dek`, then a branchless `kdf_params` (presence flag + four fields, zeros when
+/// absent), then `ephemeral_public_key`. Shared by the epoch wraps and the recovery-key
+/// wraps so the two never drift.
+fn put_wrap(out: &mut Vec<u8>, w: &crate::v1::KeyWrap) {
+    put_bytes(out, w.member_id.as_bytes());
+    put_u32(out, w.wrap_method as u32);
+    put_bytes(out, &w.nonce);
+    put_bytes(out, &w.wrapped_dek);
+    match &w.kdf_params {
+        Some(k) => {
+            put_u32(out, 1);
+            put_bytes(out, &k.salt);
+            put_u32(out, k.memory_kib);
+            put_u32(out, k.iterations);
+            put_u32(out, k.parallelism);
+        }
+        None => {
+            put_u32(out, 0);
+            put_bytes(out, &[]);
+            put_u32(out, 0);
+            put_u32(out, 0);
+            put_u32(out, 0);
+        }
+    }
+    put_bytes(out, &w.ephemeral_public_key);
 }
 
 #[inline]
@@ -279,6 +309,7 @@ mod tests {
             }],
             // must NOT affect the signed bytes
             signatures: vec![KeyringSignature { signer_public_key: vec![0xAB; 32], signature: vec![0xFF; 64] }],
+            recovery_keys: vec![],
             epochs: vec![KeyEpoch {
                 key_id: vec![1, 2, 3],
                 epoch: 0,

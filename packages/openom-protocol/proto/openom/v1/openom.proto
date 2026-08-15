@@ -137,6 +137,30 @@ message Keyring {
   // from a currently-authorized signer (any-of / 1-of-N in V1). Excluded from the
   // signed bytes, so signatures are independently collectible (threshold-ready).
   repeated KeyringSignature signatures = 10;
+  // The founder-only recovery root key(s). Every epoch's DEK is HPKE-wrapped to a
+  // RecoveryKey's public key (a WRAP_METHOD_RRK_HPKE wrap in the epoch), so the founder
+  // reaches every epoch — past and future, including epochs a co-owner minted — by
+  // unwrapping ONE recovery-key private key (held only under the founder's passphrase and
+  // recovery code, never shared with members). V1: exactly one, the founder's.
+  repeated RecoveryKey recovery_keys = 11;
+}
+
+// The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
+// construction: the private key exists only under the two founder-credential wraps in
+// `wraps`; every other party (co-owner rotations included) touches only `public_key`. A
+// removed member never receives it, so it does not weaken revocation.
+message RecoveryKey {
+  // X25519 public key. Every KeyEpoch carries one WRAP_METHOD_RRK_HPKE wrap of its DEK to
+  // this key. Covered by the keyring signature, so the server can't substitute it.
+  bytes public_key = 1;
+  // The founder this recovery key belongs to (must equal the FOUNDER signer's member_id;
+  // client-verified).
+  string member_id = 2;
+  // The recovery root private key, wrapped under the founder's passphrase KEK
+  // (WRAP_METHOD_PASSPHRASE_ARGON2ID) and recovery-code KEK
+  // (WRAP_METHOD_RECOVERY_CODE_ARGON2ID) — exactly two entries in V1, each with its
+  // Argon2id kdf_params. AAD is the tree-scoped rrk binding, not the per-epoch tuple.
+  repeated KeyWrap wraps = 3;
 }
 
 // A member of the authorized-signer set — a founder or co-owner who may administer
@@ -244,4 +268,7 @@ enum WrapMethod {
   // makes the two wraps for one member unambiguous — wrap_method is in the wrap's AAD
   // tuple (§4), so they can't be swapped. Additive/non-breaking (open enum).
   WRAP_METHOD_RECOVERY_CODE_ARGON2ID = 3;
+  // An epoch's DEK sealed (HPKE) to a RecoveryKey's public key, so the founder reaches
+  // every epoch via one recovery root private key. Uses the per-epoch wrap binding.
+  WRAP_METHOD_RRK_HPKE = 4;
 }

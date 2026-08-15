@@ -6,7 +6,7 @@
 //! that lets the passphrase change, and lets a tree be shared, without re-encrypting
 //! the data: only the small wrap is re-made, never the payloads.
 
-use openom_protocol::aad::wrap_aad;
+use openom_protocol::aad::{rrk_wrap_aad, wrap_aad};
 use zeroize::Zeroizing;
 
 use crate::seal::{xchacha_open, xchacha_seal};
@@ -60,6 +60,39 @@ pub fn unwrap_dek(
         .try_into()
         .map_err(|_| CryptoError::KeyLength)?;
     Ok(Zeroizing::new(dek))
+}
+
+/// Wrap the recovery root key's 32-byte private key under `kek`, bound to the tree-scoped
+/// rrk AAD (not the epoch tuple). Used for the founder's passphrase and recovery-code wraps
+/// of the RRK private key.
+pub fn wrap_rrk_secret(
+    kek: &Key32,
+    secret: &[u8; KEY_LEN],
+    tree_id: &[u8],
+    member_id: &str,
+    wrap_method: i32,
+) -> Result<WrappedDek, CryptoError> {
+    let mut nonce = [0u8; WRAP_NONCE_LEN];
+    getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
+    let wrapped_dek = xchacha_seal(kek, &nonce, &aad, secret)?;
+    Ok(WrappedDek { nonce: nonce.to_vec(), wrapped_dek })
+}
+
+/// Unwrap the recovery root key's private key under `kek`, verifying the tree-scoped rrk
+/// AAD. A wrong KEK / corrupted wrap / mismatched context all fail as [`CryptoError::Open`].
+pub fn unwrap_rrk_secret(
+    kek: &Key32,
+    nonce: &[u8],
+    wrapped: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    wrap_method: i32,
+) -> Result<Key32, CryptoError> {
+    let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
+    let bytes = Zeroizing::new(xchacha_open(kek, nonce, &aad, wrapped)?);
+    let secret: [u8; KEY_LEN] = bytes.as_slice().try_into().map_err(|_| CryptoError::KeyLength)?;
+    Ok(Zeroizing::new(secret))
 }
 
 #[cfg(test)]

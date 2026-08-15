@@ -115,6 +115,7 @@ mod tests {
                 hpke_public_key: vec![],
             }],
             signatures: vec![],
+            recovery_keys: vec![],
             epochs: vec![KeyEpoch {
                 key_id: vec![1, 2, 3],
                 epoch: 0,

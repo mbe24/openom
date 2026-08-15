@@ -117,6 +117,34 @@ pub struct Keyring {
     /// signed bytes, so signatures are independently collectible (threshold-ready).
     #[prost(message, repeated, tag="10")]
     pub signatures: ::prost::alloc::vec::Vec<KeyringSignature>,
+    /// The founder-only recovery root key(s). Every epoch's DEK is HPKE-wrapped to a
+    /// RecoveryKey's public key (a WRAP_METHOD_RRK_HPKE wrap in the epoch), so the founder
+    /// reaches every epoch — past and future, including epochs a co-owner minted — by
+    /// unwrapping ONE recovery-key private key (held only under the founder's passphrase and
+    /// recovery code, never shared with members). V1: exactly one, the founder's.
+    #[prost(message, repeated, tag="11")]
+    pub recovery_keys: ::prost::alloc::vec::Vec<RecoveryKey>,
+}
+/// The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
+/// construction: the private key exists only under the two founder-credential wraps in
+/// `wraps`; every other party (co-owner rotations included) touches only `public_key`. A
+/// removed member never receives it, so it does not weaken revocation.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RecoveryKey {
+    /// X25519 public key. Every KeyEpoch carries one WRAP_METHOD_RRK_HPKE wrap of its DEK to
+    /// this key. Covered by the keyring signature, so the server can't substitute it.
+    #[prost(bytes="vec", tag="1")]
+    pub public_key: ::prost::alloc::vec::Vec<u8>,
+    /// The founder this recovery key belongs to (must equal the FOUNDER signer's member_id;
+    /// client-verified).
+    #[prost(string, tag="2")]
+    pub member_id: ::prost::alloc::string::String,
+    /// The recovery root private key, wrapped under the founder's passphrase KEK
+    /// (WRAP_METHOD_PASSPHRASE_ARGON2ID) and recovery-code KEK
+    /// (WRAP_METHOD_RECOVERY_CODE_ARGON2ID) — exactly two entries in V1, each with its
+    /// Argon2id kdf_params. AAD is the tree-scoped rrk binding, not the per-epoch tuple.
+    #[prost(message, repeated, tag="3")]
+    pub wraps: ::prost::alloc::vec::Vec<KeyWrap>,
 }
 /// A member of the authorized-signer set — a founder or co-owner who may administer
 /// the keyring (rotate keys, add/remove members, re-sign).
@@ -430,6 +458,9 @@ pub enum WrapMethod {
     /// makes the two wraps for one member unambiguous — wrap_method is in the wrap's AAD
     /// tuple (§4), so they can't be swapped. Additive/non-breaking (open enum).
     RecoveryCodeArgon2id = 3,
+    /// An epoch's DEK sealed (HPKE) to a RecoveryKey's public key, so the founder reaches
+    /// every epoch via one recovery root private key. Uses the per-epoch wrap binding.
+    RrkHpke = 4,
 }
 impl WrapMethod {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -442,6 +473,7 @@ impl WrapMethod {
             Self::PassphraseArgon2id => "WRAP_METHOD_PASSPHRASE_ARGON2ID",
             Self::X25519Hpke => "WRAP_METHOD_X25519_HPKE",
             Self::RecoveryCodeArgon2id => "WRAP_METHOD_RECOVERY_CODE_ARGON2ID",
+            Self::RrkHpke => "WRAP_METHOD_RRK_HPKE",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -451,6 +483,7 @@ impl WrapMethod {
             "WRAP_METHOD_PASSPHRASE_ARGON2ID" => Some(Self::PassphraseArgon2id),
             "WRAP_METHOD_X25519_HPKE" => Some(Self::X25519Hpke),
             "WRAP_METHOD_RECOVERY_CODE_ARGON2ID" => Some(Self::RecoveryCodeArgon2id),
+            "WRAP_METHOD_RRK_HPKE" => Some(Self::RrkHpke),
             _ => None,
         }
     }

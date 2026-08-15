@@ -476,7 +476,7 @@ pub fn remove_member(
     .map_err(to_js)?;
     Ok(VaultResult {
         keyring: r.keyring,
-        recovery_code: r.recovery_code,
+        recovery_code: String::new(), // removal no longer rotates the recovery code (RRK)
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })

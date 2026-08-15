@@ -203,7 +203,6 @@ pub struct MemberAdded {
 pub struct MemberRemoved {
     pub sealer_id: String,
     pub revision: u32,
-    pub recovery_code: String,
 }
 
 // ---------------------------------------------------------------- registry
@@ -454,7 +453,7 @@ impl<S: VaultStore> VaultHost<S> {
         self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
         self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
         let id = self.register(r.sealer)?;
-        Ok(MemberRemoved { sealer_id: id, revision: r.revision, recovery_code: r.recovery_code })
+        Ok(MemberRemoved { sealer_id: id, revision: r.revision })
     }
 
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,

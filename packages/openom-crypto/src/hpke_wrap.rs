@@ -79,6 +79,16 @@ pub fn derive_hpke_keypair(ikm: &[u8; 32]) -> ([u8; HPKE_SECRET_LEN], [u8; HPKE_
     (secret, public)
 }
 
+/// Generate a fresh random X25519 HPKE keypair — for a per-tree escrow key (the recovery
+/// root key) that is NOT derived from any passphrase. Returns `(secret, public)`.
+pub fn generate_hpke_keypair() -> Result<([u8; HPKE_SECRET_LEN], [u8; HPKE_PUBLIC_LEN]), CryptoError> {
+    let mut ikm = [0u8; 32];
+    getrandom::fill(&mut ikm).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    let out = derive_hpke_keypair(&ikm);
+    ikm.iter_mut().for_each(|b| *b = 0); // scrub the IKM
+    Ok(out)
+}
+
 /// Seal `dek` to a member's X25519 public key, binding `info` (the wrap context tuple) so
 /// the wrap can't be replayed for another member/epoch/tree.
 pub fn hpke_wrap_dek(recipient_public: &[u8], dek: &[u8], info: &[u8]) -> Result<HpkeWrap, CryptoError> {
