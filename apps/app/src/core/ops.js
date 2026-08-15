@@ -19,15 +19,21 @@ export function op(type, payload) {
   return { type, ...payload };
 }
 
+// One update = one opaque byte blob. The store (and the sealer above it) treat it as
+// bytes and nothing else — so ops AND provenance must live *inside* the bytes, not beside
+// them in a structured record. An earlier version returned `{ bytes, meta }`, which a
+// plaintext store happened to accept but the encryption layer could not: sealing a plain
+// object as a byte slice yields empty ciphertext and silently drops `meta`. Everything is
+// in the JSON payload now, so the whole update — ops and metadata alike — is encrypted.
 export function encodeUpdate(ops, deviceId, lamport) {
-  const bytes = new TextEncoder().encode(JSON.stringify(ops));
-  return {
-    bytes: Array.from(bytes),
+  const payload = {
+    ops,
     meta: {
       device_id: deviceId, lamport, created_at: Date.now(),
       schema_version: SCHEMA_VERSION, doc_version: DOC_VERSION
     }
   };
+  return new TextEncoder().encode(JSON.stringify(payload));
 }
 
 /**
@@ -35,15 +41,15 @@ export function encodeUpdate(ops, deviceId, lamport) {
  * entscheiden, ob eine Aenderung aelter ist als ein Grabstein.
  */
 export function decodeUpdate(update) {
-  const meta = update?.meta ?? {};
+  const bytes = update instanceof Uint8Array ? update : new Uint8Array(update);
+  const { ops, meta = {} } = JSON.parse(new TextDecoder().decode(bytes));
   const v = meta.schema_version;
   // Fehlt die Angabe, stammt der Eintrag aus der ersten Fassung — die ist
   // lesbar. Ist sie hoeher als unsere, ist sie es nicht.
   if (v != null && v > SCHEMA_VERSION) {
     throw new FutureVersionError('update', v, SCHEMA_VERSION);
   }
-  const bytes = update.bytes instanceof Uint8Array ? update.bytes : new Uint8Array(update.bytes);
-  return { ops: JSON.parse(new TextDecoder().decode(bytes)), meta };
+  return { ops, meta };
 }
 
 /**
