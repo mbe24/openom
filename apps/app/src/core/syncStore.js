@@ -174,7 +174,14 @@ export class SyncStore {
       return { status: 'synced', version };
     } catch (e) {
       if (e instanceof ConflictError) {
-        return { status: 'conflict', remote: await this.#remote.readSnapshot(id) };
+        // The remote moved on. Fetch it for the caller to merge — but if THAT read drops, don't
+        // throw a raw network error up to the app: report offline so the tick is retried later
+        // (the doc stays dirty). A sync tick must only ever resolve to a status, never throw.
+        try {
+          return { status: 'conflict', remote: await this.#remote.readSnapshot(id) };
+        } catch (readErr) {
+          return { status: 'offline', error: readErr };
+        }
       }
       return { status: 'offline', error: e };
     }
