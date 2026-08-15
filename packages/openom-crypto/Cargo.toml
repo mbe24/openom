@@ -15,3 +15,6 @@ argon2.workspace = true
 zeroize.workspace = true
 getrandom.workspace = true
 thiserror.workspace = true
+# Recovery code: base32 encoding + a SHA-256-derived checksum byte for typo detection.
+data-encoding.workspace = true
+sha2.workspace = true

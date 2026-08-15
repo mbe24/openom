@@ -126,7 +126,9 @@ pub struct KeyWrap {
     /// AEAD(DEK); its AAD binds (tree_id, key_id, member_id, wrap_method, epoch).
     #[prost(bytes="vec", tag="4")]
     pub wrapped_dek: ::prost::alloc::vec::Vec<u8>,
-    /// Set for WRAP_METHOD_PASSPHRASE_ARGON2ID.
+    /// Set for the Argon2id wrap methods (WRAP_METHOD_PASSPHRASE_ARGON2ID and
+    /// WRAP_METHOD_RECOVERY_CODE_ARGON2ID). The recovery wrap uses minimal cost — its
+    /// input is a high-entropy code, so memory-hardness buys nothing.
     #[prost(message, optional, tag="5")]
     pub kdf_params: ::core::option::Option<KdfParams>,
     /// Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
@@ -287,6 +289,11 @@ pub enum WrapMethod {
     Unspecified = 0,
     PassphraseArgon2id = 1,
     X25519Hpke = 2,
+    /// A second wrap of the same DEK under a high-entropy printable recovery code, so a
+    /// lost passphrase isn't total data loss. A distinct value (not reusing PASSPHRASE)
+    /// makes the two wraps for one member unambiguous — wrap_method is in the wrap's AAD
+    /// tuple (§4), so they can't be swapped. Additive/non-breaking (open enum).
+    RecoveryCodeArgon2id = 3,
 }
 impl WrapMethod {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -298,6 +305,7 @@ impl WrapMethod {
             Self::Unspecified => "WRAP_METHOD_UNSPECIFIED",
             Self::PassphraseArgon2id => "WRAP_METHOD_PASSPHRASE_ARGON2ID",
             Self::X25519Hpke => "WRAP_METHOD_X25519_HPKE",
+            Self::RecoveryCodeArgon2id => "WRAP_METHOD_RECOVERY_CODE_ARGON2ID",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -306,6 +314,7 @@ impl WrapMethod {
             "WRAP_METHOD_UNSPECIFIED" => Some(Self::Unspecified),
             "WRAP_METHOD_PASSPHRASE_ARGON2ID" => Some(Self::PassphraseArgon2id),
             "WRAP_METHOD_X25519_HPKE" => Some(Self::X25519Hpke),
+            "WRAP_METHOD_RECOVERY_CODE_ARGON2ID" => Some(Self::RecoveryCodeArgon2id),
             _ => None,
         }
     }

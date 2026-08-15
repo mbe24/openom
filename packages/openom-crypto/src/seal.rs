@@ -63,8 +63,9 @@ pub(crate) fn xchacha_seal(
 ) -> Result<Vec<u8>, CryptoError> {
     check_nonce(nonce, XCHACHA_NONCE_LEN)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .encrypt(XNonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(&nonce, Payload { msg: plaintext, aad })
         .map_err(|_| CryptoError::Seal)
 }
 
@@ -76,8 +77,9 @@ pub(crate) fn xchacha_open(
 ) -> Result<Vec<u8>, CryptoError> {
     check_nonce(nonce, XCHACHA_NONCE_LEN)?;
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&nonce, Payload { msg: ciphertext, aad })
         .map_err(|_| CryptoError::Open)
 }
 
@@ -89,8 +91,9 @@ fn aesgcm_seal(
 ) -> Result<Vec<u8>, CryptoError> {
     check_nonce(nonce, AES_GCM_NONCE_LEN)?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .encrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .encrypt(&nonce, Payload { msg: plaintext, aad })
         .map_err(|_| CryptoError::Seal)
 }
 
@@ -102,8 +105,9 @@ fn aesgcm_open(
 ) -> Result<Vec<u8>, CryptoError> {
     check_nonce(nonce, AES_GCM_NONCE_LEN)?;
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .decrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&nonce, Payload { msg: ciphertext, aad })
         .map_err(|_| CryptoError::Open)
 }
 

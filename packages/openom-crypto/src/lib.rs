@@ -37,11 +37,15 @@ pub fn cipher_suite() -> &'static str {
 }
 
 mod kdf;
+mod recovery;
 mod seal;
 mod wrap;
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
+};
+pub use recovery::{
+    generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,
 };
 pub use seal::{open, seal};
 pub use wrap::{unwrap_dek, wrap_dek, WrapContext, WrappedDek};
@@ -73,4 +77,10 @@ pub enum CryptoError {
     /// The system CSPRNG failed.
     #[error("RNG failed: {0}")]
     Rng(String),
+    /// A recovery code isn't valid base32 or the wrong length.
+    #[error("malformed recovery code")]
+    RecoveryFormat,
+    /// A recovery code's checksum doesn't match — almost certainly a typo.
+    #[error("recovery code checksum mismatch (likely a typo)")]
+    RecoveryChecksum,
 }
