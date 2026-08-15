@@ -1,5 +1,7 @@
 import { createStore } from './core/store.js';
-import { TreeLibrary } from './core/library.js';
+import { TreeLibrary, dataset } from './core/library.js';
+import { composeStore } from './core/storeStack.js';
+import { createLibrarySealer } from './core/sealer/index.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, LocalOnlyAuth, syncStatus } from './core/session.js';
@@ -74,11 +76,29 @@ class App {
   async boot() {
     // Erst hier, weil nur ein Oeffnungsversuch verraet, ob IndexedDB im
     // aktuellen Browsermodus wirklich benutzbar ist.
-    const { store, kind } = await createStore();
-    this.storeKind = kind;
+    // Local, end-to-end-encrypted store: every snapshot is sealed by the WASM sealer before
+    // it reaches the durable cache — no server needed. The dev key (§16) lets this run with
+    // no unlock flow yet, for fast UI iteration; the bytes at rest are still real ciphertext.
+    const base = await createStore();
+    const sealer = createLibrarySealer({ dev: true });
+    const { store } = await composeStore({ mode: 'local', sealer, local: base.store });
+    this.storeKind = 'sealed / ' + base.kind;
     this.library = new TreeLibrary(store);
     await loadLocale(this.locale);
-    const { tree, focusId } = await this.library.openSeeded(this.datasetId);
+    let opened;
+    try {
+      opened = await this.library.openSeeded(this.datasetId);
+    } catch (e) {
+      // Pre-encryption local data can't be opened by the sealer. This local/dev path
+      // re-seeds, so reset the incompatible doc and start fresh instead of crashing. (A real
+      // plaintext → encrypted migration for existing users is a separate, later concern.)
+      console.warn('[openom] resetting unreadable local tree (likely pre-encryption data):', e);
+      const doc = dataset(this.datasetId).doc;
+      this.library.close(doc);
+      await store.delete(doc);
+      opened = await this.library.openSeeded(this.datasetId);
+    }
+    const { tree, focusId } = opened;
     this.tree = tree;
     tree.blobs = this.blobs;   // Bytes bleiben getrennt, aber erreichbar
     this.focusId = focusId;

@@ -10,11 +10,13 @@
 //   await mod.default({ module_or_path: new URL('<pkg>/openom_sealer_bg.wasm', import.meta.url) })
 // This path is exercised by the app's serverless dev flow, not the headless unit tests.
 
-// Resolved lazily + once: initializing the WASM module is idempotent per page.
+// Resolved lazily + once: initializing the WASM module is idempotent per page. The pkg is
+// built into src/vendor/sealer by scripts/build-sealer.mjs and served over HTTP; the dynamic
+// import keeps it out of the load path until a sealer is actually needed.
 let modPromise = null;
 function loadModule() {
   if (!modPromise) {
-    modPromise = import('../../../../../packages/openom-sealer/pkg/openom_sealer.js').then(async (mod) => {
+    modPromise = import('../../vendor/sealer/openom_sealer.js').then(async (mod) => {
       await mod.default(); // wasm-bindgen --target web init (fetches the _bg.wasm)
       return mod;
     });

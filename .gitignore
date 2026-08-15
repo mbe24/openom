@@ -5,10 +5,11 @@ apps/src-tauri/gen/
 .DS_Store
 
 # WASM sealer build artifacts (scripts/build-sealer.mjs): the on-mount cargo target
-# dir, the generated wasm-bindgen package, and the downloaded CLI.
+# dir, the downloaded CLI, and the generated wasm-bindgen package (emitted under the
+# web app's served root so the browser can fetch it without a bundler).
 packages/openom-sealer/target-wasm/
-packages/openom-sealer/pkg/
 packages/openom-sealer/tools/
+apps/app/src/vendor/sealer/
 
 # Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
 .env

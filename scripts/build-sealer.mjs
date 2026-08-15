@@ -47,7 +47,10 @@ const RUSTFLAGS = ['--cfg getrandom_backend="wasm_js"', process.env.WASM_RUSTFLA
 
 const WASM = path.join(CRATE, TARGET_SUBDIR, 'wasm32-unknown-unknown', PROFILE, 'openom_sealer.wasm');
 const TOOLS_DIR = path.join(CRATE, 'tools');
-const PKG_DIR = path.join(CRATE, 'pkg');
+// Output under the web app's served root (no bundler — serve.mjs hands out files directly),
+// alongside the other vendored module (src/vendor). The web sealer binding imports from here
+// and the .wasm is fetched over HTTP relative to it; Tauri bundles the same tree.
+const PKG_DIR = path.join(REPO, 'apps', 'app', 'src', 'vendor', 'sealer');
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: 'inherit', ...opts });
