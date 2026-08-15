@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use openom_store::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
-use openom_vault_host::{Provisioned, Recovered, Rekeyed, Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost};
+use openom_vault_host::{
+    MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed, Sealed,
+    Unlocked, VaultError, VaultErrorCode, VaultHost,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
@@ -145,6 +148,84 @@ async fn vault_change_passphrase(
     .map_err(join_err)?
 }
 
+// ----------------------------------------------------------------- sharing (Argon2id: async)
+
+#[tauri::command]
+async fn vault_provision_member(
+    state: State<'_, Vault>,
+    passphrase: String,
+) -> Result<MemberProvisioned, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || host.provision_member(passphrase))
+        .await
+        .map_err(join_err)?
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn vault_add_member(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    owner_passphrase: String,
+    owner_member_id: String,
+    new_member_id: String,
+    role: String,
+    member_hpke_public: Vec<u8>,
+    member_author_public: Vec<u8>,
+) -> Result<MemberAdded, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.add_member(
+            &tree_key,
+            &tree_id,
+            owner_passphrase,
+            &owner_member_id,
+            &new_member_id,
+            &role,
+            &member_hpke_public,
+            &member_author_public,
+        )
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn vault_unlock_as_member(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    passphrase: String,
+    member_kdf_params: Vec<u8>,
+    member_id: String,
+    trusted_signers: Vec<Vec<u8>>,
+) -> Result<Unlocked, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.unlock_as_member(&tree_key, &tree_id, passphrase, &member_kdf_params, &member_id, trusted_signers)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn vault_remove_member(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    owner_passphrase: String,
+    owner_member_id: String,
+    remove_member_id: String,
+) -> Result<MemberRemoved, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.remove_member(&tree_key, &tree_id, owner_passphrase, &owner_member_id, &remove_member_id)
+    })
+    .await
+    .map_err(join_err)?
+}
+
 // ----------------------------------------------------------------- sealer (cheap: sync is fine)
 
 #[tauri::command]
@@ -215,6 +296,10 @@ pub fn run() {
             vault_unlock,
             vault_recover,
             vault_change_passphrase,
+            vault_provision_member,
+            vault_add_member,
+            vault_unlock_as_member,
+            vault_remove_member,
             sealer_dev,
             sealer_seal_entry,
             sealer_open_entry,
