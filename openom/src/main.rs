@@ -96,9 +96,22 @@ async fn main() -> Result<(), lambda_http::Error> {
     // Give it a generous tree limit: the dev account is a convenience, not a
     // free-tier user, and shouldn't trip entitlement caps during development.
     if config.is_local() {
+        // Generous entitlements: the dev account is a convenience, not a free-tier
+        // user, so grant media + streaming + big caps (§17) — dev shouldn't trip
+        // entitlement gates. 5 GiB/blob, 1 TiB pool, 10 GiB tree reserve.
         sqlx::query(
-            "INSERT INTO accounts (id, max_trees) VALUES ($1, 1000000)
-             ON CONFLICT (id) DO UPDATE SET max_trees = EXCLUDED.max_trees",
+            "INSERT INTO accounts
+                 (id, max_trees, allow_media, allow_streaming_media,
+                  max_blob_bytes, max_blob_count, max_storage_bytes, max_tree_bytes)
+             VALUES ($1, 1000000, true, true, 5368709120, 1000000, 1099511627776, 10737418240)
+             ON CONFLICT (id) DO UPDATE SET
+                 max_trees = EXCLUDED.max_trees,
+                 allow_media = EXCLUDED.allow_media,
+                 allow_streaming_media = EXCLUDED.allow_streaming_media,
+                 max_blob_bytes = EXCLUDED.max_blob_bytes,
+                 max_blob_count = EXCLUDED.max_blob_count,
+                 max_storage_bytes = EXCLUDED.max_storage_bytes,
+                 max_tree_bytes = EXCLUDED.max_tree_bytes",
         )
         .bind(config.local_member_id)
         .execute(&db)
