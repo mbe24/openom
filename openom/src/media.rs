@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -301,4 +301,181 @@ async fn cleanup_rejected(
         .execute(&state.db)
         .await;
     let _ = state.storage.delete_object(staging).await;
+}
+
+// ---- Presence-based GC (§9.11, §12): refcount + tombstone-with-revive ----------
+
+/// Look up a blob's owner + state for an attach/detach op. 404 if absent; 403 if not
+/// the caller's; Conflict if still pending (must confirm before referencing).
+async fn load_for_ref(
+    state: &AppState,
+    identity: &Identity,
+    tree_id: Uuid,
+    blob_id: Uuid,
+) -> Result<i16, ApiError> {
+    let row: Option<(Uuid, i16)> = sqlx::query_as(
+        "SELECT t.owner_id, b.state
+           FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
+          WHERE b.tree_id = $1 AND b.blob_id = $2",
+    )
+    .bind(tree_id)
+    .bind(blob_id.as_bytes().as_slice())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?;
+    let (owner, statev) = row.ok_or(ApiError::NotFound)?;
+    if owner != identity.member_id {
+        return Err(ApiError::Forbidden);
+    }
+    if statev == 0 {
+        return Err(ApiError::Conflict); // pending — confirm before attaching
+    }
+    Ok(statev)
+}
+
+/// `POST /trees/{id}/media/{blob}/attach` — the client references this blob from its
+/// tree doc: bump refcount, and **revive** it if it was tombstoned (§12). Meter is
+/// unchanged (a tombstoned blob still occupied its bytes).
+pub async fn attach(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path((tree_id, blob_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    load_for_ref(&state, &identity, tree_id, blob_id).await?;
+    let (ref_count,): (i32,) = sqlx::query_as(
+        "UPDATE tree_blobs
+            SET ref_count = ref_count + 1, state = 1, tombstoned_at = NULL
+          WHERE tree_id = $1 AND blob_id = $2
+        RETURNING ref_count",
+    )
+    .bind(tree_id)
+    .bind(blob_id.as_bytes().as_slice())
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal)?;
+    Ok(ref_response(blob_id, ref_count, "live"))
+}
+
+/// `POST /trees/{id}/media/{blob}/detach` — drop a reference: decrement, and when it
+/// hits zero move to **tombstoned** (revivable) with a timestamp — never a physical
+/// delete (§9.11). Meter unchanged until the sweeper physically deletes.
+pub async fn detach(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path((tree_id, blob_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let statev = load_for_ref(&state, &identity, tree_id, blob_id).await?;
+    if statev == 2 {
+        return Ok(ref_response(blob_id, 0, "tombstoned")); // already tombstoned — idempotent
+    }
+    let (ref_count, new_state): (i32, i16) = sqlx::query_as(
+        "UPDATE tree_blobs
+            SET ref_count = GREATEST(ref_count - 1, 0),
+                state = CASE WHEN ref_count - 1 <= 0 THEN 2 ELSE 1 END,
+                tombstoned_at = CASE WHEN ref_count - 1 <= 0 THEN now() ELSE tombstoned_at END
+          WHERE tree_id = $1 AND blob_id = $2 AND state = 1
+        RETURNING ref_count, state",
+    )
+    .bind(tree_id)
+    .bind(blob_id.as_bytes().as_slice())
+    .fetch_one(&state.db)
+    .await
+    .map_err(internal)?;
+    Ok(ref_response(
+        blob_id,
+        ref_count,
+        if new_state == 2 { "tombstoned" } else { "live" },
+    ))
+}
+
+fn ref_response(blob_id: Uuid, ref_count: i32, state: &str) -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({ "blob_id": blob_id.simple().to_string(), "ref_count": ref_count, "state": state })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SweepParams {
+    /// Override the tombstone grace (seconds) — for tests/manual runs. Default 30d.
+    tombstone_grace_secs: Option<i64>,
+    /// Override the pending-intent expiry (seconds). Default 1h.
+    pending_expiry_secs: Option<i64>,
+}
+
+const DEFAULT_TOMBSTONE_GRACE_SECS: i64 = 30 * 24 * 3600;
+const DEFAULT_PENDING_EXPIRY_SECS: i64 = 3600;
+
+/// `POST /dev/gc` (local only) — run the physical sweep. In production this logic is
+/// driven by a scheduled trigger (EventBridge → an authenticated internal call), not
+/// a public route.
+pub async fn sweep_dev(
+    State(state): State<AppState>,
+    Query(p): Query<SweepParams>,
+) -> Result<Response, ApiError> {
+    let (deleted, expired) = run_sweep(
+        &state,
+        p.tombstone_grace_secs.unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
+        p.pending_expiry_secs.unwrap_or(DEFAULT_PENDING_EXPIRY_SECS),
+    )
+    .await?;
+    Ok(Json(json!({ "physically_deleted": deleted, "pending_expired": expired })).into_response())
+}
+
+/// Physical GC: delete tombstoned blobs past their grace window (crediting the meter
+/// back — the *only* place usage is returned, §9.9a), and expire abandoned pending
+/// intents (releasing the reservation + the staging object).
+async fn run_sweep(
+    state: &AppState,
+    tombstone_grace_secs: i64,
+    pending_expiry_secs: i64,
+) -> Result<(usize, usize), ApiError> {
+    // 1. Expired tombstones → physical delete + meter credit.
+    let tombs: Vec<(Uuid, Vec<u8>, String, i64, Uuid)> = sqlx::query_as(
+        "SELECT b.tree_id, b.blob_id, b.r2_key, b.size_bytes, t.owner_id
+           FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
+          WHERE b.state = 2
+            AND b.tombstoned_at <= now() - make_interval(secs => $1::double precision)",
+    )
+    .bind(tombstone_grace_secs)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    let mut deleted = 0usize;
+    for (tree_id, blob, key, size, owner) in &tombs {
+        let _ = state.storage.delete_object(key).await;
+        release(state, *owner, *size).await;
+        let _ = sqlx::query("DELETE FROM tree_blobs WHERE tree_id = $1 AND blob_id = $2")
+            .bind(tree_id)
+            .bind(blob.as_slice())
+            .execute(&state.db)
+            .await;
+        deleted += 1;
+    }
+
+    // 2. Expired pending intents → release reservation + delete the staging object.
+    let pend: Vec<(Uuid, Vec<u8>, String, i64, Uuid)> = sqlx::query_as(
+        "SELECT b.tree_id, b.blob_id, b.r2_key, b.size_bytes, t.owner_id
+           FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
+          WHERE b.state = 0
+            AND b.created_at <= now() - make_interval(secs => $1::double precision)",
+    )
+    .bind(pending_expiry_secs)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    let mut expired = 0usize;
+    for (tree_id, blob, key, size, owner) in &pend {
+        release(state, *owner, *size).await;
+        let _ = state.storage.delete_object(key).await;
+        let _ = sqlx::query("DELETE FROM tree_blobs WHERE tree_id = $1 AND blob_id = $2")
+            .bind(tree_id)
+            .bind(blob.as_slice())
+            .execute(&state.db)
+            .await;
+        expired += 1;
+    }
+
+    Ok((deleted, expired))
 }

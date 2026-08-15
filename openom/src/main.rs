@@ -62,7 +62,7 @@ async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
 }
 
 fn app(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/whoami", get(whoami))
@@ -72,6 +72,15 @@ fn app(state: AppState) -> Router {
         .route("/trees/{tree_id}/media/intent", post(media::intent))
         .route("/trees/{tree_id}/media/{blob_id}", get(media::get_media))
         .route("/trees/{tree_id}/media/{blob_id}/confirm", post(media::confirm))
+        // Presence-based GC (§9.11): the client drives refcount as it references /
+        // dereferences a blob in its tree doc.
+        .route("/trees/{tree_id}/media/{blob_id}/attach", post(media::attach))
+        .route("/trees/{tree_id}/media/{blob_id}/detach", post(media::detach));
+    // Physical sweep is local-only here; production drives it from a scheduled trigger.
+    if state.config.is_local() {
+        router = router.route("/dev/gc", post(media::sweep_dev));
+    }
+    router
         // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
         // take the presigned path, never this proxy.
         .layer(DefaultBodyLimit::max(trees::MAX_OBJECT_BYTES))
