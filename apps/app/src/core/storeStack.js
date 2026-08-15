@@ -17,6 +17,7 @@ import { MemoryStore, createStore } from './store.js';
 import { SealedStore } from './sealedStore.js';
 import { SyncStore } from './syncStore.js';
 import { RemoteStore } from './remoteStore.js';
+import { Watermarks } from './watermarks.js';
 
 /**
  * @param {object} opts
@@ -26,6 +27,7 @@ import { RemoteStore } from './remoteStore.js';
  * @param {object} [opts.remote]        a RemoteStore (or built from remoteBaseUrl)
  * @param {string} [opts.remoteBaseUrl] server base URL (used if `remote` is omitted)
  * @param {string|null} [opts.token]    auth bearer for the remote
+ * @param {object} [opts.watermarks]    §10 anti-rollback for 'synced'; defaults to a new one
  * @returns {Promise<{ store, mode, encrypted, kind, sync? }>}
  */
 export async function composeStore(opts) {
@@ -64,7 +66,10 @@ export async function composeStore(opts) {
       opts.remote ??
       new RemoteStore({ baseUrl: opts.remoteBaseUrl, token: opts.token ?? null });
     if (!remote) throw new Error("mode 'synced' requires a remote or remoteBaseUrl");
-    const sync = new SyncStore(local, remote);
+    // A partly-trusted server is a real adversary once sync exists, so the sync layer gets a
+    // Watermarks — it refuses a fast-forward onto a snapshot the client already moved past
+    // (§10 anti-rollback). Injectable for tests; persisted per device by default.
+    const sync = new SyncStore(local, remote, { watermarks: opts.watermarks ?? new Watermarks() });
     return {
       store: new SealedStore(sync, opts.sealer),
       mode,

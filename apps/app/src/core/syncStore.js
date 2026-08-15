@@ -29,6 +29,7 @@
 // merge, never overwritten.
 
 import { ConflictError } from './store.js';
+import { RegressionError } from './watermarks.js';
 
 const bytesEqual = (a, b) =>
   a === b || (!!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]));
@@ -58,13 +59,25 @@ export class SyncStore {
   #local;
   #remote;
   #persist;
+  #watermarks; // optional §10 anti-rollback; undefined → no snapshot-replay checking
   #cache = new Map(); // id -> {remoteVersion, dirty}; in-memory mirror of #persist
 
-  constructor(local, remote, { persist } = {}) {
+  constructor(local, remote, { persist, watermarks } = {}) {
     if (!local || !remote) throw new Error('SyncStore needs a local and a remote store');
     this.#local = local;
     this.#remote = remote;
     this.#persist = persist ?? defaultPersist();
+    this.#watermarks = watermarks ?? null;
+  }
+
+  // Fold an accepted snapshot's identity into the watermark, so a later replay of a snapshot
+  // the client already moved past is caught (§10). The id is the SHA-256 of the OPAQUE sealed
+  // bytes — SyncStore never decrypts; it just hashes what it moves. Throws RegressionError if
+  // this is a rollback to a superseded snapshot.
+  async #observeSnapshot(id, sealedBytes) {
+    if (!this.#watermarks) return;
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', sealedBytes));
+    this.#watermarks.observe(id, { snapshotHash: digest });
   }
 
   // Per-doc sync state, loaded from the durable store on first touch and cached.
@@ -132,7 +145,10 @@ export class SyncStore {
    */
   async putSnapshot(id, bytes, expected = null) {
     this.#save(id, { dirty: true });
-    return this.#local.putSnapshot(id, bytes, expected);
+    const version = await this.#local.putSnapshot(id, bytes, expected);
+    // Our own new snapshot becomes the watermark head (each seal is a fresh, unseen hash).
+    await this.#observeSnapshot(id, bytes);
+    return version;
   }
 
   /** Whether the doc has local changes not yet confirmed on the remote. */
@@ -170,6 +186,9 @@ export class SyncStore {
    *                    despite a lost ack — the idempotency case).
    *  - `fastForward` — local was in sync with the old remote; adopted the new one.
    *  - `conflict`    — both sides changed; `remote` (sealed) for the caller to merge.
+   *  - `rollback`    — the remote is a snapshot the client already moved past (§10); NOT
+   *                    adopted. `error` is the RegressionError. The caller should surface it
+   *                    (a partly-trusted server may be serving stale data) rather than sync.
    *  - `noRemote`    — the remote has no snapshot yet.
    *  - `offline`     — network/other error.
    */
@@ -200,6 +219,15 @@ export class SyncStore {
     if (local && !provablyClean) {
       return { status: 'conflict', remote };
     }
+    // Anti-rollback (§10): refuse to fast-forward onto a snapshot the client already moved
+    // past — a partly-trusted server re-serving an older-but-valid snapshot. Check before
+    // adopting, so a replay never overwrites the local cache.
+    try {
+      await this.#observeSnapshot(id, remote.bytes);
+    } catch (e) {
+      if (e instanceof RegressionError) return { status: 'rollback', error: e, remote };
+      throw e;
+    }
     // No local to lose, or provably clean: adopt the new remote.
     await this.#local.putSnapshot(id, remote.bytes, local ? local.version : null);
     this.#save(id, { remoteVersion: remote.version, dirty: false });
@@ -224,6 +252,7 @@ export class SyncStore {
     this.#save(id, { dirty: true });
     const version = await this.#local.putSnapshot(id, mergedBytes, local ? local.version : null);
     this.#save(id, { remoteVersion });
+    await this.#observeSnapshot(id, mergedBytes); // the merged snapshot is our new head
     return version;
   }
 
@@ -233,7 +262,10 @@ export class SyncStore {
    */
   async reconcile(id) {
     const pulled = await this.pull(id);
-    if (pulled.status === 'conflict' || pulled.status === 'offline') return pulled;
+    // conflict/offline/rollback are all terminal for this tick — do not push over them.
+    if (pulled.status === 'conflict' || pulled.status === 'offline' || pulled.status === 'rollback') {
+      return pulled;
+    }
     // A fast-forward adopted the remote and (by construction) had no local changes —
     // nothing to push. Surface it rather than masking it with a no-op 'clean' push.
     if (pulled.status === 'fastForward') return pulled;

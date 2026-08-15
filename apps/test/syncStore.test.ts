@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { SyncStore } from '../app/src/core/syncStore.js';
 import { MemoryStore, ConflictError } from '../app/src/core/store.js';
+import { Watermarks } from '../app/src/core/watermarks.js';
 
 const bytes = (...xs: number[]) => new Uint8Array(xs);
 
@@ -164,6 +165,59 @@ describe('SyncStore', () => {
     const r = await s2.pull('t');
     expect(r.status).toBe('fastForward'); // provably clean → safe to adopt
     expect(Array.from((await s2.readSnapshot('t'))!.bytes)).toEqual([2]);
+  });
+
+  // §10 anti-rollback: with a Watermarks injected, SyncStore observes every accepted snapshot
+  // (own writes and fast-forwards) and refuses a fast-forward onto a snapshot the client
+  // already moved past — a partly-trusted server re-serving stale-but-valid data.
+  const wmStore = () => new Watermarks(memKV());
+  const rollbackRemoteTo = async (remote: any, id: string, b: Uint8Array) => {
+    const cur = await remote.readSnapshot(id);
+    await remote.putSnapshot(id, b, cur ? cur.version : null); // serve old bytes at a fresh version
+  };
+
+  it('advances on genuine progress but catches a later rollback (multi-device)', async () => {
+    const remote = new MemoryStore();
+    const writer = device(remote); // pushes new snapshots
+    const b = new SyncStore(new MemoryStore(), remote, { persist: memKV(), watermarks: wmStore() });
+
+    await put(writer, 't', bytes(1));
+    await writer.pushSnapshot('t');
+    expect((await b.pull('t')).status).toBe('fastForward'); // b accepts S1
+
+    await put(writer, 't', bytes(2));
+    await writer.pushSnapshot('t');
+    expect((await b.pull('t')).status).toBe('fastForward'); // b accepts S2 — genuine progress
+
+    await rollbackRemoteTo(remote, 't', bytes(1)); // server rolls back to S1
+    const r = await b.pull('t');
+    expect(r.status).toBe('rollback');
+    expect(Array.from((await b.readSnapshot('t'))!.bytes)).toEqual([2]); // stale S1 not adopted
+  });
+
+  it('own writes advance the head, so a rollback of them is caught on the next pull', async () => {
+    // This is why observing only the pull path would be unsound: a single device that never
+    // pulls must still remember its own snapshots to detect the server reverting them.
+    const remote = new MemoryStore();
+    const s = new SyncStore(new MemoryStore(), remote, { persist: memKV(), watermarks: wmStore() });
+    await put(s, 't', bytes(1));
+    await s.pushSnapshot('t'); // head S1 (via own write)
+    await put(s, 't', bytes(2));
+    await s.pushSnapshot('t'); // head S2 (via own write)
+
+    await rollbackRemoteTo(remote, 't', bytes(1));
+    expect((await s.pull('t')).status).toBe('rollback');
+  });
+
+  it('reconcile surfaces a rollback rather than pushing over it', async () => {
+    const remote = new MemoryStore();
+    const s = new SyncStore(new MemoryStore(), remote, { persist: memKV(), watermarks: wmStore() });
+    await put(s, 't', bytes(1));
+    await s.pushSnapshot('t');
+    await put(s, 't', bytes(2));
+    await s.pushSnapshot('t');
+    await rollbackRemoteTo(remote, 't', bytes(1));
+    expect((await s.reconcile('t')).status).toBe('rollback');
   });
 
   it('does NOT clobber local content that differs from remote when the sync record is missing', async () => {
