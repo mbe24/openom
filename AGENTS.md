@@ -14,6 +14,8 @@ mood, lowercase start, no trailing period.
 - Scope: the component you touched, e.g. `app`, `store`, `server`, `tauri`,
   `preview`, `brand`, `docs`, `ci`
 - Example: `fix(app): keep the search palette out of the re-rendered shell`
+- Do NOT append a `Co-Authored-By:` / agent-attribution trailer (or any
+  Claude/session line) to commit messages.
 
 ## Validation before committing
 
