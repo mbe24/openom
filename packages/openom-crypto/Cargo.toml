@@ -19,6 +19,8 @@ thiserror.workspace = true
 # Recovery code: base32 encoding + a SHA-256-derived checksum byte for typo detection.
 data-encoding.workspace = true
 sha2.workspace = true
+# HKDF split of the Argon2id master into the KEK + owner identity (see root.rs).
+hkdf.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -72,6 +72,9 @@ zeroize = { version = "1", features = ["derive"] }
 getrandom = "0.3"
 # Base32 for the printable recovery code (grouped, checksummed).
 data-encoding = "2"
+# HKDF-SHA256: expands the one Argon2id output into two independent keys (the KEK that
+# wraps the DEK, and the Ed25519 owner identity that signs the keyring). See derive_root.
+hkdf = "0.12"
 
 # Store client (arrives with the upload path): compress + upload. rustls instead
 # of native-tls, so no OpenSSL is needed in the container. The exact rustls

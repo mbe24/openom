@@ -57,6 +57,7 @@ mod envelope;
 mod kdf;
 mod keyring;
 mod recovery;
+mod root;
 mod seal;
 mod wrap;
 pub use envelope::{open_envelope, seal_envelope, SealParams};
@@ -70,6 +71,7 @@ pub use keyring::{
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,
 };
+pub use root::{derive_root, RootKeys};
 pub use seal::{open, seal};
 pub use wrap::{unwrap_dek, wrap_dek, WrapContext, WrappedDek};
 
