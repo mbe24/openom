@@ -7,9 +7,10 @@
          locally and on a demo deployment. A missing substitution reads as "not true" → off. -->
     <meta name="openom:demo" content="%DEMO%" />
     <title>openom</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap" rel="stylesheet" />
+    <!-- Fonts are vendored (scripts/vendor-fonts.mjs), never fetched from Google at runtime — a
+         privacy-first app must not phone home or need the network to render. @font-face with
+         unicode-range keeps it lazy: only the subsets actually shown are downloaded. -->
+    <link rel="stylesheet" href="./styles/fonts.css" />
     <link rel="stylesheet" href="./styles/tokens.css" />
     <link rel="stylesheet" href="./styles/app.css" />
     <link rel="icon" href="./brand/favicon.svg" type="image/svg+xml">

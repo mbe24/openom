@@ -20,25 +20,10 @@ export const LOCALES = [
   { id: 'ti', label: 'ትግርኛ', dir: 'ltr', script: 'ethiopic' }
 ];
 
-/**
- * Schriften je System. Im Mockup vom CDN; fuer Tauri gehoeren die Dateien
- * neben die App (siehe README, Abschnitt „Schriften").
- */
-const FONTS = {
-  latin: null,   // Newsreader und Systemschrift sind schon geladen
-  arabic: 'https://fonts.googleapis.com/css2?family=Noto+Naskh+Arabic:wght@400;500;600;700&display=swap',
-  ethiopic: 'https://fonts.googleapis.com/css2?family=Noto+Sans+Ethiopic:wght@400;500;600;700&display=swap'
-};
-const loaded = new Set(['latin']);
-
-function ensureFont(script) {
-  if (loaded.has(script) || !FONTS[script]) return;
-  loaded.add(script);
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = FONTS[script];
-  document.head.appendChild(link);
-}
+// Fonts for every script (latin/arabic/ethiopic) are declared once in styles/fonts.css,
+// vendored locally — no runtime CDN fetch. @font-face + unicode-range means the browser only
+// downloads a subset when a matching glyph is actually rendered, so declaring all of them
+// upfront stays lazy. `data-script` on <html> (set in loadLocale) switches the family via CSS.
 
 export function localeInfo(id = current) {
   return LOCALES.find((l) => l.id === id) ?? LOCALES[0];
@@ -89,7 +74,6 @@ export async function loadLocale(id) {
   }
   current = id;
   const info = localeInfo(id);
-  ensureFont(info.script);
   setSortLocale(id);
   document.documentElement.lang = id;
   document.documentElement.dir = info.dir;
