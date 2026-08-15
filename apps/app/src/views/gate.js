@@ -39,6 +39,8 @@ export function gateView(app) {
       return provisionScreen(app);
     case 'recovery':
       return recoveryScreen(app);
+    case 'recover':
+      return recoverScreen(app);
     case 'unlock':
       return unlockScreen(app);
     default:
@@ -47,11 +49,14 @@ export function gateView(app) {
 }
 
 function welcomeScreen(app) {
-  return h('div', { class: 'lock' }, h('div', { class: 'lock-inner' },
+  const kids = [
     mark(),
     title('Your private, end-to-end-encrypted family tree'),
-    primary('Create your tree', { onClick: () => app.startCreate() }),
-    ghost('Explore a demo', () => app.startDemo())));
+    primary('Start your family tree', { onClick: () => app.startCreate() }),
+  ];
+  // The demo is dev/marketing only (build-time flag); a production user never sees it.
+  if (app.demoEnabled) kids.push(ghost('Explore a demo', () => app.startDemo()));
+  return h('div', { class: 'lock' }, h('div', { class: 'lock-inner' }, ...kids));
 }
 
 function provisionScreen(app) {
@@ -71,6 +76,7 @@ function recoveryScreen(app) {
     mark(),
     title('Save your recovery code. It is the ONLY way back if you forget your passphrase — we cannot recover it for you.'),
     h('div', {
+      id: 'gate-recovery-code',
       style: {
         // Base32 ASCII in an RTL doc reorders without this; force LTR + isolate.
         direction: 'ltr', unicodeBidi: 'isolate',
@@ -90,5 +96,24 @@ function unlockScreen(app) {
     mark(),
     title('Unlock your tree'),
     p, errorLine(app),
-    primary(app.gateBusy ? 'Unlocking…' : 'Unlock', { disabled: app.gateBusy, onClick: submit })));
+    primary(app.gateBusy ? 'Unlocking…' : 'Unlock', { disabled: app.gateBusy, onClick: submit }),
+    ghost('Forgot your passphrase?', () => app.startRecover())));
+}
+
+function recoverScreen(app) {
+  const code = h('input', {
+    id: 'gate-code', type: 'text', placeholder: 'Recovery code',
+    autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+    // The recovery code is ASCII base32; keep it LTR + isolated even under a RTL locale.
+    style: { ...passStyle, direction: 'ltr', unicodeBidi: 'isolate' },
+  });
+  const p1 = passField('gate-pass', 'New passphrase', 'new-password');
+  const p2 = passField('gate-pass2', 'Confirm new passphrase', 'new-password');
+  const submit = () => app.doRecover(code.value, p1.value, p2.value);
+  p2.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  return h('div', { class: 'lock' }, h('div', { class: 'lock-inner' },
+    mark(),
+    title('Enter your recovery code and choose a new passphrase.'),
+    code, p1, p2, errorLine(app),
+    primary(app.gateBusy ? 'Recovering…' : 'Recover', { disabled: app.gateBusy, onClick: submit })));
 }

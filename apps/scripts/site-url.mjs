@@ -41,12 +41,22 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   const url = await siteUrl();
+  // Demo affordance is OFF unless a demo deployment opts in (DEMO=true in the env or .env.demo).
+  // Production never sets it, so the flag defaults to false — the safe, no-demo state.
+  let demo = process.env.DEMO;
+  if (demo == null) {
+    try {
+      const env = await readFile(join(HERE, '..', '.env.demo'), 'utf8');
+      demo = env.match(/^\s*DEMO\s*=\s*(.+?)\s*$/m)?.[1];
+    } catch { /* no .env.demo — demo stays off */ }
+  }
+  demo = demo === 'true' ? 'true' : 'false';
   let touched = 0;
   for await (const file of htmlFiles(target)) {
     const before = await readFile(file, 'utf8');
     if (!before.includes('%SITE_URL%')) continue;
-    await writeFile(file, before.replaceAll('%SITE_URL%', url));
+    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%DEMO%', demo));
     touched++;
   }
-  console.log('site-url → ' + url + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
+  console.log('site-url → ' + url + ' · demo=' + demo + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
 }

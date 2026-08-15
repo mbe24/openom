@@ -49,7 +49,9 @@ createServer(async (req, res) => {
     // Same substitution the deploy does, so the placeholder never reaches a
     // browser — locally the origin is this server.
     if (extname(file) === '.html') {
-      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL);
+      // Local dev has the demo on by default (set OPENOM_DEMO=0 to match production).
+      const demo = process.env.OPENOM_DEMO === '0' ? 'false' : 'true';
+      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%DEMO%', demo);
     }
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',

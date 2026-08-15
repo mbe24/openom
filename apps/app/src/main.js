@@ -100,8 +100,17 @@ class App {
     this.applyAccent();
     this.bindKeys();
     this.bindResize();
+    // The demo is not part of the product — dev / marketing only. It's enabled by a build-time
+    // flag substituted into index.html (%DEMO% → false in production, true locally and on a demo
+    // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
+    // shortcut below is inert unless the flag is set.
+    this.demoEnabled = document.querySelector('meta[name="openom:demo"]')?.content === 'true';
     this.realTreeId = await realTreeIdBytes();
     this.vault = await createAppVault();
+    if (this.demoEnabled && new URLSearchParams(location.search).get('demo') === '1') {
+      await this.startDemo();
+      return;
+    }
     this.showGate((await this.vault.hasKeyring(REAL_DOC)) ? 'unlock' : 'welcome');
   }
 
@@ -171,6 +180,31 @@ class App {
     }
   }
 
+  startRecover() {
+    this.showGate('recover');
+  }
+
+  async doRecover(recoveryCode, newPassphrase, confirm) {
+    if (!recoveryCode?.trim()) { this.gateError = 'Enter your recovery code.'; this.renderGate(); return; }
+    if (!newPassphrase || newPassphrase.length < 8) { this.gateError = 'Use at least 8 characters for the new passphrase.'; this.renderGate(); return; }
+    if (newPassphrase !== confirm) { this.gateError = 'Passphrases do not match.'; this.renderGate(); return; }
+    this.gateBusy = true;
+    this.gateError = '';
+    this.renderGate();
+    try {
+      const { session, recoveryCode: newCode } = await this.vault.recover(REAL_DOC, this.realTreeId, recoveryCode, newPassphrase, MEMBER);
+      this.pendingSession = session;
+      this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
+      this.showGate('recovery');
+    } catch (e) {
+      this.gateBusy = false;
+      this.gateError = /rollback/i.test(e?.message ?? '')
+        ? 'This tree looks out of date or tampered — refusing to open it.'
+        : 'Could not recover. Check your recovery code and try again.';
+      this.renderGate();
+    }
+  }
+
   // Compose the store around the resolved sealer, open the tree, and switch to the app.
   async enterApp({ sealer, seedDataset, docId }) {
     const base = await createStore();
@@ -201,6 +235,8 @@ class App {
     tree.onRevision(() => this.render());
     this.schema.onChange(() => this.render());
     this.watchIdle();
+    // A freshly-provisioned tree is empty → the "start with yourself" onboarding.
+    this.view = tree.allPeople().length === 0 ? 'onboarding' : 'tree';
     this.gate = null;
     this.render();
   }

@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Demo mode (dev/marketing only). Substituted at deploy: false in production, true
+         locally and on a demo deployment. A missing substitution reads as "not true" → off. -->
+    <meta name="openom:demo" content="%DEMO%" />
     <title>openom</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
