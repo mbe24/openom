@@ -227,6 +227,59 @@ async fn vault_remove_member(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn vault_add_member_as_co_owner(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    passphrase: String,
+    co_owner_kdf_params: Vec<u8>,
+    co_owner_member_id: String,
+    trusted_signers: Vec<Vec<u8>>,
+    new_member_id: String,
+    role: String,
+    member_hpke_public: Vec<u8>,
+    member_author_public: Vec<u8>,
+) -> Result<MemberAdded, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.add_member_as_co_owner(
+            &tree_key,
+            &tree_id,
+            passphrase,
+            &co_owner_kdf_params,
+            &co_owner_member_id,
+            trusted_signers,
+            &new_member_id,
+            &role,
+            &member_hpke_public,
+            &member_author_public,
+        )
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn vault_remove_member_as_co_owner(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    passphrase: String,
+    co_owner_kdf_params: Vec<u8>,
+    co_owner_member_id: String,
+    trusted_signers: Vec<Vec<u8>>,
+    remove_member_id: String,
+) -> Result<MemberRemoved, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.remove_member_as_co_owner(&tree_key, &tree_id, passphrase, &co_owner_kdf_params, &co_owner_member_id, trusted_signers, &remove_member_id)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
 async fn vault_add_co_owner(
     state: State<'_, Vault>,
     tree_key: String,
@@ -335,6 +388,8 @@ pub fn run() {
             vault_add_member,
             vault_unlock_as_member,
             vault_remove_member,
+            vault_add_member_as_co_owner,
+            vault_remove_member_as_co_owner,
             vault_add_co_owner,
             vault_remove_co_owner,
             sealer_dev,

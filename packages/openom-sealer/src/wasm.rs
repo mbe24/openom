@@ -482,6 +482,79 @@ pub fn remove_member(
     })
 }
 
+/// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
+/// verifies against their pinned signer set (`trusted_signers` = concatenated 32-byte keys),
+/// and signs with the co-owner's identity.
+#[wasm_bindgen(js_name = addMemberAsCoOwner)]
+#[allow(clippy::too_many_arguments)]
+pub fn add_member_as_co_owner(
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    co_owner_member_id: &str,
+    trusted_signers: &[u8],
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_hpke_public: &[u8],
+    member_author_public: &[u8],
+) -> Result<VaultResult, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let kdf = KdfParams::decode(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let trusted = parse_trusted_signers(trusted_signers)?;
+    let added = vault::add_member_as_co_owner(
+        keyring,
+        passphrase.as_bytes(),
+        &kdf,
+        tree_id,
+        co_owner_member_id,
+        &trusted,
+        min_revision,
+        new_member_id,
+        parse_member_role(role)?,
+        member_hpke_public,
+        member_author_public,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult { keyring: added.keyring, recovery_code: String::new(), revision: added.revision, sealer: None })
+}
+
+/// Remove an ordinary member **as a co-owner** (any-of). Returns the re-keyed keyring, new
+/// revision, and a sealer scoped to the new epoch.
+#[wasm_bindgen(js_name = removeMemberAsCoOwner)]
+#[allow(clippy::too_many_arguments)]
+pub fn remove_member_as_co_owner(
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    co_owner_member_id: &str,
+    trusted_signers: &[u8],
+    min_revision: u32,
+    remove_member_id: &str,
+    replica_id: &[u8],
+) -> Result<VaultResult, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let kdf = KdfParams::decode(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let trusted = parse_trusted_signers(trusted_signers)?;
+    let r = vault::remove_member_as_co_owner(
+        keyring,
+        passphrase.as_bytes(),
+        &kdf,
+        tree_id,
+        co_owner_member_id,
+        &trusted,
+        min_revision,
+        remove_member_id,
+        replica_id,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: Some(WasmSealer { inner: r.sealer }) })
+}
+
 /// Promote an existing member to co-owner (founder action). Returns the new keyring +
 /// revision (no sealer — signing authority, not keys).
 #[wasm_bindgen(js_name = addCoOwner)]

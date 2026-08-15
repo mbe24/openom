@@ -470,6 +470,83 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(MemberRemoved { sealer_id: id, revision: r.revision })
     }
 
+    /// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
+    /// verifies against their pinned signer set, signs with their identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_member_as_co_owner(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        co_owner_kdf_params: &[u8],
+        co_owner_member_id: &str,
+        trusted_signers: Vec<Vec<u8>>,
+        new_member_id: &str,
+        role: &str,
+        member_hpke_public: &[u8],
+        member_author_public: &[u8],
+    ) -> Result<MemberAdded> {
+        let passphrase = Zeroizing::new(passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let kdf = KdfParams::decode(co_owner_kdf_params)
+            .map_err(|e| VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}")))?;
+        let trusted = parse_trusted_signers(&trusted_signers)?;
+        let added = vault::add_member_as_co_owner(
+            &keyring,
+            passphrase.as_bytes(),
+            &kdf,
+            tree_id,
+            co_owner_member_id,
+            &trusted,
+            floor,
+            new_member_id,
+            parse_member_role(role)?,
+            member_hpke_public,
+            member_author_public,
+        )?;
+        self.store.save_keyring(tree_key, &added.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, added.revision).map_err(VaultError::storage)?;
+        Ok(MemberAdded { revision: added.revision })
+    }
+
+    /// Remove an ordinary member **as a co-owner** (any-of): re-keys under the new epoch,
+    /// signs with the co-owner's identity, and registers a new-epoch sealer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_member_as_co_owner(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        co_owner_kdf_params: &[u8],
+        co_owner_member_id: &str,
+        trusted_signers: Vec<Vec<u8>>,
+        remove_member_id: &str,
+    ) -> Result<MemberRemoved> {
+        let passphrase = Zeroizing::new(passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let kdf = KdfParams::decode(co_owner_kdf_params)
+            .map_err(|e| VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}")))?;
+        let trusted = parse_trusted_signers(&trusted_signers)?;
+        let replica = fresh_replica()?;
+        let r = vault::remove_member_as_co_owner(
+            &keyring,
+            passphrase.as_bytes(),
+            &kdf,
+            tree_id,
+            co_owner_member_id,
+            &trusted,
+            floor,
+            remove_member_id,
+            &replica,
+        )?;
+        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        let id = self.register(r.sealer)?;
+        Ok(MemberRemoved { sealer_id: id, revision: r.revision })
+    }
+
     /// Promote an existing member to co-owner (founder action). Persists + watermarks the
     /// new keyring; no sealer changes (signing authority, not keys).
     pub fn add_co_owner(
@@ -823,6 +900,7 @@ mod tests {
     }
 
     const MEMBER2: &str = "acct-2";
+    const MEMBER3: &str = "acct-3";
 
     #[test]
     fn owner_adds_a_member_who_unlocks_through_the_host() {
@@ -906,5 +984,35 @@ mod tests {
         assert_eq!(promoted.revision, 3);
         let demoted = h.remove_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "viewer").unwrap();
         assert_eq!(demoted.revision, 4);
+    }
+
+    #[test]
+    fn a_co_owner_administers_members_through_the_host() {
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let co = h.provision_member("co pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &co.hpke_public, &co.author_public).unwrap();
+        h.add_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2).unwrap(); // rev 3
+        let founder = founder_key(&h, KEY);
+
+        // The CO-OWNER adds and then removes an ordinary member through the host.
+        let m3 = h.provision_member("m3 pass".into()).unwrap();
+        let added = h
+            .add_member_as_co_owner(KEY, TREE, "co pass".into(), &co.kdf_params, MEMBER2, vec![founder.clone()], MEMBER3, "viewer", &m3.hpke_public, &m3.author_public)
+            .unwrap();
+        assert_eq!(added.revision, 4);
+        let removed = h
+            .remove_member_as_co_owner(KEY, TREE, "co pass".into(), &co.kdf_params, MEMBER2, vec![founder], MEMBER3)
+            .unwrap();
+        assert_eq!(removed.revision, 5);
+
+        // A non-signer (an ordinary member) can't administer.
+        let ed = h.provision_member("ed pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, "acct-ed", "editor", &ed.hpke_public, &ed.author_public).unwrap();
+        let founder2 = founder_key(&h, KEY);
+        let err = h
+            .remove_member_as_co_owner(KEY, TREE, "ed pass".into(), &ed.kdf_params, "acct-ed", vec![founder2], MEMBER)
+            .unwrap_err();
+        assert_eq!(err.code, VaultErrorCode::NotAuthorized);
     }
 }
