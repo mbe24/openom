@@ -53,6 +53,7 @@ pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 
+mod chain;
 mod envelope;
 mod hpke_wrap;
 mod kdf;
@@ -61,6 +62,10 @@ mod recovery;
 mod root;
 mod seal;
 mod wrap;
+pub use chain::{
+    bootstrap_from_genesis, bootstrap_from_oob, verify_transition, verify_walk, ChainError,
+    KeyringAnchor,
+};
 pub use envelope::{open_envelope, seal_envelope, SealParams};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap,

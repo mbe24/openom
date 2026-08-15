@@ -91,7 +91,15 @@ pub fn verify_keyring_all(keyring: &Keyring, required: &[VerifyingKey]) -> Resul
     if required.is_empty() {
         return Err(CryptoError::Signature);
     }
+    // Deduplicate: a repeated key must not count as a second, separately-satisfiable
+    // requirement (else a corrupted set with a duplicated key makes unanimity gameable).
+    let mut checked: Vec<[u8; 32]> = Vec::new();
     for key in required {
+        let kb = key.to_bytes();
+        if checked.contains(&kb) {
+            continue;
+        }
+        checked.push(kb);
         verify_keyring(keyring, key)?;
     }
     Ok(())
