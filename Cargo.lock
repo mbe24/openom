@@ -2926,6 +2926,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
