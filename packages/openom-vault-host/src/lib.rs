@@ -56,9 +56,6 @@ pub enum VaultErrorCode {
     MemberNotFound,
     /// Sharing: the owner/founder can't be removed (transfer ownership instead).
     CannotRemoveOwner,
-    /// The requested flow isn't supported on a shared tree yet (e.g. change-passphrase /
-    /// recover before the member-preserving versions land).
-    Unsupported,
     /// No keyring is stored for this tree yet (provision first).
     NoKeyring,
     /// An envelope wouldn't decode / had no header.
@@ -119,7 +116,6 @@ impl From<SealerError> for VaultError {
             E::MemberExists => C::MemberExists,
             E::MemberNotFound => C::MemberNotFound,
             E::CannotRemoveOwner => C::CannotRemoveOwner,
-            E::SharedTreeUnsupported => C::Unsupported,
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
             E::RevisionOverflow => C::RevisionOverflow,
@@ -821,14 +817,22 @@ mod tests {
     }
 
     #[test]
-    fn change_passphrase_is_refused_once_shared() {
+    fn change_passphrase_on_a_shared_tree_keeps_the_member() {
         let h = host();
-        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let owner = h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let sealed = seal(&h, &owner.sealer_id, b"shared");
         let m = h.provision_member("member pass".into()).unwrap();
-        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "viewer", &m.hpke_public, &m.author_public).unwrap();
-        assert_eq!(
-            h.change_passphrase(KEY, TREE, "owner pass".into(), "new".into(), MEMBER).unwrap_err().code,
-            VaultErrorCode::Unsupported
-        );
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &m.hpke_public, &m.author_public).unwrap();
+        let old_founder = founder_key(&h, KEY);
+
+        // Changing the owner passphrase on a shared tree now succeeds (guard retired).
+        let re = h.change_passphrase(KEY, TREE, "owner pass".into(), "new pass".into(), MEMBER).unwrap();
+        assert_eq!(re.revision, 3);
+
+        // The member still unlocks against the key pinned before the change and reads content.
+        let u = h
+            .unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, vec![old_founder])
+            .unwrap();
+        assert_eq!(h.open_entry(&u.sealer_id, "snapshot", &sealed).unwrap(), b"shared");
     }
 }

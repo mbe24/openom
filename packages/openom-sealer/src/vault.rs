@@ -17,7 +17,7 @@ use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_recovery_code,
     generate_salt, hpke_unwrap_dek, hpke_wrap_dek, keyring_hash, parse_recovery_code,
     recovery_kdf_params, sign_keyring, unwrap_dek, verify_keyring, verify_keyring_any, wrap_dek,
-    Key32, VerifyingKey, WrapContext, KEY_LEN,
+    Key32, RootKeys, SigningKey, VerifyingKey, WrapContext, KEY_LEN,
 };
 use openom_protocol::aad::wrap_aad;
 use openom_protocol::v1::{
@@ -122,10 +122,17 @@ pub fn unlock(
     Ok(Unlocked { sealer, revision: opened.revision })
 }
 
-/// Recover with the recovery code, then re-provision under `new_passphrase`. Skips signature
-/// verification (the old identity is unrecoverable); the recovery wrap's AEAD tag, bound to
-/// the trusted `tree_id`, is the authentication. `min_revision` is the caller's watermark
-/// floor (0 if none) — a served revision below it is refused as a rollback.
+/// Recover with the recovery code and re-establish owner access under `new_passphrase`,
+/// **preserving** members and the signer set. The recovery code reaches the owner's wrap in
+/// the latest epoch; that epoch's owner passphrase + recovery wraps are re-issued under the
+/// new passphrase and a fresh recovery code, while members' wraps and every other epoch stay
+/// as they are. Verification is skipped (the old identity is unrecoverable) — the recovery
+/// wrap's AEAD tag, bound to the trusted `tree_id`, is the authentication.
+///
+/// Because no old signature is available, the new keyring is signed only by the new owner
+/// identity: members who pinned the old founder must **re-verify out-of-band** and re-pin —
+/// the documented "recover / owner-succession forces re-verification" boundary. `min_revision`
+/// is the caller's watermark floor (0 if none) — a served revision below it is a rollback.
 pub fn recover(
     keyring_bytes: &[u8],
     recovery_code: &str,
@@ -135,7 +142,7 @@ pub fn recover(
     replica_id: &[u8],
     min_revision: u32,
 ) -> Result<Recovered, SealerError> {
-    let keyring = decode_keyring(keyring_bytes)?;
+    let mut keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
         return Err(SealerError::TreeMismatch);
     }
@@ -143,42 +150,43 @@ pub fn recover(
     if keyring.revision < min_revision {
         return Err(SealerError::RevisionRollback { have: min_revision, got: keyring.revision });
     }
-    if is_shared(&keyring) {
-        return Err(SealerError::SharedTreeUnsupported);
-    }
-    let (epoch_key_id, epoch, wrap) = find_wrap(&keyring, member_id, RECOVERY)?;
-    let kdf = wrap
-        .kdf_params
-        .as_ref()
-        .ok_or_else(|| SealerError::BadKeyring("recovery wrap missing kdf_params".into()))?;
-    validate_kdf_params(kdf)?;
-    let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
-    let recovery_kek = derive_kek(entropy.as_slice(), kdf)?;
-    let ctx = WrapContext {
-        tree_id, // trusted
-        key_id: &epoch_key_id,
-        member_id, // trusted
-        wrap_method: RECOVERY,
-        epoch,
+    // Pull the recovery wrap's material out (owned) so the keyring can be mutated below.
+    let (epoch_key_id, epoch, kdf, rec_nonce, rec_wrapped) = {
+        let (key_id, epoch, wrap) = find_wrap(&keyring, member_id, RECOVERY)?;
+        let kdf = wrap
+            .kdf_params
+            .clone()
+            .ok_or_else(|| SealerError::BadKeyring("recovery wrap missing kdf_params".into()))?;
+        (key_id, epoch, kdf, wrap.nonce.clone(), wrap.wrapped_dek.clone())
     };
-    let dek = unwrap_dek(&recovery_kek, &wrap.nonce, &wrap.wrapped_dek, &ctx)?;
+    validate_kdf_params(&kdf)?;
+    let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
+    let recovery_kek = derive_kek(entropy.as_slice(), &kdf)?;
+    let ctx = WrapContext { tree_id, key_id: &epoch_key_id, member_id, wrap_method: RECOVERY, epoch };
+    let dek = unwrap_dek(&recovery_kek, &rec_nonce, &rec_wrapped, &ctx)?;
 
     let new_revision = min_revision
         .max(keyring.revision)
         .checked_add(1)
         .ok_or(SealerError::RevisionOverflow)?;
-    // Chain the new revision onto the one we recovered from.
     let prev_hash = keyring_hash(&keyring).to_vec();
-    let rw = build_keyring(
-        &dek,
-        tree_id,
-        &epoch_key_id,
-        epoch,
-        member_id,
-        new_passphrase,
-        new_revision,
-        prev_hash,
-    )?;
+    let secrets = new_owner_secrets(new_passphrase)?;
+
+    // Re-issue the owner's wraps in the recovered epoch under the new secrets.
+    let (pass, rec) = owner_wraps(tree_id, member_id, &epoch_key_id, epoch, &dek, &secrets)?;
+    let ep = keyring
+        .epochs
+        .iter_mut()
+        .find(|e| e.epoch == epoch)
+        .ok_or_else(|| SealerError::BadKeyring("recovered epoch missing".into()))?;
+    replace_owner_wraps(ep, member_id, pass, rec);
+
+    refounder(&mut keyring, member_id, &secrets.root);
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &secrets.root.identity);
+
     let sealer = Sealer::from_unwrapped(
         ENVELOPE_VERSION,
         dek,
@@ -186,12 +194,18 @@ pub fn recover(
         epoch_key_id,
         replica_id.to_vec(),
     );
-    Ok(Recovered { keyring: rw.keyring, recovery_code: rw.recovery_code, sealer, revision: new_revision })
+    Ok(Recovered { keyring: keyring.encode_to_vec(), recovery_code: secrets.recovery_code, sealer, revision: new_revision })
 }
 
-/// Change the passphrase: unwrap with the old one, re-wrap under the new (new identity,
-/// `revision + 1`), and **rotate the recovery code** so an old code no longer opens the tree.
-/// The DEK is unchanged — this is document control, not a data re-key (see the plan's R2).
+/// Change the passphrase: re-wrap the owner's access under a new passphrase and a fresh
+/// recovery code, in every epoch (the old KEK reaches each epoch's DEK), leaving members'
+/// wraps untouched. The DEK is unchanged — this is document control, not a data re-key.
+///
+/// On a **shared** tree the owner's identity changes (new passphrase → new key), so the new
+/// keyring is signed by **both** the old and new identity: a member who pinned the old
+/// founder key can still verify it (bridging the transition) while the new founder key it
+/// now names is what future revisions use. The member's client re-pins to the new key on
+/// seeing the endorsed change.
 pub fn change_passphrase(
     keyring_bytes: &[u8],
     old_passphrase: &[u8],
@@ -200,25 +214,42 @@ pub fn change_passphrase(
     member_id: &str,
     min_revision: u32,
 ) -> Result<Rekeyed, SealerError> {
-    let opened = open_with_passphrase(keyring_bytes, old_passphrase, tree_id, member_id)?;
-    if is_shared(&opened.keyring) {
-        return Err(SealerError::SharedTreeUnsupported);
-    }
+    let Opened { kek: old_kek, revision, prev_hash, identity: old_identity, mut keyring, .. } =
+        open_with_passphrase(keyring_bytes, old_passphrase, tree_id, member_id)?;
     let new_revision = min_revision
-        .max(opened.revision)
+        .max(revision)
         .checked_add(1)
         .ok_or(SealerError::RevisionOverflow)?;
-    let rw = build_keyring(
-        &opened.dek,
-        tree_id,
-        &opened.key_id,
-        opened.epoch,
-        member_id,
-        new_passphrase,
-        new_revision,
-        opened.prev_hash,
-    )?;
-    Ok(Rekeyed { keyring: rw.keyring, recovery_code: rw.recovery_code, revision: new_revision })
+    let secrets = new_owner_secrets(new_passphrase)?;
+
+    // Re-wrap the owner's passphrase + recovery wraps in EVERY epoch. The owner holds the old
+    // passphrase, so its KEK unwraps each epoch's DEK; members' HPKE wraps are left as-is.
+    for ep in &mut keyring.epochs {
+        let key_id = ep.key_id.clone();
+        let epoch = ep.epoch;
+        let (nonce, wrapped) = {
+            let ow = ep
+                .wraps
+                .iter()
+                .find(|w| w.member_id == member_id && w.wrap_method == PASSPHRASE)
+                .ok_or(SealerError::MissingWrap)?;
+            (ow.nonce.clone(), ow.wrapped_dek.clone())
+        };
+        let ctx = WrapContext { tree_id, key_id: &key_id, member_id, wrap_method: PASSPHRASE, epoch };
+        let dek = unwrap_dek(&old_kek, &nonce, &wrapped, &ctx)?;
+        let (pass, rec) = owner_wraps(tree_id, member_id, &key_id, epoch, &dek, &secrets)?;
+        replace_owner_wraps(ep, member_id, pass, rec);
+    }
+
+    refounder(&mut keyring, member_id, &secrets.root);
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    // Continuity: the OLD identity signs first (so members pinned to it accept this
+    // revision), then the new identity (so the owner and future revisions verify).
+    sign_keyring(&mut keyring, &old_identity);
+    sign_keyring(&mut keyring, &secrets.root.identity);
+    Ok(Rekeyed { keyring: keyring.encode_to_vec(), recovery_code: secrets.recovery_code, revision: new_revision })
 }
 
 /// What a joining member provisions from their own passphrase: the KDF params they store
@@ -478,7 +509,7 @@ struct Opened {
     prev_hash: Vec<u8>,
     /// The opener's derived signing identity — to re-sign a mutated keyring (e.g. adding a
     /// member). For a single owner this is the founder key already in the signer set.
-    identity: openom_crypto::SigningKey,
+    identity: SigningKey,
     /// The opener's passphrase KEK — to wrap a *new* epoch's DEK under the same passphrase
     /// (a re-key must keep the owner's identity/KEK stable, not mint a fresh salt).
     kek: Key32,
@@ -633,10 +664,86 @@ fn decode_keyring(bytes: &[u8]) -> Result<Keyring, SealerError> {
     Keyring::decode(bytes).map_err(|e| SealerError::BadKeyring(e.to_string()))
 }
 
-/// A keyring is "shared" once it names more than one member or more than one signer — the
-/// point past which the single-owner rebuild in [`build_keyring`] would drop other members.
-fn is_shared(keyring: &Keyring) -> bool {
-    keyring.members.len() > 1 || keyring.authorized_signers.len() > 1
+/// The new owner secrets minted by a passphrase change / recovery: the new passphrase KEK
+/// + KDF (and derived identity/HPKE keys), plus a fresh recovery code + its KEK/KDF. Used to
+/// re-wrap the owner's access in place without disturbing members' wraps.
+struct NewOwnerSecrets {
+    root: RootKeys,
+    pass_kdf: KdfParams,
+    recovery_code: String,
+    recovery_kek: Key32,
+    recovery_kdf: KdfParams,
+}
+
+fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, SealerError> {
+    let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
+    let root = derive_root(new_passphrase, &pass_kdf)?;
+    let recovery_code = generate_recovery_code()?;
+    let entropy = parse_recovery_code(&recovery_code)?;
+    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
+    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
+    Ok(NewOwnerSecrets { root, pass_kdf, recovery_code, recovery_kek, recovery_kdf })
+}
+
+/// Build the owner's fresh passphrase + recovery wraps of `dek` for one epoch under the new
+/// secrets, bound to the epoch's context.
+fn owner_wraps(
+    tree_id: &[u8],
+    member_id: &str,
+    key_id: &[u8],
+    epoch: u32,
+    dek: &[u8; KEY_LEN],
+    s: &NewOwnerSecrets,
+) -> Result<(KeyWrap, KeyWrap), SealerError> {
+    let pass_ctx = WrapContext { tree_id, key_id, member_id, wrap_method: PASSPHRASE, epoch };
+    let pass = wrap_dek(&s.root.kek, dek, &pass_ctx)?;
+    let rec_ctx = WrapContext { tree_id, key_id, member_id, wrap_method: RECOVERY, epoch };
+    let rec = wrap_dek(&s.recovery_kek, dek, &rec_ctx)?;
+    Ok((
+        KeyWrap {
+            member_id: member_id.to_string(),
+            wrap_method: PASSPHRASE,
+            nonce: pass.nonce,
+            wrapped_dek: pass.wrapped_dek,
+            kdf_params: Some(s.pass_kdf.clone()),
+            ephemeral_public_key: Vec::new(),
+        },
+        KeyWrap {
+            member_id: member_id.to_string(),
+            wrap_method: RECOVERY,
+            nonce: rec.nonce,
+            wrapped_dek: rec.wrapped_dek,
+            kdf_params: Some(s.recovery_kdf.clone()),
+            ephemeral_public_key: Vec::new(),
+        },
+    ))
+}
+
+/// Replace the owner's passphrase + recovery wraps in one epoch, leaving every other wrap
+/// (members' HPKE wraps) untouched.
+fn replace_owner_wraps(epoch: &mut KeyEpoch, member_id: &str, pass: KeyWrap, rec: KeyWrap) {
+    epoch.wraps.retain(|w| {
+        !(w.member_id == member_id && (w.wrap_method == PASSPHRASE || w.wrap_method == RECOVERY))
+    });
+    epoch.wraps.push(pass);
+    epoch.wraps.push(rec);
+}
+
+/// After the owner's key changes, point the founder signer entry and the owner's member
+/// entry at the new identity/HPKE keys, so future verification and rotations use them.
+fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
+    let new_pub = new.identity.verifying_key().to_bytes().to_vec();
+    for s in &mut keyring.authorized_signers {
+        if s.member_id == member_id {
+            s.public_key = new_pub.clone();
+        }
+    }
+    for m in &mut keyring.members {
+        if m.member_id == member_id {
+            m.author_public_key = new_pub.clone();
+            m.hpke_public_key = new.hpke_public.to_vec();
+        }
+    }
 }
 
 /// Find the wrap for `(member_id, method)` in the latest epoch. Returns `(key_id, epoch, wrap)`.
@@ -952,20 +1059,48 @@ mod tests {
     }
 
     #[test]
-    fn change_passphrase_and_recover_refuse_a_shared_keyring() {
-        // Adding a member makes the keyring shared; the single-owner rebuild flows must
-        // refuse rather than silently drop the member.
+    fn change_passphrase_on_a_shared_tree_keeps_the_member_and_bridges_trust() {
         let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
         let m = provision_member(b"member pass").unwrap();
         let shared = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).unwrap();
-        assert!(matches!(
-            change_passphrase(&shared.keyring, b"owner pass", b"new", TREE, MEMBER, 0),
-            Err(SealerError::SharedTreeUnsupported)
-        ));
-        assert!(matches!(
-            recover(&shared.keyring, &owner.recovery_code, b"new", TREE, MEMBER, b"r", 0),
-            Err(SealerError::SharedTreeUnsupported)
-        ));
+        let sealed = {
+            let owner_sealer = unlock(&shared.keyring, b"owner pass", TREE, MEMBER, b"r").unwrap().sealer;
+            seal_open(&owner_sealer, b"family notes")
+        };
+        let old_founder = founder_key(&shared.keyring);
+
+        // The owner changes their passphrase on the SHARED tree — no longer refused.
+        let re = change_passphrase(&shared.keyring, b"owner pass", b"new pass", TREE, MEMBER, 0).unwrap();
+
+        // The owner opens with the new passphrase, not the old.
+        assert!(unlock(&re.keyring, b"new pass", TREE, MEMBER, b"r").is_ok());
+        assert!(unlock(&re.keyring, b"owner pass", TREE, MEMBER, b"r").is_err());
+
+        // Continuity: the member still verifies against the key they pinned BEFORE the change
+        // (the old founder co-signed the transition), and reads the owner's content.
+        let via_old = unlock_as_member(&re.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[old_founder], b"r-m", 0).unwrap();
+        assert_eq!(via_old.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"family notes");
+        // And also against the new founder key, once re-pinned.
+        let new_founder = founder_key(&re.keyring);
+        assert!(unlock_as_member(&re.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[new_founder], b"r-m2", 0).is_ok());
+    }
+
+    #[test]
+    fn recover_on_a_shared_tree_keeps_members_but_forces_reverify() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let m = provision_member(b"member pass").unwrap();
+        let shared = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Viewer, &m.hpke_public, &m.author_public).unwrap();
+        let old_founder = founder_key(&shared.keyring);
+
+        // The owner recovers (lost passphrase) — members are preserved, not wiped.
+        let rec = recover(&shared.keyring, &owner.recovery_code, b"new pass", TREE, MEMBER, b"r-o2", 0).unwrap();
+        assert!(unlock(&rec.keyring, b"new pass", TREE, MEMBER, b"r").is_ok());
+
+        // Recovery can't co-sign with the old identity, so the member's OLD pin no longer
+        // verifies — they must re-verify out-of-band and re-pin the new founder key.
+        assert!(unlock_as_member(&rec.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[old_founder], b"r-m", 0).is_err());
+        let new_founder = founder_key(&rec.keyring);
+        assert!(unlock_as_member(&rec.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[new_founder], b"r-m2", 0).is_ok());
     }
 
     #[test]
