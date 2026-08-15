@@ -246,7 +246,10 @@ pub struct KdfParams {
 }
 /// What the object is. SNAPSHOT/DELTA are append-log entries of a tree; MEDIA is a
 /// single standalone media blob (referenced by the encrypted tree doc, not part of
-/// the log). A MEDIA object leaves the tree-coordination fields above empty.
+/// the log). PROPOSAL is a staged bundle of edits awaiting approval — it lives in a
+/// separate proposals channel and MUST be refused on the append/log path, so a
+/// malicious server can't replay an editor's proposal into the tree. MEDIA and
+/// PROPOSAL leave the tree-coordination fields above empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum Kind {
@@ -254,6 +257,7 @@ pub enum Kind {
     Snapshot = 1,
     Delta = 2,
     Media = 3,
+    Proposal = 4,
 }
 impl Kind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -266,6 +270,7 @@ impl Kind {
             Self::Snapshot => "KIND_SNAPSHOT",
             Self::Delta => "KIND_DELTA",
             Self::Media => "KIND_MEDIA",
+            Self::Proposal => "KIND_PROPOSAL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -275,6 +280,7 @@ impl Kind {
             "KIND_SNAPSHOT" => Some(Self::Snapshot),
             "KIND_DELTA" => Some(Self::Delta),
             "KIND_MEDIA" => Some(Self::Media),
+            "KIND_PROPOSAL" => Some(Self::Proposal),
             _ => None,
         }
     }
@@ -286,10 +292,13 @@ pub enum Format {
     Unspecified = 0,
     /// V1: the full tree as openom JSON (snapshot only).
     OpenomJson = 1,
-    /// The JSON op-log entries (delta).
+    /// The JSON op-log entries (delta). Distinct from the commute encoding below.
     OpenomOps = 2,
     /// Opaque bytes — a media blob (image, etc.). The server never interprets it.
     RawBytes = 4,
+    /// The commute op-based CRDT encoding (canonical, deterministic) — carries a
+    /// snapshot, a delta, or a proposal's op bundle; `kind` disambiguates which.
+    OpenomTreelog = 5,
 }
 impl Format {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -302,6 +311,7 @@ impl Format {
             Self::OpenomJson => "FORMAT_OPENOM_JSON",
             Self::OpenomOps => "FORMAT_OPENOM_OPS",
             Self::RawBytes => "FORMAT_RAW_BYTES",
+            Self::OpenomTreelog => "FORMAT_OPENOM_TREELOG",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -311,6 +321,7 @@ impl Format {
             "FORMAT_OPENOM_JSON" => Some(Self::OpenomJson),
             "FORMAT_OPENOM_OPS" => Some(Self::OpenomOps),
             "FORMAT_RAW_BYTES" => Some(Self::RawBytes),
+            "FORMAT_OPENOM_TREELOG" => Some(Self::OpenomTreelog),
             _ => None,
         }
     }

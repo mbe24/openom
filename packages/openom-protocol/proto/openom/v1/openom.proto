@@ -67,12 +67,16 @@ message Header {
 
 // What the object is. SNAPSHOT/DELTA are append-log entries of a tree; MEDIA is a
 // single standalone media blob (referenced by the encrypted tree doc, not part of
-// the log). A MEDIA object leaves the tree-coordination fields above empty.
+// the log). PROPOSAL is a staged bundle of edits awaiting approval — it lives in a
+// separate proposals channel and MUST be refused on the append/log path, so a
+// malicious server can't replay an editor's proposal into the tree. MEDIA and
+// PROPOSAL leave the tree-coordination fields above empty.
 enum Kind {
   KIND_UNSPECIFIED = 0;
   KIND_SNAPSHOT = 1;
   KIND_DELTA = 2;
   KIND_MEDIA = 3;
+  KIND_PROPOSAL = 4;
 }
 
 // Encoding of the decrypted payload.
@@ -80,12 +84,15 @@ enum Format {
   FORMAT_UNSPECIFIED = 0;
   // V1: the full tree as openom JSON (snapshot only).
   FORMAT_OPENOM_JSON = 1;
-  // The JSON op-log entries (delta).
+  // The JSON op-log entries (delta). Distinct from the commute encoding below.
   FORMAT_OPENOM_OPS = 2;
   // Tag 3 was YRS_UPDATE; a concrete CRDT format value is added when deltas ship.
   reserved 3;
   // Opaque bytes — a media blob (image, etc.). The server never interprets it.
   FORMAT_RAW_BYTES = 4;
+  // The commute op-based CRDT encoding (canonical, deterministic) — carries a
+  // snapshot, a delta, or a proposal's op bundle; `kind` disambiguates which.
+  FORMAT_OPENOM_TREELOG = 5;
 }
 
 // AEAD construction.
