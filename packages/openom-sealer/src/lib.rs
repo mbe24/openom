@@ -6,14 +6,22 @@
 //! and a native client can never disagree on how a blob was sealed.
 //!
 //! ## What lives here vs. in the caller
-//! The sealer is deliberately *not* the source of truth for the log chain. Per Fable's
-//! §3 crash-retry model, the caller (JS `SealedStore` / the Tauri command) owns the
-//! chain state — `replica_counter`, `prev_ciphertext_hash`, `covers_through_seq` — and
-//! passes it in as a [`SealContext`]. [`Sealer::seal_entry`] returns the freshly-minted
-//! `ciphertext_hash`, which the caller persists as the next entry's `prev`. This keeps
-//! the sealer a pure function of (DEK, scope, context, plaintext): a retried upload
-//! re-seals with the *same* context and produces a coherent chain, and no crash can lose
-//! chain state that only lived inside the sealer.
+//! The sealer is deliberately *not* the source of truth for the log chain. Per the §3
+//! crash-retry model, the caller (JS `SealedStore` / the Tauri command) owns the chain
+//! state — `replica_counter`, `prev_ciphertext_hash`, `covers_through_seq` — and passes
+//! it in as a [`SealContext`]. [`Sealer::seal_entry`] returns the freshly-minted
+//! `ciphertext_hash`, which the caller persists as the next entry's `prev`.
+//!
+//! ## Retry means re-UPLOAD, never re-SEAL
+//! Each `seal_entry` mints a **fresh random nonce**, so re-sealing the *same* logical
+//! entry yields a *different* `ciphertext_hash` under the *same* `(replica_id, counter)`
+//! slot — and if the first upload had actually landed (a lost ack), that is a self-
+//! inflicted chain fork. So a transient upload failure must retry the **already-sealed
+//! bytes verbatim** (the caller persists them locally before upload; that local commit is
+//! the write-ahead point). `seal_entry` is called exactly once per logical entry, and a
+//! fresh seal (new nonce) is reserved for genuinely new content, which always takes a new
+//! counter. The purity here is what makes that discipline possible, not a license to
+//! re-seal on retry.
 //!
 //! ## Scope binding
 //! A sealer is bound to exactly one `(tree_id, key_id, replica_id)`. On open it verifies
