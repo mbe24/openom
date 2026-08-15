@@ -38,11 +38,13 @@ pub fn cipher_suite() -> &'static str {
 
 mod kdf;
 mod seal;
+mod wrap;
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
 pub use seal::{open, seal};
+pub use wrap::{unwrap_dek, wrap_dek, WrapContext, WrappedDek};
 
 /// A crypto operation failed. `Open` deliberately does not distinguish a bad key from
 /// a bad tag from a tampered header — all are "this ciphertext didn't authenticate".

@@ -28,23 +28,9 @@ pub fn seal(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let aad = header_aad(version, header);
-    let payload = Payload { msg: plaintext, aad: &aad };
     match AeadAlg::try_from(header.aead) {
-        Ok(AeadAlg::Xchacha20Poly1305) => {
-            check_nonce(&header.nonce, XCHACHA_NONCE_LEN)?;
-            let cipher =
-                XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-            cipher
-                .encrypt(XNonce::from_slice(&header.nonce), payload)
-                .map_err(|_| CryptoError::Seal)
-        }
-        Ok(AeadAlg::Aes256Gcm) => {
-            check_nonce(&header.nonce, AES_GCM_NONCE_LEN)?;
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-            cipher
-                .encrypt(aes_gcm::Nonce::from_slice(&header.nonce), payload)
-                .map_err(|_| CryptoError::Seal)
-        }
+        Ok(AeadAlg::Xchacha20Poly1305) => xchacha_seal(key, &header.nonce, &aad, plaintext),
+        Ok(AeadAlg::Aes256Gcm) => aesgcm_seal(key, &header.nonce, &aad, plaintext),
         _ => Err(CryptoError::UnsupportedAead(header.aead)),
     }
 }
@@ -59,25 +45,66 @@ pub fn open(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     let aad = header_aad(version, header);
-    let payload = Payload { msg: ciphertext, aad: &aad };
     match AeadAlg::try_from(header.aead) {
-        Ok(AeadAlg::Xchacha20Poly1305) => {
-            check_nonce(&header.nonce, XCHACHA_NONCE_LEN)?;
-            let cipher =
-                XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-            cipher
-                .decrypt(XNonce::from_slice(&header.nonce), payload)
-                .map_err(|_| CryptoError::Open)
-        }
-        Ok(AeadAlg::Aes256Gcm) => {
-            check_nonce(&header.nonce, AES_GCM_NONCE_LEN)?;
-            let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-            cipher
-                .decrypt(aes_gcm::Nonce::from_slice(&header.nonce), payload)
-                .map_err(|_| CryptoError::Open)
-        }
+        Ok(AeadAlg::Xchacha20Poly1305) => xchacha_open(key, &header.nonce, &aad, ciphertext),
+        Ok(AeadAlg::Aes256Gcm) => aesgcm_open(key, &header.nonce, &aad, ciphertext),
         _ => Err(CryptoError::UnsupportedAead(header.aead)),
     }
+}
+
+// Low-level, AAD-agnostic AEAD (crate-internal). The DEK-wrap path (§4) reuses the
+// XChaCha20 pair with the wrap-context AAD instead of a header AAD.
+
+pub(crate) fn xchacha_seal(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    check_nonce(nonce, XCHACHA_NONCE_LEN)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    cipher
+        .encrypt(XNonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .map_err(|_| CryptoError::Seal)
+}
+
+pub(crate) fn xchacha_open(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    check_nonce(nonce, XCHACHA_NONCE_LEN)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .map_err(|_| CryptoError::Open)
+}
+
+fn aesgcm_seal(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    check_nonce(nonce, AES_GCM_NONCE_LEN)?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    cipher
+        .encrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: plaintext, aad })
+        .map_err(|_| CryptoError::Seal)
+}
+
+fn aesgcm_open(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    check_nonce(nonce, AES_GCM_NONCE_LEN)?;
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
+    cipher
+        .decrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .map_err(|_| CryptoError::Open)
 }
 
 fn check_nonce(nonce: &[u8], want: usize) -> Result<(), CryptoError> {
