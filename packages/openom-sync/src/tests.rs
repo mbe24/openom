@@ -68,6 +68,41 @@ fn a_second_round_of_edits_syncs_and_pull_is_idempotent() {
 }
 
 #[test]
+fn a_proposal_travels_through_the_store_and_is_approved() {
+    let store = Arc::new(MemoryStore::new());
+    let dek = generate_dek().unwrap();
+    let mut owner = client(1, b"replica-o", dek.clone(), store.clone());
+    let mut editor = client(2, b"replica-e", dek, store.clone());
+
+    // Owner creates a person; editor syncs it.
+    owner.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
+    editor.pull().unwrap();
+
+    // Editor drafts + pushes a proposal — NOT applied to its own tree.
+    let drafted = editor
+        .push_proposal(vec![TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: Some("record".into()) }])
+        .unwrap();
+    assert!(editor.tree().fact(&[1], "birth.date").claims.is_empty(), "a proposal is not applied locally");
+
+    // Owner pulls the proposal, reviews it (no conflict), approves.
+    let pending = owner.pull_proposals().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0], drafted);
+    let review = owner.tree().review(&pending[0]);
+    assert!(review.conflicts.is_empty());
+    assert_eq!(review.changes.len(), 1);
+    owner.commit_proposal(&pending[0]).unwrap();
+
+    // Editor pulls the committed result; both converge with the claim present.
+    editor.pull().unwrap();
+    assert_eq!(owner.tree().doc().snapshot(), editor.tree().doc().snapshot());
+    assert_eq!(editor.tree().fact(&[1], "birth.date").preferred.unwrap().value, "1901");
+    // The proposal lived only in its own channel, never on the tree's append log.
+    assert_eq!(store.read_updates("tree:proposals", None).unwrap().0.len(), 1);
+    assert_eq!(store.read_updates("tree", None).unwrap().0.len(), 2, "person add + approved claim only");
+}
+
+#[test]
 fn a_wrong_key_cannot_open_the_log() {
     // A device with a different DEK pulls the same log — the sealer refuses to open it.
     let store = Arc::new(MemoryStore::new());

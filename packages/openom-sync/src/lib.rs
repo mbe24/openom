@@ -18,7 +18,7 @@ use commute::Op;
 use openom_protocol::v1::{Compression, Format};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
 use openom_store::{DocStore, StoreError};
-use openom_treelog::{Tree, TreeOp};
+use openom_treelog::{Proposal, ProposalError, Tree, TreeOp};
 
 /// A sync failure — one of the three layers said no.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +30,9 @@ pub enum SyncError {
     /// A pulled delta's decrypted bytes didn't decode as a commute op run.
     #[error("delta decode failed: {0:?}")]
     Decode(commute::DecodeError),
+    /// A pulled proposal's decrypted bytes didn't decode as a proposal bundle.
+    #[error("proposal decode failed: {0:?}")]
+    ProposalDecode(ProposalError),
 }
 
 impl From<commute::DecodeError> for SyncError {
@@ -51,12 +54,32 @@ pub struct SyncClient<S: DocStore> {
     next_counter: u64,
     prev_hash: Vec<u8>,
     pull_cursor: Option<u64>,
+    // The proposals channel — a SEPARATE store doc, so a proposal is never on the tree's append
+    // log (a server can't replay an editor's proposal into the tree). Its own chain + cursor.
+    prop_counter: u64,
+    prop_prev: Vec<u8>,
+    proposals_cursor: Option<u64>,
 }
 
 impl<S: DocStore> SyncClient<S> {
     /// Wrap a freshly-unlocked tree. `doc` is the store key for this tree's log.
     pub fn new(tree: Tree, sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
-        SyncClient { tree, sealer, store, doc: doc.into(), next_counter: 0, prev_hash: Vec::new(), pull_cursor: None }
+        SyncClient {
+            tree,
+            sealer,
+            store,
+            doc: doc.into(),
+            next_counter: 0,
+            prev_hash: Vec::new(),
+            pull_cursor: None,
+            prop_counter: 0,
+            prop_prev: Vec::new(),
+            proposals_cursor: None,
+        }
+    }
+
+    fn proposals_doc(&self) -> String {
+        format!("{}:proposals", self.doc)
     }
 
     /// The local tree (read model, queries).
@@ -108,6 +131,45 @@ impl<S: DocStore> SyncClient<S> {
         }
         self.pull_cursor = Some(new_cursor);
         Ok(updates.len())
+    }
+
+    /// Draft a proposal against the current head and push it to the proposals channel — sealed as
+    /// `KIND_PROPOSAL`, NOT applied to the local tree (an editor proposes; an approver commits).
+    pub fn push_proposal(&mut self, ops: Vec<TreeOp>) -> Result<Proposal> {
+        let proposal = Proposal { base: self.tree.version_cursor(), ops };
+        let ctx = SealContext {
+            kind: EntryKind::Proposal,
+            format: Format::OpenomTreelog,
+            compression: Compression::None,
+            replica_counter: self.prop_counter,
+            prev_ciphertext_hash: std::mem::take(&mut self.prop_prev),
+            covers_through_seq: 0,
+            blob_id: Vec::new(),
+        };
+        let out = self.sealer.seal_entry(&ctx, &proposal.encode())?;
+        self.store.append(&self.proposals_doc(), std::slice::from_ref(&out.envelope))?;
+        self.prop_counter += 1;
+        self.prop_prev = out.ciphertext_hash;
+        Ok(proposal)
+    }
+
+    /// Pull newly-staged proposals for review (open + decode). Read-only w.r.t. the tree.
+    pub fn pull_proposals(&mut self) -> Result<Vec<Proposal>> {
+        let (updates, new_cursor) = self.store.read_updates(&self.proposals_doc(), self.proposals_cursor)?;
+        let mut out = Vec::with_capacity(updates.len());
+        for envelope in &updates {
+            let bytes = self.sealer.open_entry(EntryKind::Proposal, envelope)?;
+            out.push(Proposal::decode(&bytes).map_err(SyncError::ProposalDecode)?);
+        }
+        self.proposals_cursor = Some(new_cursor);
+        Ok(out)
+    }
+
+    /// Approve a proposal: apply its bundle to the tree and push the resulting delta. The caller is
+    /// responsible for the role check (only an approver reaches this) and for having reviewed it.
+    pub fn commit_proposal(&mut self, proposal: &Proposal) -> Result<()> {
+        let ops = self.tree.commit_proposal(proposal);
+        self.push(&ops)
     }
 }
 
