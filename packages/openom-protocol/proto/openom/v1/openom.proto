@@ -102,21 +102,96 @@ enum Compression {
   COMPRESSION_ZSTD = 2;
 }
 
-// Per-tree key material: the DEK wrapped for each member, across key generations,
-// signed by the owner. Stored once per tree; updated only on membership change.
+// Per-tree key material AND governance: the DEK wrapped for each member across
+// epochs, the authorized-signer set, and the signed membership/role list — one
+// signed, anti-rollback, hash-chained document. Signed by ANY authorized signer
+// (1-of-N in V1); changing the signer set itself needs the founder (or, founder
+// gone, all remaining signers) — a client-enforced policy, not a wire distinction.
+// Keyring-local: the Envelope/Header skeleton and AAD are untouched by this shape.
 message Keyring {
   // Opaque tree id.
   bytes tree_id = 1;
   // Key generations (rotation produces a new epoch).
   repeated KeyEpoch epochs = 2;
-  // Monotonic anti-rollback counter, bumped on every change. A client refuses a
-  // revision lower than the highest it has seen.
+  // Monotonic anti-rollback counter, bumped on every revision. A client refuses a
+  // revision lower than the highest it has seen and (with prev_keyring_hash) one
+  // that doesn't chain onto the revision it last accepted.
   uint32 revision = 3;
-  // Owner identity (Ed25519) key id. A hint: the client verifies with its own
-  // trusted/pinned identity, never the key this names.
-  bytes signer_key_id = 4;
-  // Ed25519 signature over a canonical, domain-separated encoding of this keyring.
-  bytes signature = 5;
+  // Retired single-signer fields (were signer_key_id and signature). The signer set
+  // and per-signature key hints now live in authorized_signers / signatures.
+  reserved 4, 5;
+  // Keyring layout selector (analogous to Envelope.version): read first, then covered
+  // by the signed bytes. A higher value than the client understands is opened
+  // read-only rather than misread.
+  uint32 layout_version = 6;
+  // SHA-256 of the previous revision's canonical signing bytes; empty at genesis
+  // (revision 1). Chains the revision history so a server fork of history is
+  // detectable evidence rather than two indistinguishable valid states.
+  bytes prev_keyring_hash = 7;
+  // The trust set: who may author keyring revisions. Exactly one SIGNER_ROLE_FOUNDER.
+  repeated AuthorizedSigner authorized_signers = 8;
+  // The signed membership/role manifest — the authority for author_signature
+  // verification and role-gated approval, so neither rests on a server-rewritable row.
+  repeated Member members = 9;
+  // One or more Ed25519 signatures over this keyring's canonical signing bytes, each
+  // from a currently-authorized signer (any-of / 1-of-N in V1). Excluded from the
+  // signed bytes, so signatures are independently collectible (threshold-ready).
+  repeated KeyringSignature signatures = 10;
+}
+
+// A member of the authorized-signer set — a founder or co-owner who may administer
+// the keyring (rotate keys, add/remove members, re-sign).
+message AuthorizedSigner {
+  // Ed25519 verifying key.
+  bytes public_key = 1;
+  // Account binding (matches a Member and the KeyWrap member_id).
+  string member_id = 2;
+  // Exactly one FOUNDER at all times; the rest are CO_OWNER.
+  SignerRole role = 3;
+}
+
+// The signed role + key manifest for one member (everyone with access, signer or
+// not). Roles and per-member keys live here so they are covered by the signature and
+// cannot be rewritten by the (partly untrusted) server.
+message Member {
+  // Account id (matches KeyWrap.member_id).
+  string member_id = 1;
+  // Access/approval role.
+  MemberRole role = 2;
+  // Ed25519 key that produces this member's Header.author_signature. Empty until the
+  // member enrolls one; pinned here so verifiers never fetch author keys from the server.
+  bytes author_public_key = 3;
+  // The member's X25519 HPKE public key, recorded by the signer who verified it
+  // out-of-band at invite (§4a). Rotations wrap the DEK to THIS key.
+  bytes hpke_public_key = 4;
+}
+
+// One signature over the keyring's canonical signing bytes.
+message KeyringSignature {
+  // Which authorized_signers[] entry produced this — a hint only; verification is
+  // always against the client's pinned/trusted set, never this claim.
+  bytes signer_public_key = 1;
+  // Ed25519 signature over keyring_signing_bytes (the v2 canonical encoding).
+  bytes signature = 2;
+}
+
+// Keyring administrative authority. Exactly one FOUNDER per keyring.
+enum SignerRole {
+  SIGNER_ROLE_UNSPECIFIED = 0;
+  SIGNER_ROLE_FOUNDER = 1;
+  SIGNER_ROLE_CO_OWNER = 2;
+}
+
+// A member's access/approval role. OWNER is the founder (billing payer). CO_OWNER is
+// also an authorized signer; ADMIN approves edits but does NOT sign the keyring;
+// EDITOR proposes (needs approval); VIEWER is read-only.
+enum MemberRole {
+  MEMBER_ROLE_UNSPECIFIED = 0;
+  MEMBER_ROLE_OWNER = 1;
+  MEMBER_ROLE_CO_OWNER = 2;
+  MEMBER_ROLE_ADMIN = 3;
+  MEMBER_ROLE_EDITOR = 4;
+  MEMBER_ROLE_VIEWER = 5;
 }
 
 // One key generation.

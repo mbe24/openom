@@ -76,8 +76,12 @@ pub struct Header {
     #[prost(bytes="vec", tag="15")]
     pub blob_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Per-tree key material: the DEK wrapped for each member, across key generations,
-/// signed by the owner. Stored once per tree; updated only on membership change.
+/// Per-tree key material AND governance: the DEK wrapped for each member across
+/// epochs, the authorized-signer set, and the signed membership/role list — one
+/// signed, anti-rollback, hash-chained document. Signed by ANY authorized signer
+/// (1-of-N in V1); changing the signer set itself needs the founder (or, founder
+/// gone, all remaining signers) — a client-enforced policy, not a wire distinction.
+/// Keyring-local: the Envelope/Header skeleton and AAD are untouched by this shape.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Keyring {
     /// Opaque tree id.
@@ -86,16 +90,77 @@ pub struct Keyring {
     /// Key generations (rotation produces a new epoch).
     #[prost(message, repeated, tag="2")]
     pub epochs: ::prost::alloc::vec::Vec<KeyEpoch>,
-    /// Monotonic anti-rollback counter, bumped on every change. A client refuses a
-    /// revision lower than the highest it has seen.
+    /// Monotonic anti-rollback counter, bumped on every revision. A client refuses a
+    /// revision lower than the highest it has seen and (with prev_keyring_hash) one
+    /// that doesn't chain onto the revision it last accepted.
     #[prost(uint32, tag="3")]
     pub revision: u32,
-    /// Owner identity (Ed25519) key id. A hint: the client verifies with its own
-    /// trusted/pinned identity, never the key this names.
+    /// Keyring layout selector (analogous to Envelope.version): read first, then covered
+    /// by the signed bytes. A higher value than the client understands is opened
+    /// read-only rather than misread.
+    #[prost(uint32, tag="6")]
+    pub layout_version: u32,
+    /// SHA-256 of the previous revision's canonical signing bytes; empty at genesis
+    /// (revision 1). Chains the revision history so a server fork of history is
+    /// detectable evidence rather than two indistinguishable valid states.
+    #[prost(bytes="vec", tag="7")]
+    pub prev_keyring_hash: ::prost::alloc::vec::Vec<u8>,
+    /// The trust set: who may author keyring revisions. Exactly one SIGNER_ROLE_FOUNDER.
+    #[prost(message, repeated, tag="8")]
+    pub authorized_signers: ::prost::alloc::vec::Vec<AuthorizedSigner>,
+    /// The signed membership/role manifest — the authority for author_signature
+    /// verification and role-gated approval, so neither rests on a server-rewritable row.
+    #[prost(message, repeated, tag="9")]
+    pub members: ::prost::alloc::vec::Vec<Member>,
+    /// One or more Ed25519 signatures over this keyring's canonical signing bytes, each
+    /// from a currently-authorized signer (any-of / 1-of-N in V1). Excluded from the
+    /// signed bytes, so signatures are independently collectible (threshold-ready).
+    #[prost(message, repeated, tag="10")]
+    pub signatures: ::prost::alloc::vec::Vec<KeyringSignature>,
+}
+/// A member of the authorized-signer set — a founder or co-owner who may administer
+/// the keyring (rotate keys, add/remove members, re-sign).
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AuthorizedSigner {
+    /// Ed25519 verifying key.
+    #[prost(bytes="vec", tag="1")]
+    pub public_key: ::prost::alloc::vec::Vec<u8>,
+    /// Account binding (matches a Member and the KeyWrap member_id).
+    #[prost(string, tag="2")]
+    pub member_id: ::prost::alloc::string::String,
+    /// Exactly one FOUNDER at all times; the rest are CO_OWNER.
+    #[prost(enumeration="SignerRole", tag="3")]
+    pub role: i32,
+}
+/// The signed role + key manifest for one member (everyone with access, signer or
+/// not). Roles and per-member keys live here so they are covered by the signature and
+/// cannot be rewritten by the (partly untrusted) server.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Member {
+    /// Account id (matches KeyWrap.member_id).
+    #[prost(string, tag="1")]
+    pub member_id: ::prost::alloc::string::String,
+    /// Access/approval role.
+    #[prost(enumeration="MemberRole", tag="2")]
+    pub role: i32,
+    /// Ed25519 key that produces this member's Header.author_signature. Empty until the
+    /// member enrolls one; pinned here so verifiers never fetch author keys from the server.
+    #[prost(bytes="vec", tag="3")]
+    pub author_public_key: ::prost::alloc::vec::Vec<u8>,
+    /// The member's X25519 HPKE public key, recorded by the signer who verified it
+    /// out-of-band at invite (§4a). Rotations wrap the DEK to THIS key.
     #[prost(bytes="vec", tag="4")]
-    pub signer_key_id: ::prost::alloc::vec::Vec<u8>,
-    /// Ed25519 signature over a canonical, domain-separated encoding of this keyring.
-    #[prost(bytes="vec", tag="5")]
+    pub hpke_public_key: ::prost::alloc::vec::Vec<u8>,
+}
+/// One signature over the keyring's canonical signing bytes.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KeyringSignature {
+    /// Which authorized_signers\[\] entry produced this — a hint only; verification is
+    /// always against the client's pinned/trusted set, never this claim.
+    #[prost(bytes="vec", tag="1")]
+    pub signer_public_key: ::prost::alloc::vec::Vec<u8>,
+    /// Ed25519 signature over keyring_signing_bytes (the v2 canonical encoding).
+    #[prost(bytes="vec", tag="2")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 /// One key generation.
@@ -278,6 +343,77 @@ impl Compression {
             "COMPRESSION_UNSPECIFIED" => Some(Self::Unspecified),
             "COMPRESSION_NONE" => Some(Self::None),
             "COMPRESSION_ZSTD" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+}
+/// Keyring administrative authority. Exactly one FOUNDER per keyring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SignerRole {
+    Unspecified = 0,
+    Founder = 1,
+    CoOwner = 2,
+}
+impl SignerRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SIGNER_ROLE_UNSPECIFIED",
+            Self::Founder => "SIGNER_ROLE_FOUNDER",
+            Self::CoOwner => "SIGNER_ROLE_CO_OWNER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SIGNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SIGNER_ROLE_FOUNDER" => Some(Self::Founder),
+            "SIGNER_ROLE_CO_OWNER" => Some(Self::CoOwner),
+            _ => None,
+        }
+    }
+}
+/// A member's access/approval role. OWNER is the founder (billing payer). CO_OWNER is
+/// also an authorized signer; ADMIN approves edits but does NOT sign the keyring;
+/// EDITOR proposes (needs approval); VIEWER is read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MemberRole {
+    Unspecified = 0,
+    Owner = 1,
+    CoOwner = 2,
+    Admin = 3,
+    Editor = 4,
+    Viewer = 5,
+}
+impl MemberRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MEMBER_ROLE_UNSPECIFIED",
+            Self::Owner => "MEMBER_ROLE_OWNER",
+            Self::CoOwner => "MEMBER_ROLE_CO_OWNER",
+            Self::Admin => "MEMBER_ROLE_ADMIN",
+            Self::Editor => "MEMBER_ROLE_EDITOR",
+            Self::Viewer => "MEMBER_ROLE_VIEWER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MEMBER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "MEMBER_ROLE_OWNER" => Some(Self::Owner),
+            "MEMBER_ROLE_CO_OWNER" => Some(Self::CoOwner),
+            "MEMBER_ROLE_ADMIN" => Some(Self::Admin),
+            "MEMBER_ROLE_EDITOR" => Some(Self::Editor),
+            "MEMBER_ROLE_VIEWER" => Some(Self::Viewer),
             _ => None,
         }
     }

@@ -15,16 +15,22 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_recovery_code,
-    generate_salt, parse_recovery_code, recovery_kdf_params, sign_keyring, verify_keyring,
-    wrap_dek, unwrap_dek, Key32, WrapContext, KEY_LEN,
+    generate_salt, keyring_hash, parse_recovery_code, recovery_kdf_params, sign_keyring,
+    verify_keyring, wrap_dek, unwrap_dek, Key32, WrapContext, KEY_LEN,
 };
-use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, WrapMethod};
-use openom_protocol::{Message, ENVELOPE_VERSION};
+use openom_protocol::v1::{
+    AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, SignerRole, WrapMethod,
+};
+use openom_protocol::{Message, ENVELOPE_VERSION, KEYRING_LAYOUT_VERSION};
 
 use crate::{Sealer, SealerError};
 
 const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
+/// The founder is the sole authorized signer of a freshly-built single-owner keyring,
+/// and the owner is its sole member (§4 multi-signer; V1 builds the degenerate case).
+const FOUNDER: i32 = SignerRole::Founder as i32;
+const OWNER: i32 = MemberRole::Owner as i32;
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
@@ -80,7 +86,8 @@ pub fn provision(
 ) -> Result<Provisioned, SealerError> {
     let dek = generate_dek()?;
     let key_id = generate_salt()?.to_vec(); // 16 CSPRNG bytes as the epoch key id
-    let rw = build_keyring(&dek, tree_id, &key_id, 0, member_id, passphrase, 1)?;
+    // Genesis revision (1): no prior keyring to chain onto, so prev_keyring_hash is empty.
+    let rw = build_keyring(&dek, tree_id, &key_id, 0, member_id, passphrase, 1, Vec::new())?;
     let sealer = Sealer::from_unwrapped(
         ENVELOPE_VERSION,
         dek,
@@ -153,7 +160,18 @@ pub fn recover(
         .max(keyring.revision)
         .checked_add(1)
         .ok_or(SealerError::RevisionOverflow)?;
-    let rw = build_keyring(&dek, tree_id, &epoch_key_id, epoch, member_id, new_passphrase, new_revision)?;
+    // Chain the new revision onto the one we recovered from.
+    let prev_hash = keyring_hash(&keyring).to_vec();
+    let rw = build_keyring(
+        &dek,
+        tree_id,
+        &epoch_key_id,
+        epoch,
+        member_id,
+        new_passphrase,
+        new_revision,
+        prev_hash,
+    )?;
     let sealer = Sealer::from_unwrapped(
         ENVELOPE_VERSION,
         dek,
@@ -188,6 +206,7 @@ pub fn change_passphrase(
         member_id,
         new_passphrase,
         new_revision,
+        opened.prev_hash,
     )?;
     Ok(Rekeyed { keyring: rw.keyring, recovery_code: rw.recovery_code, revision: new_revision })
 }
@@ -199,6 +218,9 @@ struct Opened {
     key_id: Vec<u8>,
     epoch: u32,
     revision: u32,
+    /// SHA-256 of this (opened) keyring's signing bytes — what a re-signed successor
+    /// records as its `prev_keyring_hash` to chain the revision history.
+    prev_hash: Vec<u8>,
 }
 
 /// Decode + verify + unwrap the passphrase wrap, returning the DEK and epoch coordinates
@@ -220,9 +242,10 @@ fn open_with_passphrase(
         .ok_or_else(|| SealerError::BadKeyring("passphrase wrap missing kdf_params".into()))?;
     validate_kdf_params(kdf)?;
     let root = derive_root(passphrase, kdf)?;
-    // §4a V1: verify with our OWN derived identity, ignoring the document's signer_key_id.
+    // §4a V1 (single owner): the trusted signer set is our OWN derived identity — verify
+    // the keyring carries a valid signature from it, ignoring the untrusted signer hints.
     // A wrong passphrase yields a wrong identity → verification fails here (before unwrap),
-    // indistinguishably from a tampered keyring.
+    // indistinguishably from a tampered keyring. (Sharing verifies against a pinned set.)
     verify_keyring(&keyring, &root.identity.verifying_key())?;
     let ctx = WrapContext {
         tree_id, // trusted, not from the keyring
@@ -232,7 +255,8 @@ fn open_with_passphrase(
         epoch,
     };
     let dek = unwrap_dek(&root.kek, &wrap.nonce, &wrap.wrapped_dek, &ctx)?;
-    Ok(Opened { dek, key_id: epoch_key_id, epoch, revision: keyring.revision })
+    let prev_hash = keyring_hash(&keyring).to_vec();
+    Ok(Opened { dek, key_id: epoch_key_id, epoch, revision: keyring.revision, prev_hash })
 }
 
 struct Built {
@@ -240,9 +264,19 @@ struct Built {
     recovery_code: String,
 }
 
-/// Wrap `dek` under a fresh passphrase KEK and a fresh recovery code, into a signed keyring
-/// at `revision`. Shared by provision, recover, and change_passphrase. V1 carries a single
-/// epoch; a future rotation must carry forward the epochs it isn't replacing.
+/// Wrap `dek` under a fresh passphrase KEK and a fresh recovery code, into a signed
+/// keyring at `revision`, chained onto `prev_keyring_hash` (empty at genesis). Shared by
+/// provision, recover, and change_passphrase.
+///
+/// This builds the **degenerate single-owner v2 keyring**: one authorized signer (the
+/// founder = the passphrase-derived identity), one member (the owner), one signature.
+/// Sharing extends this — additional `authorized_signers`, `members`, HPKE wraps, and
+/// signatures — but the *shape* is frozen here. Two things a multi-member successor MUST
+/// change (tracked as Mode-A work, harmless in the single-owner case this builds):
+/// carry forward the epochs/signers/members it isn't replacing (this rebuilds from
+/// scratch, correct only for one member), and sign a self-key-change with the *old*
+/// still-authorized identity, not the freshly-derived one (continuity, §4a).
+#[allow(clippy::too_many_arguments)]
 fn build_keyring(
     dek: &[u8; KEY_LEN],
     tree_id: &[u8],
@@ -251,6 +285,7 @@ fn build_keyring(
     member_id: &str,
     passphrase: &[u8],
     revision: u32,
+    prev_keyring_hash: Vec<u8>,
 ) -> Result<Built, SealerError> {
     let salt = generate_salt()?.to_vec();
     let kdf = default_kdf_params(salt);
@@ -265,12 +300,24 @@ fn build_keyring(
     let rec_ctx = WrapContext { tree_id, key_id, member_id, wrap_method: RECOVERY, epoch };
     let rec = wrap_dek(&recovery_kek, dek, &rec_ctx)?;
 
+    let identity_pub = root.identity.verifying_key().to_bytes().to_vec();
     let mut keyring = Keyring {
         tree_id: tree_id.to_vec(),
         revision,
-        // A hint only (§4a V1 verifies with the derived identity, never this).
-        signer_key_id: root.identity.verifying_key().to_bytes().to_vec(),
-        signature: Vec::new(),
+        layout_version: KEYRING_LAYOUT_VERSION,
+        prev_keyring_hash,
+        authorized_signers: vec![AuthorizedSigner {
+            public_key: identity_pub,
+            member_id: member_id.to_string(),
+            role: FOUNDER,
+        }],
+        members: vec![Member {
+            member_id: member_id.to_string(),
+            role: OWNER,
+            author_public_key: Vec::new(),
+            hpke_public_key: Vec::new(),
+        }],
+        signatures: Vec::new(),
         epochs: vec![KeyEpoch {
             key_id: key_id.to_vec(),
             epoch,
@@ -343,8 +390,8 @@ const _: () = assert!(KEY_ID_LEN == 16);
 mod tests {
     use super::{change_passphrase, provision, recover, unlock};
     use crate::{EntryKind, SealContext, Sealer, SealerError};
-    use openom_crypto::generate_recovery_code;
-    use openom_protocol::v1::Keyring;
+    use openom_crypto::{generate_recovery_code, keyring_hash};
+    use openom_protocol::v1::{Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
 
     const TREE: &[u8] = b"tree-uuid-16byte";
@@ -466,5 +513,35 @@ mod tests {
             unlock(&bytes, b"pass", TREE, MEMBER, b"r"),
             Err(SealerError::BadKdfParams)
         ));
+    }
+
+    #[test]
+    fn provisioned_keyring_is_a_v2_genesis_single_owner() {
+        let p = provision(b"pass", TREE, MEMBER, b"r").unwrap();
+        let k = Keyring::decode(p.keyring.as_slice()).unwrap();
+        assert_eq!(k.layout_version, 1);
+        assert_eq!(k.revision, 1);
+        assert!(k.prev_keyring_hash.is_empty(), "genesis has no prior revision to chain onto");
+        assert_eq!(k.authorized_signers.len(), 1);
+        assert_eq!(k.authorized_signers[0].role, SignerRole::Founder as i32);
+        assert_eq!(k.authorized_signers[0].member_id, MEMBER);
+        assert_eq!(k.members.len(), 1);
+        assert_eq!(k.members[0].role, MemberRole::Owner as i32);
+        assert_eq!(k.signatures.len(), 1);
+        // The lone signature is by the founder key named in the signer set.
+        assert_eq!(k.signatures[0].signer_public_key, k.authorized_signers[0].public_key);
+    }
+
+    #[test]
+    fn change_passphrase_chains_onto_the_prior_revision() {
+        let p = provision(b"old", TREE, MEMBER, b"r").unwrap();
+        let prior = Keyring::decode(p.keyring.as_slice()).unwrap();
+        let re = change_passphrase(&p.keyring, b"old", b"new", TREE, MEMBER, 0).unwrap();
+        let next = Keyring::decode(re.keyring.as_slice()).unwrap();
+        assert_eq!(
+            next.prev_keyring_hash,
+            keyring_hash(&prior).to_vec(),
+            "the re-signed keyring must chain onto the one it replaced"
+        );
     }
 }
