@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
+    "fast-check": "^3",
     "vitest": "^3"
   },
   "type": "module"

@@ -114,20 +114,25 @@ export class SyncStore {
     return this.#local.readUpdates(id, since);
   }
   async append(id, updates) {
-    const result = await this.#local.append(id, updates);
-    this.#save(id, { dirty: true });
-    return result;
+    this.#save(id, { dirty: true }); // intent BEFORE the write (see putSnapshot)
+    return this.#local.append(id, updates);
   }
   async delete(id) {
     this.#clear(id);
     return this.#local.delete(id);
   }
 
-  /** Local commit — the synchronous durability point. Marks the doc for later push. */
+  /**
+   * Local commit — the synchronous durability point. The `dirty` intent is persisted
+   * BEFORE the durable write, not after: a crash between the two would otherwise leave the
+   * new snapshot durably stored but unmarked, so it would never be pushed — a silent loss
+   * of a committed edit (the durable local store and the flag live in different backends, so
+   * they can't be one atomic write). Marking dirty first fails safe: worst case is a
+   * redundant, idempotent re-push of an already-synced snapshot; it can never strand one.
+   */
   async putSnapshot(id, bytes, expected = null) {
-    const version = await this.#local.putSnapshot(id, bytes, expected);
     this.#save(id, { dirty: true });
-    return version;
+    return this.#local.putSnapshot(id, bytes, expected);
   }
 
   /** Whether the doc has local changes not yet confirmed on the remote. */
@@ -209,8 +214,16 @@ export class SyncStore {
    */
   async resolveWith(id, mergedBytes, remoteVersion) {
     const local = await this.#local.readSnapshot(id);
+    // `dirty` and `remoteVersion` have OPPOSITE safe orderings around the durable write.
+    // `dirty` goes first (fail-safe: a crash before the write only risks a redundant
+    // re-push). `remoteVersion` means "I have durably incorporated the remote up to this
+    // version" — recording it BEFORE the merged bytes are durable is a false claim: a crash
+    // there would make the next pull see matching versions, skip the re-merge, and push the
+    // un-merged local over the remote, dropping the remote's edits. So it is recorded only
+    // AFTER the write lands.
+    this.#save(id, { dirty: true });
     const version = await this.#local.putSnapshot(id, mergedBytes, local ? local.version : null);
-    this.#save(id, { remoteVersion, dirty: true });
+    this.#save(id, { remoteVersion });
     return version;
   }
 
