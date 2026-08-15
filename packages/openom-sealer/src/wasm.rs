@@ -14,9 +14,9 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
-use openom_crypto::{Key32, KEY_LEN};
-use openom_protocol::v1::{Aead, Compression, Format};
-use openom_protocol::ENVELOPE_VERSION;
+use openom_crypto::{Key32, VerifyingKey, KEY_LEN};
+use openom_protocol::v1::{Aead, Compression, Format, KdfParams, MemberRole};
+use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::{vault, EntryKind, SealContext, Sealer, SealerError};
 
@@ -331,4 +331,179 @@ pub fn change_passphrase(
         revision: re.revision,
         sealer: None,
     })
+}
+
+// ---- sharing (member provisioning, invite, unlock, removal) ----
+
+/// The result of [`provision_member`]: the two public keys to share out-of-band with a
+/// tree owner, and the opaque KDF params the member persists and passes back at unlock.
+#[wasm_bindgen]
+pub struct MemberIdentity {
+    kdf_params: Vec<u8>,
+    author_public: Vec<u8>,
+    hpke_public: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl MemberIdentity {
+    /// The encoded KDF params to persist in the member's account record.
+    #[wasm_bindgen(getter, js_name = kdfParams)]
+    pub fn kdf_params(&self) -> Vec<u8> {
+        self.kdf_params.clone()
+    }
+    /// The Ed25519 author verify-key to share OOB.
+    #[wasm_bindgen(getter, js_name = authorPublic)]
+    pub fn author_public(&self) -> Vec<u8> {
+        self.author_public.clone()
+    }
+    /// The X25519 HPKE public key to share OOB.
+    #[wasm_bindgen(getter, js_name = hpkePublic)]
+    pub fn hpke_public(&self) -> Vec<u8> {
+        self.hpke_public.clone()
+    }
+}
+
+/// Provision a member identity from a passphrase. Stateless — touches no keyring.
+#[wasm_bindgen(js_name = provisionMember)]
+pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let m = vault::provision_member(passphrase.as_bytes()).map_err(to_js)?;
+    Ok(MemberIdentity {
+        kdf_params: m.kdf_params.encode_to_vec(),
+        author_public: m.author_public,
+        hpke_public: m.hpke_public,
+    })
+}
+
+/// Add a member (owner action): HPKE-wrap the DEK to their OOB-verified public key and
+/// record them in the signed member list. Returns the new keyring to persist and the new
+/// revision (no sealer — the owner's session is unchanged).
+#[wasm_bindgen(js_name = addMember)]
+#[allow(clippy::too_many_arguments)]
+pub fn add_member(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_hpke_public: &[u8],
+    member_author_public: &[u8],
+) -> Result<VaultResult, JsError> {
+    let owner_passphrase = Zeroizing::new(owner_passphrase);
+    let added = vault::add_member(
+        keyring,
+        owner_passphrase.as_bytes(),
+        tree_id,
+        owner_member_id,
+        min_revision,
+        new_member_id,
+        parse_member_role(role)?,
+        member_hpke_public,
+        member_author_public,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: added.keyring,
+        recovery_code: String::new(),
+        revision: added.revision,
+        sealer: None,
+    })
+}
+
+/// Unlock a shared tree as a member: verify against the caller's pinned signer keys
+/// (`trusted_signers` = concatenated 32-byte Ed25519 verify-keys), then HPKE-unwrap with
+/// the member's passphrase. `member_kdf_params` is the blob from [`provision_member`].
+#[wasm_bindgen(js_name = unlockAsMember)]
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_as_member(
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+) -> Result<VaultResult, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let kdf = KdfParams::decode(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let trusted = parse_trusted_signers(trusted_signers)?;
+    let u = vault::unlock_as_member(
+        keyring,
+        passphrase.as_bytes(),
+        &kdf,
+        tree_id,
+        member_id,
+        &trusted,
+        replica_id,
+        min_revision,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: Vec::new(),
+        recovery_code: String::new(),
+        revision: u.revision,
+        sealer: Some(WasmSealer { inner: u.sealer }),
+    })
+}
+
+/// Remove a member (owner action) with forward-secure re-key. Returns the new keyring, a
+/// rotated recovery code, the new revision, and a sealer scoped to the new epoch.
+#[wasm_bindgen(js_name = removeMember)]
+#[allow(clippy::too_many_arguments)]
+pub fn remove_member(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    min_revision: u32,
+    remove_member_id: &str,
+    replica_id: &[u8],
+) -> Result<VaultResult, JsError> {
+    let owner_passphrase = Zeroizing::new(owner_passphrase);
+    let r = vault::remove_member(
+        keyring,
+        owner_passphrase.as_bytes(),
+        tree_id,
+        owner_member_id,
+        min_revision,
+        remove_member_id,
+        replica_id,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: r.keyring,
+        recovery_code: r.recovery_code,
+        revision: r.revision,
+        sealer: Some(WasmSealer { inner: r.sealer }),
+    })
+}
+
+fn parse_member_role(s: &str) -> Result<MemberRole, JsError> {
+    match s {
+        "owner" => Ok(MemberRole::Owner),
+        "co-owner" => Ok(MemberRole::CoOwner),
+        "admin" => Ok(MemberRole::Admin),
+        "editor" => Ok(MemberRole::Editor),
+        "viewer" => Ok(MemberRole::Viewer),
+        other => Err(JsError::new(&format!("unknown role: {other}"))),
+    }
+}
+
+/// Split a flat buffer of concatenated 32-byte Ed25519 verify-keys into pinned signer keys.
+/// At least one is required, and the length must be a whole multiple of 32.
+fn parse_trusted_signers(bytes: &[u8]) -> Result<Vec<VerifyingKey>, JsError> {
+    if bytes.is_empty() || bytes.len() % 32 != 0 {
+        return Err(JsError::new("trustedSigners must be one or more concatenated 32-byte keys"));
+    }
+    bytes
+        .chunks_exact(32)
+        .map(|c| {
+            let arr: [u8; 32] = c.try_into().expect("chunks_exact(32) yields 32 bytes");
+            VerifyingKey::from_bytes(&arr).map_err(|_| JsError::new("invalid trusted signer key"))
+        })
+        .collect()
 }
