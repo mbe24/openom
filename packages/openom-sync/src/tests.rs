@@ -103,6 +103,30 @@ fn a_proposal_travels_through_the_store_and_is_approved() {
 }
 
 #[test]
+fn a_crashed_client_rebuilds_its_tree_from_the_durable_log() {
+    // The tree is not separately durable — it is derived from the sealed log. A crash (the in-memory
+    // client vanishing) loses nothing that was pushed: a fresh client replays the log and recovers.
+    let store = Arc::new(MemoryStore::new());
+    let dek = generate_dek().unwrap();
+    let before = {
+        let mut a = client(1, b"replica-a", dek.clone(), store.clone());
+        a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
+        a.apply_batch(vec![
+            TreeOp::AddFamily { id: vec![0xF0] },
+            TreeOp::LinkChild { family: vec![0xF0], person: vec![1], pedi: Pedigree::Birth },
+        ])
+        .unwrap();
+        a.apply(TreeOp::AddClaim { person: vec![1], field: "name.given".into(), claim: vec![7], value: "Ada".into(), source: None }).unwrap();
+        a.tree().doc().snapshot()
+        // a drops here — the crash.
+    };
+
+    let mut restarted = client(1, b"replica-a", dek, store.clone());
+    restarted.pull().unwrap();
+    assert_eq!(restarted.tree().doc().snapshot(), before, "the tree is fully recovered from the durable log");
+}
+
+#[test]
 fn a_wrong_key_cannot_open_the_log() {
     // A device with a different DEK pulls the same log — the sealer refuses to open it.
     let store = Arc::new(MemoryStore::new());
