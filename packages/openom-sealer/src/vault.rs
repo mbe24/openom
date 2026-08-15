@@ -15,11 +15,14 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_recovery_code,
-    generate_salt, keyring_hash, parse_recovery_code, recovery_kdf_params, sign_keyring,
-    verify_keyring, wrap_dek, unwrap_dek, Key32, WrapContext, KEY_LEN,
+    generate_salt, hpke_unwrap_dek, hpke_wrap_dek, keyring_hash, parse_recovery_code,
+    recovery_kdf_params, sign_keyring, unwrap_dek, verify_keyring, verify_keyring_any, wrap_dek,
+    Key32, VerifyingKey, WrapContext, KEY_LEN,
 };
+use openom_protocol::aad::wrap_aad;
 use openom_protocol::v1::{
-    AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, SignerRole, WrapMethod,
+    AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, SignerRole,
+    WrapMethod,
 };
 use openom_protocol::{Message, ENVELOPE_VERSION, KEYRING_LAYOUT_VERSION};
 
@@ -27,6 +30,7 @@ use crate::{Sealer, SealerError};
 
 const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
+const HPKE: i32 = WrapMethod::X25519Hpke as i32;
 /// The founder is the sole authorized signer of a freshly-built single-owner keyring,
 /// and the owner is its sole member (§4 multi-signer; V1 builds the degenerate case).
 const FOUNDER: i32 = SignerRole::Founder as i32;
@@ -211,6 +215,141 @@ pub fn change_passphrase(
     Ok(Rekeyed { keyring: rw.keyring, recovery_code: rw.recovery_code, revision: new_revision })
 }
 
+/// What a joining member provisions from their own passphrase: the KDF params they store
+/// in their account record (to re-derive on any device) and the two **public** keys they
+/// hand a tree owner out-of-band (§4a) — the Ed25519 author key and the X25519 HPKE key.
+pub struct MemberProvision {
+    pub kdf_params: KdfParams,
+    pub author_public: Vec<u8>,
+    pub hpke_public: Vec<u8>,
+}
+
+/// Provision a member identity from a passphrase: derive the account's signing + HPKE
+/// keypairs and return the public keys (to share OOB) plus the KDF params (to persist).
+/// The secrets are never returned — they re-derive from the passphrase on unlock.
+pub fn provision_member(passphrase: &[u8]) -> Result<MemberProvision, SealerError> {
+    let kdf = default_kdf_params(generate_salt()?.to_vec());
+    let root = derive_root(passphrase, &kdf)?;
+    Ok(MemberProvision {
+        kdf_params: kdf,
+        author_public: root.identity.verifying_key().to_bytes().to_vec(),
+        hpke_public: root.hpke_public.to_vec(),
+    })
+}
+
+/// Result of [`add_member`]: the new keyring to publish and its revision.
+pub struct MemberAdded {
+    pub keyring: Vec<u8>,
+    pub revision: u32,
+}
+
+/// Add a member to a shared tree. An authorized signer (V1: the owner) re-opens the
+/// keyring with their passphrase to reach the DEK and their signing identity, HPKE-wraps
+/// the DEK to the member's public key, records them in the signed member list, and
+/// re-signs at the next revision (chained onto the prior one). The member's public keys
+/// MUST have been verified out-of-band (§4a) before calling — this function trusts them.
+#[allow(clippy::too_many_arguments)]
+pub fn add_member(
+    keyring_bytes: &[u8],
+    owner_passphrase: &[u8],
+    tree_id: &[u8],
+    owner_member_id: &str,
+    min_revision: u32,
+    new_member_id: &str,
+    role: MemberRole,
+    member_hpke_public: &[u8],
+    member_author_public: &[u8],
+) -> Result<MemberAdded, SealerError> {
+    let Opened { dek, key_id, epoch, revision, prev_hash, identity, mut keyring } =
+        open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
+
+    if new_member_id == owner_member_id
+        || keyring.members.iter().any(|m| m.member_id == new_member_id)
+    {
+        return Err(SealerError::MemberExists);
+    }
+    let new_revision = min_revision
+        .max(revision)
+        .checked_add(1)
+        .ok_or(SealerError::RevisionOverflow)?;
+
+    // HPKE-wrap the DEK to the member, bound to the current epoch's context so the wrap
+    // can't be transplanted to another member/epoch/tree.
+    let info = wrap_aad(tree_id, &key_id, new_member_id, HPKE, epoch);
+    let w = hpke_wrap_dek(member_hpke_public, dek.as_slice(), &info)?;
+    let ep = keyring
+        .epochs
+        .iter_mut()
+        .find(|e| e.epoch == epoch)
+        .ok_or_else(|| SealerError::BadKeyring("current epoch missing".into()))?;
+    ep.wraps.push(KeyWrap {
+        member_id: new_member_id.to_string(),
+        wrap_method: HPKE,
+        nonce: Vec::new(), // HPKE carries its own nonce internally
+        wrapped_dek: w.ciphertext,
+        kdf_params: None,
+        ephemeral_public_key: w.encapped_key,
+    });
+    keyring.members.push(Member {
+        member_id: new_member_id.to_string(),
+        role: role as i32,
+        author_public_key: member_author_public.to_vec(),
+        hpke_public_key: member_hpke_public.to_vec(),
+    });
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &identity);
+    Ok(MemberAdded { keyring: keyring.encode_to_vec(), revision: new_revision })
+}
+
+/// Unlock a shared tree **as a member** (not the owner): verify the keyring against the
+/// caller's **pinned** signer set (learned out-of-band, §4a — never the member's own key
+/// and never the document's signer hints), then HPKE-unwrap the DEK with the member's
+/// passphrase-derived secret. `member_kdf` is the member's own account KDF params.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_as_member(
+    keyring_bytes: &[u8],
+    member_passphrase: &[u8],
+    member_kdf: &KdfParams,
+    tree_id: &[u8],
+    member_id: &str,
+    trusted_signers: &[VerifyingKey],
+    replica_id: &[u8],
+    min_revision: u32,
+) -> Result<Unlocked, SealerError> {
+    let keyring = decode_keyring(keyring_bytes)?;
+    if keyring.tree_id != tree_id {
+        return Err(SealerError::TreeMismatch);
+    }
+    if keyring.revision < min_revision {
+        return Err(SealerError::RevisionRollback { have: min_revision, got: keyring.revision });
+    }
+    // The trust anchor: a signature from a key the member pinned OOB. This is the member
+    // path's whole security — the member cannot derive the owner's key, so it must be
+    // supplied, never taken from the (untrusted) document.
+    verify_keyring_any(&keyring, trusted_signers)?;
+
+    let (epoch_key_id, epoch, wrap) = find_wrap(&keyring, member_id, HPKE)?;
+    validate_kdf_params(member_kdf)?;
+    let root = derive_root(member_passphrase, member_kdf)?;
+    let info = wrap_aad(tree_id, &epoch_key_id, member_id, HPKE, epoch);
+    let dek = hpke_unwrap_dek(
+        root.hpke_secret.as_slice(),
+        &wrap.ephemeral_public_key,
+        &wrap.wrapped_dek,
+        &info,
+    )?;
+    let sealer = Sealer::from_unwrapped(
+        ENVELOPE_VERSION,
+        dek,
+        tree_id.to_vec(),
+        epoch_key_id,
+        replica_id.to_vec(),
+    );
+    Ok(Unlocked { sealer, revision: keyring.revision })
+}
+
 // ---- internals ----
 
 struct Opened {
@@ -221,6 +360,11 @@ struct Opened {
     /// SHA-256 of this (opened) keyring's signing bytes — what a re-signed successor
     /// records as its `prev_keyring_hash` to chain the revision history.
     prev_hash: Vec<u8>,
+    /// The opener's derived signing identity — to re-sign a mutated keyring (e.g. adding a
+    /// member). For a single owner this is the founder key already in the signer set.
+    identity: openom_crypto::SigningKey,
+    /// The decoded prior keyring, so a mutating flow preserves its signers/members/epochs.
+    keyring: Keyring,
 }
 
 /// Decode + verify + unwrap the passphrase wrap, returning the DEK and epoch coordinates
@@ -256,7 +400,8 @@ fn open_with_passphrase(
     };
     let dek = unwrap_dek(&root.kek, &wrap.nonce, &wrap.wrapped_dek, &ctx)?;
     let prev_hash = keyring_hash(&keyring).to_vec();
-    Ok(Opened { dek, key_id: epoch_key_id, epoch, revision: keyring.revision, prev_hash })
+    let revision = keyring.revision;
+    Ok(Opened { dek, key_id: epoch_key_id, epoch, revision, prev_hash, identity: root.identity, keyring })
 }
 
 struct Built {
@@ -307,15 +452,18 @@ fn build_keyring(
         layout_version: KEYRING_LAYOUT_VERSION,
         prev_keyring_hash,
         authorized_signers: vec![AuthorizedSigner {
-            public_key: identity_pub,
+            public_key: identity_pub.clone(),
             member_id: member_id.to_string(),
             role: FOUNDER,
         }],
+        // The owner's own author/HPKE keys are pinned in the member list too, so
+        // author_signature verifies against the keyring and a future co-owner rotation can
+        // HPKE-wrap the new DEK back to the owner.
         members: vec![Member {
             member_id: member_id.to_string(),
             role: OWNER,
-            author_public_key: Vec::new(),
-            hpke_public_key: Vec::new(),
+            author_public_key: identity_pub,
+            hpke_public_key: root.hpke_public.to_vec(),
         }],
         signatures: Vec::new(),
         epochs: vec![KeyEpoch {
@@ -388,11 +536,21 @@ const _: () = assert!(KEY_ID_LEN == 16);
 
 #[cfg(test)]
 mod tests {
-    use super::{change_passphrase, provision, recover, unlock};
+    use super::{
+        add_member, change_passphrase, provision, provision_member, recover, unlock,
+        unlock_as_member,
+    };
     use crate::{EntryKind, SealContext, Sealer, SealerError};
-    use openom_crypto::{generate_recovery_code, keyring_hash};
+    use openom_crypto::{generate_recovery_code, keyring_hash, VerifyingKey};
     use openom_protocol::v1::{Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
+
+    /// The founder's verify key, as a member would pin it out-of-band from an invite.
+    fn founder_key(keyring_bytes: &[u8]) -> VerifyingKey {
+        let k = Keyring::decode(keyring_bytes).unwrap();
+        let bytes: [u8; 32] = k.authorized_signers[0].public_key.as_slice().try_into().unwrap();
+        VerifyingKey::from_bytes(&bytes).unwrap()
+    }
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     const MEMBER: &str = "acct-1";
@@ -543,5 +701,79 @@ mod tests {
             keyring_hash(&prior).to_vec(),
             "the re-signed keyring must chain onto the one it replaced"
         );
+    }
+
+    const MEMBER2: &str = "acct-2";
+
+    #[test]
+    fn owner_adds_a_member_who_unlocks_and_reads_the_tree() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let sealed = seal_open(&owner.sealer, b"our shared ancestry"); // owner writes
+
+        // The joining member provisions their own identity and shares the public keys OOB.
+        let m = provision_member(b"member pass").unwrap();
+        let added = add_member(
+            &owner.keyring,
+            b"owner pass",
+            TREE,
+            MEMBER,
+            0,
+            MEMBER2,
+            MemberRole::Editor,
+            &m.hpke_public,
+            &m.author_public,
+        )
+        .unwrap();
+        assert_eq!(added.revision, 2);
+
+        // The keyring now carries the member, with an HPKE wrap and their pinned keys.
+        let k = Keyring::decode(added.keyring.as_slice()).unwrap();
+        assert!(k.members.iter().any(|mm| mm.member_id == MEMBER2 && mm.role == MemberRole::Editor as i32));
+        assert!(k.epochs[0].wraps.iter().any(|w| w.member_id == MEMBER2 && w.wrap_method == super::HPKE));
+
+        // The member unlocks against the pinned founder key and reads the owner's data.
+        let pinned = founder_key(&owner.keyring);
+        let u = unlock_as_member(&added.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[pinned], b"r-mem", 0).unwrap();
+        assert_eq!(u.revision, 2);
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"our shared ancestry");
+    }
+
+    #[test]
+    fn a_member_unlock_needs_the_pinned_signer_and_right_passphrase() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let m = provision_member(b"member pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Viewer, &m.hpke_public, &m.author_public).unwrap();
+
+        // Wrong pinned key (an attacker-substituted signer) → rejected before any unwrap.
+        let wrong = provision(b"someone else", b"other-tree-16byt", "x", b"r").unwrap();
+        let wrong_key = founder_key(&wrong.keyring);
+        assert!(unlock_as_member(&added.keyring, b"member pass", &m.kdf_params, TREE, MEMBER2, &[wrong_key], b"r", 0).is_err());
+
+        // Right pinned key, wrong passphrase → HPKE unwrap fails.
+        let pinned = founder_key(&owner.keyring);
+        assert!(unlock_as_member(&added.keyring, b"WRONG", &m.kdf_params, TREE, MEMBER2, &[pinned], b"r", 0).is_err());
+    }
+
+    #[test]
+    fn adding_the_same_member_twice_is_rejected() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let m = provision_member(b"member pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).unwrap();
+        assert!(matches!(
+            add_member(&added.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public),
+            Err(SealerError::MemberExists)
+        ));
+        // ...and the owner can't be re-added under their own id either.
+        assert!(matches!(
+            add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER, MemberRole::Editor, &m.hpke_public, &m.author_public),
+            Err(SealerError::MemberExists)
+        ));
+    }
+
+    #[test]
+    fn add_member_needs_the_owners_passphrase() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-owner").unwrap();
+        let m = provision_member(b"member pass").unwrap();
+        assert!(add_member(&owner.keyring, b"WRONG", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).is_err());
     }
 }

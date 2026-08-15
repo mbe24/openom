@@ -147,6 +147,10 @@ pub enum SealerError {
     /// No wrap in the keyring matches the expected `(member_id, wrap_method)`.
     #[error("keyring has no matching wrap")]
     MissingWrap,
+    /// A member with this id is already in the keyring (add is not idempotent — the caller
+    /// should update or remove first).
+    #[error("member already present in the keyring")]
+    MemberExists,
     /// The keyring is for a different tree than the caller expected (the caller supplies the
     /// trusted `tree_id`; it is never read from the untrusted keyring for the AEAD context).
     #[error("keyring is for a different tree")]
