@@ -196,6 +196,35 @@ fn merge_bytes_on_junk_is_a_clean_error_not_a_panic() {
     assert!(matches!(d.merge_bytes(&[0]), Err(DecodeError::BadLayout)));
 }
 
+#[test]
+fn merge_bytes_error_leaves_the_document_unchanged() {
+    // Transactional decode: a corrupt buffer applies nothing (decode fails before any integrate).
+    let mut d = Doc::new(rid(1));
+    d.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1) });
+    let before = d.checkpoint();
+    assert!(d.merge_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 5 /* count=5, but no ops follow */]).is_err());
+    assert_eq!(d.checkpoint(), before, "a failed merge must not partially apply");
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[test]
+fn snapshot_bytes_are_a_stable_golden_vector() {
+    // Locks the canonical encoding: a change to the on-wire format (the sealed archive) breaks this
+    // deliberately. Fixed replica + fixed ops ⇒ fixed bytes, forever (until a layout-version bump).
+    let r = rid(7);
+    let mut d = Doc::new(r);
+    d.apply_local(OpIntent::SetRegister { cell: vec![1], value: Value::Text("Jon".into()) });
+    d.apply_local(OpIntent::AddElement { cell: vec![2], elem: vec![9], value: Value::I64(-5) });
+    let got = hex(&d.snapshot());
+    let expected = "01000000000000000200000000000000010700000000000000000000000000000000\
+0000000000000001010500000000000000034a6f6e00000000000000020700000000000000000000000000000001\
+00000000000000010200000000000000010902fffffffffffffffb";
+    assert_eq!(got, expected, "canonical snapshot encoding changed — bump LAYOUT_VERSION + migrate");
+}
+
 proptest! {
     #[test]
     fn decode_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
@@ -213,5 +242,28 @@ proptest! {
         let ops = codec::decode_ops(&bytes).unwrap();
         // Re-encoding the decoded ops is a byte-for-byte fixpoint (canonical form is stable).
         prop_assert_eq!(codec::encode_ops(&ops), bytes);
+    }
+
+    // A nastier value alphabet — the edges where an encoder/decoder tends to break.
+    #[test]
+    fn round_trips_edge_case_values(
+        texts in prop::collection::vec("\\PC*", 0..4),
+        ints in prop::collection::vec(prop_oneof![Just(i64::MIN), Just(i64::MAX), Just(0i64), any::<i64>()], 0..4),
+    ) {
+        let mut d = Doc::new(rid(1));
+        for (i, t) in texts.iter().enumerate() {
+            d.apply_local(OpIntent::SetRegister { cell: vec![i as u8], value: Value::Text(t.clone()) });
+        }
+        for (i, n) in ints.iter().enumerate() {
+            d.apply_local(OpIntent::AddElement { cell: vec![100 + i as u8], elem: vec![0], value: Value::I64(*n) });
+        }
+        // Boundary scalars too.
+        d.apply_local(OpIntent::SetRegister { cell: vec![200], value: Value::U64(u64::MAX) });
+        d.apply_local(OpIntent::SetRegister { cell: vec![201], value: Value::Bytes(vec![]) });
+
+        let bytes = d.snapshot();
+        let rebuilt = Doc::from_snapshot(rid(2), &bytes).unwrap();
+        prop_assert_eq!(rebuilt.snapshot(), bytes);
+        prop_assert_eq!(rebuilt.checkpoint(), d.checkpoint());
     }
 }

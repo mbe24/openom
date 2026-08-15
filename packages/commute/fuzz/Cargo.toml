@@ -1,0 +1,34 @@
+# cargo-fuzz targets for commute's untrusted-input boundaries. This is a DETACHED crate (its own
+# empty [workspace]) so it never touches the stable workspace build — the main crates build on
+# stable in the container; these run under nightly libFuzzer:
+#   cd packages/commute && cargo +nightly fuzz run decode_ops
+# The stable proptests (decode_never_panics_on_arbitrary_bytes, merge_bytes_error_leaves_the_
+# document_unchanged) cover the same surface for CI; these are for deep, corpus-driven fuzzing.
+[package]
+name = "commute-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+commute = { path = ".." }
+
+[[bin]]
+name = "decode_ops"
+path = "fuzz_targets/decode_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge_bytes"
+path = "fuzz_targets/merge_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
