@@ -134,6 +134,11 @@ pub enum SealerError {
     /// different tree, or sealed under a different key epoch.
     #[error("envelope is out of scope for this sealer (tree_id/key_id mismatch)")]
     WrongScope,
+    /// The envelope's `key_id` names an epoch the caller holds no key for — an expected
+    /// access boundary (e.g. a member reading content from before they joined), distinct
+    /// from a tampered/misrouted blob.
+    #[error("no key for this envelope's epoch")]
+    EpochUnreachable,
     /// The envelope's `kind` isn't the one the caller expected to open.
     #[error("unexpected entry kind")]
     WrongKind,
@@ -228,6 +233,11 @@ impl Sealer {
         &self.tree_id
     }
 
+    /// The key epoch (`key_id`) this sealer is scoped to.
+    pub fn key_id(&self) -> &[u8] {
+        &self.key_id
+    }
+
     /// Seal `plaintext` into a wire-ready envelope under this sealer's DEK and scope,
     /// using the caller-supplied chain state in `ctx`. Returns the encoded bytes plus the
     /// `ciphertext_hash` to thread into the next call.
@@ -278,6 +288,82 @@ impl Sealer {
             return Err(SealerError::WrongScope);
         }
         Ok(())
+    }
+}
+
+/// A reader/writer over **all epochs** a caller can reach: one [`Sealer`] per epoch (they
+/// share `tree_id`/`replica_id`), routing an open to the sealer whose `key_id` matches the
+/// envelope, and always sealing new entries under the single **write epoch** (the latest).
+///
+/// This is what lets a client read content sealed before a key rotation (old-epoch
+/// snapshots and, under leave-and-lazy media, old photos) while writing only under the
+/// current key. The per-replica chain state (§8a) is orthogonal to `key_id` and spans
+/// epochs — a rotation switches which epoch a *write* targets, never the replica's counter
+/// or `prev` chain.
+pub struct SealerSet {
+    tree_id: Vec<u8>,
+    write_key_id: Vec<u8>,
+    sealers: Vec<Sealer>,
+}
+
+impl SealerSet {
+    /// Build a set from `(key_id, dek)` per reachable epoch. `write_key_id` must be one of
+    /// them (the latest epoch) — new entries seal under it.
+    pub fn new(
+        tree_id: Vec<u8>,
+        replica_id: Vec<u8>,
+        epochs: Vec<(Vec<u8>, Key32)>,
+        write_key_id: Vec<u8>,
+    ) -> Self {
+        let sealers = epochs
+            .into_iter()
+            .map(|(key_id, dek)| {
+                Sealer::from_unwrapped(
+                    openom_protocol::ENVELOPE_VERSION,
+                    dek,
+                    tree_id.clone(),
+                    key_id,
+                    replica_id.clone(),
+                )
+            })
+            .collect();
+        SealerSet { tree_id, write_key_id, sealers }
+    }
+
+    /// A single-epoch set — the local-development / demo path (one dev sealer).
+    pub fn single(sealer: Sealer) -> Self {
+        SealerSet { tree_id: sealer.tree_id.clone(), write_key_id: sealer.key_id.clone(), sealers: vec![sealer] }
+    }
+
+    /// The tree this set is scoped to.
+    pub fn tree_id(&self) -> &[u8] {
+        &self.tree_id
+    }
+
+    /// Seal a new entry under the **write** (latest) epoch.
+    pub fn seal_entry(&self, ctx: &SealContext, plaintext: &[u8]) -> Result<SealOutcome, SealerError> {
+        self.sealers
+            .iter()
+            .find(|s| s.key_id == self.write_key_id)
+            .ok_or(SealerError::EpochUnreachable)?
+            .seal_entry(ctx, plaintext)
+    }
+
+    /// Open an envelope by routing to the sealer for its epoch. A `tree_id` mismatch is a
+    /// misrouted blob (`WrongScope`); a `key_id` the set doesn't hold is an access boundary
+    /// (`EpochUnreachable`).
+    pub fn open_entry(&self, expect: EntryKind, envelope_bytes: &[u8]) -> Result<Vec<u8>, SealerError> {
+        let envelope =
+            Envelope::decode(envelope_bytes).map_err(|e| SealerError::Decode(e.to_string()))?;
+        let header = envelope.header.as_ref().ok_or(SealerError::NoHeader)?;
+        if header.tree_id != self.tree_id {
+            return Err(SealerError::WrongScope);
+        }
+        self.sealers
+            .iter()
+            .find(|s| s.key_id == header.key_id)
+            .ok_or(SealerError::EpochUnreachable)?
+            .open_entry(expect, envelope_bytes)
     }
 }
 

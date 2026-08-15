@@ -24,9 +24,9 @@ use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
     SignerRole, WrapMethod,
 };
-use openom_protocol::{Message, ENVELOPE_VERSION, KEYRING_LAYOUT_VERSION};
+use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 
-use crate::{Sealer, SealerError};
+use crate::{SealerError, SealerSet};
 
 const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
@@ -53,25 +53,26 @@ const MAX_ITERATIONS: u32 = 16;
 const MAX_PARALLELISM: u32 = 8;
 
 /// Result of [`provision`]: the encoded keyring to store, the recovery code to show ONCE,
-/// and the ready sealer (built from the fresh DEK — one Argon2id, no second unlock).
+/// and the ready sealer set (built from the fresh DEK — one Argon2id, no second unlock).
 pub struct Provisioned {
     pub keyring: Vec<u8>,
     pub recovery_code: String,
-    pub sealer: Sealer,
+    pub sealer: SealerSet,
 }
 
-/// Result of [`unlock`]: the sealer plus the keyring `revision` the caller must watermark.
+/// Result of [`unlock`]: the sealer set (all epochs the caller can reach) plus the keyring
+/// `revision` the caller must watermark.
 pub struct Unlocked {
-    pub sealer: Sealer,
+    pub sealer: SealerSet,
     pub revision: u32,
 }
 
 /// Result of [`recover`]: a freshly re-provisioned keyring + a NEW recovery code (both to
-/// store/show), the sealer, and the new `revision`.
+/// store/show), the sealer set, and the new `revision`.
 pub struct Recovered {
     pub keyring: Vec<u8>,
     pub recovery_code: String,
-    pub sealer: Sealer,
+    pub sealer: SealerSet,
     pub revision: u32,
 }
 
@@ -129,13 +130,18 @@ pub fn provision(
     };
     sign_keyring(&mut keyring, &secrets.root.identity);
 
-    let sealer =
-        Sealer::from_unwrapped(ENVELOPE_VERSION, dek, tree_id.to_vec(), key_id, replica_id.to_vec());
+    let sealer = SealerSet::new(
+        tree_id.to_vec(),
+        replica_id.to_vec(),
+        vec![(key_id.clone(), dek)],
+        key_id,
+    );
     Ok(Provisioned { keyring: keyring.encode_to_vec(), recovery_code: secrets.recovery_code, sealer })
 }
 
-/// Open an existing keyring with a passphrase and build a sealer. Verifies the keyring with
-/// the caller's own derived identity (§4a V1), then unwraps the DEK.
+/// Open an existing keyring with a passphrase and build a sealer set spanning every epoch
+/// the owner can reach (via the recovery root key). Verifies the keyring with the caller's
+/// own derived identity (§4a V1).
 pub fn unlock(
     keyring_bytes: &[u8],
     passphrase: &[u8],
@@ -143,15 +149,14 @@ pub fn unlock(
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<Unlocked, SealerError> {
-    let opened = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
-    let sealer = Sealer::from_unwrapped(
-        ENVELOPE_VERSION,
-        opened.dek,
-        tree_id.to_vec(),
-        opened.key_id,
-        replica_id.to_vec(),
-    );
-    Ok(Unlocked { sealer, revision: opened.revision })
+    let Opened { key_id: write_key_id, revision, rrk_secret, keyring, .. } =
+        open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
+    let epochs = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?
+        .into_iter()
+        .map(|(k, _e, d)| (k, d))
+        .collect();
+    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
+    Ok(Unlocked { sealer, revision })
 }
 
 /// Recover with the recovery code and re-establish owner access under `new_passphrase`,
@@ -217,9 +222,14 @@ pub fn recover(
     keyring.signatures.clear();
     sign_keyring(&mut keyring, &secrets.root.identity);
 
-    let (key_id, _, dek) = latest_epoch_dek(&keyring, tree_id, member_id, &rrk_secret)?;
-    let sealer =
-        Sealer::from_unwrapped(ENVELOPE_VERSION, dek, tree_id.to_vec(), key_id, replica_id.to_vec());
+    let deks = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?;
+    let write_key_id = deks
+        .iter()
+        .max_by_key(|(_, e, _)| *e)
+        .map(|(k, _, _)| k.clone())
+        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+    let epochs = deks.into_iter().map(|(k, _e, d)| (k, d)).collect();
+    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
     Ok(Recovered { keyring: keyring.encode_to_vec(), recovery_code: secrets.recovery_code, sealer, revision: new_revision })
 }
 
@@ -378,24 +388,27 @@ pub fn unlock_as_member(
     // path's whole security — the member cannot derive the owner's key, so it must be
     // supplied, never taken from the (untrusted) document.
     verify_keyring_any(&keyring, trusted_signers)?;
-
-    let (epoch_key_id, epoch, wrap) = find_wrap(&keyring, member_id, HPKE)?;
     validate_kdf_params(member_kdf)?;
     let root = derive_root(member_passphrase, member_kdf)?;
-    let info = wrap_aad(tree_id, &epoch_key_id, member_id, HPKE, epoch);
-    let dek = hpke_unwrap_dek(
-        root.hpke_secret.as_slice(),
-        &wrap.ephemeral_public_key,
-        &wrap.wrapped_dek,
-        &info,
-    )?;
-    let sealer = Sealer::from_unwrapped(
-        ENVELOPE_VERSION,
-        dek,
-        tree_id.to_vec(),
-        epoch_key_id,
-        replica_id.to_vec(),
-    );
+
+    // HPKE-unwrap every epoch the member holds a wrap for (they read the full history their
+    // wraps cover); write under the latest such epoch. No wrap at all → a removed member.
+    let mut epochs: Vec<(u32, Vec<u8>, Key32)> = Vec::new();
+    for ep in &keyring.epochs {
+        if let Some(w) = ep.wraps.iter().find(|w| w.member_id == member_id && w.wrap_method == HPKE) {
+            let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE, ep.epoch);
+            let dek =
+                hpke_unwrap_dek(root.hpke_secret.as_slice(), &w.ephemeral_public_key, &w.wrapped_dek, &info)?;
+            epochs.push((ep.epoch, ep.key_id.clone(), dek));
+        }
+    }
+    let write_key_id = epochs
+        .iter()
+        .max_by_key(|(e, _, _)| *e)
+        .map(|(_, k, _)| k.clone())
+        .ok_or(SealerError::MissingWrap)?;
+    let set_epochs = epochs.into_iter().map(|(_e, k, d)| (k, d)).collect();
+    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), set_epochs, write_key_id);
     Ok(Unlocked { sealer, revision: keyring.revision })
 }
 
@@ -406,7 +419,7 @@ pub fn unlock_as_member(
 pub struct MemberRemoved {
     pub keyring: Vec<u8>,
     pub revision: u32,
-    pub sealer: Sealer,
+    pub sealer: SealerSet,
 }
 
 /// Remove a member with **forward-secure revocation**: mint a fresh DEK under a new epoch,
@@ -426,7 +439,7 @@ pub fn remove_member(
     remove_member_id: &str,
     replica_id: &[u8],
 ) -> Result<MemberRemoved, SealerError> {
-    let Opened { epoch: old_epoch, revision, prev_hash, identity, mut keyring, .. } =
+    let Opened { epoch: old_epoch, revision, prev_hash, identity, rrk_secret, mut keyring, .. } =
         open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
 
     if remove_member_id == owner_member_id {
@@ -472,21 +485,32 @@ pub fn remove_member(
     keyring.epochs.push(KeyEpoch { key_id: new_key_id.clone(), epoch: new_epoch, wraps });
     keyring.members.retain(|m| m.member_id != remove_member_id);
     keyring.authorized_signers.retain(|s| s.member_id != remove_member_id);
+    // Strip the removed member's wraps from every (old) epoch too — hygiene, not a new
+    // secrecy guarantee (they cached those keys while a member); forward secrecy comes from
+    // their absence in the NEW epoch.
+    for ep in &mut keyring.epochs {
+        ep.wraps.retain(|w| w.member_id != remove_member_id);
+    }
 
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
     sign_keyring(&mut keyring, &identity);
 
-    let sealer =
-        Sealer::from_unwrapped(ENVELOPE_VERSION, new_dek, tree_id.to_vec(), new_key_id, replica_id.to_vec());
+    // The owner re-seals the tree with a set spanning every epoch (reached via the RRK),
+    // writing under the new epoch.
+    let epochs = epoch_deks(&keyring, tree_id, owner_member_id, &rrk_secret)?
+        .into_iter()
+        .map(|(k, _e, d)| (k, d))
+        .collect();
+    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, new_key_id);
     Ok(MemberRemoved { keyring: keyring.encode_to_vec(), revision: new_revision, sealer })
 }
 
 // ---- internals ----
 
 struct Opened {
-    dek: Key32,
+    /// The latest epoch's `key_id` (the write epoch) and number.
     key_id: Vec<u8>,
     epoch: u32,
     revision: u32,
@@ -537,10 +561,16 @@ fn open_with_passphrase(
     verify_keyring(&keyring, &root.identity.verifying_key())?;
     let rrk_secret = unwrap_rrk_secret(&root.kek, &nonce, &wrapped, tree_id, member_id, PASSPHRASE)?;
 
-    let (key_id, epoch, dek) = latest_epoch_dek(&keyring, tree_id, member_id, &rrk_secret)?;
+    let latest = keyring
+        .epochs
+        .iter()
+        .max_by_key(|e| e.epoch)
+        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+    let key_id = latest.key_id.clone();
+    let epoch = latest.epoch;
     let prev_hash = keyring_hash(&keyring).to_vec();
     let revision = keyring.revision;
-    Ok(Opened { dek, key_id, epoch, revision, prev_hash, identity: root.identity, rrk_secret, keyring })
+    Ok(Opened { key_id, epoch, revision, prev_hash, identity: root.identity, rrk_secret, keyring })
 }
 
 fn decode_keyring(bytes: &[u8]) -> Result<Keyring, SealerError> {
@@ -659,21 +689,6 @@ fn epoch_deks(
         .collect()
 }
 
-/// The latest epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
-fn latest_epoch_dek(
-    keyring: &Keyring,
-    tree_id: &[u8],
-    founder_id: &str,
-    rrk_secret: &Key32,
-) -> Result<(Vec<u8>, u32, Key32), SealerError> {
-    let ep = keyring
-        .epochs
-        .iter()
-        .max_by_key(|e| e.epoch)
-        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
-    Ok((ep.key_id.clone(), ep.epoch, open_epoch_dek(ep, tree_id, founder_id, rrk_secret)?))
-}
-
 /// The founder's recovery key entry (by member id).
 fn recovery_key_for<'a>(keyring: &'a Keyring, member_id: &str) -> Result<&'a RecoveryKey, SealerError> {
     keyring
@@ -711,25 +726,6 @@ fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
     }
 }
 
-/// Find the wrap for `(member_id, method)` in the latest epoch. Returns `(key_id, epoch, wrap)`.
-fn find_wrap<'a>(
-    keyring: &'a Keyring,
-    member_id: &str,
-    method: i32,
-) -> Result<(Vec<u8>, u32, &'a KeyWrap), SealerError> {
-    let epoch = keyring
-        .epochs
-        .iter()
-        .max_by_key(|e| e.epoch)
-        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
-    let wrap = epoch
-        .wraps
-        .iter()
-        .find(|w| w.member_id == member_id && w.wrap_method == method)
-        .ok_or(SealerError::MissingWrap)?;
-    Ok((epoch.key_id.clone(), epoch.epoch, wrap))
-}
-
 /// Reject Argon2id params outside the runnable window (they come from an unverified keyring).
 fn validate_kdf_params(p: &openom_protocol::v1::KdfParams) -> Result<(), SealerError> {
     let ok = (MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&p.memory_kib)
@@ -751,7 +747,7 @@ mod tests {
         add_member, change_passphrase, provision, provision_member, recover, remove_member,
         unlock, unlock_as_member,
     };
-    use crate::{EntryKind, SealContext, Sealer, SealerError};
+    use crate::{EntryKind, SealContext, SealerError, SealerSet};
     use openom_crypto::{generate_recovery_code, keyring_hash, VerifyingKey};
     use openom_protocol::v1::{Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
@@ -766,7 +762,7 @@ mod tests {
     const TREE: &[u8] = b"tree-uuid-16byte";
     const MEMBER: &str = "acct-1";
 
-    fn seal_open(sealer: &Sealer, plaintext: &[u8]) -> Vec<u8> {
+    fn seal_open(sealer: &SealerSet, plaintext: &[u8]) -> Vec<u8> {
         let out = sealer
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), plaintext)
             .unwrap();
@@ -1084,6 +1080,35 @@ mod tests {
         // change_passphrase after a recover on a multi-epoch tree must not brick.
         let ch = change_passphrase(&rec.keyring, b"new pass", b"newer pass", TREE, MEMBER, 0).unwrap();
         assert!(unlock(&ch.keyring, b"newer pass", TREE, MEMBER, b"r").is_ok());
+    }
+
+    #[test]
+    fn owner_reads_across_epochs_after_a_rotation() {
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let old = seal_open(&owner.sealer, b"old epoch content"); // epoch 0
+
+        let m = provision_member(b"m pass").unwrap();
+        let k1 = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &m.hpke_public, &m.author_public).unwrap();
+        let removed = remove_member(&k1.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, b"r-o2").unwrap();
+        let new = seal_open(&removed.sealer, b"new epoch content"); // epoch 1
+
+        // The owner unlocks a set spanning BOTH epochs and reads old and new content.
+        let u = unlock(&removed.keyring, b"owner pass", TREE, MEMBER, b"r").unwrap();
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &old).unwrap(), b"old epoch content");
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &new).unwrap(), b"new epoch content");
+    }
+
+    #[test]
+    fn a_member_added_later_reads_the_pre_join_history() {
+        // Content sealed before the member joins is readable by them (all-epoch wraps +
+        // multi-epoch read), which is the family-archive behavior we chose.
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let pre = seal_open(&owner.sealer, b"pre-join photo");
+        let m = provision_member(b"m pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Viewer, &m.hpke_public, &m.author_public).unwrap();
+        let pinned = founder_key(&owner.keyring);
+        let u = unlock_as_member(&added.keyring, b"m pass", &m.kdf_params, TREE, MEMBER2, &[pinned], b"r-m", 0).unwrap();
+        assert_eq!(u.sealer.open_entry(EntryKind::Snapshot, &pre).unwrap(), b"pre-join photo");
     }
 
     #[test]

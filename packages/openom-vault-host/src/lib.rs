@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use openom_crypto::VerifyingKey;
 use openom_sealer::vault;
-use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use openom_protocol::v1::{Compression, Format, KdfParams, MemberRole};
 use openom_protocol::Message;
 use serde::Serialize;
@@ -62,6 +62,9 @@ pub enum VaultErrorCode {
     BadEnvelope,
     /// An envelope is out of this sealer's (tree_id, key_id) scope.
     WrongScope,
+    /// The envelope's epoch isn't one the caller holds a key for (e.g. content from before
+    /// a member joined) — an access boundary, not a tampered/misrouted blob.
+    EpochUnreachable,
     /// An envelope isn't the expected kind.
     WrongKind,
     /// A malformed request field (unknown kind/format/compression string).
@@ -109,6 +112,7 @@ impl From<SealerError> for VaultError {
             E::Crypto(_) => C::CryptoOpen,
             E::Decode(_) | E::NoHeader => C::BadEnvelope,
             E::WrongScope => C::WrongScope,
+            E::EpochUnreachable => C::EpochUnreachable,
             E::WrongKind => C::WrongKind,
             E::BadKeyring(_) => C::BadKeyring,
             E::BadKdfParams => C::BadKdfParams,
@@ -213,17 +217,17 @@ pub struct MemberRemoved {
 /// the map lock is held (we clone the `Arc` out first), so the lock is never poisoned by a seal.
 #[derive(Default)]
 struct Registry {
-    map: Mutex<HashMap<String, Arc<Sealer>>>,
+    map: Mutex<HashMap<String, Arc<SealerSet>>>,
 }
 
 impl Registry {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Sealer>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SealerSet>>> {
         self.map.lock().unwrap_or_else(|e| e.into_inner())
     }
-    fn insert(&self, id: String, sealer: Sealer) {
+    fn insert(&self, id: String, sealer: SealerSet) {
         self.lock().insert(id, Arc::new(sealer));
     }
-    fn get(&self, id: &str) -> Option<Arc<Sealer>> {
+    fn get(&self, id: &str) -> Option<Arc<SealerSet>> {
         self.lock().get(id).cloned()
     }
     fn remove(&self, id: &str) {
@@ -460,7 +464,7 @@ impl<S: VaultStore> VaultHost<S> {
     /// well-known key — no keyring, no unlock.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
         let replica = fresh_replica()?;
-        let id = self.register(Sealer::dev(tree_id.to_vec(), replica))?;
+        let id = self.register(SealerSet::single(Sealer::dev(tree_id.to_vec(), replica)))?;
         Ok(Unlocked { sealer_id: id, revision: 0 })
     }
 
@@ -517,13 +521,13 @@ impl<S: VaultStore> VaultHost<S> {
             .ok_or_else(|| VaultError::new(VaultErrorCode::NoKeyring, format!("no keyring for tree {tree_key}")))
     }
 
-    fn sealer(&self, id: &str) -> Result<Arc<Sealer>> {
+    fn sealer(&self, id: &str) -> Result<Arc<SealerSet>> {
         self.registry
             .get(id)
             .ok_or_else(|| VaultError::new(VaultErrorCode::UnknownSealer, "unknown or locked sealer"))
     }
 
-    fn register(&self, sealer: Sealer) -> Result<String> {
+    fn register(&self, sealer: SealerSet) -> Result<String> {
         // 128 random bits, hex. Same trust domain as the web worker's sequential ids (any caller
         // able to invoke can call provision itself), just without a shared counter.
         let id = hex(&openom_crypto::generate_salt().map_err(SealerError::from)?);

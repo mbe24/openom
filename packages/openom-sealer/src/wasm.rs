@@ -18,14 +18,14 @@ use openom_crypto::{Key32, VerifyingKey, KEY_LEN};
 use openom_protocol::v1::{Aead, Compression, Format, KdfParams, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
-use crate::{vault, EntryKind, SealContext, Sealer, SealerError};
+use crate::{vault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
 /// weaker-isolation trade-off vs. native — see the threat model / SERVER-DATA-FORMAT §16).
 #[wasm_bindgen]
 pub struct WasmSealer {
-    inner: Sealer,
+    inner: SealerSet,
 }
 
 /// The result of [`WasmSealer::seal_entry`]: the wire-ready envelope bytes and the
@@ -57,7 +57,7 @@ impl WasmSealer {
     /// server and no unlock flow, for fast UI iteration. Production refuses its `key_id`.
     pub fn dev(tree_id: &[u8], replica_id: &[u8]) -> WasmSealer {
         WasmSealer {
-            inner: Sealer::dev(tree_id.to_vec(), replica_id.to_vec()),
+            inner: SealerSet::single(Sealer::dev(tree_id.to_vec(), replica_id.to_vec())),
         }
     }
 
@@ -90,7 +90,7 @@ impl WasmSealer {
         if let Some(name) = aead {
             sealer = sealer.with_aead(parse_aead(&name)?);
         }
-        Ok(WasmSealer { inner: sealer })
+        Ok(WasmSealer { inner: SealerSet::single(sealer) })
     }
 
     /// Seal `plaintext` under this sealer's DEK/scope with the caller-supplied chain state.
