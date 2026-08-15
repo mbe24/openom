@@ -17,8 +17,8 @@ use std::sync::Arc;
 use openom_store::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
-    MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed, Sealed,
-    Unlocked, VaultError, VaultErrorCode, VaultHost,
+    CoOwnerChanged, MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed,
+    Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -226,6 +226,41 @@ async fn vault_remove_member(
     .map_err(join_err)?
 }
 
+#[tauri::command]
+async fn vault_add_co_owner(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    founder_passphrase: String,
+    founder_member_id: String,
+    target_member_id: String,
+) -> Result<CoOwnerChanged, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.add_co_owner(&tree_key, &tree_id, founder_passphrase, &founder_member_id, &target_member_id)
+    })
+    .await
+    .map_err(join_err)?
+}
+
+#[tauri::command]
+async fn vault_remove_co_owner(
+    state: State<'_, Vault>,
+    tree_key: String,
+    tree_id: Vec<u8>,
+    founder_passphrase: String,
+    founder_member_id: String,
+    target_member_id: String,
+    new_role: String,
+) -> Result<CoOwnerChanged, VaultError> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.remove_co_owner(&tree_key, &tree_id, founder_passphrase, &founder_member_id, &target_member_id, &new_role)
+    })
+    .await
+    .map_err(join_err)?
+}
+
 // ----------------------------------------------------------------- sealer (cheap: sync is fine)
 
 #[tauri::command]
@@ -300,6 +335,8 @@ pub fn run() {
             vault_add_member,
             vault_unlock_as_member,
             vault_remove_member,
+            vault_add_co_owner,
+            vault_remove_co_owner,
             sealer_dev,
             sealer_seal_entry,
             sealer_open_entry,

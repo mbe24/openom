@@ -482,6 +482,57 @@ pub fn remove_member(
     })
 }
 
+/// Promote an existing member to co-owner (founder action). Returns the new keyring +
+/// revision (no sealer — signing authority, not keys).
+#[wasm_bindgen(js_name = addCoOwner)]
+pub fn add_co_owner(
+    keyring: &[u8],
+    founder_passphrase: String,
+    tree_id: &[u8],
+    founder_member_id: &str,
+    min_revision: u32,
+    target_member_id: &str,
+) -> Result<VaultResult, JsError> {
+    let founder_passphrase = Zeroizing::new(founder_passphrase);
+    let r = vault::add_co_owner(
+        keyring,
+        founder_passphrase.as_bytes(),
+        tree_id,
+        founder_member_id,
+        min_revision,
+        target_member_id,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: None })
+}
+
+/// Demote a co-owner to an ordinary `new_role` (founder action). Revokes signing authority,
+/// not read access (use removeMember to fully revoke).
+#[wasm_bindgen(js_name = removeCoOwner)]
+#[allow(clippy::too_many_arguments)]
+pub fn remove_co_owner(
+    keyring: &[u8],
+    founder_passphrase: String,
+    tree_id: &[u8],
+    founder_member_id: &str,
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: &str,
+) -> Result<VaultResult, JsError> {
+    let founder_passphrase = Zeroizing::new(founder_passphrase);
+    let r = vault::remove_co_owner(
+        keyring,
+        founder_passphrase.as_bytes(),
+        tree_id,
+        founder_member_id,
+        min_revision,
+        target_member_id,
+        parse_member_role(new_role)?,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: None })
+}
+
 fn parse_member_role(s: &str) -> Result<MemberRole, JsError> {
     match s {
         "owner" => Ok(MemberRole::Owner),

@@ -209,6 +209,13 @@ pub struct MemberRemoved {
     pub revision: u32,
 }
 
+/// Result of a co-owner promotion / demotion — a signing-authority change, no new sealer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoOwnerChanged {
+    pub revision: u32,
+}
+
 // ---------------------------------------------------------------- registry
 
 /// The live sealer sessions, keyed by an opaque handle. `Arc` so `lock`/`clear` can drop the
@@ -458,6 +465,53 @@ impl<S: VaultStore> VaultHost<S> {
         self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
         let id = self.register(r.sealer)?;
         Ok(MemberRemoved { sealer_id: id, revision: r.revision })
+    }
+
+    /// Promote an existing member to co-owner (founder action). Persists + watermarks the
+    /// new keyring; no sealer changes (signing authority, not keys).
+    pub fn add_co_owner(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        founder_passphrase: String,
+        founder_member_id: &str,
+        target_member_id: &str,
+    ) -> Result<CoOwnerChanged> {
+        let founder_passphrase = Zeroizing::new(founder_passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let r = vault::add_co_owner(&keyring, founder_passphrase.as_bytes(), tree_id, founder_member_id, floor, target_member_id)?;
+        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        Ok(CoOwnerChanged { revision: r.revision })
+    }
+
+    /// Demote a co-owner to an ordinary role (founder action). Revokes signing authority,
+    /// not read access — use remove_member to fully revoke. `new_role` = admin/editor/viewer.
+    pub fn remove_co_owner(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        founder_passphrase: String,
+        founder_member_id: &str,
+        target_member_id: &str,
+        new_role: &str,
+    ) -> Result<CoOwnerChanged> {
+        let founder_passphrase = Zeroizing::new(founder_passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let r = vault::remove_co_owner(
+            &keyring,
+            founder_passphrase.as_bytes(),
+            tree_id,
+            founder_member_id,
+            floor,
+            target_member_id,
+            parse_member_role(new_role)?,
+        )?;
+        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        Ok(CoOwnerChanged { revision: r.revision })
     }
 
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
@@ -837,5 +891,17 @@ mod tests {
             .unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, vec![old_founder])
             .unwrap();
         assert_eq!(h.open_entry(&u.sealer_id, "snapshot", &sealed).unwrap(), b"shared");
+    }
+
+    #[test]
+    fn founder_promotes_and_demotes_a_co_owner_through_the_host() {
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let co = h.provision_member("co pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &co.hpke_public, &co.author_public).unwrap();
+        let promoted = h.add_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2).unwrap();
+        assert_eq!(promoted.revision, 3);
+        let demoted = h.remove_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "viewer").unwrap();
+        assert_eq!(demoted.revision, 4);
     }
 }
