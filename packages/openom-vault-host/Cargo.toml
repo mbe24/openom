@@ -12,3 +12,10 @@ openom-crypto.workspace = true
 openom-protocol.workspace = true
 serde = { workspace = true }
 zeroize.workspace = true
+rusqlite = { workspace = true, optional = true }
+
+[features]
+default = []
+# A durable SqliteVaultStore for the Tauri host. Off by default so the pure logic + its tests
+# build without SQLite; the Tauri crate turns it on.
+sqlite = ["dep:rusqlite"]

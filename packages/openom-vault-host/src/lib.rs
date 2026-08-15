@@ -24,6 +24,9 @@ use openom_protocol::v1::{Compression, Format};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+
 // ---------------------------------------------------------------- errors
 
 /// A stable error code the JS side switches on (never the message text).
