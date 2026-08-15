@@ -18,9 +18,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use openom_crypto::VerifyingKey;
 use openom_sealer::vault;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
-use openom_protocol::v1::{Compression, Format};
+use openom_protocol::v1::{Compression, Format, KdfParams, MemberRole};
+use openom_protocol::Message;
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -183,6 +185,31 @@ pub struct Sealed {
     pub ciphertext_hash: Vec<u8>,
 }
 
+/// What [`VaultHost::provision_member`] returns: the public keys a joining member shares
+/// out-of-band with a tree owner, and the opaque KDF params they persist and pass back at
+/// unlock (an encoded `KdfParams` — the client treats it as a blob).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberProvisioned {
+    pub kdf_params: Vec<u8>,
+    pub author_public: Vec<u8>,
+    pub hpke_public: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberAdded {
+    pub revision: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemoved {
+    pub sealer_id: String,
+    pub revision: u32,
+    pub recovery_code: String,
+}
+
 // ---------------------------------------------------------------- registry
 
 /// The live sealer sessions, keyed by an opaque handle. `Arc` so `lock`/`clear` can drop the
@@ -320,6 +347,120 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Rekeyed { revision: re.revision, recovery_code: re.recovery_code })
     }
 
+    /// Provision a member identity from a passphrase (stateless — no tree touched): returns
+    /// the public keys to share OOB with a tree owner and the opaque KDF params the member
+    /// persists and passes back at unlock.
+    pub fn provision_member(&self, passphrase: String) -> Result<MemberProvisioned> {
+        let passphrase = Zeroizing::new(passphrase);
+        let m = vault::provision_member(passphrase.as_bytes())?;
+        Ok(MemberProvisioned {
+            kdf_params: m.kdf_params.encode_to_vec(),
+            author_public: m.author_public,
+            hpke_public: m.hpke_public,
+        })
+    }
+
+    /// Add a member to a shared tree (owner action): HPKE-wrap the DEK to their public key,
+    /// record them in the signed member list, persist + watermark the new keyring. The
+    /// owner's live sealer is unaffected (no re-key). The member's public keys MUST have
+    /// been verified out-of-band before calling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        new_member_id: &str,
+        role: &str,
+        member_hpke_public: &[u8],
+        member_author_public: &[u8],
+    ) -> Result<MemberAdded> {
+        let owner_passphrase = Zeroizing::new(owner_passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let added = vault::add_member(
+            &keyring,
+            owner_passphrase.as_bytes(),
+            tree_id,
+            owner_member_id,
+            floor,
+            new_member_id,
+            parse_member_role(role)?,
+            member_hpke_public,
+            member_author_public,
+        )?;
+        self.store.save_keyring(tree_key, &added.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, added.revision).map_err(VaultError::storage)?;
+        Ok(MemberAdded { revision: added.revision })
+    }
+
+    /// Unlock a shared tree AS A MEMBER: verify against the caller's pinned signer keys
+    /// (from out-of-band verification, not the document's hints), HPKE-unwrap with the
+    /// member's passphrase, and register a sealer. `member_kdf_params` is the opaque blob
+    /// [`provision_member`] returned.
+    pub fn unlock_as_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        member_kdf_params: &[u8],
+        member_id: &str,
+        trusted_signers: Vec<Vec<u8>>,
+    ) -> Result<Unlocked> {
+        let passphrase = Zeroizing::new(passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let kdf = KdfParams::decode(member_kdf_params)
+            .map_err(|e| VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}")))?;
+        let trusted = parse_trusted_signers(&trusted_signers)?;
+        let replica = fresh_replica()?;
+        let u = vault::unlock_as_member(
+            &keyring,
+            passphrase.as_bytes(),
+            &kdf,
+            tree_id,
+            member_id,
+            &trusted,
+            &replica,
+            floor,
+        )?;
+        self.store.observe_keyring_revision(tree_key, u.revision).map_err(VaultError::storage)?;
+        let id = self.register(u.sealer)?;
+        Ok(Unlocked { sealer_id: id, revision: u.revision })
+    }
+
+    /// Remove a member (owner action) with forward-secure re-key: a fresh DEK under a new
+    /// epoch wrapped only for those remaining, a rotated recovery code, the removed member
+    /// dropped from the member list and signer set. Registers a NEW sealer scoped to the new
+    /// epoch — the caller re-seals the tree with it and drops its old sealer handle.
+    pub fn remove_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        remove_member_id: &str,
+    ) -> Result<MemberRemoved> {
+        let owner_passphrase = Zeroizing::new(owner_passphrase);
+        let keyring = self.require_keyring(tree_key)?;
+        let floor = self.store.keyring_watermark(tree_key).map_err(VaultError::storage)?;
+        let replica = fresh_replica()?;
+        let r = vault::remove_member(
+            &keyring,
+            owner_passphrase.as_bytes(),
+            tree_id,
+            owner_member_id,
+            floor,
+            remove_member_id,
+            &replica,
+        )?;
+        self.store.save_keyring(tree_key, &r.keyring).map_err(VaultError::storage)?;
+        self.store.observe_keyring_revision(tree_key, r.revision).map_err(VaultError::storage)?;
+        let id = self.register(r.sealer)?;
+        Ok(MemberRemoved { sealer_id: id, revision: r.revision, recovery_code: r.recovery_code })
+    }
+
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
     /// well-known key — no keyring, no unlock.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
@@ -434,6 +575,35 @@ fn parse_compression(s: &str) -> Result<Compression> {
         "zstd" => Ok(Compression::Zstd),
         other => Err(VaultError::new(VaultErrorCode::BadRequest, format!("unknown compression: {other}"))),
     }
+}
+
+fn parse_member_role(s: &str) -> Result<MemberRole> {
+    match s {
+        "owner" => Ok(MemberRole::Owner),
+        "co-owner" => Ok(MemberRole::CoOwner),
+        "admin" => Ok(MemberRole::Admin),
+        "editor" => Ok(MemberRole::Editor),
+        "viewer" => Ok(MemberRole::Viewer),
+        other => Err(VaultError::new(VaultErrorCode::BadRequest, format!("unknown role: {other}"))),
+    }
+}
+
+/// Decode the caller's pinned signer verify-keys (32-byte Ed25519 each). At least one is
+/// required — a member unlock with no trust anchor would be verifying against nothing.
+fn parse_trusted_signers(raw: &[Vec<u8>]) -> Result<Vec<VerifyingKey>> {
+    if raw.is_empty() {
+        return Err(VaultError::new(VaultErrorCode::BadRequest, "no trusted signer keys supplied"));
+    }
+    raw.iter()
+        .map(|b| {
+            let arr: [u8; 32] = b
+                .as_slice()
+                .try_into()
+                .map_err(|_| VaultError::new(VaultErrorCode::BadRequest, "trusted signer key must be 32 bytes"))?;
+            VerifyingKey::from_bytes(&arr)
+                .map_err(|_| VaultError::new(VaultErrorCode::BadRequest, "invalid trusted signer key"))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- tests
@@ -587,5 +757,78 @@ mod tests {
             .seal_entry(&p.sealer_id, "nope", "openom-json", "none", 0, Vec::new(), 0, Vec::new(), b"x")
             .unwrap_err();
         assert_eq!(err.code, VaultErrorCode::BadRequest);
+    }
+
+    /// The founder verify-key from the stored keyring, as a member would pin it OOB.
+    fn founder_key(h: &VaultHost<MemStore>, tree_key: &str) -> Vec<u8> {
+        use openom_protocol::v1::Keyring;
+        let bytes = h.store.load_keyring(tree_key).unwrap().unwrap();
+        Keyring::decode(bytes.as_slice()).unwrap().authorized_signers[0].public_key.clone()
+    }
+
+    const MEMBER2: &str = "acct-2";
+
+    #[test]
+    fn owner_adds_a_member_who_unlocks_through_the_host() {
+        let h = host();
+        let owner = h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let sealed = seal(&h, &owner.sealer_id, b"shared ancestry");
+
+        let m = h.provision_member("member pass".into()).unwrap();
+        let added = h
+            .add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &m.hpke_public, &m.author_public)
+            .unwrap();
+        assert_eq!(added.revision, 2);
+
+        let pinned = vec![founder_key(&h, KEY)];
+        let u = h
+            .unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, pinned)
+            .unwrap();
+        assert_eq!(u.revision, 2);
+        assert_eq!(h.open_entry(&u.sealer_id, "snapshot", &sealed).unwrap(), b"shared ancestry");
+    }
+
+    #[test]
+    fn member_unlock_rejects_a_missing_trust_anchor() {
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let m = h.provision_member("member pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "viewer", &m.hpke_public, &m.author_public).unwrap();
+        // No pinned keys at all → bad request (a member must supply a trust anchor).
+        assert_eq!(
+            h.unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, vec![]).unwrap_err().code,
+            VaultErrorCode::BadRequest
+        );
+    }
+
+    #[test]
+    fn host_removes_a_member_and_denies_them_new_content() {
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let m = h.provision_member("member pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "editor", &m.hpke_public, &m.author_public).unwrap();
+        let pinned = vec![founder_key(&h, KEY)];
+
+        let removed = h.remove_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2).unwrap();
+        assert_eq!(removed.revision, 3);
+        // The new-epoch sealer works for new content.
+        let _ = seal(&h, &removed.sealer_id, b"post-removal");
+        // The removed member can no longer unlock (no wrap in the new epoch).
+        assert_eq!(
+            h.unlock_as_member(KEY, TREE, "member pass".into(), &m.kdf_params, MEMBER2, pinned).unwrap_err().code,
+            VaultErrorCode::MissingWrap
+        );
+    }
+
+    #[test]
+    fn change_passphrase_is_refused_once_shared() {
+        let h = host();
+        h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        let m = h.provision_member("member pass".into()).unwrap();
+        h.add_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2, "viewer", &m.hpke_public, &m.author_public).unwrap();
+        assert_eq!(
+            h.change_passphrase(KEY, TREE, "owner pass".into(), "new".into(), MEMBER).unwrap_err().code,
+            VaultErrorCode::Unsupported
+        );
     }
 }
