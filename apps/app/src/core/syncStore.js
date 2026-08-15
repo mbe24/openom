@@ -131,12 +131,29 @@ export class SyncStore {
   }
 
   /**
+   * Record a conflict resolution: store the merged snapshot locally and mark that we've
+   * now incorporated remote version `remoteVersion`, so the next push's If-Match matches
+   * the server (its current version) and the CAS succeeds. Used by the Replicator after
+   * it merges the remote plaintext into the local tree.
+   */
+  async resolveWith(id, mergedBytes, remoteVersion) {
+    const local = await this.#local.readSnapshot(id);
+    const version = await this.#local.putSnapshot(id, mergedBytes, local ? local.version : null);
+    this.#synced.set(id, remoteVersion);
+    this.#dirty.add(id);
+    return version;
+  }
+
+  /**
    * One sync tick: pull, then (if clear) push. Returns the final status. A `conflict`
    * means the caller must open the remote plaintext, merge, re-put, and reconcile again.
    */
   async reconcile(id) {
     const pulled = await this.pull(id);
     if (pulled.status === 'conflict' || pulled.status === 'offline') return pulled;
+    // A fast-forward adopted the remote and (by construction) had no local changes —
+    // nothing to push. Surface it rather than masking it with a no-op 'clean' push.
+    if (pulled.status === 'fastForward') return pulled;
     return this.pushSnapshot(id);
   }
 }
