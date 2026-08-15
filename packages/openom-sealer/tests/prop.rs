@@ -3,6 +3,7 @@
 //! AEAD) and the fuzz surface: opening arbitrary bytes never panics — it returns an error.
 
 use openom_protocol::v1::{Compression, Format};
+use openom_sealer::vault::{recover, unlock};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
 use proptest::prelude::*;
 
@@ -77,5 +78,20 @@ proptest! {
             s.open_entry(EntryKind::Delta, &out.envelope),
             Err(SealerError::WrongKind)
         ));
+    }
+
+    // The vault decodes untrusted keyring bytes from a partly-trusted server; that must never
+    // panic — only ever Err. (Random bytes never form a keyring that finds a wrap for this
+    // member, so these return before any Argon2id runs — the fuzz stays cheap.)
+    #[test]
+    fn unlock_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+        let r = unlock(&bytes, b"pass", b"tree-uuid-16byte", "acct-1", b"replica-0");
+        prop_assert!(r.is_err());
+    }
+
+    #[test]
+    fn recover_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
+        let r = recover(&bytes, "some-code", b"pass", b"tree-uuid-16byte", "acct-1", b"replica-0", 0);
+        prop_assert!(r.is_err());
     }
 }

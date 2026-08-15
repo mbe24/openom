@@ -33,6 +33,8 @@ use openom_crypto::{open_envelope, seal_envelope, CryptoError, Key32};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
 
+pub mod vault;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -135,6 +137,26 @@ pub enum SealerError {
     /// The envelope's `kind` isn't the one the caller expected to open.
     #[error("unexpected entry kind")]
     WrongKind,
+    /// The keyring bytes wouldn't decode, are too large, or are structurally invalid.
+    #[error("malformed keyring: {0}")]
+    BadKeyring(String),
+    /// A keyring's Argon2id `kdf_params` are outside the range this build will run — a
+    /// hostile keyring could otherwise OOM/CPU-burn the client before any verification.
+    #[error("keyring KDF params out of range")]
+    BadKdfParams,
+    /// No wrap in the keyring matches the expected `(member_id, wrap_method)`.
+    #[error("keyring has no matching wrap")]
+    MissingWrap,
+    /// The keyring is for a different tree than the caller expected (the caller supplies the
+    /// trusted `tree_id`; it is never read from the untrusted keyring for the AEAD context).
+    #[error("keyring is for a different tree")]
+    TreeMismatch,
+    /// The served keyring revision is below the client's watermark — a rollback/replay.
+    #[error("keyring revision rolled back: floor {have}, served {got}")]
+    RevisionRollback { have: u32, got: u32 },
+    /// The next revision would overflow `u32` (a poisoned/absurd served revision).
+    #[error("keyring revision overflow")]
+    RevisionOverflow,
 }
 
 /// A stateful sealing session bound to one `(tree_id, key_id, replica_id)` scope, holding
