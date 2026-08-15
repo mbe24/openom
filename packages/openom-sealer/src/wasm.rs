@@ -12,12 +12,13 @@
 //! the JS shim (`apps/app/src/core/sealer/`) wraps these calls with ergonomic defaults.
 
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 
 use openom_crypto::{Key32, KEY_LEN};
 use openom_protocol::v1::{Aead, Compression, Format};
 use openom_protocol::ENVELOPE_VERSION;
 
-use crate::{EntryKind, SealContext, Sealer, SealerError};
+use crate::{vault, EntryKind, SealContext, Sealer, SealerError};
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -185,4 +186,149 @@ fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
 
 fn to_js(e: SealerError) -> JsError {
     JsError::new(&e.to_string())
+}
+
+// ---- the keyring vault (passphrase lifecycle) ----
+
+/// The result of a vault flow. Carries only non-secret outputs — the keyring (to store), the
+/// recovery code (to show ONCE), the revision (to watermark), and the sealer HANDLE. No raw
+/// key material (DEK/KEK/identity) ever crosses to JS; the DEK lives inside the sealer.
+#[wasm_bindgen]
+pub struct VaultResult {
+    keyring: Vec<u8>,
+    recovery_code: String,
+    revision: u32,
+    sealer: Option<WasmSealer>,
+}
+
+#[wasm_bindgen]
+impl VaultResult {
+    /// The encoded keyring to persist (empty for unlock).
+    #[wasm_bindgen(getter)]
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+
+    /// The recovery code to show once (empty for unlock).
+    #[wasm_bindgen(getter, js_name = recoveryCode)]
+    pub fn recovery_code(&self) -> String {
+        self.recovery_code.clone()
+    }
+
+    /// The keyring revision the caller must watermark.
+    #[wasm_bindgen(getter)]
+    pub fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// Take the sealer out to JS (once). `undefined` for change-passphrase (no new sealer).
+    #[wasm_bindgen(js_name = takeSealer)]
+    pub fn take_sealer(&mut self) -> Option<WasmSealer> {
+        self.sealer.take()
+    }
+}
+
+// Passphrases and recovery codes arrive as owned `String`s — wasm-bindgen hands us ownership
+// of the copy it wrote into WASM linear memory, so wrapping them in `Zeroizing` immediately
+// scrubs that copy on drop. (The JS-side original string is GC-managed and can't be scrubbed;
+// callers minimise its lifetime — documented in the JS shim.)
+
+/// Create a new encrypted tree. Returns the keyring, the recovery code (show once), revision
+/// 1, and the sealer.
+#[wasm_bindgen]
+pub fn provision(
+    passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+) -> Result<VaultResult, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let p = vault::provision(passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: p.keyring,
+        recovery_code: p.recovery_code,
+        revision: 1,
+        sealer: Some(WasmSealer { inner: p.sealer }),
+    })
+}
+
+/// Open an existing keyring with a passphrase; returns the sealer + revision.
+#[wasm_bindgen]
+pub fn unlock(
+    keyring: &[u8],
+    passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+) -> Result<VaultResult, JsError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let u = vault::unlock(keyring, passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: Vec::new(),
+        recovery_code: String::new(),
+        revision: u.revision,
+        sealer: Some(WasmSealer { inner: u.sealer }),
+    })
+}
+
+/// Recover with the recovery code, re-provisioning under a new passphrase. `min_revision` is
+/// the caller's stored watermark (0 if none) — a served revision below it is refused.
+#[wasm_bindgen]
+pub fn recover(
+    keyring: &[u8],
+    recovery_code: String,
+    new_passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+) -> Result<VaultResult, JsError> {
+    let recovery_code = Zeroizing::new(recovery_code);
+    let new_passphrase = Zeroizing::new(new_passphrase);
+    let r = vault::recover(
+        keyring,
+        recovery_code.as_str(),
+        new_passphrase.as_bytes(),
+        tree_id,
+        member_id,
+        replica_id,
+        min_revision,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: r.keyring,
+        recovery_code: r.recovery_code,
+        revision: r.revision,
+        sealer: Some(WasmSealer { inner: r.sealer }),
+    })
+}
+
+/// Change the passphrase (rotates the recovery code, bumps the revision). No new sealer — the
+/// DEK is unchanged, so the running one keeps working.
+#[wasm_bindgen(js_name = changePassphrase)]
+pub fn change_passphrase(
+    keyring: &[u8],
+    old_passphrase: String,
+    new_passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    min_revision: u32,
+) -> Result<VaultResult, JsError> {
+    let old_passphrase = Zeroizing::new(old_passphrase);
+    let new_passphrase = Zeroizing::new(new_passphrase);
+    let re = vault::change_passphrase(
+        keyring,
+        old_passphrase.as_bytes(),
+        new_passphrase.as_bytes(),
+        tree_id,
+        member_id,
+        min_revision,
+    )
+    .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: re.keyring,
+        recovery_code: re.recovery_code,
+        revision: re.revision,
+        sealer: None,
+    })
 }
