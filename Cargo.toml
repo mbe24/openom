@@ -14,6 +14,7 @@ members = [
     "packages/commute",
     "packages/openom-treelog",
     "packages/openom-sync",
+    "packages/commute-format",
     "openom",
     "apps/src-tauri",
 ]

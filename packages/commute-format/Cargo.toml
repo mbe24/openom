@@ -1,0 +1,21 @@
+[package]
+name = "commute-format"
+description = "The commute format bridge: import/export structured documents (JSON) as mergeable commute cells — a Codec (format <-> ValueTree) and a Mapping (ValueTree <-> cells, carrying identity + merge policy)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+commute.workspace = true
+thiserror.workspace = true
+
+[features]
+# Per-codec, independently optional (YAML deferred — serde_yaml is archived + its fork unsound;
+# it'll arrive via saphyr behind a `yaml` feature later). JSON is hand-rolled (no serde), so it
+# catches duplicate keys and rejects floats — things serde_json silently drops/allows.
+default = ["json"]
+json = []
+
+[dev-dependencies]
+proptest.workspace = true
