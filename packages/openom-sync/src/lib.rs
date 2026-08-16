@@ -61,6 +61,11 @@ pub struct SyncClient<S: DocStore> {
     prop_prev: Vec<u8>,
     proposals_cursor: Option<u64>,
     snapshot_version: Option<String>,
+    // Sealed-but-not-yet-confirmed delta envelopes (a write-ahead queue). An edit is sealed exactly
+    // once and queued here; flushing appends it. A transient append failure keeps it queued for
+    // retry — re-uploading the SAME bytes, never re-sealing (§8a). Re-appending is harmless because
+    // merge is idempotent.
+    pending: Vec<Vec<u8>>,
 }
 
 impl<S: DocStore> SyncClient<S> {
@@ -78,6 +83,7 @@ impl<S: DocStore> SyncClient<S> {
             prop_prev: Vec::new(),
             proposals_cursor: None,
             snapshot_version: None,
+            pending: Vec::new(),
         }
     }
 
@@ -103,7 +109,8 @@ impl<S: DocStore> SyncClient<S> {
         self.push(&produced)
     }
 
-    /// Seal a run of ops as one delta entry and append it to the log.
+    /// Seal a run of ops as one delta entry, queue it, and flush. The seal + chain advance happen
+    /// exactly once here; if the flush fails the sealed envelope stays queued for a later retry.
     fn push(&mut self, ops: &[Op]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
@@ -118,10 +125,26 @@ impl<S: DocStore> SyncClient<S> {
             blob_id: Vec::new(),
         };
         let out = self.sealer.seal_entry(&ctx, &encode_ops(ops))?;
-        self.store.append(&self.doc, std::slice::from_ref(&out.envelope))?;
         self.next_counter += 1;
         self.prev_hash = out.ciphertext_hash;
+        self.pending.push(out.envelope);
+        self.flush()
+    }
+
+    /// Append every queued sealed envelope to the log, oldest first, dropping each as it lands. A
+    /// failed append leaves it (and the rest) queued and returns the error; call again to retry.
+    /// Safe to retry: a re-appended entry merges idempotently on peers.
+    pub fn flush(&mut self) -> Result<()> {
+        while let Some(env) = self.pending.first() {
+            self.store.append(&self.doc, std::slice::from_ref(env))?;
+            self.pending.remove(0);
+        }
         Ok(())
+    }
+
+    /// How many sealed edits are queued but not yet confirmed appended (0 == fully synced up).
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
     /// Pull every log entry newer than the last pull, opening and merging each into the tree.

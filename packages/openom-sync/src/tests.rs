@@ -5,8 +5,44 @@ use super::*;
 use openom_crypto::generate_dek;
 use openom_sealer::Sealer;
 use openom_store::memory::MemoryStore;
+use openom_store::{Caps, DocStore, Snapshot, StoreError, Update};
 use openom_treelog::{Pedigree, Tree, TreeOp};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// A store that fails the next `fail_appends` append calls, then behaves normally — to exercise the
+/// sync WAL's retry path. Everything else delegates to the wrapped store.
+struct FaultStore {
+    inner: Arc<MemoryStore>,
+    fail_appends: AtomicUsize,
+}
+impl DocStore for FaultStore {
+    fn caps(&self) -> Caps {
+        self.inner.caps()
+    }
+    fn list(&self) -> openom_store::Result<Vec<String>> {
+        self.inner.list()
+    }
+    fn read_snapshot(&self, doc: &str) -> openom_store::Result<Option<Snapshot>> {
+        self.inner.read_snapshot(doc)
+    }
+    fn read_updates(&self, doc: &str, since: Option<u64>) -> openom_store::Result<(Vec<Update>, u64)> {
+        self.inner.read_updates(doc, since)
+    }
+    fn append(&self, doc: &str, updates: &[Update]) -> openom_store::Result<u64> {
+        if self.fail_appends.load(Ordering::SeqCst) > 0 {
+            self.fail_appends.fetch_sub(1, Ordering::SeqCst);
+            return Err(StoreError::Backend("injected append failure".into()));
+        }
+        self.inner.append(doc, updates)
+    }
+    fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> openom_store::Result<String> {
+        self.inner.put_snapshot(doc, bytes, expected)
+    }
+    fn delete(&self, doc: &str) -> openom_store::Result<()> {
+        self.inner.delete(doc)
+    }
+}
 
 fn rid(i: u8) -> [u8; 16] {
     let mut r = [0u8; 16];
@@ -156,6 +192,47 @@ fn bootstrap_without_a_snapshot_replays_the_whole_log() {
     let mut c = client(2, b"replica-c", dek, store.clone());
     c.bootstrap().unwrap(); // no snapshot → full log replay
     assert_eq!(c.tree().doc().snapshot(), a.tree().doc().snapshot());
+}
+
+#[test]
+fn a_transient_append_failure_queues_and_retries_without_loss() {
+    let inner = Arc::new(MemoryStore::new());
+    let store = Arc::new(FaultStore { inner, fail_appends: AtomicUsize::new(2) });
+    let dek = generate_dek().unwrap();
+    let sealer = Sealer::from_unwrapped(1, dek.clone(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-a".to_vec());
+    let mut a = SyncClient::new(Tree::new(rid(1)), sealer, store.clone(), "tree");
+
+    // Two edits while appends are failing → sealed once, queued, not lost.
+    assert!(a.apply(TreeOp::AddPerson { id: vec![1] }).is_err());
+    assert!(a.apply(TreeOp::AddPerson { id: vec![2] }).is_err());
+    assert_eq!(a.pending_count(), 2);
+
+    // Failures exhausted → an explicit flush drains the queue (re-uploading the same sealed bytes).
+    a.flush().unwrap();
+    assert_eq!(a.pending_count(), 0);
+
+    // A peer over the same store sees both edits and converges.
+    let sealer_b = Sealer::from_unwrapped(1, dek, b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-b".to_vec());
+    let mut b = SyncClient::new(Tree::new(rid(2)), sealer_b, store.clone(), "tree");
+    b.pull().unwrap();
+    assert_eq!(b.tree().persons().len(), 2);
+    assert_eq!(a.tree().doc().snapshot(), b.tree().doc().snapshot());
+}
+
+#[test]
+fn a_duplicate_appended_delta_is_harmless() {
+    // A lost-ack retry can land the same sealed delta twice; commute's idempotent merge absorbs it.
+    let store = Arc::new(MemoryStore::new());
+    let dek = generate_dek().unwrap();
+    let mut a = client(1, b"replica-a", dek.clone(), store.clone());
+    a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
+    // Re-append the existing log entry verbatim (the duplicate).
+    let (updates, _) = store.read_updates("tree", None).unwrap();
+    store.append("tree", &updates).unwrap();
+
+    let mut b = client(2, b"replica-b", dek, store.clone());
+    b.pull().unwrap();
+    assert_eq!(b.tree().persons(), vec![vec![1u8]], "the duplicate must not create a second person");
 }
 
 #[test]
