@@ -65,6 +65,7 @@ export class FamilyTree {
   #ready;
   #replica;
   #listeners = new Set();
+  #deltaListeners = new Set(); // notified of each locally-produced delta (for the sync controller)
   #cursor = 0; // store log entries folded into the engine
   #undo = []; // stacks of inverse-descriptor batches
   #redo = [];
@@ -97,9 +98,39 @@ export class FamilyTree {
     return () => this.#listeners.delete(fn);
   }
 
+  /** Subscribe to each locally-produced delta (raw treelog bytes) — the sync controller seals + pushes
+   *  them. Remote deltas merged via mergeRemote are NOT emitted (they must not be pushed back). */
+  onDelta(fn) {
+    this.#deltaListeners.add(fn);
+    return () => this.#deltaListeners.delete(fn);
+  }
+
   #bump() {
     this.revision += 1;
     for (const fn of this.#listeners) fn(this.revision);
+  }
+
+  #emit(deltas) {
+    if (!this.#deltaListeners.size) return;
+    for (const d of deltas) for (const fn of this.#deltaListeners) fn(d);
+  }
+
+  /** The full engine state as raw commute bytes — the sync controller seals it as the bootstrap
+   *  baseline a fresh device restores from. */
+  snapshotBytes() {
+    return this.#engine.snapshot();
+  }
+
+  /** Integrate a peer's delta (raw treelog bytes the controller already unsealed): fold it into the
+   *  engine, persist it locally for durability, and refresh the views. Does not re-emit (not local). */
+  async mergeRemote(bytes) {
+    await this.#ensure();
+    const bin = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    this.#engine.mergeBytes(bin);
+    await this.#store.append(this.#docId, [bin]);
+    this.#cursor += 1;
+    this.#materialize();
+    this.#bump();
   }
 
   // ------------------------------------------------------------------ engine read helpers
@@ -370,6 +401,7 @@ export class FamilyTree {
   async #commit(deltas, { silent = false, undoable = true, inverse = null, touched = null } = {}) {
     if (deltas.length) await profile('store.append', () => this.#store.append(this.#docId, deltas));
     this.#cursor += deltas.length;
+    this.#emit(deltas);
     if (silent && touched) for (const id of touched) this.#refreshPerson(id);
     else this.#materialize();
     if (undoable) this.#record(inverse, silent);
@@ -399,6 +431,7 @@ export class FamilyTree {
     for (const d of [...batch].reverse()) this.#applyDesc(d, out, inv);
     if (out.length) await this.#store.append(this.#docId, out);
     this.#cursor += out.length;
+    this.#emit(out);
     this.#materialize();
     target.push(inv.reverse());
     this.#group = null;

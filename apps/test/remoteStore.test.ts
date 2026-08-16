@@ -64,9 +64,10 @@ describe('RemoteStore', () => {
     expect(store.caps()).toEqual({ remote: true, conditionalWrites: true, durable: true });
   });
 
-  it('delta methods reflect V1 (snapshot-only) limits', async () => {
-    const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => res() });
-    expect(await store.readUpdates('t', 0)).toEqual({ updates: [], cursor: 0 });
-    await expect(store.append('t', [])).rejects.toThrow(/V2/);
+  it('readLog on a 404 (no log yet) returns an empty tail; list/delete stay unsupported', async () => {
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => res({ status: 404 }) });
+    expect(await store.readLog('t', -1)).toEqual({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 });
+    await expect(store.list()).rejects.toThrow();
+    await expect(store.delete()).rejects.toThrow();
   });
 });
