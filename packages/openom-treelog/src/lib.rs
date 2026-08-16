@@ -443,8 +443,14 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
+/// Claim payload layout version. v1 = `len(value)‖value‖0/1‖[len(source)‖source]`, preceded by this
+/// byte. The leading version lets a future typed-leaf value land without a migration; a payload whose
+/// version this build doesn't know surfaces as an opaque (unreadable-but-present) claim rather than
+/// silently vanishing from the read model — these bytes are permanent sealed-archive substrate.
+const CLAIM_V1: u8 = 1;
+
 fn encode_claim(value: &str, source: Option<&str>) -> Vec<u8> {
-    let mut o = Vec::new();
+    let mut o = vec![CLAIM_V1];
     put_str(&mut o, value);
     match source {
         Some(s) => {
@@ -474,6 +480,14 @@ fn take_str(b: &[u8], pos: &mut usize) -> Option<String> {
 /// `commute` and could in principle be corrupt).
 fn decode_claim(b: &[u8]) -> Option<(String, Option<String>)> {
     let mut pos = 0;
+    let version = *b.get(pos)?;
+    pos += 1;
+    if version != CLAIM_V1 {
+        // A newer payload format this build can't parse: keep the claim present but unrenderable,
+        // never silently absent (the same discipline as refusing unknown ops rather than skipping
+        // them). The claim id is retained by the OR-set; only its value is opaque here.
+        return Some((format!("(unreadable claim: payload v{version})"), None));
+    }
     let value = take_str(b, &mut pos)?;
     let has_source = *b.get(pos)?;
     pos += 1;

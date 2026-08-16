@@ -113,7 +113,7 @@ fn treelog_snapshot_golden_vector() {
     let got = hex(&t.doc().snapshot());
     let expected = "01000000000000000200000000000000010707070707070707070707070707070701000000000000000101\
 000000000000000101000000000000000002070707070707070707070707070707070100000000000000140200000001010000000a\
-62697274682e64617465000000000000000109040000000000000009000000043139303100";
+62697274682e6461746500000000000000010904000000000000000a01000000043139303100";
     assert_eq!(got, expected, "treelog snapshot encoding changed — update BOTH goldens (native + wasm)");
 }
 
@@ -149,6 +149,26 @@ fn facts_attach_to_a_family_subject_not_just_persons() {
     // Putting facts on a family does not make it a person, nor drop it from the family roster.
     assert!(!t.has_person(&fam));
     assert_eq!(t.families(), vec![fam]);
+}
+
+#[test]
+fn claim_payload_is_versioned_and_unknown_versions_surface() {
+    // v1 round-trips transparently (the version byte is invisible to the read model).
+    let mut t = Tree::new(rid(1));
+    t.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) });
+    let f = t.fact(&pid(1), "birth.date");
+    assert_eq!(f.preferred.unwrap().value, "1901");
+    assert_eq!(f.claims[0].source.as_deref(), Some("parish"));
+    assert_eq!(decode_claim(&encode_claim("x", None)), Some(("x".into(), None)));
+
+    // A payload from a FUTURE claim format (version byte != 1) must not silently vanish — it surfaces
+    // as an opaque, unreadable-but-present claim (id retained by the OR-set).
+    let unknown = decode_claim(&[2, 0, 0, 0, 0]);
+    assert!(unknown.is_some(), "an unknown-version claim must not be dropped");
+    assert!(unknown.unwrap().0.contains("unreadable"));
+
+    // Genuinely empty/corrupt bytes have nothing to surface → None (dropped, defensively).
+    assert_eq!(decode_claim(&[]), None);
 }
 
 #[test]
