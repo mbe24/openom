@@ -714,6 +714,47 @@ async fn keyring_put_requires_privilege() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_removal_purges_and_access_list() {
+    // Removing a member (via a keyring transition) drops their ACL row AND reclaims their transient
+    // state — open proposals + rate bucket — so they leave nothing behind. GET /access reflects it.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let m = Uuid::new_v4();
+    let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[(m, 3)]); // maintainer
+    send(&app, put_keyring_as(tree, &rev1, owner)).await;
+
+    // m leaves a footprint: a proposal + a delta (which creates their rate bucket).
+    send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &proposal_envelope(tree, b"p"), m)).await;
+    send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"c", b"replica-m0000000", 0), m)).await;
+    let props: i64 = sqlx::query_scalar("SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
+    let rate: i64 = sqlx::query_scalar("SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
+    assert_eq!((props, rate), (1, 1), "m has a proposal + a rate bucket before removal");
+
+    // The access list shows both members.
+    let (_, _, ab) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&ab).unwrap()["members"].as_array().unwrap().len(), 2, "owner + m");
+
+    // rev2 removes m.
+    let rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::OK, "remove m");
+
+    assert_eq!(role_of(&db, tree, m).await, None, "ACL row gone");
+    let props: i64 = sqlx::query_scalar("SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
+    let rate: i64 = sqlx::query_scalar("SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
+    assert_eq!((props, rate), (0, 0), "m's proposal + rate bucket reclaimed on removal");
+    let (_, _, ab2) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&ab2).unwrap()["members"].as_array().unwrap().len(), 1, "only owner remains");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn proposals_lifecycle() {
     let app = router().await;
     let db = db().await;

@@ -143,9 +143,26 @@ pub async fn put_keyring(
         .map_err(internal)?;
         ids.push(id);
     }
-    // Remove ACL rows for members no longer in the keyring (guard the empty case — never nuke the ACL).
+    // Remove everything belonging to members no longer in the keyring (guard the empty case — never nuke
+    // the ACL). Dropping the ACL row cuts their access; we also reclaim their transient state so a removed
+    // member leaves nothing behind: their open proposals and their rate bucket. Pending (un-attached)
+    // media uploads are left to the existing GC sweep (it releases the reservation + staging object);
+    // live/attached blobs stay — they're part of the tree now (bulk-detach of a departed member's media
+    // is a heavier policy, a follow-up).
     if !ids.is_empty() {
         sqlx::query("DELETE FROM tree_access WHERE tree_id = $1 AND member_id <> ALL($2)")
+            .bind(tree_id)
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        sqlx::query("DELETE FROM proposals WHERE tree_id = $1 AND proposer_member_id <> ALL($2)")
+            .bind(tree_id)
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        sqlx::query("DELETE FROM member_rate WHERE tree_id = $1 AND member_id <> ALL($2)")
             .bind(tree_id)
             .bind(&ids)
             .execute(&mut *tx)
@@ -208,4 +225,36 @@ pub async fn get_keyring(
     let revisions =
         rows.into_iter().map(|(revision, payload)| KeyringRevision { revision, payload: b64(&payload) }).collect();
     Ok((StatusCode::OK, Json(KeyringHistory { revisions, head })).into_response())
+}
+
+#[derive(Serialize)]
+struct AccessMember {
+    member_id: String,
+    role: i16,
+}
+
+/// `GET /trees/{tree_id}/access` — the current derived member list (id + role). A read convenience for a
+/// members/sharing UI; the authoritative source is the keyring, this is its derived projection.
+pub async fn get_access(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    let owner = owner.ok_or(ApiError::NotFound)?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
+
+    let rows: Vec<(Uuid, i16)> =
+        sqlx::query_as("SELECT member_id, role FROM tree_access WHERE tree_id = $1 ORDER BY role")
+            .bind(tree_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(internal)?;
+    let members: Vec<AccessMember> =
+        rows.into_iter().map(|(id, role)| AccessMember { member_id: id.to_string(), role }).collect();
+    Ok((StatusCode::OK, Json(json!({ "members": members }))).into_response())
 }

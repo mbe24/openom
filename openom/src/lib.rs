@@ -88,6 +88,8 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/keyring",
             put(keyring::put_keyring).get(keyring::get_keyring),
         )
+        // The derived member list (id + role) — a read convenience for a sharing UI.
+        .route("/trees/{tree_id}/access", get(keyring::get_access))
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
