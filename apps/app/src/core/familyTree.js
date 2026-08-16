@@ -19,6 +19,8 @@ import {
 } from './model.js';
 
 const NEW_PERSON = { given: '', surname: '', sex: 'U', custom: {} };
+const COMPACT_AT = 200; // replayed-tail length past which hydrate folds the log into a fresh snapshot
+const SNAP_TAG = 0xcc; // marks a snapshot payload that carries a coverage-cursor header
 const enc = new TextEncoder();
 const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 const bytes = (h) => new Uint8Array(h.match(/../g)?.map((x) => parseInt(x, 16)) ?? []);
@@ -651,13 +653,32 @@ export class FamilyTree {
   async redo() { if (this.#redo.length) await this.#applyBatch(this.#redo.pop(), this.#undo); }
 
   // ------------------------------------------------------------------ loading
+  // A snapshot payload = [SNAP_TAG][u32 BE coverage cursor][commute snapshot bytes]. The coverage
+  // cursor rides in the payload so no DocStore layer has to carry it — they stay opaque-byte stores.
+  #wrapSnapshot(snap, cursor) {
+    const out = new Uint8Array(5 + snap.length);
+    out[0] = SNAP_TAG;
+    new DataView(out.buffer).setUint32(1, cursor >>> 0, false);
+    out.set(snap, 5);
+    return out;
+  }
+  #unwrapSnapshot(b) {
+    if (b.length >= 5 && b[0] === SNAP_TAG) {
+      const cursor = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(1, false);
+      return { snapshot: b.subarray(5), cursor };
+    }
+    return { snapshot: b, cursor: 0 }; // unwrapped/foreign — replay the whole log (idempotent)
+  }
+
   async hydrate() {
     await this.#ensure();
     const snap = await this.#store.readSnapshot(this.#docId);
     if (snap) {
-      const b = snap.bytes instanceof Uint8Array ? snap.bytes : new Uint8Array(snap.bytes);
-      this.#engine = await createTree({ replica: this.#replica, snapshot: b });
-      this.#cursor = snap.logCursor ?? 0;
+      const raw = snap.bytes instanceof Uint8Array ? snap.bytes : new Uint8Array(snap.bytes);
+      const { snapshot, cursor } = this.#unwrapSnapshot(raw);
+      // Restore the folded state, then replay only the log tail after what the snapshot covers.
+      this.#engine = await createTree({ replica: this.#replica, snapshot });
+      this.#cursor = cursor;
     }
     const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
     for (const u of updates) {
@@ -668,6 +689,9 @@ export class FamilyTree {
     this.#materialize();
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null;
     this.#bump();
+    // Bound reload cost: once the replayed tail is long, fold it into a fresh snapshot so future loads
+    // skip it (mirrors the legacy engine's COMPACT_AT, lost in the treelog rewrite).
+    if (updates.length > COMPACT_AT) await this.compact().catch(() => {});
   }
 
   async seed(ops) {
@@ -718,11 +742,10 @@ export class FamilyTree {
   async compact() {
     const e = await this.#ensure();
     const prev = await this.#store.readSnapshot(this.#docId);
-    const payload = e.snapshot();
+    // Fold the whole log into one snapshot that COVERS log entries 0..#cursor; the next load restores
+    // it and replays only the tail after #cursor instead of the entire history.
+    const payload = this.#wrapSnapshot(e.snapshot(), this.#cursor);
     try {
-      // Snapshot→log coverage (so hydrate can skip the covered prefix) rides with the B1 log work: no
-      // caller compacts yet and the stores carry no cursor, so hydrate replays the whole log onto the
-      // snapshot — idempotent, hence correct, just not yet shrinking reload work.
       await this.#store.putSnapshot(this.#docId, payload, prev?.version ?? null);
     } catch (err) {
       if (err?.name !== 'ConflictError') throw err;

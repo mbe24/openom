@@ -111,6 +111,29 @@ describe.skipIf(!built)('FamilyTree (treelog-backed)', () => {
     expect(mother?.sex).toBe('F');
   });
 
+  it('compaction bounds reload — a later load skips the covered log prefix', async () => {
+    const inner = new MemoryStore();
+    let lastSince = -1; // capture the offset hydrate asks the log for
+    const store = {
+      append: (...a) => inner.append(...a),
+      readUpdates: (id, since) => { lastSince = since; return inner.readUpdates(id, since); },
+      readSnapshot: (...a) => inner.readSnapshot(...a),
+      putSnapshot: (...a) => inner.putSnapshot(...a),
+      delete: (...a) => inner.delete(...a),
+    };
+    const a = new FamilyTree(store, 'doc');
+    await a.hydrate();
+    for (let i = 0; i < 4; i++) await a.createPerson({ given: 'P' + i });
+    await a.compact(); // snapshot covers the four creates
+    await a.createPerson({ given: 'Late' }); // one action after the snapshot
+
+    const b = new FamilyTree(store, 'doc');
+    await b.hydrate();
+    expect(lastSince).toBeGreaterThan(0); // restored from the snapshot; only the tail was replayed
+    expect(b.allPeople().length).toBe(5);
+    expect(b.allPeople().some((p) => p.given === 'Late')).toBe(true);
+  });
+
   it('stores custom booleans as explicit values and reads them back typed', async () => {
     const schema = { field: (id) => ({ id, type: id === 'emigrated' ? 'boolean' : 'text' }) };
     const store = new MemoryStore();
