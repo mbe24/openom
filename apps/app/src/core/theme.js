@@ -52,5 +52,8 @@ export function applyTheme(accentInput, mode = 'light', root = document.document
     set('--accent-tint-text', ok(Math.max(24, l - 10), c, h));
   }
   root.dataset.mode = mode;
+  // Tell the browser which scheme to render native controls in (range track, scrollbars, form
+  // fields) — without this they stay light in dark mode (e.g. a bright slider track).
+  root.style.colorScheme = mode === 'dark' ? 'dark' : 'light';
   return { accent, adjusted };
 }

@@ -144,7 +144,7 @@ export function settingsView(app) {
             const file = e.dataTransfer?.files?.[0];
             if (file) app.parseImport(file);
           }
-        }, t('transfer-drop'), t('import-hint')),
+        }, t('transfer-drop')),
       app.importReport
         ? h('div', { class: 'stack', style: { gap: '8px' } },
             h('div', { class: 'row between' },

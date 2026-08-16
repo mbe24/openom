@@ -2,6 +2,7 @@
    Laufzeit; hier stehen die Startwerte (Sage, Light) und alles, was nicht
    von der Akzentfarbe abhaengt. */
 :root {
+  color-scheme: light;
   --accent: oklch(49.8% 0.0444 166.4);
   --accent-pressed: oklch(41.8% 0.0444 166.4);
   --accent-tint: oklch(94% 0.03 166.4);
@@ -52,6 +53,7 @@
 /* Dark Mode folgt dem System, solange der Nutzer nichts waehlt. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-mode]) {
+    color-scheme: dark;
     --canvas: #121214;
     --card: #1a1a1e;
     --raised: #26262b;
