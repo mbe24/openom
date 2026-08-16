@@ -67,6 +67,29 @@ fn snapshot_envelope(tree: Uuid, ciphertext: &[u8], hash_of: Option<&[u8]>) -> V
     Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
 }
 
+/// A real delta envelope with a replica dot (replica_id + replica_counter).
+fn delta_envelope(tree: Uuid, ciphertext: &[u8], replica: &[u8], counter: u64) -> Vec<u8> {
+    let header = Header {
+        kind: Kind::Delta as i32,
+        aead: Aead::Xchacha20Poly1305 as i32,
+        tree_id: tree.as_bytes().to_vec(),
+        ciphertext_hash: Sha256::digest(ciphertext).to_vec(),
+        replica_id: replica.to_vec(),
+        replica_counter: counter,
+        ..Default::default()
+    };
+    Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
+}
+
+fn post_bytes(uri: String, body: &[u8]) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
 fn put_tree(tree: Uuid, env: &[u8], if_match: Option<&str>) -> Request<Body> {
     let mut b = Request::builder()
         .method("PUT")
@@ -126,6 +149,61 @@ async fn tree_lifecycle() {
 
     let (s, _, _) = send(&app, get(format!("/trees/{}", Uuid::new_v4()))).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "unknown tree");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn delta_log_lifecycle() {
+    let app = router().await;
+    let tree = Uuid::new_v4();
+    // The tree must exist (created by an initial snapshot) before deltas append to it.
+    send(&app, put_tree(tree, &snapshot_envelope(tree, b"ct", None), None)).await;
+
+    let ra = b"replica-aaaaaaaa".to_vec();
+    let d0 = delta_envelope(tree, b"delta-zero", &ra, 0);
+    let d1 = delta_envelope(tree, b"delta-one", &ra, 1);
+
+    let (s, _, b0) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
+    assert_eq!(s, StatusCode::OK, "append d0");
+    assert_eq!(serde_json::from_slice::<Value>(&b0).unwrap()["seq"].as_i64().unwrap(), 0);
+
+    let (s, _, b1) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d1)).await;
+    assert_eq!(s, StatusCode::OK, "append d1");
+    assert_eq!(serde_json::from_slice::<Value>(&b1).unwrap()["seq"].as_i64().unwrap(), 1);
+
+    // Re-delivering d0 (same replica dot) is idempotent — same seq, no new entry.
+    let (s, _, br) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
+    assert_eq!(s, StatusCode::OK, "re-append idempotent");
+    assert_eq!(serde_json::from_slice::<Value>(&br).unwrap()["seq"].as_i64().unwrap(), 0);
+
+    // Whole tail: both deltas, in order, payloads round-tripping the exact sealed bytes.
+    let (s, _, tb) = send(&app, get(format!("/trees/{tree}/log?since=-1"))).await;
+    assert_eq!(s, StatusCode::OK, "read tail");
+    let tail: Value = serde_json::from_slice(&tb).unwrap();
+    let entries = tail["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "two deltas, not three (re-delivery didn't duplicate)");
+    assert_eq!(tail["head_seq"].as_i64().unwrap(), 1);
+    assert_eq!(tail["next_cursor"].as_i64().unwrap(), 1);
+    let p0 = base64::engine::general_purpose::STANDARD
+        .decode(entries[0]["payload"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(p0, d0, "payload round-trips the sealed delta bytes");
+
+    // From a cursor: only the tail after seq 0.
+    let (s, _, tb2) = send(&app, get(format!("/trees/{tree}/log?since=0"))).await;
+    assert_eq!(s, StatusCode::OK, "read tail since 0");
+    let tail2: Value = serde_json::from_slice(&tb2).unwrap();
+    assert_eq!(tail2["entries"].as_array().unwrap().len(), 1, "one delta after seq 0");
+    assert_eq!(tail2["entries"][0]["seq"].as_i64().unwrap(), 1);
+
+    // Appending to a tree that doesn't exist → 404 (header tree_id matches the url so validation passes).
+    let unknown = Uuid::new_v4();
+    let (s, _, _) = send(
+        &app,
+        post_bytes(format!("/trees/{unknown}/log"), &delta_envelope(unknown, b"x", &ra, 0)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "append to unknown tree");
 }
 
 #[tokio::test]

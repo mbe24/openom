@@ -323,6 +323,8 @@ pub enum ApiError {
     NotFound,
     Conflict,
     QuotaExceeded,
+    /// The requested log tail is no longer retained — the client must bootstrap from a snapshot.
+    Gone(String),
     BadRequest(String),
     Internal(String),
 }
@@ -342,6 +344,7 @@ impl IntoResponse for ApiError {
             ApiError::QuotaExceeded => {
                 (StatusCode::FORBIDDEN, "account resource limit reached".to_string())
             }
+            ApiError::Gone(m) => (StatusCode::GONE, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => {
                 tracing::error!(error = %m, "tree handler internal error");

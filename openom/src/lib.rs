@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod log;
 pub mod media;
 pub mod prof;
 pub mod storage;
@@ -71,6 +72,8 @@ pub fn app(state: AppState) -> Router {
         .route("/ready", get(ready))
         .route("/whoami", get(whoami))
         .route("/trees/{tree_id}", get(trees::get_tree).put(trees::put_tree))
+        // Delta-log: append a sealed delta / pull the ordered tail (sync + change history, §B1).
+        .route("/trees/{tree_id}/log", post(log::append_log).get(log::get_log))
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
