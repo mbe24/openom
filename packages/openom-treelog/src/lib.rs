@@ -567,10 +567,7 @@ impl Tree {
         prefix.extend_from_slice(&(subject.len() as u32).to_be_bytes());
         prefix.extend_from_slice(subject);
         let mut out = Vec::new();
-        for c in self.doc.set_cell_ids() {
-            if !c.starts_with(&prefix) {
-                continue;
-            }
+        for c in self.doc.set_cell_ids_with_prefix(&prefix) {
             let rest = &c[prefix.len()..];
             if rest.len() < 4 {
                 continue;

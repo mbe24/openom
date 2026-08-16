@@ -49,6 +49,25 @@ fn disjoint_registers_both_survive() {
 }
 
 #[test]
+fn set_cell_ids_with_prefix_scopes_to_matching_live_cells() {
+    let mut d = Doc::new(rid(1));
+    // Two cells under prefix …AA, one under …BB (length-prefixed like a real (kind, subject) address).
+    let a1 = vec![2, 0, 0, 0, 1, 0xAA, b'x'];
+    let a2 = vec![2, 0, 0, 0, 1, 0xAA, b'y'];
+    let b1 = vec![2, 0, 0, 0, 1, 0xBB, b'x'];
+    d.apply_local(OpIntent::AddElement { cell: a1.clone(), elem: elem(0), value: Value::Null });
+    d.apply_local(OpIntent::AddElement { cell: a2.clone(), elem: elem(1), value: Value::Null });
+    d.apply_local(OpIntent::AddElement { cell: b1.clone(), elem: elem(2), value: Value::Null });
+
+    let pa = vec![2, 0, 0, 0, 1, 0xAA];
+    assert_eq!(d.set_cell_ids_with_prefix(&pa), vec![a1.clone(), a2.clone()]);
+    // A cell with no live elements drops out; a different prefix stays isolated.
+    d.apply_local(OpIntent::RemoveElement { cell: a2.clone(), elem: elem(1) });
+    assert_eq!(d.set_cell_ids_with_prefix(&pa), vec![a1]);
+    assert_eq!(d.set_cell_ids_with_prefix(&[2, 0, 0, 0, 1, 0xBB]), vec![b1]);
+}
+
+#[test]
 fn set_add_and_remove_resolve_by_stamp_no_resurrection() {
     // Add, then a later remove tombstones it; a re-delivered add (older stamp) never resurrects it.
     let mut d = Doc::new(rid(1));

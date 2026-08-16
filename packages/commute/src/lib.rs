@@ -191,6 +191,18 @@ impl Doc {
             .collect()
     }
 
+    /// The live set cells whose id starts with `prefix`, in order. A range-scan over the sorted map
+    /// (O(log n + matches)), so a domain layer can enumerate one subject's cells without scanning the
+    /// whole document.
+    pub fn set_cell_ids_with_prefix(&self, prefix: &[u8]) -> Vec<CellId> {
+        self.sets
+            .range(prefix.to_vec()..)
+            .take_while(|(c, _)| c.starts_with(prefix))
+            .filter(|(_, elems)| elems.values().any(|e| e.live()))
+            .map(|(c, _)| c.clone())
+            .collect()
+    }
+
     /// The live elements of a set cell (tombstoned elements excluded), in deterministic id order.
     pub fn set_elements(&self, cell: &[u8]) -> Vec<(&ElemId, &Value)> {
         self.sets
