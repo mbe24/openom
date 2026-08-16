@@ -111,6 +111,35 @@ describe.skipIf(!built)('FamilyTree (treelog-backed)', () => {
     expect(mother?.sex).toBe('F');
   });
 
+  it('an undo on one replica does not corrupt another replica sharing the store (convergence)', async () => {
+    // Two FamilyTree instances over ONE store = two tabs of the same doc (two replicas), which is real
+    // today via shared IndexedDB. This is the case that would silently corrupt convergence once B1
+    // delta-sync connects: an undo that rewinds the Lamport clock or truncates the shared log destroys a
+    // concurrent replica's work. With forward inverse-op undo it must converge.
+    const store = new MemoryStore();
+    const A = new FamilyTree(store, 'doc');
+    await A.hydrate();
+    const p = await A.createPerson({ given: 'Ada' });
+    await A.updatePerson(p.id, { given: 'Bea' }); // A: a settled, undoable rename
+
+    const B = new FamilyTree(store, 'doc'); // second tab
+    await B.hydrate();
+    expect(B.person(p.id).given).toBe('Bea');
+    await B.updatePerson(p.id, { note: 'hi' }); // B's concurrent edit to a different field
+
+    await A.undo(); // A reverts its rename
+    expect(A.person(p.id).given).toBe('Ada');
+    await A.updatePerson(p.id, { given: 'Cleo' }); // A re-edits after the undo
+
+    // A fresh reader merges the entire shared log; both edits must survive and converge.
+    const C = new FamilyTree(store, 'doc');
+    await C.hydrate();
+    const person = C.person(p.id);
+    expect(person).toBeTruthy();
+    expect(person.note).toBe('hi'); // B's concurrent edit survived A's undo (no log truncation)
+    expect(person.given).toBe('Cleo'); // A's post-undo re-edit propagated (no clock rewind / stamp reuse)
+  });
+
   it('undoes and redoes settled edits along a timeline', async () => {
     const store = new MemoryStore();
     const tree = new FamilyTree(store, 'tree-undo');

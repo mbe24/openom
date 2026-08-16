@@ -4,18 +4,21 @@
 // convergent op, and multi-device merge is real.
 //
 // Representation: a person owns name- and event-sub-entities (each an opaque id with leaf facts), plus
-// simple person facts (sex, note, portrait) and a single JSON `custom` claim. Families own spouse and
-// child OR-sets and marriage facts. Ids are hex strings app-facing (opaque), 16-byte in the engine.
+// simple person facts (sex, note, portrait) and per-field `custom.*` claims. Families own spouse and
+// child OR-sets and marriage facts. Ids are hex strings app-facing (opaque), bytes in the engine.
 // Persistence: each edit appends its treelog delta bytes to the DocStore (opaque to the store); hydrate
 // merges them back. The engine owns the Lamport clock and tombstones, so there is no manual meta here.
+//
+// Undo/redo is FORWARD-only: an action records the compensating ops that reverse it, and undo applies
+// them as new, freshly-stamped ops appended to the log — never a Lamport rewind or a log truncation, so
+// it stays convergent when other replicas (e.g. another tab) share the same log.
 import { createTree } from './treelog/index.js';
 import { compareSiblings } from './sort.js';
 import {
-  makeName, makeEvent, givenOf, familyOf, definePersonViews, mergeFamilyFields, defineFamilyViews,
+  makeName, makeEvent, definePersonViews, mergeFamilyFields, defineFamilyViews,
 } from './model.js';
 
 const NEW_PERSON = { given: '', surname: '', sex: 'U', custom: {} };
-const MAX_HISTORY = 100; // undo/redo timeline depth
 const enc = new TextEncoder();
 const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 const bytes = (h) => new Uint8Array(h.match(/../g)?.map((x) => parseInt(x, 16)) ?? []);
@@ -43,9 +46,6 @@ function loadReplica() {
   return r;
 }
 
-/** The person fields the editor patches, mapped to where they live in the engine. */
-const EVENT_TYPES = ['birth', 'death'];
-
 export class FamilyTree {
   revision = 0;
   people = new Map();
@@ -63,14 +63,13 @@ export class FamilyTree {
   #replica;
   #listeners = new Set();
   #cursor = 0; // store log entries folded into the engine
-  #history = []; // engine snapshots — the undo/redo timeline
-  #hindex = -1; // cursor into #history
+  #undo = []; // stacks of inverse-descriptor batches
+  #redo = [];
+  #group = null; // the open silent-edit burst's frame (coalesces per-keystroke edits into one undo step)
 
   constructor(store, docId) {
     this.#store = store;
     this.#docId = docId;
-    // A stable per-device replica id (persisted). Reused as the claim id for ordinary single-value
-    // edits, so re-editing the same field across sessions updates in place instead of piling up claims.
     this.#replica = loadReplica();
     this.#ready = createTree({ replica: this.#replica });
   }
@@ -190,12 +189,18 @@ export class FamilyTree {
     }
   }
 
-  /** Rebuild the view-facing Maps from the engine. Called after every change. */
+  /** Rebuild the whole view-facing model from the engine (after a settled edit / load / undo). */
   #materialize() {
     const e = this.#engine;
     this.people = new Map(e.persons().map((pid) => [pid, this.#buildPerson(pid)]));
     this.families = new Map(e.families().map((fid) => [fid, this.#buildFamily(fid)]));
     this.#buildMedia();
+  }
+
+  /** Refresh just one person in place — cheap enough to run on every silent keystroke. */
+  #refreshPerson(id) {
+    if (this.#engine.hasPerson(bytes(id))) this.people.set(id, this.#buildPerson(id));
+    else this.people.delete(id);
   }
 
   // ------------------------------------------------------------------ reading (same as legacy)
@@ -259,189 +264,268 @@ export class FamilyTree {
     return seen;
   }
 
+  // ------------------------------------------------------------------ op primitives
+  // Each applies through the shim AND records the inverse descriptor(s) into `inv` (a plain array of
+  // [op, ...hexArgs]). `inv` is optional (seeding passes none). All ids in descriptors are hex.
+  #opAddPerson(pid, out, inv) { out.push(this.#engine.addPerson(pid)); inv?.push(['removePerson', hex(pid)]); }
+  #opRemovePerson(pid, out, inv) { out.push(this.#engine.removePerson(pid)); inv?.push(['addPerson', hex(pid)]); }
+  #opAddFamily(fid, out, inv) { out.push(this.#engine.addFamily(fid)); inv?.push(['removeFamily', hex(fid)]); }
+  #opRemoveFamily(fid, out, inv) { out.push(this.#engine.removeFamily(fid)); inv?.push(['addFamily', hex(fid)]); }
+  #opLinkChild(fid, pid, pedi, out, inv) { out.push(this.#engine.linkChild(fid, pid, pedi)); inv?.push(['unlinkChild', hex(fid), hex(pid)]); }
+  #opUnlinkChild(fid, pid, out, inv) {
+    const cur = this.#engine.children(fid).find((k) => k.person === hex(pid));
+    out.push(this.#engine.unlinkChild(fid, pid));
+    inv?.push(['linkChild', hex(fid), hex(pid), cur ? cur.pedi : 'birth']);
+  }
+  #opLinkSpouse(fid, pid, out, inv) { out.push(this.#engine.linkSpouse(fid, pid)); inv?.push(['unlinkSpouse', hex(fid), hex(pid)]); }
+  #opUnlinkSpouse(fid, pid, out, inv) { out.push(this.#engine.unlinkSpouse(fid, pid)); inv?.push(['linkSpouse', hex(fid), hex(pid)]); }
+  #opAddName(pid, nid, out, inv) { out.push(this.#engine.addName(pid, nid)); inv?.push(['removeName', hex(pid), hex(nid)]); }
+  #opRemoveName(pid, nid, out, inv) { out.push(this.#engine.removeName(pid, nid)); inv?.push(['addName', hex(pid), hex(nid)]); }
+  #opSetPrimaryName(pid, nid, out, inv) {
+    const prior = this.#engine.primaryName(pid); // hex | null
+    out.push(this.#engine.setPrimaryName(pid, nid));
+    inv?.push(['setPrimaryName', hex(pid), prior ?? hex(nid)]);
+  }
+  #opAddEvent(pid, eid, out, inv) { out.push(this.#engine.addEvent(pid, eid)); inv?.push(['removeEvent', hex(pid), hex(eid)]); }
+  #opRemoveEvent(pid, eid, out, inv) { out.push(this.#engine.removeEvent(pid, eid)); inv?.push(['addEvent', hex(pid), hex(eid)]); }
+  #opAddMediaRecord(mid, out, inv) { out.push(this.#engine.addMediaRecord(mid)); inv?.push(['removeMediaRecord', hex(mid)]); }
+  #opRemoveMediaRecord(mid, out, inv) { out.push(this.#engine.removeMediaRecord(mid)); inv?.push(['addMediaRecord', hex(mid)]); }
+  #opAddMediaLink(subj, link, media, out, inv) { out.push(this.#engine.addMediaLink(subj, link, media)); inv?.push(['removeMediaLink', hex(subj), hex(link)]); }
+  #opRemoveMediaLink(subj, link, out, inv) {
+    const cur = this.#engine.media(subj).find((m) => m.link === hex(link));
+    out.push(this.#engine.removeMediaLink(subj, link));
+    inv?.push(['addMediaLink', hex(subj), hex(link), cur ? cur.media : hex(link)]);
+  }
+  #opAddSource(sid, out, inv) { out.push(this.#engine.addSource(sid)); inv?.push(['removeSource', hex(sid)]); }
+  #opCite(subj, field, sid, claim, out, inv) { out.push(this.#engine.cite(subj, field, sid, claim)); inv?.push(['uncite', hex(subj), field, hex(sid)]); }
+
+  /**
+   * Reconcile a fact's claim set to `targetClaims` with `targetPref` preferred (replace semantics), and
+   * record the inverse = restore the fact to its current state. This is the one primitive behind every
+   * single-value field set/clear. Retracts only currently-live claims, so a concurrent edit on another
+   * replica (whose claim this replica hasn't merged) survives — the competing-claims guarantee.
+   */
+  #opRestoreFact(subject, field, targetClaims, targetPref, out, inv) {
+    const cur = this.#engine.fact(subject, field);
+    inv?.push(['restoreFact', hex(subject), field,
+      cur.claims.map((c) => ({ id: c.id, value: c.value, source: c.source ?? null })),
+      cur.preferred ? cur.preferred.id : null]);
+    for (const c of cur.claims) out.push(this.#engine.retractClaim(subject, field, bytes(c.id)));
+    for (const c of targetClaims) out.push(this.#engine.addClaim(subject, field, bytes(c.id), c.value, c.source ?? null));
+    if (targetPref != null) out.push(this.#engine.setPreferredClaim(subject, field, bytes(targetPref)));
+  }
+
+  /** Apply one inverse/redo descriptor, recording its own inverse into `inv`. */
+  #applyDesc(d, out, inv) {
+    const [op, ...a] = d;
+    switch (op) {
+      case 'addPerson': return this.#opAddPerson(bytes(a[0]), out, inv);
+      case 'removePerson': return this.#opRemovePerson(bytes(a[0]), out, inv);
+      case 'addFamily': return this.#opAddFamily(bytes(a[0]), out, inv);
+      case 'removeFamily': return this.#opRemoveFamily(bytes(a[0]), out, inv);
+      case 'linkChild': return this.#opLinkChild(bytes(a[0]), bytes(a[1]), a[2], out, inv);
+      case 'unlinkChild': return this.#opUnlinkChild(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'linkSpouse': return this.#opLinkSpouse(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'unlinkSpouse': return this.#opUnlinkSpouse(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'addName': return this.#opAddName(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'removeName': return this.#opRemoveName(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'setPrimaryName': return this.#opSetPrimaryName(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'addEvent': return this.#opAddEvent(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'removeEvent': return this.#opRemoveEvent(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'addMediaRecord': return this.#opAddMediaRecord(bytes(a[0]), out, inv);
+      case 'removeMediaRecord': return this.#opRemoveMediaRecord(bytes(a[0]), out, inv);
+      case 'addMediaLink': return this.#opAddMediaLink(bytes(a[0]), bytes(a[1]), bytes(a[2]), out, inv);
+      case 'removeMediaLink': return this.#opRemoveMediaLink(bytes(a[0]), bytes(a[1]), out, inv);
+      case 'restoreFact': return this.#opRestoreFact(bytes(a[0]), a[1], a[2], a[3], out, inv);
+      default: return;
+    }
+  }
+
   // ------------------------------------------------------------------ writing
-  /** Apply a batch of engine deltas (each Uint8Array) as one atomic store append, then rematerialize. */
-  async #commit(deltas, { silent = false, undoable = true } = {}) {
+  /**
+   * Apply `deltas` (each Uint8Array) as one atomic store append, refresh the view model, and record the
+   * action's inverse for undo. `touched` lets a silent (per-keystroke) commit refresh only the edited
+   * people instead of the whole tree.
+   */
+  async #commit(deltas, { silent = false, undoable = true, inverse = null, touched = null } = {}) {
     if (deltas.length) await this.#store.append(this.#docId, deltas);
     this.#cursor += deltas.length;
-    this.#materialize();
-    // A settled edit (non-silent) is one undo step; per-keystroke silent writes update state without a
-    // frame, so undo reverts the whole edit rather than one character.
-    if (undoable && !silent) this.#pushHistory();
+    if (silent && touched) for (const id of touched) this.#refreshPerson(id);
+    else this.#materialize();
+    if (undoable) this.#record(inverse, silent);
     if (!silent) this.#bump();
   }
 
-  // ------------------------------------------------------------------ undo/redo timeline
-  /** Anchor the timeline at the current state (after hydrate/seed/reset — nothing to undo behind it). */
-  #baseline() {
-    this.#history = [this.#engine.snapshot()];
-    this.#hindex = 0;
+  /**
+   * Record an undo frame. A run of silent (per-keystroke) writes coalesces into ONE frame whose inverse
+   * is the pre-run state; the settling non-silent write closes the run without adding a second frame. A
+   * standalone non-silent action is its own frame.
+   */
+  #record(inverse, silent) {
+    if (!inverse || !inverse.length) { if (!silent) this.#group = null; return; }
+    if (silent) {
+      if (!this.#group) { this.#group = inverse; this.#undo.push(inverse); this.#redo.length = 0; }
+    } else if (this.#group) {
+      this.#group = null; // settling of a typing burst — frame already pushed
+    } else {
+      this.#undo.push(inverse); this.#redo.length = 0;
+    }
   }
-  #pushHistory() {
-    this.#history.length = this.#hindex + 1; // drop any redo tail
-    this.#history.push(this.#engine.snapshot());
-    if (this.#history.length > MAX_HISTORY) this.#history.shift();
-    this.#hindex = this.#history.length - 1;
-  }
-  async #restoreTo(snap) {
-    // Rebuild the engine from the target snapshot and rewrite the local log to match. (Log-rewrite is
-    // fine offline; collaborative-undo semantics are deferred to the sync work.)
-    this.#engine = await createTree({ replica: this.#replica, snapshot: snap });
-    await this.#store.delete(this.#docId);
-    await this.#store.append(this.#docId, [snap]);
-    this.#cursor = 1;
+
+  /** Apply a recorded batch as a new forward action (reverse order), pushing its inverse to `target`. */
+  async #applyBatch(batch, target) {
+    await this.#ensure();
+    const out = [], inv = [];
+    for (const d of [...batch].reverse()) this.#applyDesc(d, out, inv);
+    if (out.length) await this.#store.append(this.#docId, out);
+    this.#cursor += out.length;
     this.#materialize();
+    target.push(inv.reverse());
+    this.#group = null;
     this.#bump();
   }
 
   /**
-   * Set (or clear) a single-value leaf field with replace semantics. Reconciles against whatever claims
-   * are currently live — not just this replica's — so clearing a field written in a prior session (whose
-   * claim carries a different, older claim id) actually takes effect, and a set doesn't pile up a stale
-   * claim beside it. Concurrent edits on *different* replicas still both survive (each only retracts what
-   * it saw), preserving the competing-claims guarantee for genuinely conflicting edits.
+   * Set (or clear) a single-value leaf field with replace semantics, via the restore-fact primitive.
+   * Clearing retracts every live claim (so a value written in a prior session or by another replica
+   * really goes away); a set reconciles to this replica's single claim.
    */
-  #setLeaf(subject, field, value, out) {
-    const e = this.#engine;
-    const myHex = hex(this.#replica);
+  #setLeaf(subject, field, value, out, inv) {
     const clearing = value === '' || value == null;
-    for (const c of e.fact(subject, field).claims) {
-      if (clearing || c.id !== myHex) out.push(e.retractClaim(subject, field, bytes(c.id)));
-    }
-    if (!clearing) {
-      out.push(e.addClaim(subject, field, this.#replica, String(value), null));
-      out.push(e.setPreferredClaim(subject, field, this.#replica));
-    }
+    const myHex = hex(this.#replica);
+    const target = clearing ? [] : [{ id: myHex, value: String(value), source: null }];
+    this.#opRestoreFact(subject, field, target, clearing ? null : myHex, out, inv);
   }
 
-  /** The subject's primary name-entity id (bytes), minting one if absent (recording deltas in `out`). */
-  #primaryName(pid, out) {
-    const e = this.#engine;
-    const existing = e.primaryName(pid);
+  /** The subject's primary name-entity id (bytes), minting one if absent (recording ops in out/inv). */
+  #primaryName(pid, out, inv) {
+    const existing = this.#engine.primaryName(pid);
     if (existing) return bytes(existing);
-    const nid = e.newId();
-    out.push(e.addName(pid, nid));
-    out.push(e.setPrimaryName(pid, nid));
+    const nid = this.#engine.newId();
+    this.#opAddName(pid, nid, out, inv);
+    this.#opSetPrimaryName(pid, nid, out, inv);
     return nid;
   }
 
   /** The subject's event-entity of `type` (bytes), minting one if absent. */
-  #eventOfType(pid, type, out) {
-    const e = this.#engine;
-    for (const eid of e.events(pid)) {
-      // `eid` is a hex string from the shim; return the bytes callers pass back into the engine.
+  #eventOfType(pid, type, out, inv) {
+    for (const eid of this.#engine.events(pid)) {
       if (this.#val(eid, 'type') === type) return bytes(eid);
     }
-    const eid = e.newId();
-    out.push(e.addEvent(pid, eid));
-    this.#setLeaf(eid, 'type', type, out);
+    const eid = this.#engine.newId();
+    this.#opAddEvent(pid, eid, out, inv);
+    this.#setLeaf(eid, 'type', type, out, inv);
     return eid;
   }
 
-  /** Translate an editor patch on person `pid` (bytes) into engine deltas, appended to `out`. */
-  #applyPatch(pid, patch, out) {
-    const e = this.#engine;
+  /** Translate an editor patch on person `pid` (bytes) into engine deltas + inverse. */
+  #applyPatch(pid, patch, out, inv) {
     if ('given' in patch || 'surname' in patch) {
-      const nid = this.#primaryName(pid, out);
-      if ('given' in patch) this.#setLeaf(nid, 'given', patch.given, out);
-      if ('surname' in patch) this.#setLeaf(nid, 'family', patch.surname, out);
+      const nid = this.#primaryName(pid, out, inv);
+      if ('given' in patch) this.#setLeaf(nid, 'given', patch.given, out, inv);
+      if ('surname' in patch) this.#setLeaf(nid, 'family', patch.surname, out, inv);
     }
     for (const [key, type] of [['birth', 'birth'], ['death', 'death']]) {
       const placeKey = key + 'Place';
       if (!(key in patch) && !(placeKey in patch)) continue;
-      const eid = this.#eventOfType(pid, type, out);
-      if (key in patch) this.#setLeaf(eid, 'date', patch[key], out);
-      if (placeKey in patch) this.#setLeaf(eid, 'place', patch[placeKey], out);
+      const eid = this.#eventOfType(pid, type, out, inv);
+      if (key in patch) this.#setLeaf(eid, 'date', patch[key], out, inv);
+      if (placeKey in patch) this.#setLeaf(eid, 'place', patch[placeKey], out, inv);
     }
-    if ('sex' in patch) this.#setLeaf(pid, 'sex', patch.sex, out);
-    if ('note' in patch) this.#setLeaf(pid, 'note', patch.note, out);
-    if ('portraitId' in patch) this.#setLeaf(pid, 'portrait', patch.portraitId, out);
+    if ('sex' in patch) this.#setLeaf(pid, 'sex', patch.sex, out, inv);
+    if ('note' in patch) this.#setLeaf(pid, 'note', patch.note, out, inv);
+    if ('portraitId' in patch) this.#setLeaf(pid, 'portrait', patch.portraitId, out, inv);
     if ('custom' in patch) {
-      // One fact per custom field. A falsy value (unset text, unchecked boolean) retracts the field,
+      // One fact per custom field. A falsy value (unset text, unchecked boolean) clears the field,
       // matching the app's "empty/false = not set" convention (SchemaRegistry.usage).
       for (const [k, v] of Object.entries(patch.custom)) {
         const s = v === false || v === '' || v == null ? '' : String(v);
-        this.#setLeaf(pid, 'custom.' + k, s, out);
+        this.#setLeaf(pid, 'custom.' + k, s, out, inv);
       }
     }
-    void e;
+  }
+
+  #setFamilyFacts(fid, facts, out, inv) {
+    if ('marriage' in facts) this.#setLeaf(fid, 'marriage.date', facts.marriage, out, inv);
+    if ('place' in facts) this.#setLeaf(fid, 'marriage.place', facts.place, out, inv);
   }
 
   async createPerson(fields = {}) {
     const e = await this.#ensure();
     const pid = e.newId();
-    const out = [e.addPerson(pid)];
-    const merged = { ...NEW_PERSON, ...fields };
-    this.#applyPatch(pid, merged, out);
-    await this.#commit(out);
+    const out = [], inv = [];
+    this.#opAddPerson(pid, out, inv);
+    this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, out, inv);
+    await this.#commit(out, { inverse: inv });
     return this.person(hex(pid));
   }
 
   async updatePerson(id, patch, opts = {}) {
     await this.#ensure();
-    const out = [];
-    this.#applyPatch(bytes(id), patch, out);
-    await this.#commit(out, opts);
+    const out = [], inv = [];
+    this.#applyPatch(bytes(id), patch, out, inv);
+    await this.#commit(out, { ...opts, inverse: inv, touched: [id] });
     return this.person(id);
   }
 
   async deletePerson(id) {
-    const e = await this.#ensure();
+    await this.#ensure();
     const pid = bytes(id);
-    const out = [e.removePerson(pid)];
+    const out = [], inv = [];
+    this.#opRemovePerson(pid, out, inv);
     // Self-contained ops don't cascade — unlink the person from every family explicitly.
     for (const f of this.families.values()) {
-      if (f.spouses.includes(id)) out.push(e.unlinkSpouse(bytes(f.id), pid));
-      if (f.children.includes(id)) out.push(e.unlinkChild(bytes(f.id), pid));
+      if (f.spouses.includes(id)) this.#opUnlinkSpouse(bytes(f.id), pid, out, inv);
+      if (f.children.includes(id)) this.#opUnlinkChild(bytes(f.id), pid, out, inv);
     }
-    await this.#commit(out);
+    await this.#commit(out, { inverse: inv });
   }
 
   async addMarriage(aId, bFieldsOrId, facts = {}) {
     const e = await this.#ensure();
-    const out = [];
+    const out = [], inv = [];
     let bId;
     if (typeof bFieldsOrId === 'string') {
       bId = bFieldsOrId;
     } else {
       const nb = e.newId();
-      out.push(e.addPerson(nb));
-      this.#applyPatch(nb, { ...NEW_PERSON, ...bFieldsOrId }, out);
+      this.#opAddPerson(nb, out, inv);
+      this.#applyPatch(nb, { ...NEW_PERSON, ...bFieldsOrId }, out, inv);
       bId = hex(nb);
     }
     const fid = e.newId();
-    out.push(e.addFamily(fid));
-    out.push(e.linkSpouse(fid, bytes(aId)));
-    out.push(e.linkSpouse(fid, bytes(bId)));
-    this.#setFamilyFacts(fid, facts, out);
-    await this.#commit(out);
+    this.#opAddFamily(fid, out, inv);
+    this.#opLinkSpouse(fid, bytes(aId), out, inv);
+    this.#opLinkSpouse(fid, bytes(bId), out, inv);
+    this.#setFamilyFacts(fid, facts, out, inv);
+    await this.#commit(out, { inverse: inv });
     return this.family(hex(fid));
   }
 
   async addChild(familyId, fieldsOrId) {
     const e = await this.#ensure();
-    const out = [];
+    const out = [], inv = [];
     let pid;
     if (typeof fieldsOrId === 'string') {
       pid = bytes(fieldsOrId);
     } else {
       pid = e.newId();
-      out.push(e.addPerson(pid));
-      this.#applyPatch(pid, { ...NEW_PERSON, ...fieldsOrId }, out);
+      this.#opAddPerson(pid, out, inv);
+      this.#applyPatch(pid, { ...NEW_PERSON, ...fieldsOrId }, out, inv);
     }
-    out.push(e.linkChild(bytes(familyId), pid, 'birth'));
-    await this.#commit(out);
+    this.#opLinkChild(bytes(familyId), pid, 'birth', out, inv);
+    await this.#commit(out, { inverse: inv });
     return this.person(hex(pid));
   }
 
   async addParents(childId, father = null, mother = null) {
     const e = await this.#ensure();
     const existing = this.childFamilyOf(childId);
-    const out = [];
+    const out = [], inv = [];
     const fid = existing ? bytes(existing.id) : e.newId();
     if (!existing) {
-      out.push(e.addFamily(fid));
-      out.push(e.linkChild(fid, bytes(childId), 'birth'));
+      this.#opAddFamily(fid, out, inv);
+      this.#opLinkChild(fid, bytes(childId), 'birth', out, inv);
     }
     for (const [role, val] of [['M', father], ['F', mother]]) {
       if (!val) continue;
@@ -450,47 +534,50 @@ export class FamilyTree {
         pid = bytes(val);
       } else {
         pid = e.newId();
-        out.push(e.addPerson(pid));
+        this.#opAddPerson(pid, out, inv);
         // NEW_PERSON first so `sex: role` isn't clobbered by its default 'U'.
-        this.#applyPatch(pid, { ...NEW_PERSON, sex: role, ...val }, out);
+        this.#applyPatch(pid, { ...NEW_PERSON, sex: role, ...val }, out, inv);
       }
-      out.push(e.linkSpouse(fid, pid));
+      this.#opLinkSpouse(fid, pid, out, inv);
     }
-    await this.#commit(out);
+    await this.#commit(out, { inverse: inv });
     return this.family(hex(fid));
   }
 
   async removeMarriage(familyId) {
     if (!this.families.has(familyId)) return;
-    const e = await this.#ensure();
-    await this.#commit([e.removeFamily(bytes(familyId))]);
+    await this.#ensure();
+    const out = [], inv = [];
+    this.#opRemoveFamily(bytes(familyId), out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async unlinkChild(familyId, personId) {
-    const e = await this.#ensure();
-    await this.#commit([e.unlinkChild(bytes(familyId), bytes(personId))]);
+    await this.#ensure();
+    const out = [], inv = [];
+    this.#opUnlinkChild(bytes(familyId), bytes(personId), out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async unlinkSpouse(familyId, personId) {
-    const e = await this.#ensure();
-    await this.#commit([e.unlinkSpouse(bytes(familyId), bytes(personId))]);
+    await this.#ensure();
+    const out = [], inv = [];
+    this.#opUnlinkSpouse(bytes(familyId), bytes(personId), out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async linkSpouse(familyId, personId) {
-    const e = await this.#ensure();
-    await this.#commit([e.linkSpouse(bytes(familyId), bytes(personId))]);
-  }
-
-  #setFamilyFacts(fid, facts, out) {
-    if ('marriage' in facts) this.#setLeaf(fid, 'marriage.date', facts.marriage, out);
-    if ('place' in facts) this.#setLeaf(fid, 'marriage.place', facts.place, out);
+    await this.#ensure();
+    const out = [], inv = [];
+    this.#opLinkSpouse(bytes(familyId), bytes(personId), out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async setFamilyFacts(familyId, facts) {
     await this.#ensure();
-    const out = [];
-    this.#setFamilyFacts(bytes(familyId), facts, out);
-    await this.#commit(out);
+    const out = [], inv = [];
+    this.#setFamilyFacts(bytes(familyId), facts, out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   // ------------------------------------------------------------------ media
@@ -498,64 +585,60 @@ export class FamilyTree {
     const e = await this.#ensure();
     const rec = e.newId();
     const link = e.newId();
-    const out = [e.addMediaRecord(rec)];
-    this.#setLeaf(rec, 'mime', mime, out);
-    this.#setLeaf(rec, 'hash', h, out);
-    if (w) this.#setLeaf(rec, 'w', w, out);
-    if (hh) this.#setLeaf(rec, 'h', hh, out);
-    out.push(e.addMediaLink(bytes(subjectId), link, rec));
-    this.#setLeaf(link, 'role', role, out);
-    if (caption) this.#setLeaf(link, 'caption', caption, out);
-    if (crop) this.#setLeaf(link, 'crop', JSON.stringify(crop), out);
-    if (role === 'portrait') this.#setLeaf(bytes(subjectId), 'portrait', hex(link), out);
-    await this.#commit(out);
+    const out = [], inv = [];
+    this.#opAddMediaRecord(rec, out, inv);
+    this.#setLeaf(rec, 'mime', mime, out, inv);
+    this.#setLeaf(rec, 'hash', h, out, inv);
+    if (w) this.#setLeaf(rec, 'w', w, out, inv);
+    if (hh) this.#setLeaf(rec, 'h', hh, out, inv);
+    this.#opAddMediaLink(bytes(subjectId), link, rec, out, inv);
+    this.#setLeaf(link, 'role', role, out, inv);
+    if (caption) this.#setLeaf(link, 'caption', caption, out, inv);
+    if (crop) this.#setLeaf(link, 'crop', JSON.stringify(crop), out, inv);
+    if (role === 'portrait') this.#setLeaf(bytes(subjectId), 'portrait', hex(link), out, inv);
+    await this.#commit(out, { inverse: inv });
     return { mediaId: hex(rec), linkId: hex(link) };
   }
 
   async setPortrait(subjectId, linkId) {
     await this.#ensure();
-    const out = [];
-    this.#setLeaf(bytes(subjectId), 'portrait', linkId, out);
-    await this.#commit(out);
+    const out = [], inv = [];
+    this.#setLeaf(bytes(subjectId), 'portrait', linkId, out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async detachMedia(linkId) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
-    const e = await this.#ensure();
-    await this.#commit([e.removeMediaLink(bytes(link.subjectId), bytes(linkId))]);
+    await this.#ensure();
+    const out = [], inv = [];
+    this.#opRemoveMediaLink(bytes(link.subjectId), bytes(linkId), out, inv);
+    // Drop the portrait pointer too if this link was it.
+    if (this.people.get(link.subjectId)?.portraitId === linkId) this.#setLeaf(bytes(link.subjectId), 'portrait', '', out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   async setCrop(linkId, crop) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
     await this.#ensure();
-    const out = [];
-    this.#setLeaf(bytes(linkId), 'crop', JSON.stringify(crop), out);
-    await this.#commit(out);
+    const out = [], inv = [];
+    this.#setLeaf(bytes(linkId), 'crop', JSON.stringify(crop), out, inv);
+    await this.#commit(out, { inverse: inv });
   }
 
   // ------------------------------------------------------------------ undo / redo
-  get canUndo() { return this.#hindex > 0; }
-  get canRedo() { return this.#hindex < this.#history.length - 1; }
-  async undo() {
-    if (!this.canUndo) return;
-    this.#hindex -= 1;
-    await this.#restoreTo(this.#history[this.#hindex]);
-  }
-  async redo() {
-    if (!this.canRedo) return;
-    this.#hindex += 1;
-    await this.#restoreTo(this.#history[this.#hindex]);
-  }
+  get canUndo() { return this.#undo.length > 0; }
+  get canRedo() { return this.#redo.length > 0; }
+  async undo() { if (this.#undo.length) await this.#applyBatch(this.#undo.pop(), this.#redo); }
+  async redo() { if (this.#redo.length) await this.#applyBatch(this.#redo.pop(), this.#undo); }
 
   // ------------------------------------------------------------------ loading
   async hydrate() {
-    const e = await this.#ensure();
+    await this.#ensure();
     const snap = await this.#store.readSnapshot(this.#docId);
     if (snap) {
       const b = snap.bytes instanceof Uint8Array ? snap.bytes : new Uint8Array(snap.bytes);
-      // Rebuild the engine from the snapshot, then fold the tail.
       this.#engine = await createTree({ replica: this.#replica, snapshot: b });
       this.#cursor = snap.logCursor ?? 0;
     }
@@ -566,15 +649,14 @@ export class FamilyTree {
     }
     this.#cursor = cursor ?? this.#cursor + updates.length;
     this.#materialize();
-    this.#baseline();
+    this.#undo.length = 0; this.#redo.length = 0; this.#group = null;
     this.#bump();
-    void e;
   }
 
   async seed(ops) {
     const e = await this.#ensure();
-    // `ops` are legacy v2 upsert ops (from seed.js). Translate them into engine deltas with a stable
-    // string-id → engine-id map so cross-references resolve.
+    // `ops` are legacy v2 upsert ops (from seed.js). Translate into engine deltas with a stable
+    // string-id → engine-id map so cross-references resolve. Seeding is not undoable (no inverse).
     const out = [];
     const idOf = new Map();
     const idFor = (s) => {
@@ -585,27 +667,26 @@ export class FamilyTree {
     for (const o of ops) {
       if (o.type === 'upsertPerson') {
         const pid = idFor(o.id);
-        out.push(e.addPerson(pid));
-        this.#applyPatch(pid, { ...NEW_PERSON, ...o.fields }, out);
+        this.#opAddPerson(pid, out, null);
+        this.#applyPatch(pid, { ...NEW_PERSON, ...o.fields }, out, null);
         (o.fields.sources ?? []).forEach((s) => {
           const sid = e.newId();
-          out.push(e.addSource(sid));
-          this.#setLeaf(sid, 'title', s.title ?? '', out);
-          this.#setLeaf(sid, 'detail', s.detail ?? '', out);
-          this.#setLeaf(sid, 'supports', s.supports ?? '', out);
-          out.push(e.cite(pid, '', sid, null));
+          this.#opAddSource(sid, out, null);
+          this.#setLeaf(sid, 'title', s.title ?? '', out, null);
+          this.#setLeaf(sid, 'detail', s.detail ?? '', out, null);
+          this.#setLeaf(sid, 'supports', s.supports ?? '', out, null);
+          this.#opCite(pid, '', sid, null, out, null);
         });
       } else if (o.type === 'upsertFamily') {
         const fid = idFor(o.id);
-        out.push(e.addFamily(fid));
-        for (const s of o.fields.spouses ?? []) out.push(e.linkSpouse(fid, idFor(s)));
-        for (const c of o.fields.children ?? []) out.push(e.linkChild(fid, idFor(c), 'birth'));
-        this.#setFamilyFacts(fid, o.fields.facts ?? {}, out);
+        this.#opAddFamily(fid, out, null);
+        for (const s of o.fields.spouses ?? []) this.#opLinkSpouse(fid, idFor(s), out, null);
+        for (const c of o.fields.children ?? []) this.#opLinkChild(fid, idFor(c), 'birth', out, null);
+        this.#setFamilyFacts(fid, o.fields.facts ?? {}, out, null);
       }
     }
-    // Seeding is not an undoable action; anchor the timeline at the seeded state.
     await this.#commit(out, { undoable: false });
-    this.#baseline();
+    this.#undo.length = 0; this.#redo.length = 0; this.#group = null;
   }
 
   async reset() {
@@ -613,7 +694,7 @@ export class FamilyTree {
     this.#engine = await createTree({ replica: this.#replica });
     this.#cursor = 0;
     this.#materialize();
-    this.#baseline();
+    this.#undo.length = 0; this.#redo.length = 0; this.#group = null;
     this.#bump();
   }
 
