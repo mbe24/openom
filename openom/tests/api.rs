@@ -25,8 +25,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
-use openom_protocol::v1::{Aead, Envelope, Header, Kind};
+use openom_protocol::v1::{
+    Aead, AuthorizedSigner, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole,
+    SignerRole, WrapMethod,
+};
 use openom_protocol::Message;
+use openom_crypto::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -216,6 +220,78 @@ fn post_json_as(uri: String, json: Value, member: Uuid) -> Request<Body> {
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {member}"))
         .body(Body::from(json.to_string()))
+        .unwrap()
+}
+
+/// Build a signed keyring for `tree` at `revision`, with `owner` as the founder + owner-member and each
+/// `(id, member_role)` in `extra` as an additional member (with the wraps `wrap_complete` requires),
+/// signed by `founder`. Models the builder in openom-crypto's chain.rs tests, but uses real UUID member
+/// ids so the server's ACL derivation can parse them. `prev_hash` empty for genesis.
+fn build_keyring(
+    tree: Uuid,
+    revision: u32,
+    prev_hash: Vec<u8>,
+    founder: &SigningKey,
+    owner: Uuid,
+    extra: &[(Uuid, i32)],
+) -> Keyring {
+    let fpub = founder.verifying_key().to_bytes().to_vec();
+    let owner_s = owner.to_string();
+    let mut members = vec![Member {
+        member_id: owner_s.clone(),
+        role: MemberRole::Owner as i32,
+        author_public_key: fpub.clone(),
+        hpke_public_key: vec![9; 32],
+    }];
+    // Newest epoch: the founder's RRK wrap + an HPKE wrap per non-founder member.
+    let mut wraps = vec![KeyWrap {
+        member_id: owner_s.clone(),
+        wrap_method: WrapMethod::RrkHpke as i32,
+        nonce: vec![],
+        wrapped_dek: vec![1],
+        kdf_params: None,
+        ephemeral_public_key: vec![],
+    }];
+    for (id, role) in extra {
+        let s = id.to_string();
+        members.push(Member { member_id: s.clone(), role: *role, author_public_key: vec![7; 32], hpke_public_key: vec![9; 32] });
+        wraps.push(KeyWrap { member_id: s, wrap_method: WrapMethod::X25519Hpke as i32, nonce: vec![], wrapped_dek: vec![1], kdf_params: None, ephemeral_public_key: vec![] });
+    }
+    let mut k = Keyring {
+        tree_id: tree.as_bytes().to_vec(),
+        revision,
+        layout_version: 1,
+        prev_keyring_hash: prev_hash,
+        authorized_signers: vec![AuthorizedSigner {
+            public_key: fpub,
+            member_id: owner_s,
+            role: SignerRole::Founder as i32,
+        }],
+        members,
+        signatures: vec![],
+        recovery_keys: vec![],
+        epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+    };
+    sign_keyring(&mut k, founder);
+    k
+}
+
+fn put_keyring_as(tree: Uuid, k: &Keyring, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(format!("/trees/{tree}/keyring"))
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::from(k.encode_to_vec()))
+        .unwrap()
+}
+
+async fn role_of(db: &sqlx::PgPool, tree: Uuid, member: Uuid) -> Option<i16> {
+    sqlx::query_scalar("SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2")
+        .bind(tree)
+        .bind(member)
+        .fetch_optional(db)
+        .await
         .unwrap()
 }
 
@@ -487,6 +563,153 @@ async fn per_member_rate_isolation() {
     assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"m1", b"replica-maint000", 1), maint)).await.0, StatusCode::TOO_MANY_REQUESTS, "maintainer throttled");
     // The owner has their OWN bucket — unaffected by the maintainer draining theirs.
     assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"o0", b"replica-owner000", 0), owner)).await.0, StatusCode::OK, "owner not throttled by the maintainer");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_genesis_derives_acl() {
+    // A genesis keyring PUT verifies + derives tree_access from its members, wiring slice 2 into the
+    // slice-1 enforcement: the derived roles gate the endpoints.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let editor = Uuid::new_v4();
+    let viewer = Uuid::new_v4();
+    let genesis = build_keyring(tree, 1, vec![], &founder, owner, &[(editor, 4), (viewer, 5)]);
+
+    let (s, _, body) = send(&app, put_keyring_as(tree, &genesis, owner)).await;
+    assert_eq!(s, StatusCode::OK, "owner PUTs the genesis keyring");
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["revision"].as_i64().unwrap(), 1);
+
+    // ACL derived from the members list.
+    assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner");
+    assert_eq!(role_of(&db, tree, editor).await, Some(4), "editor");
+    assert_eq!(role_of(&db, tree, viewer).await, Some(5), "viewer");
+
+    // And the derived roles actually gate: the editor may propose but not commit; the viewer neither.
+    let prop = proposal_envelope(tree, b"p");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)).await.0, StatusCode::OK, "derived editor proposes");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"x", b"replica-editor00", 0), editor)).await.0, StatusCode::FORBIDDEN, "derived editor can't commit");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)).await.0, StatusCode::FORBIDDEN, "derived viewer can't propose");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_transition_updates_and_removes() {
+    // A verified successor updates the ACL: promote a member, then remove them.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let m = Uuid::new_v4();
+    let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[(m, 4)]); // editor
+    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+    assert_eq!(role_of(&db, tree, m).await, Some(4));
+
+    // rev2: promote m to maintainer (ordinary change, founder-signed), chaining onto rev1.
+    let rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[(m, 3)]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::OK, "promote");
+    assert_eq!(role_of(&db, tree, m).await, Some(3), "promoted to maintainer");
+    // Now m can commit.
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"c", b"replica-m0000000", 0), m)).await.0, StatusCode::OK, "maintainer commits");
+
+    // rev3: remove m entirely → their ACL row is deleted → they're refused.
+    let rev3 = build_keyring(tree, 3, keyring_hash(&rev2).to_vec(), &founder, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev3, owner)).await.0, StatusCode::OK, "remove");
+    assert_eq!(role_of(&db, tree, m).await, None, "ACL row gone after removal");
+    assert_eq!(send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m)).await.0, StatusCode::FORBIDDEN, "removed member refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_rejects_rollback_fork_unsigned() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+
+    // Rollback: re-PUT revision 1 while head is 1 → not a sequential successor → 409.
+    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::CONFLICT, "rollback refused");
+
+    // Fork: a revision-2 with a wrong prev_keyring_hash → 409.
+    let forked = build_keyring(tree, 2, vec![0u8; 32], &founder, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &forked, owner)).await.0, StatusCode::CONFLICT, "fork refused");
+
+    // Unsigned/unauthorized: a valid-shaped rev2 signed by a stranger, not a prior signer → 400.
+    let stranger = generate_identity().unwrap();
+    let mut rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[]);
+    rev2.signatures.clear();
+    sign_keyring(&mut rev2, &stranger);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::BAD_REQUEST, "unendorsed change refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_history() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[]);
+    let rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[]);
+    send(&app, put_keyring_as(tree, &rev1, owner)).await;
+    send(&app, put_keyring_as(tree, &rev2, owner)).await;
+
+    let (s, _, b) = send(&app, get_as(format!("/trees/{tree}/keyring?from=1"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    let h: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(h["head"].as_i64().unwrap(), 2);
+    assert_eq!(h["revisions"].as_array().unwrap().len(), 2, "whole chain from 1");
+    let p1 = base64::engine::general_purpose::STANDARD.decode(h["revisions"][0]["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(p1, rev1.encode_to_vec(), "revision payload round-trips");
+
+    let (_, _, b2) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&b2).unwrap()["revisions"].as_array().unwrap().len(), 1, "tail from 2");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_put_requires_privilege() {
+    // A non-member can't PUT a genesis; a viewer (derived) can't PUT a successor.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder = generate_identity().unwrap();
+    let viewer = Uuid::new_v4();
+    let stranger = Uuid::new_v4();
+    let genesis = build_keyring(tree, 1, vec![], &founder, owner, &[(viewer, 5)]);
+
+    // A non-owner non-member can't establish the keyring.
+    assert_eq!(send(&app, put_keyring_as(tree, &genesis, stranger)).await.0, StatusCode::FORBIDDEN, "stranger can't PUT genesis");
+    // Owner establishes it.
+    assert_eq!(send(&app, put_keyring_as(tree, &genesis, owner)).await.0, StatusCode::OK);
+    // The derived viewer lacks Administer → can't PUT a successor (refused before any crypto).
+    let rev2 = build_keyring(tree, 2, keyring_hash(&genesis).to_vec(), &founder, owner, &[(viewer, 5)]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev2, viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't PUT a keyring");
 }
 
 #[tokio::test]

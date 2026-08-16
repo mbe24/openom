@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod authz;
 pub mod config;
+pub mod keyring;
 pub mod log;
 pub mod media;
 pub mod prof;
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use jsonwebtoken::DecodingKey;
 use sqlx::postgres::PgPoolOptions;
@@ -82,6 +83,11 @@ pub fn app(state: AppState) -> Router {
             post(proposals::create_proposal).get(proposals::list_proposals),
         )
         .route("/trees/{tree_id}/proposals/{proposal_id}", delete(proposals::delete_proposal))
+        // Keyring: the authoritative signed membership/role chain; PUT verifies + derives the ACL (§B3).
+        .route(
+            "/trees/{tree_id}/keyring",
+            put(keyring::put_keyring).get(keyring::get_keyring),
+        )
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
