@@ -12,7 +12,7 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use openom_protocol::aad::author_signing_bytes;
-use openom_protocol::v1::{Header, Keyring, Kind, MemberRole};
+use openom_protocol::v1::{Header, Keyring, Kind, MemberRole, SignerRole};
 use sha2::{Digest, Sha256};
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
@@ -90,6 +90,27 @@ pub fn verify_entry(version: u32, header: &Header, plaintext: &[u8], governing: 
         return Err(EntryError::InsufficientRole);
     }
     Ok(())
+}
+
+/// Whether the epoch identified by `key_id` is **attributed** — its DEK was wrapped to someone besides
+/// the sole founder (a co-owner or an ordinary member), i.e. the tree is shared under this epoch. Entries
+/// under an attributed epoch MUST carry a valid `author_signature` (see [`verify_entry`]); entries under
+/// an unattributed epoch — a solo owner's own epoch, wrapped only to the founder — may be unattributed
+/// (V1's communal-DEK history stays valid). The decision is derived from the VERIFIED keyring, never from
+/// an entry's own (server-visible, forgeable) emptiness — so a keyless hostile server can't downgrade an
+/// attributed epoch to "looks unattributed, skip the check" (the §B3 downgrade attack). `key_id` is
+/// AAD-bound, so a forger can't lie about which epoch they sealed under either.
+pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
+    let founder = keyring
+        .authorized_signers
+        .iter()
+        .find(|s| s.role == SignerRole::Founder as i32)
+        .map(|s| &s.member_id);
+    keyring
+        .epochs
+        .iter()
+        .filter(|e| e.key_id == key_id)
+        .any(|e| e.wraps.iter().any(|w| Some(&w.member_id) != founder))
 }
 
 #[cfg(test)]
@@ -203,5 +224,36 @@ mod tests {
         let kr = governing(vec![]);
         let h = Header { kind: Kind::Delta as i32, key_id: KID.to_vec(), ..Default::default() };
         assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::Unattributed));
+    }
+
+    #[test]
+    fn epoch_attribution_tracks_who_the_dek_is_wrapped_to() {
+        use openom_protocol::v1::{AuthorizedSigner, KeyWrap};
+        let wrap = |id: &str| KeyWrap {
+            member_id: id.into(),
+            wrap_method: 0,
+            nonce: vec![],
+            wrapped_dek: vec![1],
+            kdf_params: None,
+            ephemeral_public_key: vec![],
+        };
+        let founder = AuthorizedSigner { public_key: vec![0; 32], member_id: "owner".into(), role: SignerRole::Founder as i32 };
+        let mk = |wraps: Vec<KeyWrap>| Keyring {
+            tree_id: vec![],
+            revision: 1,
+            layout_version: 1,
+            prev_keyring_hash: vec![],
+            authorized_signers: vec![founder.clone()],
+            members: vec![],
+            signatures: vec![],
+            recovery_keys: vec![],
+            epochs: vec![KeyEpoch { key_id: KID.to_vec(), epoch: 0, wraps }],
+        };
+        // Solo owner: the epoch's DEK is wrapped only to the founder → unattributed (V1 history stays valid).
+        assert!(!epoch_is_attributed(&mk(vec![wrap("owner")]), KID));
+        // Shared: a wrap to any non-founder member → attributed (entries must be signed).
+        assert!(epoch_is_attributed(&mk(vec![wrap("owner"), wrap("editor-1")]), KID));
+        // An unknown key_id has no matching epoch → not attributed.
+        assert!(!epoch_is_attributed(&mk(vec![wrap("owner"), wrap("editor-1")]), b"no-such-key"));
     }
 }

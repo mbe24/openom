@@ -67,7 +67,7 @@ pub use chain::{
     bootstrap_from_genesis, bootstrap_from_oob, verify_reset, verify_transition, verify_walk,
     ChainError, KeyringAnchor,
 };
-pub use entry::{verify_entry, EntryError};
+pub use entry::{epoch_is_attributed, verify_entry, EntryError};
 pub use envelope::{open_envelope, seal_envelope, SealParams};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap,
