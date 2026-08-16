@@ -90,6 +90,63 @@ fn post_bytes(uri: String, body: &[u8]) -> Request<Body> {
         .unwrap()
 }
 
+/// As `post_bytes`, but authenticated as a specific member (local fake-auth accepts a
+/// UUID bearer as the caller id — see auth.rs).
+fn post_bytes_as(uri: String, body: &[u8], member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::from(body.to_vec()))
+        .unwrap()
+}
+
+/// A snapshot PUT authenticated as a specific member (creates a tree owned by them).
+fn put_tree_as(tree: Uuid, env: &[u8], member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(format!("/trees/{tree}"))
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::from(env.to_vec()))
+        .unwrap()
+}
+
+/// A pool straight to the test DB, to seed accounts with specific metering caps. Uses
+/// the same DATABASE_URL the router builds its state from.
+async fn db() -> sqlx::PgPool {
+    let url = std::env::var("DATABASE_URL").expect("DATABASE_URL set for integration tests");
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect test db")
+}
+
+/// Insert (or reset) a fresh account with explicit metering caps, isolated from the
+/// shared generous dev account. The bucket starts full (`log_tokens = log_burst`).
+async fn seed_account(db: &sqlx::PgPool, id: Uuid, max_tree_bytes: i64, log_rate: f64, log_burst: i32) {
+    sqlx::query(
+        "INSERT INTO accounts (id, max_trees, max_tree_bytes, log_rate, log_burst, log_tokens, log_refilled_at)
+         VALUES ($1, 1000, $2, $3, $4, $4::float8, now())
+         ON CONFLICT (id) DO UPDATE SET
+             max_tree_bytes = EXCLUDED.max_tree_bytes,
+             log_rate = EXCLUDED.log_rate,
+             log_burst = EXCLUDED.log_burst,
+             log_tokens = EXCLUDED.log_tokens,
+             tree_used_bytes = 0,
+             log_refilled_at = now()",
+    )
+    .bind(id)
+    .bind(max_tree_bytes)
+    .bind(log_rate)
+    .bind(log_burst)
+    .execute(db)
+    .await
+    .expect("seed account");
+}
+
 fn put_tree(tree: Uuid, env: &[u8], if_match: Option<&str>) -> Request<Body> {
     let mut b = Request::builder()
         .method("PUT")
@@ -206,6 +263,89 @@ async fn delta_log_lifecycle() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "append to unknown tree");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn log_rate_limit_429() {
+    let app = router().await;
+    let db = db().await;
+    // A dedicated account with a one-token bucket that barely refills, so the second
+    // *new* append trips the abuse gate. Generous byte cap — this isolates the rate axis.
+    let member = Uuid::new_v4();
+    seed_account(&db, member, 1 << 30, 0.001, 1).await;
+
+    let tree = Uuid::new_v4();
+    let (s, _, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member)).await;
+    assert_eq!(s, StatusCode::OK, "create tree as the throttled member");
+
+    let ra = b"replica-rate0000".to_vec();
+    // First new append spends the single token.
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    assert_eq!(s, StatusCode::OK, "first append within rate");
+
+    // Second new append: bucket empty → 429 with a Retry-After hint.
+    let (s, h, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d1", &ra, 1), member)).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "second append over rate");
+    assert!(h.get("retry-after").is_some(), "429 carries Retry-After");
+
+    // A re-delivery of the already-appended d0 is NOT metered — idempotent success even while throttled.
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    assert_eq!(s, StatusCode::OK, "re-delivery bypasses the rate gate");
+
+    // Only d0 actually landed — the throttled append never persisted.
+    let read = Request::builder()
+        .uri(format!("/trees/{tree}/log?since=-1"))
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::empty())
+        .unwrap();
+    let (s, _, tb) = send(&app, read).await;
+    assert_eq!(s, StatusCode::OK);
+    let tail: Value = serde_json::from_slice(&tb).unwrap();
+    assert_eq!(tail["entries"].as_array().unwrap().len(), 1, "throttled append never persisted");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn log_capacity_403() {
+    let app = router().await;
+    let db = db().await;
+    // Generous rate, but we'll pin the byte cap to exactly one delta's worth mid-test.
+    let member = Uuid::new_v4();
+    seed_account(&db, member, 1 << 30, 1000.0, 1000).await;
+
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member)).await;
+
+    let ra = b"replica-cap00000".to_vec();
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    assert_eq!(s, StatusCode::OK, "first append within capacity");
+
+    // Pin max_tree_bytes to exactly what's now used → the reserve is full.
+    let used: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(member)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(used > 0, "the append charged the tree-byte meter");
+    sqlx::query("UPDATE accounts SET max_tree_bytes = $2 WHERE id = $1")
+        .bind(member)
+        .bind(used)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // Next new append would overflow the reserve → 403 (a plan limit, not a transient throttle).
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d1", &ra, 1), member)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "append over the tree-byte reserve");
+
+    // The rejected append charged nothing (rolled back).
+    let after: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(member)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(after, used, "a rejected append leaves the meter untouched");
 }
 
 #[tokio::test]

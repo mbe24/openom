@@ -10,6 +10,11 @@
 //! visible before an earlier one and a tail-puller would skip an entry. The idempotency dot
 //! `(tree_id, replica_id, replica_counter)` makes a re-delivered append a no-op that returns the
 //! original seq. Payloads are stored inline in Postgres (deltas are small; R2 spillover is a follow-up).
+//!
+//! A new append is metered against the tree owner (owner-pays, §17): a per-account token bucket
+//! (abuse rate → 429) and the tree-byte capacity meter (→ 403), both inside the append transaction so
+//! a rejection charges nothing. Re-deliveries are never metered (they return before the gates). The
+//! byte meter is monotonic until log GC reclaims compacted-away entries and credits it back (follow-up).
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -126,6 +131,53 @@ pub async fn append_log(
     if let Some((seq,)) = existing {
         tx.commit().await.map_err(internal)?;
         return Ok((StatusCode::OK, Json(AppendResult { seq })).into_response());
+    }
+
+    // Metering — charged to the tree OWNER (owner-pays, §17), only for a genuinely new
+    // append (re-deliveries returned above, so a retrying client is never metered).
+    //
+    // (1) Abuse rate: a per-account token bucket, refilled continuously and drained one
+    // token per append, in a single atomic UPDATE. The WHERE guard re-derives the
+    // refilled balance so the check and the debit can't race. 0 rows → over rate.
+    let rated = sqlx::query(
+        "UPDATE accounts
+            SET log_tokens = LEAST(log_burst::float8,
+                                   log_tokens + EXTRACT(EPOCH FROM (now() - log_refilled_at)) * log_rate) - 1,
+                log_refilled_at = now()
+          WHERE id = $1
+            AND LEAST(log_burst::float8,
+                      log_tokens + EXTRACT(EPOCH FROM (now() - log_refilled_at)) * log_rate) >= 1",
+    )
+    .bind(owner)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if rated.rows_affected() != 1 {
+        // Roll back (drop tx) so nothing is charged, and hint how long to back off.
+        let rate: f64 = sqlx::query_scalar("SELECT log_rate FROM accounts WHERE id = $1")
+            .bind(owner)
+            .fetch_one(&state.db)
+            .await
+            .map_err(internal)?;
+        let retry = if rate > 0.0 { (1.0 / rate).ceil() as u64 } else { 60 };
+        tracing::info!(event = "rate_rejected", resource = "log", %tree_id, %owner);
+        return Err(ApiError::TooManyRequests(retry.max(1)));
+    }
+
+    // (2) Byte capacity: the tree-byte meter (§17), an axis independent of the media
+    // pool. Charge the delta's size; 0 rows → the tree reserve is full.
+    let capped = sqlx::query(
+        "UPDATE accounts SET tree_used_bytes = tree_used_bytes + $2
+          WHERE id = $1 AND tree_used_bytes + $2 <= max_tree_bytes",
+    )
+    .bind(owner)
+    .bind(d.size)
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    if capped.rows_affected() != 1 {
+        tracing::info!(event = "quota_rejected", resource = "log", %tree_id, %owner);
+        return Err(ApiError::QuotaExceeded);
     }
 
     let seq = next_seq;

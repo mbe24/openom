@@ -137,8 +137,10 @@ async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Er
     sqlx::query(
         "INSERT INTO accounts
              (id, max_trees, allow_media, allow_streaming_media,
-              max_blob_bytes, max_blob_count, max_storage_bytes, max_tree_bytes)
-         VALUES ($1, 1000000, true, true, 5368709120, 1000000, 1099511627776, 10737418240)
+              max_blob_bytes, max_blob_count, max_storage_bytes, max_tree_bytes,
+              log_rate, log_burst, log_tokens)
+         VALUES ($1, 1000000, true, true, 5368709120, 1000000, 1099511627776, 10737418240,
+                 100000, 100000, 100000)
          ON CONFLICT (id) DO UPDATE SET
              max_trees = EXCLUDED.max_trees,
              allow_media = EXCLUDED.allow_media,
@@ -146,7 +148,9 @@ async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Er
              max_blob_bytes = EXCLUDED.max_blob_bytes,
              max_blob_count = EXCLUDED.max_blob_count,
              max_storage_bytes = EXCLUDED.max_storage_bytes,
-             max_tree_bytes = EXCLUDED.max_tree_bytes",
+             max_tree_bytes = EXCLUDED.max_tree_bytes,
+             log_rate = EXCLUDED.log_rate,
+             log_burst = EXCLUDED.log_burst",
     )
     .bind(member_id)
     .execute(db)

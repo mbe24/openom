@@ -13,8 +13,8 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, RETRY_AFTER};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use openom_protocol::v1::{Envelope, Kind};
 use openom_protocol::{Message, ENVELOPE_VERSION};
@@ -323,6 +323,10 @@ pub enum ApiError {
     NotFound,
     Conflict,
     QuotaExceeded,
+    /// Append rate exceeded (abuse gate). Carries a Retry-After hint in seconds. A
+    /// 429 — distinct from QuotaExceeded's 403 — because it's transient: the client
+    /// should back off and retry, not treat it as a plan limit (§17).
+    TooManyRequests(u64),
     /// The requested log tail is no longer retained — the client must bootstrap from a snapshot.
     Gone(String),
     BadRequest(String),
@@ -331,6 +335,16 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // Rate limiting carries a header, so build its response directly.
+        if let ApiError::TooManyRequests(secs) = self {
+            let mut resp =
+                (StatusCode::TOO_MANY_REQUESTS, "append rate exceeded — retry after the indicated delay".to_string())
+                    .into_response();
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                resp.headers_mut().insert(RETRY_AFTER, v);
+            }
+            return resp;
+        }
         let (status, msg) = match self {
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
@@ -344,6 +358,7 @@ impl IntoResponse for ApiError {
             ApiError::QuotaExceeded => {
                 (StatusCode::FORBIDDEN, "account resource limit reached".to_string())
             }
+            ApiError::TooManyRequests(_) => unreachable!("handled before the match (carries a header)"),
             ApiError::Gone(m) => (StatusCode::GONE, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => {

@@ -689,6 +689,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commute-format"
+version = "0.1.0"
+dependencies = [
+ "commute",
+ "proptest",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
