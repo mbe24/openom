@@ -38,7 +38,7 @@ fn competing_claims_both_survive() {
     a.apply(TreeOp::AddPerson { id: pid(1) });
     let oa = a
         .apply(TreeOp::AddClaim {
-            person: pid(1),
+            subject: pid(1),
             field: "birth.date".into(),
             claim: cid(1),
             value: "1901".into(),
@@ -50,7 +50,7 @@ fn competing_claims_both_survive() {
     b.doc_mut().merge_op(&a.persons_add_op(&pid(1))); // (helper below reconstructs the add)
     let ob = b
         .apply(TreeOp::AddClaim {
-            person: pid(1),
+            subject: pid(1),
             field: "birth.date".into(),
             claim: cid(2),
             value: "1903".into(),
@@ -74,21 +74,21 @@ fn competing_claims_both_survive() {
 #[test]
 fn preferred_pointer_selects_a_claim_and_falls_back_when_unset() {
     let mut t = Tree::new(rid(1));
-    t.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
-    t.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(2), value: "1903".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(2), value: "1903".into(), source: None });
     // No explicit preference yet → deterministic fallback (greatest claim id = cid(2) = "1903").
     assert_eq!(t.fact(&pid(1), "birth.date").preferred.unwrap().value, "1903");
     // Explicitly prefer the 1901 claim.
-    t.apply(TreeOp::SetPreferredClaim { person: pid(1), field: "birth.date".into(), claim: cid(1) });
+    t.apply(TreeOp::SetPreferredClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1) });
     assert_eq!(t.fact(&pid(1), "birth.date").preferred.unwrap().value, "1901");
 }
 
 #[test]
 fn retracting_a_claim_removes_it() {
     let mut t = Tree::new(rid(1));
-    t.apply(TreeOp::AddClaim { person: pid(1), field: "name.given".into(), claim: cid(1), value: "Jon".into(), source: None });
-    t.apply(TreeOp::AddClaim { person: pid(1), field: "name.given".into(), claim: cid(2), value: "John".into(), source: None });
-    t.apply(TreeOp::RetractClaim { person: pid(1), field: "name.given".into(), claim: cid(1) });
+    t.apply(TreeOp::AddClaim { subject: pid(1), field: "name.given".into(), claim: cid(1), value: "Jon".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: pid(1), field: "name.given".into(), claim: cid(2), value: "John".into(), source: None });
+    t.apply(TreeOp::RetractClaim { subject: pid(1), field: "name.given".into(), claim: cid(1) });
     let fact = t.fact(&pid(1), "name.given");
     assert_eq!(fact.claims.len(), 1);
     assert_eq!(fact.claims[0].value, "John");
@@ -109,7 +109,7 @@ fn hex(b: &[u8]) -> String {
 fn treelog_snapshot_golden_vector() {
     let mut t = Tree::new([7u8; 16]);
     t.apply(TreeOp::AddPerson { id: vec![1] });
-    t.apply(TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None });
     let got = hex(&t.doc().snapshot());
     let expected = "01000000000000000200000000000000010707070707070707070707070707070701000000000000000101\
 000000000000000101000000000000000002070707070707070707070707070707070100000000000000140200000001010000000a\
@@ -131,6 +131,24 @@ fn a_marriage_added_as_one_batch_lands_atomically() {
     assert_eq!(t.families(), vec![fid(0)]);
     assert_eq!(t.spouses_of(&fid(0)), vec![pid(1), pid(2)]);
     assert_eq!(t.children_of(&fid(0)), vec![(pid(3), Pedigree::Birth)]);
+}
+
+#[test]
+fn facts_attach_to_a_family_subject_not_just_persons() {
+    // Family-level facts (a marriage date/place) are stored on the FAMILY id through the very same
+    // fact channel as person facts — nothing in the cell addressing is person-specific, so any
+    // `SubjectId` works. This is the capability the app's v2 `family.facts` maps onto; the
+    // shadow-parity projection (the app swap) relies on it.
+    let mut t = Tree::new(rid(1));
+    let fam = fid(0);
+    t.apply(TreeOp::AddFamily { id: fam.clone() });
+    t.apply(TreeOp::AddClaim { subject: fam.clone(), field: "marriage.date".into(), claim: cid(1), value: "17.10.1707".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: fam.clone(), field: "marriage.place".into(), claim: cid(2), value: "Dornheim".into(), source: None });
+    assert_eq!(t.fact(&fam, "marriage.date").preferred.unwrap().value, "17.10.1707");
+    assert_eq!(t.fact(&fam, "marriage.place").preferred.unwrap().value, "Dornheim");
+    // Putting facts on a family does not make it a person, nor drop it from the family roster.
+    assert!(!t.has_person(&fam));
+    assert_eq!(t.families(), vec![fam]);
 }
 
 #[test]
@@ -168,7 +186,7 @@ fn move_child_reparents_and_survives_a_concurrent_edit() {
         b.doc_mut().merge_op(o);
     }
     let mv = a.apply(TreeOp::MoveChild { person: pid(3), from: fid(0), to: fid(1), pedi: Pedigree::Birth });
-    let edit = b.apply(TreeOp::AddClaim { person: pid(3), field: "name.given".into(), claim: cid(1), value: "Mary".into(), source: None });
+    let edit = b.apply(TreeOp::AddClaim { subject: pid(3), field: "name.given".into(), claim: cid(1), value: "Mary".into(), source: None });
     for o in &mv {
         b.doc_mut().merge_op(o);
     }
@@ -186,8 +204,8 @@ fn disjoint_fields_both_survive() {
     // M1: two devices edit different fields of the same person; neither clobbers the other.
     let mut a = Tree::new(rid(1));
     let mut b = Tree::new(rid(2));
-    let oa = a.apply(TreeOp::AddClaim { person: pid(1), field: "birth.place".into(), claim: cid(1), value: "London".into(), source: None });
-    let ob = b.apply(TreeOp::AddClaim { person: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None });
+    let oa = a.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.place".into(), claim: cid(1), value: "London".into(), source: None });
+    let ob = b.apply(TreeOp::AddClaim { subject: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None });
     for o in &ob {
         a.doc_mut().merge_op(o);
     }
@@ -211,7 +229,7 @@ fn delete_wins_but_the_concurrent_edit_is_not_lost() {
         b.doc_mut().merge_op(o);
     }
     let del = a.apply(TreeOp::RemovePerson { id: pid(1) });
-    let edit = b.apply(TreeOp::AddClaim { person: pid(1), field: "note".into(), claim: cid(1), value: "was here".into(), source: None });
+    let edit = b.apply(TreeOp::AddClaim { subject: pid(1), field: "note".into(), claim: cid(1), value: "was here".into(), source: None });
     for o in &edit {
         a.doc_mut().merge_op(o);
     }
@@ -230,7 +248,7 @@ fn a_long_offline_replica_catches_up_in_one_delta() {
     let mut b = Tree::new(rid(2));
     for i in 0..12u8 {
         a.apply(TreeOp::AddPerson { id: pid(i) });
-        a.apply(TreeOp::AddClaim { person: pid(i), field: "name.given".into(), claim: cid(0), value: format!("p{i}"), source: None });
+        a.apply(TreeOp::AddClaim { subject: pid(i), field: "name.given".into(), claim: cid(0), value: format!("p{i}"), source: None });
     }
     let vv = b.doc().version();
     let delta = a.doc().delta_since(&vv);
@@ -275,7 +293,7 @@ fn propose_review_commit_happy_path() {
     // An editor drafts a proposal against the owner's current version.
     let proposal = Proposal {
         base: owner.version_cursor(),
-        ops: vec![TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) }],
+        ops: vec![TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) }],
     };
     let review = owner.review(&proposal);
     assert!(review.conflicts.is_empty());
@@ -296,16 +314,16 @@ fn a_stale_proposal_on_a_moved_fact_is_flagged_and_keeps_both() {
     // conflict; committing anyway keeps every claim (the claim model never silently drops one).
     let mut owner = Tree::new(rid(1));
     owner.apply(TreeOp::AddPerson { id: pid(1) });
-    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
+    owner.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
     let proposal = Proposal {
         base: owner.version_cursor(),
-        ops: vec![TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(2), value: "1903".into(), source: None }],
+        ops: vec![TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(2), value: "1903".into(), source: None }],
     };
     // The head moves the same fact after the proposal was drafted.
-    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
+    owner.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
 
     let review = owner.review(&proposal);
-    assert_eq!(review.conflicts, vec![Conflict { person: pid(1), field: "birth.date".into() }]);
+    assert_eq!(review.conflicts, vec![Conflict { subject: pid(1), field: "birth.date".into() }]);
 
     owner.commit_proposal(&proposal);
     assert_eq!(owner.fact(&pid(1), "birth.date").claims.len(), 3, "all three competing claims retained");
@@ -314,13 +332,13 @@ fn a_stale_proposal_on_a_moved_fact_is_flagged_and_keeps_both() {
 #[test]
 fn a_proposal_on_an_untouched_fact_has_no_conflict() {
     let mut owner = Tree::new(rid(1));
-    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
+    owner.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: None });
     let proposal = Proposal {
         base: owner.version_cursor(),
-        ops: vec![TreeOp::AddClaim { person: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None }],
+        ops: vec![TreeOp::AddClaim { subject: pid(1), field: "death.date".into(), claim: cid(2), value: "1970".into(), source: None }],
     };
     // The head moves a DIFFERENT fact — no conflict for the proposal's field.
-    owner.apply(TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
+    owner.apply(TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(3), value: "1902".into(), source: None });
     assert!(owner.review(&proposal).conflicts.is_empty());
 }
 
@@ -332,7 +350,7 @@ fn proposal_encodes_and_decodes() {
         base,
         ops: vec![
             TreeOp::AddPerson { id: pid(1) },
-            TreeOp::AddClaim { person: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) },
+            TreeOp::AddClaim { subject: pid(1), field: "birth.date".into(), claim: cid(1), value: "1901".into(), source: Some("parish".into()) },
             TreeOp::MoveChild { person: pid(1), from: fid(0), to: fid(1), pedi: Pedigree::Adopted },
         ],
     };
@@ -396,9 +414,9 @@ fn treeop_strat() -> impl Strategy<Value = TreeOp> {
     prop_oneof![
         (0u8..3).prop_map(|p| TreeOp::AddPerson { id: pid(p) }),
         (0u8..3).prop_map(|p| TreeOp::RemovePerson { id: pid(p) }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::AddClaim { person: pid(p), field: field_of(f), claim: cid(c), value: format!("v{c}"), source: None }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::SetPreferredClaim { person: pid(p), field: field_of(f), claim: cid(c) }),
-        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::RetractClaim { person: pid(p), field: field_of(f), claim: cid(c) }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::AddClaim { subject: pid(p), field: field_of(f), claim: cid(c), value: format!("v{c}"), source: None }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::SetPreferredClaim { subject: pid(p), field: field_of(f), claim: cid(c) }),
+        (0u8..3, 0u8..2, 0u8..4).prop_map(|(p, f, c)| TreeOp::RetractClaim { subject: pid(p), field: field_of(f), claim: cid(c) }),
         (0u8..2).prop_map(|x| TreeOp::AddFamily { id: fid(x) }),
         (0u8..2).prop_map(|x| TreeOp::RemoveFamily { id: fid(x) }),
         (0u8..2, 0u8..3, 0u8..3).prop_map(|(x, p, pe)| TreeOp::LinkChild { family: fid(x), person: pid(p), pedi: pedi_of(pe) }),

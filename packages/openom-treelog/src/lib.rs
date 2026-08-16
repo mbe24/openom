@@ -35,6 +35,12 @@ pub type FamilyId = Vec<u8>;
 pub type FieldKey = String;
 /// A caller-minted claim id (opaque; the merge key for one claim within a fact).
 pub type ClaimId = Vec<u8>;
+/// Any fact-bearing entity id: a person, a family, or (later) a sub-entity such as a name, event, or
+/// source record. Facts are addressed purely by `(kind, subject_bytes, field)` — nothing in the cell
+/// machinery is person-specific — so a family id is a valid fact subject (that is how family-level
+/// facts like a marriage date/place are stored). Person and family ids share this 16-byte keyspace;
+/// the collision surface is the same as two person ids colliding, which the design already accepts.
+pub type SubjectId = Vec<u8>;
 /// An opaque reference to an encrypted media blob (its remote id / ciphertext hash) — the merge key
 /// for one attachment.
 pub type MediaRef = Vec<u8>;
@@ -94,11 +100,11 @@ fn cell(kind: u8, parts: &[&[u8]]) -> CellId {
 fn persons_cell() -> CellId {
     cell(KIND_PERSONS, &[])
 }
-fn fact_claims_cell(person: &[u8], field: &str) -> CellId {
-    cell(KIND_FACT_CLAIMS, &[person, field.as_bytes()])
+fn fact_claims_cell(subject: &[u8], field: &str) -> CellId {
+    cell(KIND_FACT_CLAIMS, &[subject, field.as_bytes()])
 }
-fn fact_preferred_cell(person: &[u8], field: &str) -> CellId {
-    cell(KIND_FACT_PREFERRED, &[person, field.as_bytes()])
+fn fact_preferred_cell(subject: &[u8], field: &str) -> CellId {
+    cell(KIND_FACT_PREFERRED, &[subject, field.as_bytes()])
 }
 fn families_cell() -> CellId {
     cell(KIND_FAMILIES, &[])
@@ -161,9 +167,9 @@ impl Proposal {
 pub enum Change {
     PersonAdded(PersonId),
     PersonRemoved(PersonId),
-    ClaimAdded { person: PersonId, field: FieldKey, value: String, source: Option<String>, current_preferred: Option<String> },
-    PreferredChanged { person: PersonId, field: FieldKey, claim: ClaimId },
-    ClaimRetracted { person: PersonId, field: FieldKey, claim: ClaimId },
+    ClaimAdded { subject: SubjectId, field: FieldKey, value: String, source: Option<String>, current_preferred: Option<String> },
+    PreferredChanged { subject: SubjectId, field: FieldKey, claim: ClaimId },
+    ClaimRetracted { subject: SubjectId, field: FieldKey, claim: ClaimId },
     FamilyAdded(FamilyId),
     FamilyRemoved(FamilyId),
     ChildLinked { family: FamilyId, person: PersonId, pedi: Pedigree },
@@ -179,7 +185,7 @@ pub enum Change {
 /// whether to apply anyway (in the claim model that usually means "keep both").
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Conflict {
-    pub person: PersonId,
+    pub subject: SubjectId,
     pub field: FieldKey,
 }
 
@@ -197,9 +203,9 @@ pub struct Review {
 pub enum TreeOp {
     AddPerson { id: PersonId },
     RemovePerson { id: PersonId },
-    AddClaim { person: PersonId, field: FieldKey, claim: ClaimId, value: String, source: Option<String> },
-    SetPreferredClaim { person: PersonId, field: FieldKey, claim: ClaimId },
-    RetractClaim { person: PersonId, field: FieldKey, claim: ClaimId },
+    AddClaim { subject: SubjectId, field: FieldKey, claim: ClaimId, value: String, source: Option<String> },
+    SetPreferredClaim { subject: SubjectId, field: FieldKey, claim: ClaimId },
+    RetractClaim { subject: SubjectId, field: FieldKey, claim: ClaimId },
     AddFamily { id: FamilyId },
     RemoveFamily { id: FamilyId },
     LinkChild { family: FamilyId, person: PersonId, pedi: Pedigree },
@@ -222,16 +228,16 @@ impl TreeOp {
         match self {
             TreeOp::AddPerson { id } => vec![OpIntent::AddElement { cell: persons_cell(), elem: id, value: Value::Null }],
             TreeOp::RemovePerson { id } => vec![OpIntent::RemoveElement { cell: persons_cell(), elem: id }],
-            TreeOp::AddClaim { person, field, claim, value, source } => vec![OpIntent::AddElement {
-                cell: fact_claims_cell(&person, &field),
+            TreeOp::AddClaim { subject, field, claim, value, source } => vec![OpIntent::AddElement {
+                cell: fact_claims_cell(&subject, &field),
                 elem: claim,
                 value: Value::Bytes(encode_claim(&value, source.as_deref())),
             }],
-            TreeOp::SetPreferredClaim { person, field, claim } => {
-                vec![OpIntent::SetRegister { cell: fact_preferred_cell(&person, &field), value: Value::Bytes(claim) }]
+            TreeOp::SetPreferredClaim { subject, field, claim } => {
+                vec![OpIntent::SetRegister { cell: fact_preferred_cell(&subject, &field), value: Value::Bytes(claim) }]
             }
-            TreeOp::RetractClaim { person, field, claim } => {
-                vec![OpIntent::RemoveElement { cell: fact_claims_cell(&person, &field), elem: claim }]
+            TreeOp::RetractClaim { subject, field, claim } => {
+                vec![OpIntent::RemoveElement { cell: fact_claims_cell(&subject, &field), elem: claim }]
             }
             TreeOp::AddFamily { id } => vec![OpIntent::AddElement { cell: families_cell(), elem: id, value: Value::Null }],
             TreeOp::RemoveFamily { id } => vec![OpIntent::RemoveElement { cell: families_cell(), elem: id }],
@@ -302,10 +308,10 @@ impl Tree {
         let changed = self.doc.changed_cells_since(&proposal.base);
         let mut review = Review::default();
         for op in &proposal.ops {
-            if let Some((person, field)) = fact_target(op) {
-                let touched = changed.contains(&fact_claims_cell(&person, &field)) || changed.contains(&fact_preferred_cell(&person, &field));
+            if let Some((subject, field)) = fact_target(op) {
+                let touched = changed.contains(&fact_claims_cell(&subject, &field)) || changed.contains(&fact_preferred_cell(&subject, &field));
                 if touched {
-                    let c = Conflict { person, field };
+                    let c = Conflict { subject, field };
                     if !review.conflicts.contains(&c) {
                         review.conflicts.push(c);
                     }
@@ -327,12 +333,12 @@ impl Tree {
         match op.clone() {
             TreeOp::AddPerson { id } => Change::PersonAdded(id),
             TreeOp::RemovePerson { id } => Change::PersonRemoved(id),
-            TreeOp::AddClaim { person, field, value, source, .. } => {
-                let current_preferred = self.fact(&person, &field).preferred.map(|c| c.value);
-                Change::ClaimAdded { person, field, value, source, current_preferred }
+            TreeOp::AddClaim { subject, field, value, source, .. } => {
+                let current_preferred = self.fact(&subject, &field).preferred.map(|c| c.value);
+                Change::ClaimAdded { subject, field, value, source, current_preferred }
             }
-            TreeOp::SetPreferredClaim { person, field, claim } => Change::PreferredChanged { person, field, claim },
-            TreeOp::RetractClaim { person, field, claim } => Change::ClaimRetracted { person, field, claim },
+            TreeOp::SetPreferredClaim { subject, field, claim } => Change::PreferredChanged { subject, field, claim },
+            TreeOp::RetractClaim { subject, field, claim } => Change::ClaimRetracted { subject, field, claim },
             TreeOp::AddFamily { id } => Change::FamilyAdded(id),
             TreeOp::RemoveFamily { id } => Change::FamilyRemoved(id),
             TreeOp::LinkChild { family, person, pedi } => Change::ChildLinked { family, person, pedi },
@@ -395,10 +401,10 @@ impl Tree {
     }
 
     /// A person's fact: every retained claim + the preferred one. Empty if the fact has no claims.
-    pub fn fact(&self, person: &[u8], field: &str) -> Fact {
+    pub fn fact(&self, subject: &[u8], field: &str) -> Fact {
         let mut claims: Vec<Claim> = self
             .doc
-            .set_elements(&fact_claims_cell(person, field))
+            .set_elements(&fact_claims_cell(subject, field))
             .into_iter()
             .filter_map(|(id, v)| match v {
                 Value::Bytes(b) => decode_claim(b).map(|(value, source)| Claim { id: id.clone(), value, source }),
@@ -408,7 +414,7 @@ impl Tree {
         claims.sort_by(|a, b| a.id.cmp(&b.id));
 
         // Preferred: the explicit pointer if it still names a live claim; else the greatest id.
-        let pointer = match self.doc.register(&fact_preferred_cell(person, field)) {
+        let pointer = match self.doc.register(&fact_preferred_cell(subject, field)) {
             Some(Value::Bytes(id)) => Some(id.clone()),
             _ => None,
         };
@@ -420,12 +426,12 @@ impl Tree {
     }
 }
 
-/// The (person, field) a fact op targets, for conflict detection. `None` for non-fact ops.
-fn fact_target(op: &TreeOp) -> Option<(PersonId, FieldKey)> {
+/// The (subject, field) a fact op targets, for conflict detection. `None` for non-fact ops.
+fn fact_target(op: &TreeOp) -> Option<(SubjectId, FieldKey)> {
     match op {
-        TreeOp::AddClaim { person, field, .. }
-        | TreeOp::SetPreferredClaim { person, field, .. }
-        | TreeOp::RetractClaim { person, field, .. } => Some((person.clone(), field.clone())),
+        TreeOp::AddClaim { subject, field, .. }
+        | TreeOp::SetPreferredClaim { subject, field, .. }
+        | TreeOp::RetractClaim { subject, field, .. } => Some((subject.clone(), field.clone())),
         _ => None,
     }
 }

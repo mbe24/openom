@@ -48,23 +48,23 @@ fn put_op(o: &mut Vec<u8>, op: &TreeOp) {
             o.push(1);
             put_bytes(o, id);
         }
-        TreeOp::AddClaim { person, field, claim, value, source } => {
+        TreeOp::AddClaim { subject, field, claim, value, source } => {
             o.push(2);
-            put_bytes(o, person);
+            put_bytes(o, subject);
             put_bytes(o, field.as_bytes());
             put_bytes(o, claim);
             put_bytes(o, value.as_bytes());
             put_opt(o, source);
         }
-        TreeOp::SetPreferredClaim { person, field, claim } => {
+        TreeOp::SetPreferredClaim { subject, field, claim } => {
             o.push(3);
-            put_bytes(o, person);
+            put_bytes(o, subject);
             put_bytes(o, field.as_bytes());
             put_bytes(o, claim);
         }
-        TreeOp::RetractClaim { person, field, claim } => {
+        TreeOp::RetractClaim { subject, field, claim } => {
             o.push(4);
-            put_bytes(o, person);
+            put_bytes(o, subject);
             put_bytes(o, field.as_bytes());
             put_bytes(o, claim);
         }
@@ -186,9 +186,9 @@ impl<'a> R<'a> {
         Ok(match self.u8()? {
             0 => TreeOp::AddPerson { id: self.bytes()? },
             1 => TreeOp::RemovePerson { id: self.bytes()? },
-            2 => TreeOp::AddClaim { person: self.bytes()?, field: self.string()?, claim: self.bytes()?, value: self.string()?, source: self.opt_string()? },
-            3 => TreeOp::SetPreferredClaim { person: self.bytes()?, field: self.string()?, claim: self.bytes()? },
-            4 => TreeOp::RetractClaim { person: self.bytes()?, field: self.string()?, claim: self.bytes()? },
+            2 => TreeOp::AddClaim { subject: self.bytes()?, field: self.string()?, claim: self.bytes()?, value: self.string()?, source: self.opt_string()? },
+            3 => TreeOp::SetPreferredClaim { subject: self.bytes()?, field: self.string()?, claim: self.bytes()? },
+            4 => TreeOp::RetractClaim { subject: self.bytes()?, field: self.string()?, claim: self.bytes()? },
             5 => TreeOp::AddFamily { id: self.bytes()? },
             6 => TreeOp::RemoveFamily { id: self.bytes()? },
             7 => TreeOp::LinkChild { family: self.bytes()?, person: self.bytes()?, pedi: self.pedi()? },

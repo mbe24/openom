@@ -97,9 +97,9 @@ impl WasmTree {
         encode_ops(&self.inner.apply(TreeOp::RemovePerson { id: id.to_vec() }))
     }
     #[wasm_bindgen(js_name = addClaim)]
-    pub fn add_claim(&mut self, person: &[u8], field: &str, claim: &[u8], value: &str, source: Option<String>) -> Vec<u8> {
+    pub fn add_claim(&mut self, subject: &[u8], field: &str, claim: &[u8], value: &str, source: Option<String>) -> Vec<u8> {
         encode_ops(&self.inner.apply(TreeOp::AddClaim {
-            person: person.to_vec(),
+            subject: subject.to_vec(),
             field: field.to_string(),
             claim: claim.to_vec(),
             value: value.to_string(),
@@ -107,12 +107,12 @@ impl WasmTree {
         }))
     }
     #[wasm_bindgen(js_name = setPreferredClaim)]
-    pub fn set_preferred_claim(&mut self, person: &[u8], field: &str, claim: &[u8]) -> Vec<u8> {
-        encode_ops(&self.inner.apply(TreeOp::SetPreferredClaim { person: person.to_vec(), field: field.to_string(), claim: claim.to_vec() }))
+    pub fn set_preferred_claim(&mut self, subject: &[u8], field: &str, claim: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::SetPreferredClaim { subject: subject.to_vec(), field: field.to_string(), claim: claim.to_vec() }))
     }
     #[wasm_bindgen(js_name = retractClaim)]
-    pub fn retract_claim(&mut self, person: &[u8], field: &str, claim: &[u8]) -> Vec<u8> {
-        encode_ops(&self.inner.apply(TreeOp::RetractClaim { person: person.to_vec(), field: field.to_string(), claim: claim.to_vec() }))
+    pub fn retract_claim(&mut self, subject: &[u8], field: &str, claim: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RetractClaim { subject: subject.to_vec(), field: field.to_string(), claim: claim.to_vec() }))
     }
     #[wasm_bindgen(js_name = addFamily)]
     pub fn add_family(&mut self, id: &[u8]) -> Vec<u8> {
@@ -176,8 +176,8 @@ impl WasmTree {
         self.inner.has_person(id)
     }
     /// A fact as JSON `{ claims: [{id,value,source}], preferred }`.
-    pub fn fact(&self, person: &[u8], field: &str) -> String {
-        let f = self.inner.fact(person, field);
+    pub fn fact(&self, subject: &[u8], field: &str) -> String {
+        let f = self.inner.fact(subject, field);
         let view = FactView { claims: f.claims.iter().map(claim_view).collect(), preferred: f.preferred.as_ref().map(claim_view) };
         serde_json::to_string(&view).expect("serialize fact")
     }
