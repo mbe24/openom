@@ -82,6 +82,55 @@ fn value_strat() -> impl Strategy<Value = ValueTree> {
     })
 }
 
+// --- mapping (JSON -> commute cells) ----------------------------------------------------------
+
+#[test]
+fn imports_scalars_and_a_keyed_collection_into_commute() {
+    let codec = c();
+    let doc = codec.parse(br#"{"title":"Smith Family","people":[{"id":"p1","name":"Ada"},{"id":"p2","name":"Bea"}]}"#).unwrap();
+    // "title" is undeclared but scalar → auto LWW register; "people" is a declared keyed collection.
+    let spec = MappingSpec { fields: vec![("people".into(), FieldPolicy::Keyed { key_field: "id".into() })] };
+    let plan = import(&doc, &spec, &codec).unwrap();
+
+    let mut d = commute::Doc::new([0u8; 16]);
+    for intent in plan.intents {
+        d.apply_local(intent);
+    }
+    assert_eq!(d.register(b"title"), Some(&commute::Value::Text("Smith Family".into())));
+    let people = d.set_elements(b"people");
+    assert_eq!(people.len(), 2);
+    let ids: Vec<&[u8]> = people.iter().map(|(id, _)| id.as_slice()).collect();
+    assert!(ids.contains(&&b"p1"[..]) && ids.contains(&&b"p2"[..]));
+}
+
+#[test]
+fn an_undeclared_collection_is_a_hard_error() {
+    let codec = c();
+    let doc = codec.parse(br#"{"tags":["a","b"]}"#).unwrap(); // a collection with no declared policy
+    assert_eq!(import(&doc, &MappingSpec::default(), &codec), Err(MapError::UndeclaredCollection("tags".into())));
+}
+
+#[test]
+fn duplicate_keys_within_a_collection_are_rejected() {
+    let codec = c();
+    let doc = codec.parse(br#"{"people":[{"id":"p1"},{"id":"p1"}]}"#).unwrap();
+    let spec = MappingSpec { fields: vec![("people".into(), FieldPolicy::Keyed { key_field: "id".into() })] };
+    assert_eq!(import(&doc, &spec, &codec), Err(MapError::DuplicateKey { field: "people".into(), key: "p1".into() }));
+}
+
+#[test]
+fn an_atomic_field_stores_the_subtree_opaquely() {
+    let codec = c();
+    let doc = codec.parse(br#"{"settings":{"theme":"dark","n":3}}"#).unwrap();
+    let spec = MappingSpec { fields: vec![("settings".into(), FieldPolicy::Atomic)] };
+    let plan = import(&doc, &spec, &codec).unwrap();
+    let mut d = commute::Doc::new([0u8; 16]);
+    for intent in plan.intents {
+        d.apply_local(intent);
+    }
+    assert!(matches!(d.register(b"settings"), Some(commute::Value::Bytes(b)) if !b.is_empty()));
+}
+
 proptest! {
     #[test]
     fn parse_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..256)) {

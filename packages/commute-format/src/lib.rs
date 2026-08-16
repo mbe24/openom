@@ -59,5 +59,8 @@ mod json;
 #[cfg(feature = "json")]
 pub use json::JsonCodec;
 
+pub mod mapping;
+pub use mapping::{import, FieldPolicy, ImportPlan, MapError, MappingSpec};
+
 #[cfg(test)]
 mod tests;
