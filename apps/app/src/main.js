@@ -310,7 +310,7 @@ class App {
     const base = await createStore();
     const { store } = await composeStore({ mode: 'local', sealer, local: base.store });
     this.storeKind = 'sealed / ' + base.kind;
-    this.library = new TreeLibrary(store);
+    this.library = new TreeLibrary(store, this.schema);
     let opened;
     if (seedDataset) {
       try {

@@ -12,10 +12,12 @@ export const dataset = (id) => DATASETS.find((d) => d.id === id) ?? DATASETS[0];
 /** Die Sammlung der Baeume. Traegt den Lebenszyklus, nicht der Baum selbst. */
 export class TreeLibrary {
   #store;
+  #schema;
   #open = new Map();
 
-  constructor(store) {
+  constructor(store, schema = null) {
     this.#store = store;
+    this.#schema = schema;
   }
 
   async list() {
@@ -24,14 +26,14 @@ export class TreeLibrary {
 
   async open(docId = 'tree-1') {
     if (this.#open.has(docId)) return this.#open.get(docId);
-    const tree = new FamilyTree(this.#store, docId);
+    const tree = new FamilyTree(this.#store, docId, this.#schema);
     await tree.hydrate();
     this.#open.set(docId, tree);
     return tree;
   }
 
   async create(docId = 'tree-' + Date.now()) {
-    const tree = new FamilyTree(this.#store, docId);
+    const tree = new FamilyTree(this.#store, docId, this.#schema);
     this.#open.set(docId, tree);
     return tree;
   }

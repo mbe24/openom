@@ -66,12 +66,22 @@ export class FamilyTree {
   #undo = []; // stacks of inverse-descriptor batches
   #redo = [];
   #group = null; // the open silent-edit burst's frame (coalesces per-keystroke edits into one undo step)
+  #schema; // optional SchemaRegistry — lets custom fields read back as their declared type
 
-  constructor(store, docId) {
+  constructor(store, docId, schema = null) {
     this.#store = store;
     this.#docId = docId;
+    this.#schema = schema;
     this.#replica = loadReplica();
     this.#ready = createTree({ replica: this.#replica });
+  }
+
+  /** Coerce a stored custom-field string back to its declared type (bool/number), else leave a string. */
+  #coerceCustom(id, raw) {
+    const type = this.#schema?.field?.(id)?.type;
+    if (type === 'boolean') return raw === 'true';
+    if (type === 'number') return raw === '' ? '' : Number(raw);
+    return raw;
   }
 
   async #ensure() {
@@ -128,7 +138,9 @@ export class FamilyTree {
     // are strings under claim-payload v1; boolean/option coercion on read is a schema-layer follow-up.)
     const custom = {};
     for (const f of e.fieldsOf(b)) {
-      if (f.startsWith('custom.')) custom[f.slice('custom.'.length)] = this.#val(pidHex, f);
+      if (!f.startsWith('custom.')) continue;
+      const id = f.slice('custom.'.length);
+      custom[id] = this.#coerceCustom(id, this.#val(pidHex, f));
     }
     const person = { id: pidHex, names, events, custom, sex: this.#val(pidHex, 'sex') || 'U', note: this.#val(pidHex, 'note') };
     const portrait = this.#val(pidHex, 'portrait');
@@ -436,10 +448,12 @@ export class FamilyTree {
     if ('note' in patch) this.#setLeaf(pid, 'note', patch.note, out, inv);
     if ('portraitId' in patch) this.#setLeaf(pid, 'portrait', patch.portraitId, out, inv);
     if ('custom' in patch) {
-      // One fact per custom field. A falsy value (unset text, unchecked boolean) clears the field,
-      // matching the app's "empty/false = not set" convention (SchemaRegistry.usage).
       for (const [k, v] of Object.entries(patch.custom)) {
-        const s = v === false || v === '' || v == null ? '' : String(v);
+        const isBool = typeof v === 'boolean' || this.#schema?.field?.(k)?.type === 'boolean';
+        // A boolean is stored as an explicit 'true'/'false' claim (never cleared), so unchecking is a
+        // last-writer-wins write via the preferred pointer rather than a retract that goes sticky under
+        // concurrency. Text/option/number clear on empty (empty = not set).
+        const s = isBool ? String(v === true || v === 'true') : (v === '' || v == null ? '' : String(v));
         this.#setLeaf(pid, 'custom.' + k, s, out, inv);
       }
     }

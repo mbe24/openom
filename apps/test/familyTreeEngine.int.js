@@ -111,6 +111,24 @@ describe.skipIf(!built)('FamilyTree (treelog-backed)', () => {
     expect(mother?.sex).toBe('F');
   });
 
+  it('stores custom booleans as explicit values and reads them back typed', async () => {
+    const schema = { field: (id) => ({ id, type: id === 'emigrated' ? 'boolean' : 'text' }) };
+    const store = new MemoryStore();
+    const tree = new FamilyTree(store, 'doc', schema);
+    await tree.hydrate();
+    const p = await tree.createPerson({ given: 'Ada', custom: { emigrated: true, occupation: 'Analyst' } });
+    expect(tree.person(p.id).custom.emigrated).toBe(true); // a real boolean, not the string 'true'
+    expect(tree.person(p.id).custom.occupation).toBe('Analyst');
+
+    // Unchecking stores an explicit false (a last-writer-wins write, not a retract) and reads false.
+    await tree.updatePerson(p.id, { custom: { emigrated: false } });
+    expect(tree.person(p.id).custom.emigrated).toBe(false);
+    const reopened = new FamilyTree(store, 'doc', schema);
+    await reopened.hydrate();
+    expect(reopened.person(p.id).custom.emigrated).toBe(false);
+    expect(reopened.person(p.id).custom.occupation).toBe('Analyst');
+  });
+
   it('an undo on one replica does not corrupt another replica sharing the store (convergence)', async () => {
     // Two FamilyTree instances over ONE store = two tabs of the same doc (two replicas), which is real
     // today via shared IndexedDB. This is the case that would silently corrupt convergence once B1
