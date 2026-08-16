@@ -6,6 +6,12 @@ license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+# Off by default → zero cost in the release build. Enable (`--features profiling`, or in a debug/dev
+# build) to emit per-scope timing spans on the hot paths (see `prof`).
+default = []
+profiling = []
+
 [dependencies]
 # Shared model + crypto (identical to the client's). The server never decrypts
 # trees (zero-knowledge), but it validates and serialises against the same code.

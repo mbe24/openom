@@ -98,6 +98,7 @@ pub async fn put_tree(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    let _p = crate::prof::span("tree.put");
     let valid = validate_snapshot(&body, tree_id, !state.config.is_local())?;
     let expected = if_match(&headers);
 
@@ -137,6 +138,7 @@ pub async fn get_tree(
     identity: Identity,
     Path(tree_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
+    let _p = crate::prof::span("tree.get");
     let row: Option<(Uuid, String, Option<String>)> =
         sqlx::query_as("SELECT owner_id, r2_key, snapshot_version FROM trees WHERE id = $1")
             .bind(tree_id)

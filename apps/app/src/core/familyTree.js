@@ -14,6 +14,7 @@
 // it stays convergent when other replicas (e.g. another tab) share the same log.
 import { createTree } from './treelog/index.js';
 import { compareSiblings } from './sort.js';
+import { profile } from './profile.js';
 import {
   makeName, makeEvent, definePersonViews, mergeFamilyFields, defineFamilyViews,
 } from './model.js';
@@ -208,10 +209,12 @@ export class FamilyTree {
 
   /** Rebuild the whole view-facing model from the engine (after a settled edit / load / undo). */
   #materialize() {
-    const e = this.#engine;
-    this.people = new Map(e.persons().map((pid) => [pid, this.#buildPerson(pid)]));
-    this.families = new Map(e.families().map((fid) => [fid, this.#buildFamily(fid)]));
-    this.#buildMedia();
+    profile('materialize', () => {
+      const e = this.#engine;
+      this.people = new Map(e.persons().map((pid) => [pid, this.#buildPerson(pid)]));
+      this.families = new Map(e.families().map((fid) => [fid, this.#buildFamily(fid)]));
+      this.#buildMedia();
+    });
   }
 
   /** Refresh just one person in place — cheap enough to run on every silent keystroke. */
@@ -365,7 +368,7 @@ export class FamilyTree {
    * people instead of the whole tree.
    */
   async #commit(deltas, { silent = false, undoable = true, inverse = null, touched = null } = {}) {
-    if (deltas.length) await this.#store.append(this.#docId, deltas);
+    if (deltas.length) await profile('store.append', () => this.#store.append(this.#docId, deltas));
     this.#cursor += deltas.length;
     if (silent && touched) for (const id of touched) this.#refreshPerson(id);
     else this.#materialize();
@@ -681,10 +684,12 @@ export class FamilyTree {
       this.#cursor = cursor;
     }
     const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
-    for (const u of updates) {
-      const bin = u instanceof Uint8Array ? u : new Uint8Array(u);
-      this.#engine.mergeBytes(bin);
-    }
+    profile('hydrate.replay', () => {
+      for (const u of updates) {
+        const bin = u instanceof Uint8Array ? u : new Uint8Array(u);
+        this.#engine.mergeBytes(bin);
+      }
+    });
     this.#cursor = cursor ?? this.#cursor + updates.length;
     this.#materialize();
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null;

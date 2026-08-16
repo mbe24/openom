@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod config;
 pub mod media;
+pub mod prof;
 pub mod storage;
 pub mod telemetry;
 pub mod trees;
