@@ -24,6 +24,9 @@ use commute::{CellId, Doc, Op, OpIntent, ReplicaId, Value};
 mod wire;
 pub use wire::ProposalError;
 
+#[cfg(feature = "wasm")]
+mod wasm;
+
 /// A caller-minted person id (opaque; the merge key for a person).
 pub type PersonId = Vec<u8>;
 /// A caller-minted family id (opaque; the merge key for a family/union).

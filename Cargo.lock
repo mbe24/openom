@@ -682,6 +682,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "commute"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3220,6 +3227,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-sync"
+version = "0.1.0"
+dependencies = [
+ "commute",
+ "openom-crypto",
+ "openom-protocol",
+ "openom-sealer",
+ "openom-store",
+ "openom-treelog",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-tauri"
 version = "0.1.0"
 dependencies = [
@@ -3229,6 +3249,17 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+]
+
+[[package]]
+name = "openom-treelog"
+version = "0.1.0"
+dependencies = [
+ "commute",
+ "proptest",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

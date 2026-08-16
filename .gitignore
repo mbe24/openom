@@ -10,6 +10,8 @@ apps/src-tauri/gen/
 packages/openom-sealer/target-wasm/
 packages/openom-sealer/tools/
 apps/app/src/vendor/sealer/
+packages/openom-treelog/target-wasm/
+apps/app/src/vendor/treelog/
 
 # Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
 .env
