@@ -50,9 +50,9 @@ export class SealerSession {
    * `kind` ∈ {'snapshot','delta'}; defaults to 'snapshot'. Serialized against every other
    * seal on this session so the chain stays linear. Returns the wire-ready envelope bytes.
    */
-  seal(plaintext, _docId, { kind = 'snapshot' } = {}) {
+  seal(plaintext, _docId, { kind = 'snapshot', format = 'openom-treelog' } = {}) {
     if (this.#locked) return Promise.reject(new Error('sealer is locked'));
-    const run = this.#queue.then(() => this.#doSeal(plaintext, kind));
+    const run = this.#queue.then(() => this.#doSeal(plaintext, kind, format));
     // Keep the queue chained but don't let one rejection poison the next seal.
     this.#queue = run.then(
       () => {},
@@ -61,10 +61,10 @@ export class SealerSession {
     return run;
   }
 
-  async #doSeal(plaintext, kind) {
+  async #doSeal(plaintext, kind, format) {
     const out = await this.#core.sealEntry(
       kind,
-      'openom-json', // V1 payload format
+      format, // payload format — the tree store seals treelog engine bytes (FORMAT_OPENOM_TREELOG)
       'none', // compression handled by the caller when it lands; not in V1
       this.#counter,
       this.#prev,
