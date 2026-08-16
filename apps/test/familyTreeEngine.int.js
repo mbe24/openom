@@ -76,6 +76,41 @@ describe.skipIf(!built)('FamilyTree (treelog-backed)', () => {
     expect(tree.childrenOf(a.id).length).toBe(0);
   });
 
+  it('clears a field that was set in a previous session (retract reconciles all live claims)', async () => {
+    const store = new MemoryStore();
+    const a = new FamilyTree(store, 'doc');
+    await a.hydrate();
+    const p = await a.createPerson({ given: 'Ada', birth: '1815' });
+
+    // A fresh instance = a new session/tab (fresh replica id where storage is absent).
+    const b = new FamilyTree(store, 'doc');
+    await b.hydrate();
+    expect(b.person(p.id).birth).toBe('1815');
+    await b.updatePerson(p.id, { birth: '' }); // clear a prior-session field
+    expect(b.person(p.id).birth).toBe('');
+
+    // Stays cleared after another reload (the retract really landed, not a view artifact).
+    const c = new FamilyTree(store, 'doc');
+    await c.hydrate();
+    expect(c.person(p.id).birth).toBe('');
+    // And a re-set from the new session takes effect without piling up a stale competing claim.
+    await c.updatePerson(p.id, { birth: '1820' });
+    expect(c.person(p.id).birth).toBe('1820');
+  });
+
+  it('addParents assigns father=M and mother=F (sex not clobbered by the default)', async () => {
+    const store = new MemoryStore();
+    const tree = new FamilyTree(store, 'doc');
+    await tree.hydrate();
+    const kid = await tree.createPerson({ given: 'Kid' });
+    await tree.addParents(kid.id, { given: 'Dad' }, { given: 'Mom' });
+    const { father, mother } = tree.parentsOf(kid.id);
+    expect(father?.given).toBe('Dad');
+    expect(father?.sex).toBe('M');
+    expect(mother?.given).toBe('Mom');
+    expect(mother?.sex).toBe('F');
+  });
+
   it('undoes and redoes settled edits along a timeline', async () => {
     const store = new MemoryStore();
     const tree = new FamilyTree(store, 'tree-undo');

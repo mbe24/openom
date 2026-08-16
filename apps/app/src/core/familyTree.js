@@ -28,6 +28,21 @@ const bytes = (h) => new Uint8Array(h.match(/../g)?.map((x) => parseInt(x, 16)) 
 export const seedAppId = (symbolic) => hex(enc.encode(symbolic));
 const splitGiven = (s) => (String(s ?? '').trim() ? String(s).trim().split(/\s+/) : []);
 
+// A stable per-device replica id, persisted so re-edits across reloads/tabs reuse the same claim id
+// (update-in-place, not pile-up) and the version vector doesn't grow one entry per session. Falls back
+// to a fresh id where no storage exists (e.g. a headless test) — correctness holds either way because
+// a set/clear reconciles against whatever claims are currently live, not just this replica's.
+const REPLICA_KEY = 'openom.replica.v1';
+function loadReplica() {
+  try {
+    const s = globalThis.localStorage?.getItem(REPLICA_KEY);
+    if (s && /^[0-9a-f]{32}$/.test(s)) return bytes(s);
+  } catch { /* no storage — fall through */ }
+  const r = crypto.getRandomValues(new Uint8Array(16));
+  try { globalThis.localStorage?.setItem(REPLICA_KEY, hex(r)); } catch { /* ignore */ }
+  return r;
+}
+
 /** The person fields the editor patches, mapped to where they live in the engine. */
 const EVENT_TYPES = ['birth', 'death'];
 
@@ -54,9 +69,9 @@ export class FamilyTree {
   constructor(store, docId) {
     this.#store = store;
     this.#docId = docId;
-    // A per-instance replica id (per browsing context). Reused as the claim id for ordinary single-
-    // value edits, so re-editing the same field updates in place instead of piling up claims.
-    this.#replica = crypto.getRandomValues(new Uint8Array(16));
+    // A stable per-device replica id (persisted). Reused as the claim id for ordinary single-value
+    // edits, so re-editing the same field across sessions updates in place instead of piling up claims.
+    this.#replica = loadReplica();
     this.#ready = createTree({ replica: this.#replica });
   }
 
@@ -79,6 +94,13 @@ export class FamilyTree {
   #val(subjectHex, field) {
     const f = this.#engine.fact(bytes(subjectHex), field);
     return f.preferred ? f.preferred.value : '';
+  }
+
+  /** Parse a crop claim defensively — a malformed value (or a forward-version sentinel string) must
+   *  never throw and brick the whole read model. */
+  #parseCrop(raw) {
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch { return null; }
   }
 
   #buildPerson(pidHex) {
@@ -162,7 +184,7 @@ export class FamilyTree {
           role: this.#val(link, 'role') || 'document',
           order: Number(this.#val(link, 'order')) || 0,
           caption: this.#val(link, 'caption'),
-          crop: this.#val(link, 'crop') ? JSON.parse(this.#val(link, 'crop')) : null,
+          crop: this.#parseCrop(this.#val(link, 'crop')),
         });
       }
     }
@@ -272,12 +294,21 @@ export class FamilyTree {
     this.#bump();
   }
 
-  /** Set a single-value leaf claim (replica-stable claim id + preferred). Empty value → retract. */
+  /**
+   * Set (or clear) a single-value leaf field with replace semantics. Reconciles against whatever claims
+   * are currently live — not just this replica's — so clearing a field written in a prior session (whose
+   * claim carries a different, older claim id) actually takes effect, and a set doesn't pile up a stale
+   * claim beside it. Concurrent edits on *different* replicas still both survive (each only retracts what
+   * it saw), preserving the competing-claims guarantee for genuinely conflicting edits.
+   */
   #setLeaf(subject, field, value, out) {
     const e = this.#engine;
-    if (value === '' || value == null) {
-      out.push(e.retractClaim(subject, field, this.#replica));
-    } else {
+    const myHex = hex(this.#replica);
+    const clearing = value === '' || value == null;
+    for (const c of e.fact(subject, field).claims) {
+      if (clearing || c.id !== myHex) out.push(e.retractClaim(subject, field, bytes(c.id)));
+    }
+    if (!clearing) {
       out.push(e.addClaim(subject, field, this.#replica, String(value), null));
       out.push(e.setPreferredClaim(subject, field, this.#replica));
     }
@@ -420,7 +451,8 @@ export class FamilyTree {
       } else {
         pid = e.newId();
         out.push(e.addPerson(pid));
-        this.#applyPatch(pid, { sex: role, ...NEW_PERSON, ...val }, out);
+        // NEW_PERSON first so `sex: role` isn't clobbered by its default 'U'.
+        this.#applyPatch(pid, { ...NEW_PERSON, sex: role, ...val }, out);
       }
       out.push(e.linkSpouse(fid, pid));
     }
