@@ -23,6 +23,10 @@ pub enum FieldPolicy {
     /// The value is an array of objects → an OR-set keyed by the field name; each element is
     /// identified by its `key_field` and stored as an opaque leaf.
     Keyed { key_field: String },
+    /// An array of scalars → an OR-set keyed by the scalar value itself (tags, aliases). Concurrent
+    /// adds/removes of distinct values converge; a repeated value in one document collapses (it's a
+    /// set). The alternative for a scalar collection would be the lossy whole-list Atomic.
+    ValueIdentity,
     /// The whole value (any shape) → one atomic LWW register (opaque leaf). Explicit opt-in.
     Atomic,
 }
@@ -160,6 +164,21 @@ pub fn import(doc: &ValueTree, spec: &MappingSpec, codec: &dyn Codec) -> Result<
                 let bytes = codec.emit(value)?;
                 plan.intents.push(OpIntent::SetRegister { cell: cell(field), value: Value::Bytes(bytes) });
                 plan.summary.push(format!("set {field} (atomic)"));
+            }
+            Some(FieldPolicy::ValueIdentity) => {
+                let ValueTree::Seq(elems) = value else {
+                    return Err(MapError::NotAnArray(field.clone()));
+                };
+                let mut seen: HashSet<String> = HashSet::new();
+                for elem in elems {
+                    let key = key_string(elem).ok_or_else(|| MapError::BadKeyType { field: field.clone() })?;
+                    let v = scalar(elem).expect("key_string implies scalar");
+                    // A set: a repeated value collapses (idempotent), not an error.
+                    if seen.insert(key.clone()) {
+                        plan.intents.push(OpIntent::AddElement { cell: cell(field), elem: key.into_bytes(), value: v });
+                    }
+                }
+                plan.summary.push(format!("upsert {} value(s) in {field}", seen.len()));
             }
             Some(FieldPolicy::Keyed { key_field }) => {
                 let ValueTree::Seq(elems) = value else {

@@ -156,6 +156,25 @@ fn an_atomic_field_stores_the_subtree_opaquely() {
     assert!(matches!(d.register(b"settings"), Some(commute::Value::Bytes(b)) if !b.is_empty()));
 }
 
+#[test]
+fn a_value_identity_scalar_set_dedups_and_round_trips() {
+    let codec = c();
+    let doc = codec.parse(br#"{"tags":["red","green","red"]}"#).unwrap(); // the repeated "red" collapses
+    let spec = MappingSpec { fields: vec![("tags".into(), FieldPolicy::ValueIdentity)] };
+    let plan = import(&doc, &spec, &codec).unwrap();
+
+    let mut d = commute::Doc::new([0u8; 16]);
+    for intent in plan.intents {
+        d.apply_local(intent);
+    }
+    assert_eq!(d.set_elements(b"tags").len(), 2, "the set deduped the repeated value");
+
+    let ValueTree::Map(m) = export(&d, &codec).unwrap() else { panic!("object") };
+    let ValueTree::Seq(vals) = m.iter().find(|(k, _)| k == "tags").map(|(_, v)| v).unwrap() else { panic!("array") };
+    assert_eq!(vals.len(), 2);
+    assert!(vals.contains(&ValueTree::Str("red".into())) && vals.contains(&ValueTree::Str("green".into())));
+}
+
 proptest! {
     #[test]
     fn parse_never_panics_on_arbitrary_bytes(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
