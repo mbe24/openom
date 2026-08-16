@@ -323,15 +323,27 @@ async fn cross_owner_access_forbidden() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
 
     let tree = Uuid::new_v4();
-    let (s, _, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    let (s, h, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
     assert_eq!(s, StatusCode::OK, "owner creates the tree");
+    let version = etag(&h);
     // Owner seeds one delta so the log read path has something to guard.
     let ra = b"replica-owner000".to_vec();
     send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), owner)).await;
 
-    // A non-owner is refused on read snapshot, read log, and append.
+    // A non-owner is refused on read snapshot, read log, append, and a CAS snapshot update (the
+    // seam now guards the PUT/commit path too — it used to inline owner_id in the SQL predicate).
     let (s, _, _) = send(&app, get_as(format!("/trees/{tree}"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the snapshot");
+    let cas = Request::builder()
+        .method("PUT")
+        .uri(format!("/trees/{tree}"))
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {other}"))
+        .header("if-match", version.trim_matches('"'))
+        .body(Body::from(snapshot_envelope(tree, b"hostile-rev", None)))
+        .unwrap();
+    let (s, _, _) = send(&app, cas).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot commit a snapshot update");
     let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/log?since=-1"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the log");
     let (s, _, _) = send(

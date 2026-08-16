@@ -245,19 +245,32 @@ async fn cas_create(
 async fn cas_update(
     state: &AppState,
     tree_id: Uuid,
-    owner: Uuid,
+    caller: Uuid,
     r2_key: &str,
     version: &str,
     size: i64,
     valid: &Validated,
     expected: &str,
 ) -> Result<(), ApiError> {
+    // Authorize through the seam on the tree's REAL owner, not the caller. A snapshot PUT is a
+    // *commit*, so under B3 this widens to Maintainer+ by changing authorize() alone — previously the
+    // owner check was inlined as `owner_id = caller` in the CAS predicate, which would have 403'd every
+    // non-owner committer no matter what the seam said. Resolving the owner up front also lets the CAS
+    // key purely on the version.
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    let owner = owner.ok_or(ApiError::NotFound)?;
+    crate::authz::authorize(&state.db, tree_id, owner, caller, Access::Write).await?;
+
     let res = sqlx::query(
         "UPDATE trees
             SET r2_key = $1, snapshot_version = $2, envelope_version = $3, aead = $4,
                 size_bytes = $5, ciphertext_hash = $6, covers_through_seq = $7,
                 updated_at = now()
-          WHERE id = $8 AND owner_id = $9 AND snapshot_version = $10
+          WHERE id = $8 AND snapshot_version = $9
             AND $7 >= covers_through_seq",
     )
     .bind(r2_key)
@@ -268,7 +281,6 @@ async fn cas_update(
     .bind(&valid.ciphertext_hash)
     .bind(valid.covers_through_seq)
     .bind(tree_id)
-    .bind(owner)
     .bind(expected)
     .execute(&state.db)
     .await
@@ -277,23 +289,10 @@ async fn cas_update(
     if res.rows_affected() == 1 {
         return Ok(());
     }
-
-    // Disambiguate the 0-row failure so the client gets a truthful status.
-    let row: Option<(Uuid,)> = sqlx::query_as("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    match row {
-        None => Err(ApiError::NotFound),
-        Some((o,)) if o != owner => Err(ApiError::Forbidden),
-        Some(_) => {
-            // The common concurrency case: someone else advanced the snapshot, or a
-            // covers_through_seq regression. A rising rate here is contention (§9.7).
-            tracing::info!(event = "snapshot_cas_conflict", reason = "stale_version");
-            Err(ApiError::Conflict)
-        }
-    }
+    // Owner + existence already confirmed above, so a 0-row now is a stale version or a
+    // covers_through_seq regression — the common concurrency case (§9.7).
+    tracing::info!(event = "snapshot_cas_conflict", reason = "stale_version");
+    Err(ApiError::Conflict)
 }
 
 /// Read `If-Match`, unwrapping the ETag quoting. `None` (or `*`) means "create".
