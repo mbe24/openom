@@ -169,6 +169,7 @@ struct LogEntry {
     member: Option<String>,
     replica: String,
     counter: i64,
+    time: String,            // created_at as text — for the change-history / activity feed
     payload: Option<String>, // base64 of the sealed delta bytes (None if spilled to R2 — later)
 }
 
@@ -216,8 +217,8 @@ pub async fn get_log(
         }
     }
 
-    let rows: Vec<(i64, Option<Uuid>, Vec<u8>, i64, Option<Vec<u8>>, i64)> = sqlx::query_as(
-        "SELECT seq, member_id, replica_id, replica_counter, payload, size_bytes
+    let rows: Vec<(i64, Option<Uuid>, Vec<u8>, i64, Option<Vec<u8>>, i64, String)> = sqlx::query_as(
+        "SELECT seq, member_id, replica_id, replica_counter, payload, size_bytes, created_at::text
            FROM tree_log
           WHERE tree_id = $1 AND seq > $2
           ORDER BY seq
@@ -233,7 +234,7 @@ pub async fn get_log(
     let mut entries = Vec::new();
     let mut budget = 0usize;
     let mut next_cursor = since;
-    for (seq, member, replica, counter, payload, size) in rows {
+    for (seq, member, replica, counter, payload, size, created_at) in rows {
         if !entries.is_empty() && budget + size as usize > TAIL_BYTE_BUDGET {
             break; // page here; the client pulls again from next_cursor
         }
@@ -243,6 +244,7 @@ pub async fn get_log(
             member: member.map(|m| m.to_string()),
             replica: b64(&replica),
             counter,
+            time: created_at,
             payload: payload.map(|p| b64(&p)),
         });
         next_cursor = seq;

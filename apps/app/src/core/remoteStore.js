@@ -11,6 +11,20 @@
 import { ConflictError } from './store.js';
 
 const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
+const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
+
+/**
+ * The requested log tail is below the server's retained window (HTTP 410): the client can't catch up
+ * from deltas and must bootstrap from a snapshot. Carries the retained bounds so the caller can decide.
+ */
+export class BootstrapRequiredError extends Error {
+  constructor(oldestRetainedSeq, headSeq) {
+    super('log tail no longer retained — bootstrap from a snapshot');
+    this.name = 'BootstrapRequiredError';
+    this.oldestRetainedSeq = oldestRetainedSeq;
+    this.headSeq = headSeq;
+  }
+}
 
 export class RemoteStore {
   #baseUrl;
@@ -67,13 +81,66 @@ export class RemoteStore {
     return unquote(res.headers.get('etag'));
   }
 
-  // Delta-log surface — V2 (the server is snapshot-only in V1).
-  async readUpdates(_id, _since) {
-    return { updates: [], cursor: 0 };
+  // ---- delta-log surface (POST/GET /trees/{id}/log) ----
+
+  /** Append one sealed delta envelope; returns its server-assigned `seq` (idempotent on the dot). */
+  async appendLog(id, sealedDelta) {
+    const res = await this.#fetch(`${this.#tree(id)}/log`, {
+      method: 'POST',
+      headers: this.#headers({ 'content-type': 'application/octet-stream' }),
+      body: sealedDelta,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`appendLog ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+    }
+    return (await res.json()).seq;
   }
-  async append() {
-    throw new Error('remote delta append is a V2 feature (server is snapshot-only in V1)');
+
+  /**
+   * The ordered tail after `since` (default from the start). Returns `{ entries, nextCursor,
+   * oldestRetainedSeq, headSeq }`; each entry is `{ seq, member, replica, counter, time, payload }`
+   * with `payload` the sealed delta bytes. Throws BootstrapRequiredError on a 410 (cursor below the
+   * retained window).
+   */
+  async readLog(id, since = -1) {
+    const res = await this.#fetch(`${this.#tree(id)}/log?since=${since}`, { headers: this.#headers() });
+    if (res.status === 404) return { entries: [], nextCursor: since, oldestRetainedSeq: 0, headSeq: -1 };
+    if (res.status === 410) {
+      const j = await res.json().catch(() => ({}));
+      throw new BootstrapRequiredError(j.oldest_retained_seq ?? 0, j.head_seq ?? -1);
+    }
+    if (!res.ok) throw new Error(`readLog ${id}: HTTP ${res.status}`);
+    const tail = await res.json();
+    return {
+      entries: (tail.entries ?? []).map((e) => ({
+        seq: e.seq,
+        member: e.member ?? null,
+        replica: e.replica,
+        counter: e.counter,
+        time: e.time ?? null,
+        payload: b64decode(e.payload),
+      })),
+      nextCursor: tail.next_cursor,
+      oldestRetainedSeq: tail.oldest_retained_seq,
+      headSeq: tail.head_seq,
+    };
   }
+
+  /**
+   * The change-history / activity feed: log metadata (who/when/where in the sequence) without paying
+   * for the payload bytes. Same endpoint; the caller ignores `payload`. (A payload-free server mode is
+   * a later optimization.)
+   */
+  async activity(id, since = -1) {
+    const { entries, nextCursor, headSeq } = await this.readLog(id, since);
+    return {
+      changes: entries.map(({ seq, member, replica, counter, time }) => ({ seq, member, replica, counter, time })),
+      nextCursor,
+      headSeq,
+    };
+  }
+
   async list() {
     throw new Error('remote list is not supported');
   }

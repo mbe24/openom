@@ -184,6 +184,8 @@ async fn delta_log_lifecycle() {
     assert_eq!(entries.len(), 2, "two deltas, not three (re-delivery didn't duplicate)");
     assert_eq!(tail["head_seq"].as_i64().unwrap(), 1);
     assert_eq!(tail["next_cursor"].as_i64().unwrap(), 1);
+    assert!(!entries[0]["time"].as_str().unwrap().is_empty(), "entries carry a timestamp for the activity feed");
+    assert!(!entries[0]["member"].as_str().unwrap().is_empty(), "and an author");
     let p0 = base64::engine::general_purpose::STANDARD
         .decode(entries[0]["payload"].as_str().unwrap())
         .unwrap();
