@@ -129,7 +129,7 @@ fn import_then_export_reconstructs_the_document() {
     for intent in plan.intents {
         d.apply_local(intent);
     }
-    let exported = export(&d, &codec).unwrap();
+    let exported = export(&d, &spec, &codec).unwrap();
     let ValueTree::Map(m) = exported else { panic!("expected object") };
 
     // The scalar field round-trips.
@@ -169,10 +169,74 @@ fn a_value_identity_scalar_set_dedups_and_round_trips() {
     }
     assert_eq!(d.set_elements(b"tags").len(), 2, "the set deduped the repeated value");
 
-    let ValueTree::Map(m) = export(&d, &codec).unwrap() else { panic!("object") };
+    let ValueTree::Map(m) = export(&d, &spec, &codec).unwrap() else { panic!("object") };
     let ValueTree::Seq(vals) = m.iter().find(|(k, _)| k == "tags").map(|(_, v)| v).unwrap() else { panic!("array") };
     assert_eq!(vals.len(), 2);
     assert!(vals.contains(&ValueTree::Str("red".into())) && vals.contains(&ValueTree::Str("green".into())));
+}
+
+fn id_order(seq: &ValueTree) -> Vec<String> {
+    let ValueTree::Seq(elems) = seq else { panic!("array") };
+    elems
+        .iter()
+        .map(|e| match e {
+            ValueTree::Map(p) => match p.iter().find(|(k, _)| k == "id").map(|(_, v)| v) {
+                Some(ValueTree::Str(s)) => s.clone(),
+                _ => "?".into(),
+            },
+            _ => "?".into(),
+        })
+        .collect()
+}
+
+#[test]
+fn keyed_ordered_sorts_by_the_order_field_on_export() {
+    let codec = c();
+    // Elements out of order; the order_field "n" drives export order.
+    let doc = codec.parse(br#"{"kids":[{"id":"b","n":2},{"id":"a","n":1},{"id":"c","n":3}]}"#).unwrap();
+    let spec = MappingSpec { fields: vec![("kids".into(), FieldPolicy::KeyedOrdered { key_field: "id".into(), order_field: "n".into() })] };
+    let mut d = commute::Doc::new([0u8; 16]);
+    for i in import(&doc, &spec, &codec).unwrap().intents {
+        d.apply_local(i);
+    }
+    let ValueTree::Map(m) = export(&d, &spec, &codec).unwrap() else { panic!("object") };
+    let kids = m.iter().find(|(k, _)| k == "kids").map(|(_, v)| v).unwrap();
+    assert_eq!(id_order(kids), vec!["a", "b", "c"]);
+}
+
+#[test]
+fn keyed_ordered_requires_the_order_field() {
+    let codec = c();
+    let doc = codec.parse(br#"{"kids":[{"id":"a"}]}"#).unwrap(); // missing "n"
+    let spec = MappingSpec { fields: vec![("kids".into(), FieldPolicy::KeyedOrdered { key_field: "id".into(), order_field: "n".into() })] };
+    assert_eq!(import(&doc, &spec, &codec), Err(MapError::MissingKey { field: "kids".into(), key: "n".into() }));
+}
+
+#[test]
+fn replace_mode_retracts_absent_elements_but_merge_keeps_them() {
+    let codec = c();
+    let spec = MappingSpec { fields: vec![("people".into(), FieldPolicy::Keyed { key_field: "id".into() })] };
+    let mut d = commute::Doc::new([0u8; 16]);
+    for i in import(&codec.parse(br#"{"people":[{"id":"p1"},{"id":"p2"}]}"#).unwrap(), &spec, &codec).unwrap().intents {
+        d.apply_local(i);
+    }
+    assert_eq!(d.set_elements(b"people").len(), 2);
+
+    let doc2 = codec.parse(br#"{"people":[{"id":"p1"}]}"#).unwrap();
+
+    // Merge keeps p2.
+    let mut merged = d.clone();
+    for i in import_mode(&doc2, &spec, &codec, ImportMode::Merge, Some(&merged)).unwrap().intents {
+        merged.apply_local(i);
+    }
+    assert_eq!(merged.set_elements(b"people").len(), 2, "merge never removes");
+
+    // Replace retracts the absent p2.
+    for i in import_mode(&doc2, &spec, &codec, ImportMode::Replace, Some(&d)).unwrap().intents {
+        d.apply_local(i);
+    }
+    let ids: Vec<Vec<u8>> = d.set_elements(b"people").iter().map(|(id, _)| id.to_vec()).collect();
+    assert_eq!(ids, vec![b"p1".to_vec()], "replace retracted the element the document omitted");
 }
 
 proptest! {
