@@ -15,7 +15,8 @@
 
 use commute::codec::encode_ops;
 use commute::Op;
-use openom_protocol::v1::{Compression, Format};
+use openom_protocol::v1::{Compression, Envelope, Format};
+use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
 use openom_store::{DocStore, StoreError};
 use openom_treelog::{Proposal, ProposalError, Tree, TreeOp};
@@ -59,6 +60,7 @@ pub struct SyncClient<S: DocStore> {
     prop_counter: u64,
     prop_prev: Vec<u8>,
     proposals_cursor: Option<u64>,
+    snapshot_version: Option<String>,
 }
 
 impl<S: DocStore> SyncClient<S> {
@@ -75,6 +77,7 @@ impl<S: DocStore> SyncClient<S> {
             prop_counter: 0,
             prop_prev: Vec::new(),
             proposals_cursor: None,
+            snapshot_version: None,
         }
     }
 
@@ -131,6 +134,51 @@ impl<S: DocStore> SyncClient<S> {
         }
         self.pull_cursor = Some(new_cursor);
         Ok(updates.len())
+    }
+
+    /// Fold the tree into a snapshot and store it (CAS on the prior snapshot version), recording
+    /// the log seq it covers through. A fresh client can then [`bootstrap`](Self::bootstrap) from
+    /// the snapshot + only the tail, instead of replaying the whole log. Returns the covered seq.
+    /// The caller should be current (pull first) so the snapshot reflects the whole log.
+    pub fn compact(&mut self) -> Result<u64> {
+        let covered = match self.pull_cursor {
+            Some(c) => c,
+            None => self.store.read_updates(&self.doc, None)?.1,
+        };
+        let ctx = SealContext {
+            kind: EntryKind::Snapshot,
+            format: Format::OpenomTreelog,
+            compression: Compression::None,
+            replica_counter: self.next_counter,
+            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
+            covers_through_seq: covered,
+            blob_id: Vec::new(),
+        };
+        let out = self.sealer.seal_entry(&ctx, &self.tree.doc().snapshot())?;
+        let version = self.store.put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
+        self.snapshot_version = Some(version);
+        self.next_counter += 1;
+        self.prev_hash = out.ciphertext_hash;
+        Ok(covered)
+    }
+
+    /// Bring a fresh client up to date the fast way: load the stored snapshot (if any), then pull
+    /// only the deltas after the seq it covers. Falls back to a full log replay when there is no
+    /// snapshot. Idempotent — safe even if the snapshot and the log tail overlap.
+    pub fn bootstrap(&mut self) -> Result<()> {
+        if let Some(snap) = self.store.read_snapshot(&self.doc)? {
+            let covered = Envelope::decode(snap.bytes.as_slice())
+                .ok()
+                .and_then(|e| e.header)
+                .map(|h| h.covers_through_seq)
+                .unwrap_or(0);
+            let plaintext = self.sealer.open_entry(EntryKind::Snapshot, &snap.bytes)?;
+            self.tree.doc_mut().merge_bytes(&plaintext)?;
+            self.snapshot_version = Some(snap.version);
+            self.pull_cursor = Some(covered);
+        }
+        self.pull()?;
+        Ok(())
     }
 
     /// Draft a proposal against the current head and push it to the proposals channel — sealed as

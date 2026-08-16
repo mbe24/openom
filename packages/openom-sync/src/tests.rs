@@ -127,6 +127,38 @@ fn a_crashed_client_rebuilds_its_tree_from_the_durable_log() {
 }
 
 #[test]
+fn a_fresh_client_bootstraps_from_a_snapshot_plus_the_tail() {
+    let store = Arc::new(MemoryStore::new());
+    let dek = generate_dek().unwrap();
+    let mut a = client(1, b"replica-a", dek.clone(), store.clone());
+    a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
+    a.apply(TreeOp::AddPerson { id: vec![2] }).unwrap();
+    a.compact().unwrap(); // the snapshot covers the two people
+                          // A tail edit after the snapshot.
+    a.apply(TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None }).unwrap();
+
+    // A fresh client bootstraps: the snapshot (two people) + only the tail (the claim).
+    let mut c = client(3, b"replica-c", dek, store.clone());
+    c.bootstrap().unwrap();
+    assert_eq!(c.tree().doc().snapshot(), a.tree().doc().snapshot());
+    assert_eq!(c.tree().persons().len(), 2);
+    assert_eq!(c.tree().fact(&[1], "birth.date").preferred.unwrap().value, "1901");
+}
+
+#[test]
+fn bootstrap_without_a_snapshot_replays_the_whole_log() {
+    let store = Arc::new(MemoryStore::new());
+    let dek = generate_dek().unwrap();
+    let mut a = client(1, b"replica-a", dek.clone(), store.clone());
+    a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
+    a.apply(TreeOp::AddFamily { id: vec![0xF0] }).unwrap();
+
+    let mut c = client(2, b"replica-c", dek, store.clone());
+    c.bootstrap().unwrap(); // no snapshot → full log replay
+    assert_eq!(c.tree().doc().snapshot(), a.tree().doc().snapshot());
+}
+
+#[test]
 fn a_wrong_key_cannot_open_the_log() {
     // A device with a different DEK pulls the same log — the sealer refuses to open it.
     let store = Arc::new(MemoryStore::new());
