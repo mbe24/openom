@@ -1,6 +1,7 @@
 import { FamilyTree } from './familyTree.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
+import { shadowParity } from './treelog/project.js';
 
 /** Die mitgelieferten Baeume. Jeder liegt in einem eigenen Dokument. */
 export const DATASETS = [
@@ -27,6 +28,7 @@ export class TreeLibrary {
     const tree = new FamilyTree(this.#store, docId);
     await tree.hydrate();
     this.#open.set(docId, tree);
+    void shadowParity(tree); // dark, flag-gated, fire-and-forget; no-op unless openom.engine=shadow
     return tree;
   }
 
@@ -39,7 +41,10 @@ export class TreeLibrary {
   async openSeeded(datasetId = 'bach') {
     const set = dataset(datasetId);
     const tree = await this.open(set.doc);
-    if (tree.people.size === 0) await tree.seed(set.ops());
+    if (tree.people.size === 0) {
+      await tree.seed(set.ops());
+      void shadowParity(tree); // re-check after seeding a fresh demo tree (open() saw it empty)
+    }
     return { tree, focusId: set.focus, datasetId: set.id };
   }
 
