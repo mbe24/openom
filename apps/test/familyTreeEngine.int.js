@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createTree } from '../app/src/core/treelog/index.js';
-import { FamilyTree } from '../app/src/core/familyTree.engine.js';
+import { FamilyTree } from '../app/src/core/familyTree.js';
 import { MemoryStore } from '../app/src/core/store.js';
 import { seedOps } from '../app/src/core/seed.js';
 
@@ -74,5 +74,30 @@ describe.skipIf(!built)('FamilyTree (treelog-backed)', () => {
     await tree.deletePerson(kid.id);
     expect(tree.person(kid.id)).toBeUndefined();
     expect(tree.childrenOf(a.id).length).toBe(0);
+  });
+
+  it('undoes and redoes settled edits along a timeline', async () => {
+    const store = new MemoryStore();
+    const tree = new FamilyTree(store, 'tree-undo');
+    await tree.hydrate();
+    expect(tree.canUndo).toBe(false);
+
+    const a = await tree.createPerson({ given: 'Ada', surname: 'Lovelace' });
+    expect(tree.canUndo).toBe(true);
+    await tree.updatePerson(a.id, { surname: 'Byron' });
+    expect(tree.person(a.id).surname).toBe('Byron');
+
+    await tree.undo(); // revert the surname edit
+    expect(tree.person(a.id).surname).toBe('Lovelace');
+    await tree.redo(); // reapply it
+    expect(tree.person(a.id).surname).toBe('Byron');
+
+    await tree.undo(); // back to just-created
+    await tree.undo(); // back before the create → person gone
+    expect(tree.person(a.id)).toBeUndefined();
+    expect(tree.canUndo).toBe(false);
+    expect(tree.canRedo).toBe(true);
+    await tree.redo(); // the person returns
+    expect(tree.person(a.id)?.given).toBe('Ada');
   });
 });

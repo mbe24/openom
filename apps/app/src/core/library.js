@@ -1,4 +1,4 @@
-import { FamilyTree, seedAppId } from './familyTree.engine.js';
+import { FamilyTree, seedAppId } from './familyTree.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
 

@@ -1,19 +1,24 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import fc from 'fast-check';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { createTree } from '../app/src/core/treelog/index.js';
 import { FamilyTree } from '../app/src/core/familyTree.js';
 import { SealedStore } from '../app/src/core/sealedStore.js';
 import { MemoryStore } from '../app/src/core/store.js';
 
-// Reproduces, one layer below the browser, the persistence failure found while wiring the
-// WASM sealer: a FamilyTree written through an encrypting store must re-hydrate intact in a
-// fresh instance (a reload). It failed because updates weren't bytes, so the sealer dropped
-// them — this suite is the regression guard.
-//
-// The sealer here faithfully models the WASM sealer's byte contract: seal takes a
-// Uint8Array; ANYTHING ELSE is coerced to empty bytes, exactly as wasm-bindgen's &[u8]
-// does. That coercion is the precise mechanism by which a non-byte payload is silently
-// dropped, so a caller that hands the store a non-byte value fails here the same way it
-// fails in the browser.
+// The treelog-backed FamilyTree written through an encrypting store must re-hydrate intact in a fresh
+// instance (a reload) — this is the "make it real": a user's own sealed-at-rest tree, not just the
+// in-memory demo. The sealer here faithfully models the WASM sealer's byte contract: seal takes a
+// Uint8Array; ANYTHING ELSE coerces to empty bytes (exactly as wasm-bindgen's &[u8] does), so a caller
+// that hands the store a non-byte payload fails here the same way it would in the browser. The engine's
+// edit deltas and snapshots are Uint8Array, so they pass through cleanly — that's what this guards.
+
+const wasmUrl = new URL('../app/src/vendor/treelog/openom_treelog_bg.wasm', import.meta.url);
+const built = fs.existsSync(fileURLToPath(wasmUrl));
+const initInput = built ? { module_or_path: fs.readFileSync(fileURLToPath(wasmUrl)) } : undefined;
+beforeAll(async () => { if (built) await createTree({ initInput }); });
+
 function byteSealer() {
   const MARK = 0xe5; // proves the bytes actually passed through seal(), not a bypass
   return {
@@ -40,16 +45,17 @@ async function reload(store: any, doc: string) {
   return t;
 }
 
-describe('persistence through an encrypting store', () => {
+describe.skipIf(!built)('persistence through an encrypting store (treelog engine)', () => {
   it('re-hydrates deltas written through the sealer (the reload path)', async () => {
     const store = sealedStore();
     const a = new FamilyTree(store, 'tree-1');
     await a.hydrate();
-    const ada = await a.createPerson({ given: 'Ada' });
+    const ada = await a.createPerson({ given: 'Ada', surname: 'Lovelace', birth: '1815' });
     const bea = await a.createPerson({ given: 'Bea' });
 
     const b = await reload(store, 'tree-1');
     expect(b.person(ada.id)?.given).toBe('Ada');
+    expect(b.person(ada.id)?.birth).toBe('1815');
     expect(b.person(bea.id)?.given).toBe('Bea');
     expect(b.allPeople().length).toBe(2);
   });
@@ -67,8 +73,8 @@ describe('persistence through an encrypting store', () => {
   });
 
   it('survives arbitrary edit sequences and re-hydrates to the same state (fuzz)', async () => {
-    // The model trims + whitespace-splits given names (model.js), so a name only round-trips
-    // unchanged if it has no whitespace — generate letters-only names to compare cleanly.
+    // The model trims + whitespace-splits given names (model.js), so a name only round-trips unchanged
+    // if it has no whitespace — generate letters-only names to compare cleanly.
     const nameArb = fc
       .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz'.split('')), { minLength: 1, maxLength: 6 })
       .map((cs) => cs.join(''));
