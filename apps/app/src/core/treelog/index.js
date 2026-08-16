@@ -34,6 +34,20 @@ function wrap(inner) {
     moveChild: (person, from, to, pedi = 'birth') => inner.moveChild(person, from, to, pedi),
     linkSpouse: (family, person) => inner.linkSpouse(family, person),
     unlinkSpouse: (family, person) => inner.unlinkSpouse(family, person),
+    // sub-entities: names / events / sources / citations / media (each subject arg is any entity id)
+    addName: (subject, name) => inner.addName(subject, name),
+    removeName: (subject, name) => inner.removeName(subject, name),
+    setPrimaryName: (subject, name) => inner.setPrimaryName(subject, name),
+    addEvent: (subject, event) => inner.addEvent(subject, event),
+    removeEvent: (subject, event) => inner.removeEvent(subject, event),
+    addSource: (source) => inner.addSource(source),
+    removeSource: (source) => inner.removeSource(source),
+    cite: (subject, field, source, claim = null) => inner.cite(subject, field, source, claim ?? undefined),
+    uncite: (subject, field, source) => inner.uncite(subject, field, source),
+    addMediaRecord: (media) => inner.addMediaRecord(media),
+    removeMediaRecord: (media) => inner.removeMediaRecord(media),
+    addMediaLink: (subject, link, media) => inner.addMediaLink(subject, link, media),
+    removeMediaLink: (subject, link) => inner.removeMediaLink(subject, link),
 
     // --- sync ---
     mergeBytes: (bytes) => inner.mergeBytes(bytes),
@@ -42,10 +56,18 @@ function wrap(inner) {
     // --- read model (parsed) ---
     persons: () => JSON.parse(inner.persons()),
     hasPerson: (id) => inner.hasPerson(id),
-    fact: (person, field) => JSON.parse(inner.fact(person, field)),
+    fact: (subject, field) => JSON.parse(inner.fact(subject, field)),
     families: () => JSON.parse(inner.families()),
     children: (family) => JSON.parse(inner.children(family)),
     spouses: (family) => JSON.parse(inner.spouses(family)),
+    names: (subject) => JSON.parse(inner.names(subject)),
+    primaryName: (subject) => inner.primaryName(subject) ?? null,
+    events: (subject) => JSON.parse(inner.events(subject)),
+    fieldsOf: (subject) => JSON.parse(inner.fieldsOf(subject)),
+    sources: () => JSON.parse(inner.sources()),
+    cites: (subject, field) => JSON.parse(inner.cites(subject, field)),
+    media: (subject) => JSON.parse(inner.media(subject)),
+    mediaRecords: () => JSON.parse(inner.mediaRecords()),
 
     newId,
   };
