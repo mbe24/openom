@@ -65,10 +65,21 @@ pub struct Header {
     /// (rollback evidence for the snapshot line).
     #[prost(bytes="vec", tag="13")]
     pub replaces_ciphertext_hash: ::prost::alloc::vec::Vec<u8>,
-    /// Reserved, empty in V1. Per-member signature for change attribution once trees
-    /// are shared; absent means "not attributed" (V1's communal-DEK trust model).
+    /// Per-member signature for change attribution on shared trees; absent means "not
+    /// attributed" (V1's communal-DEK trust model). Ed25519 over `author_signing_bytes`
+    /// (domain-tagged, excludes nonce/ciphertext_hash/itself, binds SHA-256(plaintext)).
+    /// Stays inside header_aad: stripping it invalidates the AEAD tag (fail-closed).
     #[prost(bytes="vec", tag="14")]
     pub author_signature: ::prost::alloc::vec::Vec<u8>,
+    /// The member who authored this entry, on a shared tree (matches a Keyring.members
+    /// entry). Names whose key verifies author_signature. Empty on unattributed trees.
+    #[prost(string, tag="16")]
+    pub author_member_id: ::prost::alloc::string::String,
+    /// The keyring revision that GOVERNED this entry when authored — the verifier looks
+    /// up the author's role at this revision. Signed (in author_signing_bytes) so it
+    /// can't be tampered; 0/empty on unattributed trees. (§B3 launch gate.)
+    #[prost(uint32, tag="17")]
+    pub keyring_revision: u32,
     /// KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
     /// cannot swap two of a tree's blobs undetected (the AAD otherwise binds only
     /// tree_id). Empty for tree kinds and throughout V1. Reader-side ciphertext-hash

@@ -45,6 +45,47 @@ pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
     put_bytes(&mut out, &header.replaces_ciphertext_hash);
     put_bytes(&mut out, &header.author_signature);
     put_bytes(&mut out, &header.blob_id);
+    // Attribution fields (§B3): bound here so the keyless server can't rewrite who authored an entry or
+    // which keyring revision governs it without the key-holder detecting it on decrypt. `author_signature`
+    // itself stays in the AAD (above) — stripping it changes the AAD, so the AEAD tag fails to open
+    // (fail-closed), which is what makes a downgrade-to-unattributed impossible for a keyless server.
+    put_bytes(&mut out, header.author_member_id.as_bytes());
+    put_u32(&mut out, header.keyring_revision);
+    out
+}
+
+/// The canonical, domain-separated byte string a member's Ed25519 **author** key signs to attribute an
+/// entry on a shared tree (§B3 launch gate; pins `design.sharing.md` §3.3). Covers every header field
+/// that exists **before sealing** — so it is computable pre-seal — plus `SHA-256(plaintext)` to bind the
+/// actual content. Deliberately EXCLUDES: `nonce` (minted inside seal, unknown at sign time; the AEAD tag
+/// binds it anyway), `ciphertext_hash` (derives from the ciphertext this ultimately produces — circular),
+/// and `author_signature` itself. The `openom:author:v1` tag makes it byte-disjoint from the keyring
+/// (`openom:keyring`), wrap (`openom:wrap:v1`), and header AAD (bare version) byte strings — load-bearing,
+/// because a founder/co-owner's author key IS their signer key (`chain.rs` requires it), so only the
+/// domain tag separates an author signature from a keyring signature.
+///
+/// Verification order (client): AEAD-open the entry (authenticates the header, incl. `author_signature`,
+/// against this exact ciphertext) → compute `SHA-256(plaintext)` → rebuild these bytes → Ed25519-verify
+/// against the claimed member's `author_public_key` at the governing keyring revision.
+pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(224);
+    put_bytes(&mut out, b"openom:author:v1");
+    put_u32(&mut out, version);
+    put_u32(&mut out, header.kind as u32);
+    put_u32(&mut out, header.format as u32);
+    put_u32(&mut out, header.aead as u32);
+    put_u32(&mut out, header.compression as u32);
+    put_bytes(&mut out, &header.key_id);
+    put_bytes(&mut out, &header.tree_id);
+    put_bytes(&mut out, &header.replica_id);
+    put_u64(&mut out, header.replica_counter);
+    put_bytes(&mut out, &header.prev_ciphertext_hash);
+    put_u64(&mut out, header.covers_through_seq);
+    put_bytes(&mut out, &header.replaces_ciphertext_hash);
+    put_bytes(&mut out, &header.blob_id);
+    put_bytes(&mut out, header.author_member_id.as_bytes());
+    put_u32(&mut out, header.keyring_revision);
+    put_bytes(&mut out, plaintext_hash);
     out
 }
 
@@ -204,6 +245,8 @@ mod tests {
             replaces_ciphertext_hash: vec![],
             author_signature: vec![],
             blob_id: vec![],
+            author_member_id: String::new(),
+            keyring_revision: 0,
         }
     }
 
@@ -230,6 +273,8 @@ mod tests {
         framed(&mut want, &[]); // replaces_ciphertext_hash
         framed(&mut want, &[]); // author_signature
         framed(&mut want, &[]); // blob_id
+        framed(&mut want, &[]); // author_member_id
+        want.extend_from_slice(&0u32.to_be_bytes()); // keyring_revision
         assert_eq!(header_aad(1, &sample()), want);
     }
 
@@ -269,6 +314,96 @@ mod tests {
     #[test]
     fn deterministic() {
         assert_eq!(header_aad(1, &sample()), header_aad(1, &sample()));
+    }
+
+    // ---- author_signing_bytes (§B3 launch gate) ----
+
+    fn attributed() -> Header {
+        let mut h = sample();
+        h.kind = Kind::Delta as i32;
+        h.author_member_id = "member-1".into();
+        h.keyring_revision = 3;
+        h
+    }
+
+    /// Independently-constructed expected layout — the anchor a JS/WASM twin must reproduce.
+    #[test]
+    fn author_signing_bytes_documented_layout() {
+        let h = attributed();
+        let hash = [0x44u8; 32];
+        let mut want = Vec::new();
+        let framed = |w: &mut Vec<u8>, b: &[u8]| {
+            w.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            w.extend_from_slice(b);
+        };
+        framed(&mut want, b"openom:author:v1");
+        for v in [1u32 /*version*/, Kind::Delta as u32, 1 /*format*/, 2 /*aead*/, Compression::None as u32] {
+            want.extend_from_slice(&v.to_be_bytes());
+        }
+        framed(&mut want, &[0xAA, 0xBB]); // key_id
+        // nonce EXCLUDED (minted at seal)
+        framed(&mut want, &[0x11; 16]); // tree_id
+        framed(&mut want, &[0x22; 4]); // replica_id
+        want.extend_from_slice(&5u64.to_be_bytes()); // replica_counter
+        // ciphertext_hash EXCLUDED (circular)
+        framed(&mut want, &[]); // prev_ciphertext_hash
+        want.extend_from_slice(&0u64.to_be_bytes()); // covers_through_seq
+        framed(&mut want, &[]); // replaces_ciphertext_hash
+        framed(&mut want, &[]); // blob_id
+        // author_signature EXCLUDED (self)
+        framed(&mut want, b"member-1"); // author_member_id
+        want.extend_from_slice(&3u32.to_be_bytes()); // keyring_revision
+        framed(&mut want, &hash); // SHA-256(plaintext)
+        assert_eq!(author_signing_bytes(1, &h, &hash), want);
+    }
+
+    /// Excludes nonce, ciphertext_hash, and author_signature — changing any leaves the signing bytes
+    /// unchanged (so the signature is computable pre-seal and doesn't self-reference).
+    #[test]
+    fn author_signing_bytes_excludes_seal_derived_fields() {
+        let h = attributed();
+        let hash = [0x44u8; 32];
+        let base = author_signing_bytes(1, &h, &hash);
+        for mutate in [
+            |x: &mut Header| x.nonce = vec![0xEE; 24],
+            |x: &mut Header| x.ciphertext_hash = vec![0xEE; 32],
+            |x: &mut Header| x.author_signature = vec![0xEE; 64],
+        ] {
+            let mut m = h.clone();
+            mutate(&mut m);
+            assert_eq!(author_signing_bytes(1, &m, &hash), base, "seal-derived field must not affect signing bytes");
+        }
+    }
+
+    /// Binds content + attribution: changing the plaintext hash, the claimed author, the governing
+    /// revision, or the kind all change the signing bytes (so none can be swapped under a fixed signature).
+    #[test]
+    fn author_signing_bytes_binds_content_and_attribution() {
+        let h = attributed();
+        let hash = [0x44u8; 32];
+        let base = author_signing_bytes(1, &h, &hash);
+        assert_ne!(author_signing_bytes(1, &h, &[0x55; 32]), base, "plaintext hash bound");
+        let mut a = h.clone();
+        a.author_member_id = "member-2".into();
+        assert_ne!(author_signing_bytes(1, &a, &hash), base, "author_member_id bound");
+        let mut r = h.clone();
+        r.keyring_revision = 4;
+        assert_ne!(author_signing_bytes(1, &r, &hash), base, "keyring_revision bound");
+        let mut k = h.clone();
+        k.kind = Kind::Proposal as i32;
+        assert_ne!(author_signing_bytes(1, &k, &hash), base, "kind bound (no re-seal a proposal as a delta)");
+    }
+
+    /// Domain-separated from every other signed/authenticated byte string, so a signature can't be
+    /// cross-replayed (a founder's author key IS their signer key — only the tag separates the contexts).
+    #[test]
+    fn author_signing_bytes_domain_disjoint() {
+        let h = attributed();
+        let asb = author_signing_bytes(1, &h, &[0x44; 32]);
+        assert_eq!(&asb[..4], &(b"openom:author:v1".len() as u32).to_be_bytes());
+        assert_eq!(&asb[4..20], b"openom:author:v1");
+        // header_aad starts with a bare version int (0,0,0,1), not a framed tag → disjoint at byte 0..4.
+        assert_ne!(asb[..4], header_aad(1, &h)[..4]);
     }
 
     #[test]

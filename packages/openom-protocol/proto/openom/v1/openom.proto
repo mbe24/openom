@@ -54,9 +54,19 @@ message Header {
   // (rollback evidence for the snapshot line).
   bytes replaces_ciphertext_hash = 13;
 
-  // Reserved, empty in V1. Per-member signature for change attribution once trees
-  // are shared; absent means "not attributed" (V1's communal-DEK trust model).
+  // Per-member signature for change attribution on shared trees; absent means "not
+  // attributed" (V1's communal-DEK trust model). Ed25519 over `author_signing_bytes`
+  // (domain-tagged, excludes nonce/ciphertext_hash/itself, binds SHA-256(plaintext)).
+  // Stays inside header_aad: stripping it invalidates the AEAD tag (fail-closed).
   bytes author_signature = 14;
+
+  // The member who authored this entry, on a shared tree (matches a Keyring.members
+  // entry). Names whose key verifies author_signature. Empty on unattributed trees.
+  string author_member_id = 16;
+  // The keyring revision that GOVERNED this entry when authored — the verifier looks
+  // up the author's role at this revision. Signed (in author_signing_bytes) so it
+  // can't be tampered; 0/empty on unattributed trees. (§B3 launch gate.)
+  uint32 keyring_revision = 17;
 
   // KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
   // cannot swap two of a tree's blobs undetected (the AAD otherwise binds only

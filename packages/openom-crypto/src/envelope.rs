@@ -63,8 +63,10 @@ pub fn seal_envelope(
         prev_ciphertext_hash: params.prev_ciphertext_hash.to_vec(),
         covers_through_seq: params.covers_through_seq,
         replaces_ciphertext_hash: Vec::new(),
-        author_signature: Vec::new(),
+        author_signature: Vec::new(), // populated on shared trees when an author key is present (LG2)
         blob_id: params.blob_id.to_vec(),
+        author_member_id: String::new(),
+        keyring_revision: 0,
     };
 
     let ciphertext = seal(params.version, &header, dek, plaintext)?;
