@@ -239,6 +239,33 @@ fn a_long_offline_replica_catches_up_in_one_delta() {
     assert_eq!(b.persons().len(), 12);
 }
 
+fn mref(i: u8) -> MediaRef {
+    vec![0xA0 | i]
+}
+
+#[test]
+fn media_attaches_detaches_without_resurrection() {
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    a.apply(TreeOp::AddPerson { id: pid(1) });
+    let m1 = a.apply(TreeOp::AttachMedia { subject: pid(1), media: mref(0) });
+    a.apply(TreeOp::AttachMedia { subject: pid(1), media: mref(1) });
+    a.apply(TreeOp::DetachMedia { subject: pid(1), media: mref(0) });
+    assert_eq!(a.media_of(&pid(1)), vec![mref(1)]);
+
+    // A stale re-attach of the detached blob (delivered late to another replica) must not resurrect.
+    for o in &m1 {
+        b.doc_mut().merge_op(o);
+    }
+    for o in a.apply(TreeOp::AddPerson { id: pid(2) }).iter() {
+        let _ = o;
+    }
+    // Bring b fully up to date, then confirm the detached blob stays gone.
+    b.doc_mut().merge_bytes(&a.doc().snapshot()).unwrap();
+    assert_eq!(b.media_of(&pid(1)), vec![mref(1)]);
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+}
+
 // --- proposal / approval flow -------------------------------------------------------------------
 
 #[test]
@@ -379,6 +406,8 @@ fn treeop_strat() -> impl Strategy<Value = TreeOp> {
         (0u8..2, 0u8..2, 0u8..3, 0u8..3).prop_map(|(f1, f2, p, pe)| TreeOp::MoveChild { person: pid(p), from: fid(f1), to: fid(f2), pedi: pedi_of(pe) }),
         (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::LinkSpouse { family: fid(x), person: pid(p) }),
         (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::UnlinkSpouse { family: fid(x), person: pid(p) }),
+        (0u8..3, 0u8..2).prop_map(|(p, m)| TreeOp::AttachMedia { subject: pid(p), media: vec![0xA0 | m] }),
+        (0u8..3, 0u8..2).prop_map(|(p, m)| TreeOp::DetachMedia { subject: pid(p), media: vec![0xA0 | m] }),
     ]
 }
 

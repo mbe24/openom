@@ -142,6 +142,14 @@ impl WasmTree {
     pub fn unlink_spouse(&mut self, family: &[u8], person: &[u8]) -> Vec<u8> {
         encode_ops(&self.inner.apply(TreeOp::UnlinkSpouse { family: family.to_vec(), person: person.to_vec() }))
     }
+    #[wasm_bindgen(js_name = attachMedia)]
+    pub fn attach_media(&mut self, subject: &[u8], media: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AttachMedia { subject: subject.to_vec(), media: media.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = detachMedia)]
+    pub fn detach_media(&mut self, subject: &[u8], media: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::DetachMedia { subject: subject.to_vec(), media: media.to_vec() }))
+    }
 
     // ---- sync ----
 
@@ -187,5 +195,10 @@ impl WasmTree {
     pub fn spouses(&self, family: &[u8]) -> String {
         let ids: Vec<String> = self.inner.spouses_of(family).iter().map(|s| hex(s)).collect();
         serde_json::to_string(&ids).expect("serialize spouses")
+    }
+    /// A subject's attached media (refs) as a JSON array of hex strings.
+    pub fn media(&self, subject: &[u8]) -> String {
+        let ids: Vec<String> = self.inner.media_of(subject).iter().map(|m| hex(m)).collect();
+        serde_json::to_string(&ids).expect("serialize media")
     }
 }

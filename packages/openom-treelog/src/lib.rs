@@ -35,6 +35,9 @@ pub type FamilyId = Vec<u8>;
 pub type FieldKey = String;
 /// A caller-minted claim id (opaque; the merge key for one claim within a fact).
 pub type ClaimId = Vec<u8>;
+/// An opaque reference to an encrypted media blob (its remote id / ciphertext hash) — the merge key
+/// for one attachment.
+pub type MediaRef = Vec<u8>;
 
 /// How a child belongs to a family. A child can legitimately belong to more than one family (a birth
 /// family and an adoptive one), so this is per child-link, not per person.
@@ -76,6 +79,7 @@ const KIND_FACT_PREFERRED: u8 = 3; // per (person, field): the preferred-claim r
 const KIND_FAMILIES: u8 = 4; // the set of live family ids
 const KIND_CHILDREN: u8 = 5; // per family: the OR-set of child person ids (value = pedigree)
 const KIND_SPOUSES: u8 = 6; // per family: the OR-set of spouse/partner person ids
+const KIND_MEDIA: u8 = 7; // per subject (person/family): the OR-set of attached media refs
 
 /// Build a length-prefixed, kind-tagged cell address from its parts (collision-free across kinds).
 fn cell(kind: u8, parts: &[&[u8]]) -> CellId {
@@ -104,6 +108,9 @@ fn children_cell(family: &[u8]) -> CellId {
 }
 fn spouses_cell(family: &[u8]) -> CellId {
     cell(KIND_SPOUSES, &[family])
+}
+fn media_cell(subject: &[u8]) -> CellId {
+    cell(KIND_MEDIA, &[subject])
 }
 
 /// A single sourced assertion about a fact — the value plus its provenance. Distinct claims stay
@@ -164,6 +171,8 @@ pub enum Change {
     ChildMoved { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
     SpouseLinked { family: FamilyId, person: PersonId },
     SpouseUnlinked { family: FamilyId, person: PersonId },
+    MediaAttached { subject: Vec<u8>, media: MediaRef },
+    MediaDetached { subject: Vec<u8>, media: MediaRef },
 }
 
 /// A fact the proposal edits that ALSO moved since the proposal's base — the approver decides
@@ -200,6 +209,10 @@ pub enum TreeOp {
     MoveChild { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
     LinkSpouse { family: FamilyId, person: PersonId },
     UnlinkSpouse { family: FamilyId, person: PersonId },
+    /// Attach a media blob to a subject (a person or a family). `DetachMedia` tombstones it, so a
+    /// re-delivered attach never resurrects a detached blob.
+    AttachMedia { subject: Vec<u8>, media: MediaRef },
+    DetachMedia { subject: Vec<u8>, media: MediaRef },
 }
 
 impl TreeOp {
@@ -237,6 +250,12 @@ impl TreeOp {
             }
             TreeOp::UnlinkSpouse { family, person } => {
                 vec![OpIntent::RemoveElement { cell: spouses_cell(&family), elem: person }]
+            }
+            TreeOp::AttachMedia { subject, media } => {
+                vec![OpIntent::AddElement { cell: media_cell(&subject), elem: media, value: Value::Null }]
+            }
+            TreeOp::DetachMedia { subject, media } => {
+                vec![OpIntent::RemoveElement { cell: media_cell(&subject), elem: media }]
             }
         }
     }
@@ -321,6 +340,8 @@ impl Tree {
             TreeOp::MoveChild { person, from, to, pedi } => Change::ChildMoved { person, from, to, pedi },
             TreeOp::LinkSpouse { family, person } => Change::SpouseLinked { family, person },
             TreeOp::UnlinkSpouse { family, person } => Change::SpouseUnlinked { family, person },
+            TreeOp::AttachMedia { subject, media } => Change::MediaAttached { subject, media },
+            TreeOp::DetachMedia { subject, media } => Change::MediaDetached { subject, media },
         }
     }
 
@@ -366,6 +387,11 @@ impl Tree {
     /// The spouses/partners of a family, in deterministic person-id order.
     pub fn spouses_of(&self, family: &[u8]) -> Vec<PersonId> {
         self.doc.set_elements(&spouses_cell(family)).into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The media attached to a subject (person or family), in deterministic order.
+    pub fn media_of(&self, subject: &[u8]) -> Vec<MediaRef> {
+        self.doc.set_elements(&media_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
     }
 
     /// A person's fact: every retained claim + the preferred one. Empty if the fact has no claims.

@@ -104,6 +104,16 @@ fn put_op(o: &mut Vec<u8>, op: &TreeOp) {
             put_bytes(o, family);
             put_bytes(o, person);
         }
+        TreeOp::AttachMedia { subject, media } => {
+            o.push(12);
+            put_bytes(o, subject);
+            put_bytes(o, media);
+        }
+        TreeOp::DetachMedia { subject, media } => {
+            o.push(13);
+            put_bytes(o, subject);
+            put_bytes(o, media);
+        }
     }
 }
 
@@ -186,6 +196,8 @@ impl<'a> R<'a> {
             9 => TreeOp::MoveChild { person: self.bytes()?, from: self.bytes()?, to: self.bytes()?, pedi: self.pedi()? },
             10 => TreeOp::LinkSpouse { family: self.bytes()?, person: self.bytes()? },
             11 => TreeOp::UnlinkSpouse { family: self.bytes()?, person: self.bytes()? },
+            12 => TreeOp::AttachMedia { subject: self.bytes()?, media: self.bytes()? },
+            13 => TreeOp::DetachMedia { subject: self.bytes()?, media: self.bytes()? },
             _ => return Err(ProposalError::BadTag),
         })
     }
