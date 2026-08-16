@@ -60,7 +60,7 @@ mod json;
 pub use json::JsonCodec;
 
 pub mod mapping;
-pub use mapping::{import, FieldPolicy, ImportPlan, MapError, MappingSpec};
+pub use mapping::{export, import, FieldPolicy, ImportPlan, MapError, MappingSpec};
 
 #[cfg(test)]
 mod tests;

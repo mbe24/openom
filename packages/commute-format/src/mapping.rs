@@ -74,6 +74,47 @@ fn cell(field: &str) -> CellId {
     field.as_bytes().to_vec()
 }
 
+/// Project a commute document back into a [`ValueTree`] — the reverse of [`import`]. Register cells
+/// become scalar fields (or the decoded sub-tree if they hold an opaque/atomic leaf); set cells
+/// become arrays of their decoded elements. Field order is the document's canonical (cell) order,
+/// so `export ∘ import` round-trips modulo key ordering. Needs no spec: the cell's stored shape
+/// (scalar vs opaque bytes vs set) says how to reverse it.
+pub fn export(doc: &commute::Doc, codec: &dyn Codec) -> Result<ValueTree, MapError> {
+    let mut fields: Vec<(String, ValueTree)> = Vec::new();
+    for (cell, value) in doc.register_cells() {
+        let field = String::from_utf8(cell).map_err(|_| MapError::NotAnObject)?;
+        let tree = match value {
+            Value::Bytes(b) => codec.parse(&b)?, // an atomic/opaque leaf → its sub-tree
+            v => value_to_tree(&v),
+        };
+        fields.push((field, tree));
+    }
+    for cell in doc.set_cell_ids() {
+        let field = String::from_utf8(cell.clone()).map_err(|_| MapError::NotAnObject)?;
+        let mut arr = Vec::new();
+        for (_, v) in doc.set_elements(&cell) {
+            match v {
+                Value::Bytes(b) => arr.push(codec.parse(b)?),
+                other => arr.push(value_to_tree(other)),
+            }
+        }
+        fields.push((field, ValueTree::Seq(arr)));
+    }
+    Ok(ValueTree::Map(fields))
+}
+
+/// A ValueTree for a commute scalar leaf.
+fn value_to_tree(v: &Value) -> ValueTree {
+    match v {
+        Value::Null => ValueTree::Null,
+        Value::Bool(b) => ValueTree::Bool(*b),
+        Value::I64(n) => ValueTree::Int(*n),
+        Value::U64(n) => ValueTree::Uint(*n),
+        Value::Text(s) => ValueTree::Str(s.clone()),
+        Value::Bytes(b) => ValueTree::Bytes(b.clone()),
+    }
+}
+
 /// A commute leaf value for a scalar ValueTree, or `None` if it isn't a scalar.
 fn scalar(v: &ValueTree) -> Option<Value> {
     Some(match v {

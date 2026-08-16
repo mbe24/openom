@@ -176,6 +176,21 @@ impl Doc {
         self.registers.get(cell).map(|(_, v)| v)
     }
 
+    /// Every register cell and its value, in deterministic cell order — for a domain/bridge layer
+    /// that needs to walk the whole document (e.g. export).
+    pub fn register_cells(&self) -> Vec<(CellId, Value)> {
+        self.registers.iter().map(|(c, (_, v))| (c.clone(), v.clone())).collect()
+    }
+
+    /// The ids of every set cell that has at least one live element, in deterministic order.
+    pub fn set_cell_ids(&self) -> Vec<CellId> {
+        self.sets
+            .iter()
+            .filter(|(_, elems)| elems.values().any(|e| e.live()))
+            .map(|(c, _)| c.clone())
+            .collect()
+    }
+
     /// The live elements of a set cell (tombstoned elements excluded), in deterministic id order.
     pub fn set_elements(&self, cell: &[u8]) -> Vec<(&ElemId, &Value)> {
         self.sets

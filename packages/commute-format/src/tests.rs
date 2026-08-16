@@ -119,6 +119,31 @@ fn duplicate_keys_within_a_collection_are_rejected() {
 }
 
 #[test]
+fn import_then_export_reconstructs_the_document() {
+    let codec = c();
+    let doc = codec.parse(br#"{"title":"Smith","people":[{"id":"p1","name":"Ada"},{"id":"p2","name":"Bea"}]}"#).unwrap();
+    let spec = MappingSpec { fields: vec![("people".into(), FieldPolicy::Keyed { key_field: "id".into() })] };
+    let plan = import(&doc, &spec, &codec).unwrap();
+
+    let mut d = commute::Doc::new([0u8; 16]);
+    for intent in plan.intents {
+        d.apply_local(intent);
+    }
+    let exported = export(&d, &codec).unwrap();
+    let ValueTree::Map(m) = exported else { panic!("expected object") };
+
+    // The scalar field round-trips.
+    assert!(m.iter().any(|(k, v)| k == "title" && *v == ValueTree::Str("Smith".into())));
+    // The keyed collection comes back as an array of the original objects.
+    let people = m.iter().find(|(k, _)| k == "people").map(|(_, v)| v).unwrap();
+    let ValueTree::Seq(elems) = people else { panic!("expected array") };
+    assert_eq!(elems.len(), 2);
+    for e in elems {
+        assert!(matches!(e, ValueTree::Map(props) if props.iter().any(|(k, _)| k == "id") && props.iter().any(|(k, _)| k == "name")));
+    }
+}
+
+#[test]
 fn an_atomic_field_stores_the_subtree_opaquely() {
     let codec = c();
     let doc = codec.parse(br#"{"settings":{"theme":"dark","n":3}}"#).unwrap();
