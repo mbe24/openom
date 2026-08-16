@@ -11,6 +11,7 @@ pub mod config;
 pub mod log;
 pub mod media;
 pub mod prof;
+pub mod proposals;
 pub mod storage;
 pub mod telemetry;
 pub mod trees;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use jsonwebtoken::DecodingKey;
 use sqlx::postgres::PgPoolOptions;
@@ -75,6 +76,12 @@ pub fn app(state: AppState) -> Router {
         .route("/trees/{tree_id}", get(trees::get_tree).put(trees::put_tree))
         // Delta-log: append a sealed delta / pull the ordered tail (sync + change history, §B1).
         .route("/trees/{tree_id}/log", post(log::append_log).get(log::get_log))
+        // Proposals: the transient, off-history approval channel for review-changes (§B2).
+        .route(
+            "/trees/{tree_id}/proposals",
+            post(proposals::create_proposal).get(proposals::list_proposals),
+        )
+        .route("/trees/{tree_id}/proposals/{proposal_id}", delete(proposals::delete_proposal))
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
@@ -139,9 +146,11 @@ async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Er
         "INSERT INTO accounts
              (id, max_trees, allow_media, allow_streaming_media,
               max_blob_bytes, max_blob_count, max_storage_bytes, max_tree_bytes,
-              log_rate, log_burst, log_tokens)
+              log_rate, log_burst, log_tokens,
+              max_proposal_bytes, max_open_proposals_per_tree, max_proposals_per_member_day)
          VALUES ($1, 1000000, true, true, 5368709120, 1000000, 1099511627776, 10737418240,
-                 100000, 100000, 100000)
+                 100000, 100000, 100000,
+                 1048576, 100000, 100000)
          ON CONFLICT (id) DO UPDATE SET
              max_trees = EXCLUDED.max_trees,
              allow_media = EXCLUDED.allow_media,
@@ -151,7 +160,10 @@ async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Er
              max_storage_bytes = EXCLUDED.max_storage_bytes,
              max_tree_bytes = EXCLUDED.max_tree_bytes,
              log_rate = EXCLUDED.log_rate,
-             log_burst = EXCLUDED.log_burst",
+             log_burst = EXCLUDED.log_burst,
+             max_proposal_bytes = EXCLUDED.max_proposal_bytes,
+             max_open_proposals_per_tree = EXCLUDED.max_open_proposals_per_tree,
+             max_proposals_per_member_day = EXCLUDED.max_proposals_per_member_day",
     )
     .bind(member_id)
     .execute(db)

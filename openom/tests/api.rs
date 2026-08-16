@@ -67,6 +67,18 @@ fn snapshot_envelope(tree: Uuid, ciphertext: &[u8], hash_of: Option<&[u8]>) -> V
     Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
 }
 
+/// A real KIND_PROPOSAL envelope (no replica dot — each proposal is a fresh submission).
+fn proposal_envelope(tree: Uuid, ciphertext: &[u8]) -> Vec<u8> {
+    let header = Header {
+        kind: Kind::Proposal as i32,
+        aead: Aead::Xchacha20Poly1305 as i32,
+        tree_id: tree.as_bytes().to_vec(),
+        ciphertext_hash: Sha256::digest(ciphertext).to_vec(),
+        ..Default::default()
+    };
+    Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
+}
+
 /// A real delta envelope with a replica dot (replica_id + replica_counter).
 fn delta_envelope(tree: Uuid, ciphertext: &[u8], replica: &[u8], counter: u64) -> Vec<u8> {
     let header = Header {
@@ -145,6 +157,32 @@ async fn seed_account(db: &sqlx::PgPool, id: Uuid, max_tree_bytes: i64, log_rate
     .execute(db)
     .await
     .expect("seed account");
+}
+
+/// Enable/limit proposals for an account (default seed leaves them disabled = free tier).
+async fn set_proposal_meters(db: &sqlx::PgPool, id: Uuid, max_bytes: i64, max_open: i32, max_day: i32) {
+    sqlx::query(
+        "UPDATE accounts
+            SET max_proposal_bytes = $2, max_open_proposals_per_tree = $3, max_proposals_per_member_day = $4
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(max_bytes)
+    .bind(max_open)
+    .bind(max_day)
+    .execute(db)
+    .await
+    .expect("set proposal meters");
+}
+
+/// A DELETE authenticated as a specific member.
+fn delete_as(uri: String, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn put_tree(tree: Uuid, env: &[u8], if_match: Option<&str>) -> Request<Body> {
@@ -302,6 +340,140 @@ async fn cross_owner_access_forbidden() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot append");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn proposals_lifecycle() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let other = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
+
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    // Submit a proposal.
+    let prop = proposal_envelope(tree, b"suggested-edit-bundle");
+    let (s, _, body) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, owner)).await;
+    assert_eq!(s, StatusCode::OK, "submit proposal");
+    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+
+    // List it back — payload round-trips the exact sealed bytes, attributed to the proposer.
+    let (s, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    assert_eq!(s, StatusCode::OK, "list proposals");
+    let list: Value = serde_json::from_slice(&lb).unwrap();
+    let items = list["proposals"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "one open proposal");
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(items[0]["payload"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(payload, prop, "proposal payload round-trips");
+    assert!(!items[0]["proposer"].as_str().unwrap().is_empty(), "attributed to a member");
+
+    // A non-owner can neither list nor submit (the authz seam) — V1 owner-only.
+    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/proposals"), other)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot list proposals");
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, other)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot propose");
+
+    // Resolve (delete) it → gone from the open list; deleting again is idempotent.
+    let (s, _, _) = send(&app, delete_as(format!("/trees/{tree}/proposals/{id}"), owner)).await;
+    assert_eq!(s, StatusCode::OK, "delete proposal");
+    let (s, _, lb2) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"].as_array().unwrap().len(),
+        0,
+        "no open proposals after resolve"
+    );
+    let (s, _, _) = send(&app, delete_as(format!("/trees/{tree}/proposals/{id}"), owner)).await;
+    assert_eq!(s, StatusCode::OK, "delete is idempotent");
+
+    // The security property: a proposal must be refused on the delta-log path, so a hostile server
+    // can never replay an editor's proposal into the authoritative tree history.
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &prop, owner)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "KIND_PROPOSAL refused on the log path");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn proposals_caps() {
+    let app = router().await;
+    let db = db().await;
+
+    // (1) Free tier: proposals disabled (default meters = 0) → 403.
+    let free = Uuid::new_v4();
+    seed_account(&db, free, 1 << 30, 1000.0, 1000).await; // proposal meters left at 0
+    let t_free = Uuid::new_v4();
+    send(&app, put_tree_as(t_free, &snapshot_envelope(t_free, b"ct", None), free)).await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(format!("/trees/{t_free}/proposals"), &proposal_envelope(t_free, b"x"), free),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "proposals disabled on the free tier");
+
+    // (2) Open-per-tree cap of 1: second concurrent proposal → 403; frees up after a delete.
+    let cap = Uuid::new_v4();
+    seed_account(&db, cap, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, cap, 1 << 20, 1, 50).await;
+    let t_cap = Uuid::new_v4();
+    send(&app, put_tree_as(t_cap, &snapshot_envelope(t_cap, b"ct", None), cap)).await;
+    let (s, _, b1) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p1"), cap)).await;
+    assert_eq!(s, StatusCode::OK, "first proposal fits");
+    let id1 = serde_json::from_slice::<Value>(&b1).unwrap()["id"].as_str().unwrap().to_string();
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p2"), cap)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "second exceeds the open-per-tree cap");
+    send(&app, delete_as(format!("/trees/{t_cap}/proposals/{id1}"), cap)).await;
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p3"), cap)).await;
+    assert_eq!(s, StatusCode::OK, "a slot freed up after resolving one");
+
+    // (3) Per-member/day cap of 1 backed by the ledger: survives delete-then-resubmit.
+    let day = Uuid::new_v4();
+    seed_account(&db, day, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, day, 1 << 20, 50, 1).await;
+    let t_day = Uuid::new_v4();
+    send(&app, put_tree_as(t_day, &snapshot_envelope(t_day, b"ct", None), day)).await;
+    let (s, _, bd) = send(&app, post_bytes_as(format!("/trees/{t_day}/proposals"), &proposal_envelope(t_day, b"d1"), day)).await;
+    assert_eq!(s, StatusCode::OK, "first submission of the day");
+    let idd = serde_json::from_slice::<Value>(&bd).unwrap()["id"].as_str().unwrap().to_string();
+    send(&app, delete_as(format!("/trees/{t_day}/proposals/{idd}"), day)).await; // resolve it
+    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_day}/proposals"), &proposal_envelope(t_day, b"d2"), day)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "daily cap counts submissions, not open rows");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn proposals_ttl_swept() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let (_, _, body) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &proposal_envelope(tree, b"stale"), owner)).await;
+    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    // Backdate its TTL so it's expired, then run the sweep.
+    sqlx::query("UPDATE proposals SET expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
+        .bind(&id)
+        .execute(&db)
+        .await
+        .unwrap();
+    // Already invisible to reads before the physical sweep.
+    let (_, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&lb).unwrap()["proposals"].as_array().unwrap().len(), 0, "expired hidden from reads");
+    // The sweep physically reclaims it.
+    let (s, _, gb) = send(&app, post("/dev/gc".to_string())).await;
+    assert_eq!(s, StatusCode::OK, "run dev gc");
+    assert!(serde_json::from_slice::<Value>(&gb).unwrap()["proposals_expired"].as_u64().unwrap() >= 1, "swept ≥1 expired proposal");
+    // Gone even when explicitly asking for expired ones.
+    let (_, _, lb2) = send(&app, get_as(format!("/trees/{tree}/proposals?include_expired=true"), owner)).await;
+    assert_eq!(serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"].as_array().unwrap().len(), 0, "physically gone");
 }
 
 #[tokio::test]

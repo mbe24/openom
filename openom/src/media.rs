@@ -407,23 +407,29 @@ pub async fn sweep_dev(
     State(state): State<AppState>,
     Query(p): Query<SweepParams>,
 ) -> Result<Response, ApiError> {
-    let (deleted, expired) = run_sweep(
+    let (deleted, expired, proposals_expired) = run_sweep(
         &state,
         p.tombstone_grace_secs.unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
         p.pending_expiry_secs.unwrap_or(DEFAULT_PENDING_EXPIRY_SECS),
     )
     .await?;
-    Ok(Json(json!({ "physically_deleted": deleted, "pending_expired": expired })).into_response())
+    Ok(Json(json!({
+        "physically_deleted": deleted,
+        "pending_expired": expired,
+        "proposals_expired": proposals_expired,
+    }))
+    .into_response())
 }
 
 /// Physical GC: delete tombstoned blobs past their grace window (crediting the meter
-/// back — the *only* place usage is returned, §9.9a), and expire abandoned pending
-/// intents (releasing the reservation + the staging object).
+/// back — the *only* place usage is returned, §9.9a), expire abandoned pending
+/// intents (releasing the reservation + the staging object), and reclaim expired
+/// proposals + stale day-count ledger rows.
 async fn run_sweep(
     state: &AppState,
     tombstone_grace_secs: i64,
     pending_expiry_secs: i64,
-) -> Result<(usize, usize), ApiError> {
+) -> Result<(usize, usize, usize), ApiError> {
     // 1. Expired tombstones → physical delete + meter credit.
     let tombs: Vec<(Uuid, Vec<u8>, String, i64, Uuid)> = sqlx::query_as(
         "SELECT b.tree_id, b.blob_id, b.r2_key, b.size_bytes, t.owner_id
@@ -470,5 +476,17 @@ async fn run_sweep(
         expired += 1;
     }
 
-    Ok((deleted, expired))
+    // 3. Expired proposals → physical delete. They're already invisible to reads (lists filter on
+    // expires_at); this reclaims the rows. Proposals don't touch a byte meter, so there's nothing to
+    // credit back. Old day-count ledger rows (well past the day) are reclaimed too.
+    let props = sqlx::query("DELETE FROM proposals WHERE expires_at <= now()")
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    let _ = sqlx::query("DELETE FROM proposal_day_counts WHERE day < current_date - 1")
+        .execute(&state.db)
+        .await;
+    let proposals_expired = props.rows_affected() as usize;
+
+    Ok((deleted, expired, proposals_expired))
 }
