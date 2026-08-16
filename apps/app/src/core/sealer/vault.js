@@ -22,6 +22,28 @@ function freshReplicaId() {
 }
 
 /**
+ * Frame keyring successor revisions for `acceptRemoteKeyring`: each hop as a 4-byte big-endian length
+ * prefix followed by its bytes, concatenated in ascending revision order (the wire shape the wasm's
+ * `split_length_prefixed` expects).
+ * @param {Uint8Array[]} revisions
+ * @returns {Uint8Array}
+ */
+export function frameHops(revisions) {
+  let total = 0;
+  for (const r of revisions) total += 4 + r.length;
+  const out = new Uint8Array(total);
+  const dv = new DataView(out.buffer);
+  let off = 0;
+  for (const r of revisions) {
+    dv.setUint32(off, r.length, false); // big-endian
+    off += 4;
+    out.set(r, off);
+    off += r.length;
+  }
+  return out;
+}
+
+/**
  * @param {object} deps
  * @param {object} deps.worker         the crypto worker proxy (provision/unlock/recover/changePassphrase/sealEntry/openEntry/lock)
  * @param {object} deps.keyringStore   { load(treeKey), save(treeKey, bytes) }
@@ -76,6 +98,30 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       await keyringStore.save(treeKey, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { recoveryCode: r.recoveryCode };
+    },
+
+    /**
+     * Pull newer keyring revisions from the server and adopt them if they verify. `fetchSuccessors` is
+     * given our current revision and returns the successor keyring byte-arrays after it (ascending);
+     * the worker (Rust) decides whether they form a legitimate chain onto our stored anchor — a fork,
+     * rollback, or withheld hop is refused there and this throws without touching stored state. Only the
+     * worker-validated head is persisted + watermarked, so an untrusted server can never plant a keyring
+     * we didn't verify or roll us backward (§10). No-op (and no fetch cost beyond the one call) when
+     * there's nothing newer.
+     * @returns {Promise<{ revision: number, changed: boolean }>}
+     */
+    async syncKeyring(treeKey, treeId, fetchSuccessors) {
+      const anchor = await requireKeyring(treeKey);
+      const since = watermarks.current(treeKey).keyringRevision;
+      const successors = await fetchSuccessors(since);
+      if (!successors || successors.length === 0) {
+        return { revision: since, changed: false };
+      }
+      const r = await worker.acceptRemoteKeyring(anchor, treeId, frameHops(successors));
+      // Persist + watermark ONLY after the worker validated the walk.
+      await keyringStore.save(treeKey, r.keyring);
+      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      return { revision: r.revision, changed: true };
     },
   };
 }

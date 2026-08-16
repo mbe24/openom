@@ -141,6 +141,24 @@ export class RemoteStore {
     };
   }
 
+  // ---- keyring surface (GET /trees/{id}/keyring) ----
+
+  /**
+   * The keyring revision chain from `from` (inclusive) to head, for the client to verify + adopt via
+   * the sealer's `acceptRemoteKeyring`. Returns `{ revisions, head }` where `revisions` is the opaque
+   * signed keyring bytes ascending (Uint8Array[]). A 404 (no keyring yet) → empty.
+   */
+  async readKeyring(id, from = 1) {
+    const res = await this.#fetch(`${this.#tree(id)}/keyring?from=${from}`, { headers: this.#headers() });
+    if (res.status === 404) return { revisions: [], head: 0 };
+    if (!res.ok) throw new Error(`readKeyring ${id}: HTTP ${res.status}`);
+    const body = await res.json();
+    return {
+      revisions: (body.revisions ?? []).map((r) => b64decode(r.payload)),
+      head: body.head ?? 0,
+    };
+  }
+
   async list() {
     throw new Error('remote list is not supported');
   }

@@ -13,6 +13,7 @@ import init, {
   unlock as wasmUnlock,
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
+  acceptRemoteKeyring as wasmAcceptRemoteKeyring,
   WasmSealer,
 } from '../../vendor/sealer/openom_sealer.js';
 
@@ -83,6 +84,18 @@ const api = {
     await ensureInit();
     const r = wasmChangePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, minRevision);
     const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision };
+    r.free();
+    return out;
+  },
+
+  // Verify a keyring chain pulled from the untrusted server and return the validated head to store.
+  // The Rust does the trust decision (verify_walk: legitimate successor vs fork/rollback/withheld hop);
+  // this only marshals. `hops` is the successors framed as [u32-BE len][bytes]… (see vault.frameHops).
+  // No sealer is produced — keyring state only.
+  async acceptRemoteKeyring(anchor, treeId, hops) {
+    await ensureInit();
+    const r = wasmAcceptRemoteKeyring(anchor, treeId, hops);
+    const out = { keyring: r.keyring, revision: r.revision };
     r.free();
     return out;
   },
