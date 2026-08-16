@@ -98,8 +98,8 @@ pub async fn create_proposal(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    // V1: only the owner may propose; B3 widens this to editors via the same seam.
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+    // Editor+ may propose (the whole point of the role); metered to the owner (owner-pays).
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Propose).await?;
 
     // Owner's proposal entitlements (owner-pays).
     let (max_bytes, max_open, max_day, ttl): (i64, i32, i32, i32) = sqlx::query_as(
@@ -119,15 +119,19 @@ pub async fn create_proposal(
 
     let mut tx = state.db.begin().await.map_err(internal)?;
 
-    // Concurrency cap: count this tree's still-open (non-expired) proposals.
-    let open: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM proposals WHERE tree_id = $1 AND expires_at > now()")
-            .bind(tree_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(internal)?;
+    // Concurrency cap, per-(tree, proposer): each member gets up to `max_open` still-open proposals, so
+    // one editor can't fill a tree-global pool for the whole TTL and starve the others (total is bounded
+    // by members × max_open, and membership is itself capped).
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2 AND expires_at > now()",
+    )
+    .bind(tree_id)
+    .bind(identity.member_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(internal)?;
     if open >= max_open as i64 {
-        tracing::info!(event = "quota_rejected", resource = "proposals_open", %tree_id, %owner);
+        tracing::info!(event = "quota_rejected", resource = "proposals_open", %tree_id, member = %identity.member_id);
         return Err(ApiError::QuotaExceeded);
     }
 
@@ -261,7 +265,22 @@ pub async fn delete_proposal(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+
+    // Policy: a Maintainer+ may resolve any proposal (accept/reject); the proposer may withdraw their
+    // OWN. Neither is a plain capability gate, so fetch the proposer and branch. A missing proposal is an
+    // idempotent success (the client accepts then deletes, and may retry) — but only for someone who
+    // could have deleted it, so an unauthorized caller is refused before we reveal existence.
+    let proposer: Option<Uuid> =
+        sqlx::query_scalar("SELECT proposer_member_id FROM proposals WHERE tree_id = $1 AND id = $2")
+            .bind(tree_id)
+            .bind(proposal_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?;
+    if proposer != Some(identity.member_id) {
+        // Not the proposer (or the proposal is gone) → require Maintainer+.
+        crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    }
 
     sqlx::query("DELETE FROM proposals WHERE tree_id = $1 AND id = $2")
         .bind(tree_id)

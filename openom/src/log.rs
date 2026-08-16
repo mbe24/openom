@@ -115,7 +115,7 @@ pub async fn append_log(
             .await
             .map_err(internal)?;
     let (owner, next_seq) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
 
     // Idempotent re-delivery: the dot is already present → return its seq, assign nothing new.
     let existing: Option<(i64,)> = sqlx::query_as(
@@ -132,36 +132,45 @@ pub async fn append_log(
         return Ok((StatusCode::OK, Json(AppendResult { seq })).into_response());
     }
 
-    // Metering — charged to the tree OWNER (owner-pays, §17), only for a genuinely new
-    // append (re-deliveries returned above, so a retrying client is never metered).
+    // Metering — capacity charged to the tree OWNER (owner-pays, §17); rate is PER-MEMBER so one
+    // abusive member can't drain a shared bucket and DoS the owner + co-members. Only a genuinely new
+    // append is metered (re-deliveries returned above, so a retrying client is never metered).
     //
-    // (1) Abuse rate: a per-account token bucket, refilled continuously and drained one
-    // token per append, in a single atomic UPDATE. The WHERE guard re-derives the
-    // refilled balance so the check and the debit can't race. 0 rows → over rate.
-    let rated = sqlx::query(
-        "UPDATE accounts
-            SET log_tokens = LEAST(log_burst::float8,
-                                   log_tokens + EXTRACT(EPOCH FROM (now() - log_refilled_at)) * log_rate) - 1,
-                log_refilled_at = now()
-          WHERE id = $1
-            AND LEAST(log_burst::float8,
-                      log_tokens + EXTRACT(EPOCH FROM (now() - log_refilled_at)) * log_rate) >= 1",
+    // (1a) Per-member abuse rate: a token bucket keyed (tree, member), refilled at the OWNER's plan rate
+    // (owner-pays sets the budget; the member holds the state). Lazily created full on first append. The
+    // WHERE guard on the UPDATE branch re-derives the balance so check and debit can't race; 0 rows → over.
+    let (m_rate, m_burst): (f64, i32) =
+        sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?;
+    let member_ok = sqlx::query(
+        "INSERT INTO member_rate (tree_id, member_id, tokens, refilled_at)
+         VALUES ($1, $2, $3::float8 - 1, now())
+         ON CONFLICT (tree_id, member_id) DO UPDATE
+           SET tokens = LEAST($3::float8, member_rate.tokens
+                              + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) - 1,
+               refilled_at = now()
+           WHERE LEAST($3::float8, member_rate.tokens
+                       + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) >= 1",
     )
-    .bind(owner)
+    .bind(tree_id)
+    .bind(identity.member_id)
+    .bind(m_burst)
+    .bind(m_rate)
     .execute(&mut *tx)
     .await
     .map_err(internal)?;
-    if rated.rows_affected() != 1 {
-        // Roll back (drop tx) so nothing is charged, and hint how long to back off.
-        let rate: f64 = sqlx::query_scalar("SELECT log_rate FROM accounts WHERE id = $1")
-            .bind(owner)
-            .fetch_one(&state.db)
-            .await
-            .map_err(internal)?;
-        let retry = if rate > 0.0 { (1.0 / rate).ceil() as u64 } else { 60 };
-        tracing::info!(event = "rate_rejected", resource = "log", %tree_id, %owner);
+    if member_ok.rows_affected() != 1 {
+        let retry = if m_rate > 0.0 { (1.0 / m_rate).ceil() as u64 } else { 60 };
+        tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %identity.member_id);
         return Err(ApiError::TooManyRequests(retry.max(1)));
     }
+
+    // (A coarse per-account backstop against *coordinated* multi-member bursts is a follow-up — it needs
+    // its own burst budget with headroom above one member's, not the shared log_burst the per-member
+    // bucket already uses. The per-member bucket above is the substantive abuse isolation.)
 
     // (2) Byte capacity: the tree-byte meter (§17), an axis independent of the media
     // pool. Charge the delta's size; 0 rows → the tree reserve is full.

@@ -263,7 +263,7 @@ async fn cas_update(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, caller, Access::Write).await?;
+    crate::authz::authorize(&state.db, tree_id, owner, caller, Access::Commit).await?;
 
     let res = sqlx::query(
         "UPDATE trees

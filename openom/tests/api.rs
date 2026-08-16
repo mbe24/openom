@@ -175,6 +175,50 @@ async fn set_proposal_meters(db: &sqlx::PgPool, id: Uuid, max_bytes: i64, max_op
     .expect("set proposal meters");
 }
 
+/// Grant (or change) a member's role on a tree — stands in for slice 2's keyring-derived ACL.
+/// Roles: 1 owner, 2 co_owner, 3 maintainer, 4 editor, 5 viewer.
+async fn grant_role(db: &sqlx::PgPool, tree_id: Uuid, member: Uuid, role: i16) {
+    sqlx::query(
+        "INSERT INTO tree_access (tree_id, member_id, role) VALUES ($1, $2, $3)
+         ON CONFLICT (tree_id, member_id) DO UPDATE SET role = EXCLUDED.role",
+    )
+    .bind(tree_id)
+    .bind(member)
+    .bind(role)
+    .execute(db)
+    .await
+    .expect("grant role");
+}
+
+/// Turn on media entitlements for an account (so a StageMedia authz PASS isn't masked by an
+/// entitlement 403).
+async fn enable_media(db: &sqlx::PgPool, id: Uuid) {
+    sqlx::query(
+        "UPDATE accounts SET allow_media = true, max_blob_bytes = 1048576,
+             max_blob_count = 100, max_storage_bytes = 104857600 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(db)
+    .await
+    .expect("enable media");
+}
+
+/// A JSON media-intent body with a well-formed (base64 32-byte) object hash.
+fn intent_body() -> Value {
+    let hash = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+    serde_json::json!({ "size_bytes": 100, "object_sha256": hash })
+}
+
+fn post_json_as(uri: String, json: Value, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::from(json.to_string()))
+        .unwrap()
+}
+
 /// A DELETE authenticated as a specific member.
 fn delete_as(uri: String, member: Uuid) -> Request<Body> {
     Request::builder()
@@ -352,6 +396,97 @@ async fn cross_owner_access_forbidden() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot append");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn roles_read_propose_commit() {
+    // The core role matrix: Read = Viewer+, Propose = Editor+, Commit (append) = Maintainer+.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let viewer = Uuid::new_v4();
+    let editor = Uuid::new_v4();
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, viewer, 5).await;
+    grant_role(&db, tree, editor, 4).await;
+    grant_role(&db, tree, maint, 3).await;
+
+    // Read — every member role can read snapshot, log, and proposals.
+    for m in [viewer, editor, maint] {
+        assert_eq!(send(&app, get_as(format!("/trees/{tree}"), m)).await.0, StatusCode::OK, "read snapshot");
+        assert_eq!(send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m)).await.0, StatusCode::OK, "read log");
+        assert_eq!(send(&app, get_as(format!("/trees/{tree}/proposals"), m)).await.0, StatusCode::OK, "read proposals");
+    }
+
+    // Propose — Editor+ yes, Viewer no.
+    let prop = proposal_envelope(tree, b"suggestion");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't propose");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)).await.0, StatusCode::OK, "editor proposes");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, maint)).await.0, StatusCode::OK, "maintainer proposes");
+
+    // Commit (append a delta) — Maintainer+ yes, Editor + Viewer no.
+    let d = |r: &'static [u8]| delta_envelope(tree, b"x", r, 0);
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-viewer00"), viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't commit");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-editor00"), editor)).await.0, StatusCode::FORBIDDEN, "editor can't commit (V1 propose/approve)");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-maint000"), maint)).await.0, StatusCode::OK, "maintainer commits");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn roles_media() {
+    // Media split: upload (StageMedia) = Editor+, attach (Commit) = Maintainer+.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    enable_media(&db, owner).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let viewer = Uuid::new_v4();
+    let editor = Uuid::new_v4();
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, viewer, 5).await;
+    grant_role(&db, tree, editor, 4).await;
+    grant_role(&db, tree, maint, 3).await;
+
+    // Upload (intent) — Editor+ passes authz (media enabled, so a pass isn't masked); Viewer 403.
+    assert_eq!(send(&app, post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't upload");
+    assert_eq!(send(&app, post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), editor)).await.0, StatusCode::OK, "editor uploads");
+
+    // Attach = Commit. Insert a live blob directly (no MinIO round-trip needed to test the gate).
+    let blob = Uuid::new_v4();
+    sqlx::query("INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state, ref_count) VALUES ($1,$2,$3,10,1,0)")
+        .bind(tree).bind(blob.as_bytes().as_slice()).bind(format!("k/{blob}"))
+        .execute(&db).await.unwrap();
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], editor)).await.0, StatusCode::FORBIDDEN, "editor can't attach (commit-adjacent)");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], maint)).await.0, StatusCode::OK, "maintainer attaches");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn per_member_rate_isolation() {
+    // One member exhausting their rate bucket must NOT throttle the owner (or co-members).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 0.001, 1).await; // burst 1, negligible refill
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, maint, 3).await;
+
+    // The maintainer spends their single token, then is throttled.
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"m0", b"replica-maint000", 0), maint)).await.0, StatusCode::OK, "maintainer's first append");
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"m1", b"replica-maint000", 1), maint)).await.0, StatusCode::TOO_MANY_REQUESTS, "maintainer throttled");
+    // The owner has their OWN bucket — unaffected by the maintainer draining theirs.
+    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"o0", b"replica-owner000", 0), owner)).await.0, StatusCode::OK, "owner not throttled by the maintainer");
 }
 
 #[tokio::test]

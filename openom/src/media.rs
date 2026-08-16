@@ -80,7 +80,7 @@ pub async fn intent(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::StageMedia).await?;
 
     // Atomic entitlement gate + reservation (the cas_create pattern, §9.9): media
     // allowed, blob ≤ per-blob cap, pool + count have room. Reserved at intent so
@@ -107,13 +107,14 @@ pub async fn intent(
     let blob = Uuid::new_v4();
     let staging = staging_key(tree_id, blob);
     if let Err(e) = sqlx::query(
-        "INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state)
-         VALUES ($1, $2, $3, $4, 0)",
+        "INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state, uploaded_by)
+         VALUES ($1, $2, $3, $4, 0, $5)",
     )
     .bind(tree_id)
     .bind(blob.as_bytes().as_slice())
     .bind(&staging)
     .bind(req.size_bytes)
+    .bind(identity.member_id)
     .execute(&state.db)
     .await
     {
@@ -154,7 +155,7 @@ pub async fn confirm(
     .await
     .map_err(internal)?;
     let (owner, key, declared, statev) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::StageMedia).await?;
     if statev == 1 {
         // Already confirmed — idempotent success (clients retry).
         return Ok(live_response(blob_id, declared));
@@ -319,7 +320,8 @@ async fn load_for_ref(
     .await
     .map_err(internal)?;
     let (owner, statev) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
+    // attach/detach mutate the refcount, which tracks the tree doc's actual references — a commit.
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
     if statev == 0 {
         return Err(ApiError::Conflict); // pending — confirm before attaching
     }
