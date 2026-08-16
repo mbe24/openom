@@ -42,6 +42,11 @@ pub struct Config {
     pub s3_secret_key: String,
     /// Supabase JWT secret (HS256). Required in production, unused locally.
     pub jwt_secret: Option<String>,
+    /// Expected JWT `aud` claim. `Some` → the token's audience must match (hardening);
+    /// `None` → the audience check is skipped. Defaults to Supabase's `"authenticated"`
+    /// in production and off locally; `SUPABASE_JWT_AUD` overrides, and an explicit empty
+    /// value opts out (for a deployment whose tokens carry a non-standard audience).
+    pub jwt_audience: Option<String>,
     /// The account fake-auth maps anonymous local requests to.
     pub local_member_id: Uuid,
 
@@ -78,6 +83,12 @@ impl Config {
             s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),
             s3_secret_key: env::var("S3_SECRET_KEY").unwrap_or_else(|_| "openompw123".into()),
             jwt_secret: env::var("SUPABASE_JWT_SECRET").ok(),
+            jwt_audience: match env::var("SUPABASE_JWT_AUD") {
+                Ok(v) if v.trim().is_empty() => None, // explicit opt-out
+                Ok(v) => Some(v),
+                Err(_) if run_mode == RunMode::Production => Some("authenticated".into()),
+                Err(_) => None,
+            },
             local_member_id: env::var("OPENOM_LOCAL_MEMBER_ID")
                 .ok()
                 .and_then(|s| Uuid::parse_str(&s).ok())

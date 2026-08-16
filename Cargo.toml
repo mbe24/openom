@@ -61,7 +61,10 @@ tower-http = { version = "0.6", features = ["trace"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "migrate", "macros"] }
 
 # Auth: Supabase JWTs validated in-memory (HS256); uuid for account/tree ids.
-jsonwebtoken = "11"
+# Pure-Rust HMAC backend, not the aws-lc-rs default — HS256 needs no process-level
+# rustls CryptoProvider (which the default would panic without at first decode), and
+# it avoids a cmake/C build in the container.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Crypto: the same primitives on client and server.
