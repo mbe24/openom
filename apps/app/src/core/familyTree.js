@@ -160,8 +160,11 @@ export class FamilyTree {
   #buildFamily(fidHex) {
     const e = this.#engine;
     const b = bytes(fidHex);
-    const spouses = e.spouses(b);
-    const childLinks = e.children(b).map((c) => ({ id: c.person, pedi: c.pedi }));
+    // Filter out members whose person no longer exists (a dangling link left by a concurrent
+    // delete-vs-link on another replica). people is materialized before families, so this is the one
+    // place that keeps every consumer — raw counts + the query/graph layer included — free of ghosts.
+    const spouses = e.spouses(b).filter((s) => this.people.has(s));
+    const childLinks = e.children(b).filter((c) => this.people.has(c.person)).map((c) => ({ id: c.person, pedi: c.pedi }));
     const facts = {};
     const marriage = this.#val(fidHex, 'marriage.date');
     const place = this.#val(fidHex, 'marriage.place');
@@ -717,7 +720,10 @@ export class FamilyTree {
     const prev = await this.#store.readSnapshot(this.#docId);
     const payload = e.snapshot();
     try {
-      await this.#store.putSnapshot(this.#docId, payload, prev?.version ?? null, { logCursor: this.#cursor });
+      // Snapshot→log coverage (so hydrate can skip the covered prefix) rides with the B1 log work: no
+      // caller compacts yet and the stores carry no cursor, so hydrate replays the whole log onto the
+      // snapshot — idempotent, hence correct, just not yet shrinking reload work.
+      await this.#store.putSnapshot(this.#docId, payload, prev?.version ?? null);
     } catch (err) {
       if (err?.name !== 'ConflictError') throw err;
     }
