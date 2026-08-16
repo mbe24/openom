@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::Identity;
+use crate::authz::Access;
 use crate::trees::ApiError;
 use crate::AppState;
 
@@ -114,9 +115,7 @@ pub async fn append_log(
             .await
             .map_err(internal)?;
     let (owner, next_seq) = row.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
 
     // Idempotent re-delivery: the dot is already present → return its seq, assign nothing new.
     let existing: Option<(i64,)> = sqlx::query_as(
@@ -252,9 +251,7 @@ pub async fn get_log(
             .await
             .map_err(internal)?;
     let (owner, next_seq) = meta.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
     let oldest: Option<i64> = sqlx::query_scalar("SELECT MIN(seq) FROM tree_log WHERE tree_id = $1")
         .bind(tree_id)

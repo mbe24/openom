@@ -160,6 +160,13 @@ fn put_tree(tree: Uuid, env: &[u8], if_match: Option<&str>) -> Request<Body> {
 fn get(uri: String) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
 }
+fn get_as(uri: String, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::empty())
+        .unwrap()
+}
 fn post(uri: String) -> Request<Body> {
     Request::builder().method("POST").uri(uri).body(Body::empty()).unwrap()
 }
@@ -263,6 +270,38 @@ async fn delta_log_lifecycle() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "append to unknown tree");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn cross_owner_access_forbidden() {
+    // The single-owner boundary the authz seam enforces: a member who doesn't own a
+    // tree gets 403 on every access. This is exactly the predicate B3 will widen to
+    // role-based, so it doubles as a regression anchor for that change.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let other = Uuid::new_v4(); // a different member; needn't even have an account
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+
+    let tree = Uuid::new_v4();
+    let (s, _, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    assert_eq!(s, StatusCode::OK, "owner creates the tree");
+    // Owner seeds one delta so the log read path has something to guard.
+    let ra = b"replica-owner000".to_vec();
+    send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), owner)).await;
+
+    // A non-owner is refused on read snapshot, read log, and append.
+    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}"), other)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the snapshot");
+    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/log?since=-1"), other)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the log");
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"x", b"replica-other000", 0), other),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot append");
 }
 
 #[tokio::test]

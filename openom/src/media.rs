@@ -21,6 +21,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::Identity;
+use crate::authz::Access;
 use crate::trees::ApiError;
 use crate::AppState;
 
@@ -79,9 +80,7 @@ pub async fn intent(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
 
     // Atomic entitlement gate + reservation (the cas_create pattern, §9.9): media
     // allowed, blob ≤ per-blob cap, pool + count have room. Reserved at intent so
@@ -155,9 +154,7 @@ pub async fn confirm(
     .await
     .map_err(internal)?;
     let (owner, key, declared, statev) = row.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
     if statev == 1 {
         // Already confirmed — idempotent success (clients retry).
         return Ok(live_response(blob_id, declared));
@@ -227,9 +224,7 @@ pub async fn get_media(
     .await
     .map_err(internal)?;
     let (owner, key, statev) = row.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
     if statev != 1 {
         return Err(ApiError::NotFound); // only live blobs are downloadable
     }
@@ -324,9 +319,7 @@ async fn load_for_ref(
     .await
     .map_err(internal)?;
     let (owner, statev) = row.ok_or(ApiError::NotFound)?;
-    if owner != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Write).await?;
     if statev == 0 {
         return Err(ApiError::Conflict); // pending — confirm before attaching
     }

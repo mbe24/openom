@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::Identity;
+use crate::authz::Access;
 use crate::AppState;
 
 /// Per-object ceiling. The Lambda proxy path tops out around 6 MB (§9.9); tree
@@ -147,9 +148,7 @@ pub async fn get_tree(
             .map_err(internal)?;
 
     let (owner_id, r2_key, version) = row.ok_or(ApiError::NotFound)?;
-    if owner_id != identity.member_id {
-        return Err(ApiError::Forbidden);
-    }
+    crate::authz::authorize(&state.db, tree_id, owner_id, identity.member_id, Access::Read).await?;
     let version = version.ok_or(ApiError::NotFound)?; // row exists but no snapshot yet
 
     let bytes = state
