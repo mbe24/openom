@@ -280,27 +280,91 @@ fn a_long_offline_replica_catches_up_in_one_delta() {
 fn mref(i: u8) -> MediaRef {
     vec![0xA0 | i]
 }
+fn lnk(i: u8) -> MediaLinkId {
+    vec![0xB0 | i]
+}
 
 #[test]
-fn media_attaches_detaches_without_resurrection() {
+fn media_links_attach_detach_without_resurrection() {
     let mut a = Tree::new(rid(1));
     let mut b = Tree::new(rid(2));
     a.apply(TreeOp::AddPerson { id: pid(1) });
-    let m1 = a.apply(TreeOp::AttachMedia { subject: pid(1), media: mref(0) });
-    a.apply(TreeOp::AttachMedia { subject: pid(1), media: mref(1) });
-    a.apply(TreeOp::DetachMedia { subject: pid(1), media: mref(0) });
-    assert_eq!(a.media_of(&pid(1)), vec![mref(1)]);
+    a.apply(TreeOp::AddMediaRecord { media: mref(0) });
+    // Two links point at the SAME record; detaching one link leaves the other (and the record).
+    let l0 = a.apply(TreeOp::AddMediaLink { subject: pid(1), link: lnk(0), media: mref(0) });
+    a.apply(TreeOp::AddMediaLink { subject: pid(1), link: lnk(1), media: mref(0) });
+    a.apply(TreeOp::RemoveMediaLink { subject: pid(1), link: lnk(0) });
+    assert_eq!(a.media_of(&pid(1)), vec![(lnk(1), mref(0))]);
+    assert_eq!(a.media_records(), vec![mref(0)]);
 
-    // A stale re-attach of the detached blob (delivered late to another replica) must not resurrect.
-    for o in &m1 {
+    // A stale re-delivery of the detached link (arriving late at another replica) must not resurrect.
+    for o in &l0 {
         b.doc_mut().merge_op(o);
     }
-    for o in a.apply(TreeOp::AddPerson { id: pid(2) }).iter() {
-        let _ = o;
-    }
-    // Bring b fully up to date, then confirm the detached blob stays gone.
     b.doc_mut().merge_bytes(&a.doc().snapshot()).unwrap();
-    assert_eq!(b.media_of(&pid(1)), vec![mref(1)]);
+    assert_eq!(b.media_of(&pid(1)), vec![(lnk(1), mref(0))]);
+    assert_eq!(a.doc().snapshot(), b.doc().snapshot());
+}
+
+#[test]
+fn sub_entities_round_trip_names_events_sources_cites() {
+    // A person with two names (a primary + an aka), two events, and a cited source — the structure a
+    // flattened per-person projection would collapse.
+    let mut t = Tree::new(rid(1));
+    let p = pid(1);
+    t.apply(TreeOp::AddPerson { id: p.clone() });
+    let (n1, n2) = (vec![0x10], vec![0x11]);
+    let (e1, e2) = (vec![0x20], vec![0x21]);
+    let s1 = vec![0x30];
+    let leaf = |t: &mut Tree, subj: &[u8], field: &str, c: u8, v: &str| {
+        t.apply(TreeOp::AddClaim { subject: subj.to_vec(), field: field.into(), claim: cid(c), value: v.into(), source: None });
+    };
+    t.apply(TreeOp::AddName { subject: p.clone(), name: n1.clone() });
+    leaf(&mut t, &n1, "given", 1, "Johann Sebastian");
+    leaf(&mut t, &n1, "family", 2, "Bach");
+    t.apply(TreeOp::AddName { subject: p.clone(), name: n2.clone() });
+    leaf(&mut t, &n2, "given", 3, "J. S.");
+    t.apply(TreeOp::SetPrimaryName { subject: p.clone(), name: n1.clone() });
+    t.apply(TreeOp::AddEvent { subject: p.clone(), event: e1.clone() });
+    leaf(&mut t, &e1, "type", 4, "birth");
+    leaf(&mut t, &e1, "date", 5, "1685");
+    t.apply(TreeOp::AddEvent { subject: p.clone(), event: e2.clone() });
+    leaf(&mut t, &e2, "type", 6, "death");
+    t.apply(TreeOp::AddSource { source: s1.clone() });
+    leaf(&mut t, &s1, "title", 7, "Taufregister");
+    t.apply(TreeOp::Cite { subject: p.clone(), field: "birth.date".into(), source: s1.clone(), claim: Some(cid(5)) });
+
+    assert_eq!(t.names_of(&p).len(), 2);
+    assert_eq!(t.primary_name(&p), Some(n1.clone()));
+    assert_eq!(t.fact(&n1, "given").preferred.unwrap().value, "Johann Sebastian");
+    assert_eq!(t.events_of(&p).len(), 2);
+    assert_eq!(t.sources(), vec![s1.clone()]);
+    assert_eq!(t.cites_of(&p, "birth.date"), vec![(s1.clone(), Some(cid(5)))]);
+
+    // Primary-name fallback: remove the pointed-at name → falls back to the greatest live name id.
+    t.apply(TreeOp::RemoveName { subject: p.clone(), name: n1.clone() });
+    assert_eq!(t.primary_name(&p), Some(n2), "fell back to the remaining live name");
+}
+
+#[test]
+fn concurrent_sub_entity_edits_converge() {
+    // A adds a name to a person; B concurrently adds an event to the same person. Both survive.
+    let mut a = Tree::new(rid(1));
+    let mut b = Tree::new(rid(2));
+    let add = a.apply(TreeOp::AddPerson { id: pid(1) });
+    for o in &add {
+        b.doc_mut().merge_op(o);
+    }
+    let na = a.apply(TreeOp::AddName { subject: pid(1), name: vec![0x10] });
+    let eb = b.apply(TreeOp::AddEvent { subject: pid(1), event: vec![0x20] });
+    for o in &eb {
+        a.doc_mut().merge_op(o);
+    }
+    for o in &na {
+        b.doc_mut().merge_op(o);
+    }
+    assert_eq!(a.names_of(&pid(1)), vec![vec![0x10]]);
+    assert_eq!(a.events_of(&pid(1)), vec![vec![0x20]]);
     assert_eq!(a.doc().snapshot(), b.doc().snapshot());
 }
 
@@ -444,8 +508,16 @@ fn treeop_strat() -> impl Strategy<Value = TreeOp> {
         (0u8..2, 0u8..2, 0u8..3, 0u8..3).prop_map(|(f1, f2, p, pe)| TreeOp::MoveChild { person: pid(p), from: fid(f1), to: fid(f2), pedi: pedi_of(pe) }),
         (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::LinkSpouse { family: fid(x), person: pid(p) }),
         (0u8..2, 0u8..3).prop_map(|(x, p)| TreeOp::UnlinkSpouse { family: fid(x), person: pid(p) }),
-        (0u8..3, 0u8..2).prop_map(|(p, m)| TreeOp::AttachMedia { subject: pid(p), media: vec![0xA0 | m] }),
-        (0u8..3, 0u8..2).prop_map(|(p, m)| TreeOp::DetachMedia { subject: pid(p), media: vec![0xA0 | m] }),
+        (0u8..3, 0u8..2).prop_map(|(p, n)| TreeOp::AddName { subject: pid(p), name: vec![0x10 | n] }),
+        (0u8..3, 0u8..2).prop_map(|(p, n)| TreeOp::RemoveName { subject: pid(p), name: vec![0x10 | n] }),
+        (0u8..3, 0u8..2).prop_map(|(p, n)| TreeOp::SetPrimaryName { subject: pid(p), name: vec![0x10 | n] }),
+        (0u8..3, 0u8..2).prop_map(|(p, e)| TreeOp::AddEvent { subject: pid(p), event: vec![0x20 | e] }),
+        (0u8..3, 0u8..2).prop_map(|(p, e)| TreeOp::RemoveEvent { subject: pid(p), event: vec![0x20 | e] }),
+        (0u8..2).prop_map(|s| TreeOp::AddSource { source: vec![0x30 | s] }),
+        (0u8..3, 0u8..2, 0u8..2).prop_map(|(p, f, s)| TreeOp::Cite { subject: pid(p), field: field_of(f), source: vec![0x30 | s], claim: None }),
+        (0u8..2).prop_map(|m| TreeOp::AddMediaRecord { media: vec![0xA0 | m] }),
+        (0u8..3, 0u8..2, 0u8..2).prop_map(|(p, l, m)| TreeOp::AddMediaLink { subject: pid(p), link: vec![0xB0 | l], media: vec![0xA0 | m] }),
+        (0u8..3, 0u8..2).prop_map(|(p, l)| TreeOp::RemoveMediaLink { subject: pid(p), link: vec![0xB0 | l] }),
     ]
 }
 

@@ -38,6 +38,16 @@ fn put_opt(o: &mut Vec<u8>, s: &Option<String>) {
     }
 }
 
+fn put_opt_bytes(o: &mut Vec<u8>, b: &Option<Vec<u8>>) {
+    match b {
+        Some(x) => {
+            o.push(1);
+            put_bytes(o, x);
+        }
+        None => o.push(0),
+    }
+}
+
 fn put_op(o: &mut Vec<u8>, op: &TreeOp) {
     match op {
         TreeOp::AddPerson { id } => {
@@ -104,15 +114,71 @@ fn put_op(o: &mut Vec<u8>, op: &TreeOp) {
             put_bytes(o, family);
             put_bytes(o, person);
         }
-        TreeOp::AttachMedia { subject, media } => {
-            o.push(12);
+        // Tags 12/13 (the retired AttachMedia/DetachMedia) are permanently reserved — never re-used.
+        TreeOp::AddName { subject, name } => {
+            o.push(14);
             put_bytes(o, subject);
+            put_bytes(o, name);
+        }
+        TreeOp::RemoveName { subject, name } => {
+            o.push(15);
+            put_bytes(o, subject);
+            put_bytes(o, name);
+        }
+        TreeOp::SetPrimaryName { subject, name } => {
+            o.push(16);
+            put_bytes(o, subject);
+            put_bytes(o, name);
+        }
+        TreeOp::AddEvent { subject, event } => {
+            o.push(17);
+            put_bytes(o, subject);
+            put_bytes(o, event);
+        }
+        TreeOp::RemoveEvent { subject, event } => {
+            o.push(18);
+            put_bytes(o, subject);
+            put_bytes(o, event);
+        }
+        TreeOp::AddSource { source } => {
+            o.push(19);
+            put_bytes(o, source);
+        }
+        TreeOp::RemoveSource { source } => {
+            o.push(20);
+            put_bytes(o, source);
+        }
+        TreeOp::Cite { subject, field, source, claim } => {
+            o.push(21);
+            put_bytes(o, subject);
+            put_bytes(o, field.as_bytes());
+            put_bytes(o, source);
+            put_opt_bytes(o, claim);
+        }
+        TreeOp::Uncite { subject, field, source } => {
+            o.push(22);
+            put_bytes(o, subject);
+            put_bytes(o, field.as_bytes());
+            put_bytes(o, source);
+        }
+        TreeOp::AddMediaRecord { media } => {
+            o.push(23);
             put_bytes(o, media);
         }
-        TreeOp::DetachMedia { subject, media } => {
-            o.push(13);
-            put_bytes(o, subject);
+        TreeOp::RemoveMediaRecord { media } => {
+            o.push(24);
             put_bytes(o, media);
+        }
+        TreeOp::AddMediaLink { subject, link, media } => {
+            o.push(25);
+            put_bytes(o, subject);
+            put_bytes(o, link);
+            put_bytes(o, media);
+        }
+        TreeOp::RemoveMediaLink { subject, link } => {
+            o.push(26);
+            put_bytes(o, subject);
+            put_bytes(o, link);
         }
     }
 }
@@ -176,6 +242,13 @@ impl<'a> R<'a> {
             _ => Err(ProposalError::BadTag),
         }
     }
+    fn opt_bytes(&mut self) -> Result<Option<Vec<u8>>, ProposalError> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.bytes()?)),
+            _ => Err(ProposalError::BadTag),
+        }
+    }
     fn replica(&mut self) -> Result<ReplicaId, ProposalError> {
         Ok(self.take(16)?.try_into().expect("16"))
     }
@@ -196,8 +269,20 @@ impl<'a> R<'a> {
             9 => TreeOp::MoveChild { person: self.bytes()?, from: self.bytes()?, to: self.bytes()?, pedi: self.pedi()? },
             10 => TreeOp::LinkSpouse { family: self.bytes()?, person: self.bytes()? },
             11 => TreeOp::UnlinkSpouse { family: self.bytes()?, person: self.bytes()? },
-            12 => TreeOp::AttachMedia { subject: self.bytes()?, media: self.bytes()? },
-            13 => TreeOp::DetachMedia { subject: self.bytes()?, media: self.bytes()? },
+            // 12/13 = retired AttachMedia/DetachMedia — reserved, decode as BadTag.
+            14 => TreeOp::AddName { subject: self.bytes()?, name: self.bytes()? },
+            15 => TreeOp::RemoveName { subject: self.bytes()?, name: self.bytes()? },
+            16 => TreeOp::SetPrimaryName { subject: self.bytes()?, name: self.bytes()? },
+            17 => TreeOp::AddEvent { subject: self.bytes()?, event: self.bytes()? },
+            18 => TreeOp::RemoveEvent { subject: self.bytes()?, event: self.bytes()? },
+            19 => TreeOp::AddSource { source: self.bytes()? },
+            20 => TreeOp::RemoveSource { source: self.bytes()? },
+            21 => TreeOp::Cite { subject: self.bytes()?, field: self.string()?, source: self.bytes()?, claim: self.opt_bytes()? },
+            22 => TreeOp::Uncite { subject: self.bytes()?, field: self.string()?, source: self.bytes()? },
+            23 => TreeOp::AddMediaRecord { media: self.bytes()? },
+            24 => TreeOp::RemoveMediaRecord { media: self.bytes()? },
+            25 => TreeOp::AddMediaLink { subject: self.bytes()?, link: self.bytes()?, media: self.bytes()? },
+            26 => TreeOp::RemoveMediaLink { subject: self.bytes()?, link: self.bytes()? },
             _ => return Err(ProposalError::BadTag),
         })
     }

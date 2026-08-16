@@ -64,6 +64,16 @@ struct ChildView {
     person: String,
     pedi: String,
 }
+#[derive(serde::Serialize)]
+struct MediaLinkView {
+    link: String,
+    media: String,
+}
+#[derive(serde::Serialize)]
+struct CiteView {
+    source: String,
+    claim: Option<String>,
+}
 
 fn claim_view(c: &crate::Claim) -> ClaimView {
     ClaimView { id: hex(&c.id), value: c.value.clone(), source: c.source.clone() }
@@ -142,13 +152,57 @@ impl WasmTree {
     pub fn unlink_spouse(&mut self, family: &[u8], person: &[u8]) -> Vec<u8> {
         encode_ops(&self.inner.apply(TreeOp::UnlinkSpouse { family: family.to_vec(), person: person.to_vec() }))
     }
-    #[wasm_bindgen(js_name = attachMedia)]
-    pub fn attach_media(&mut self, subject: &[u8], media: &[u8]) -> Vec<u8> {
-        encode_ops(&self.inner.apply(TreeOp::AttachMedia { subject: subject.to_vec(), media: media.to_vec() }))
+    #[wasm_bindgen(js_name = addName)]
+    pub fn add_name(&mut self, subject: &[u8], name: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AddName { subject: subject.to_vec(), name: name.to_vec() }))
     }
-    #[wasm_bindgen(js_name = detachMedia)]
-    pub fn detach_media(&mut self, subject: &[u8], media: &[u8]) -> Vec<u8> {
-        encode_ops(&self.inner.apply(TreeOp::DetachMedia { subject: subject.to_vec(), media: media.to_vec() }))
+    #[wasm_bindgen(js_name = removeName)]
+    pub fn remove_name(&mut self, subject: &[u8], name: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RemoveName { subject: subject.to_vec(), name: name.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = setPrimaryName)]
+    pub fn set_primary_name(&mut self, subject: &[u8], name: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::SetPrimaryName { subject: subject.to_vec(), name: name.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = addEvent)]
+    pub fn add_event(&mut self, subject: &[u8], event: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AddEvent { subject: subject.to_vec(), event: event.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = removeEvent)]
+    pub fn remove_event(&mut self, subject: &[u8], event: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RemoveEvent { subject: subject.to_vec(), event: event.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = addSource)]
+    pub fn add_source(&mut self, source: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AddSource { source: source.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = removeSource)]
+    pub fn remove_source(&mut self, source: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RemoveSource { source: source.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = cite)]
+    pub fn cite(&mut self, subject: &[u8], field: &str, source: &[u8], claim: Option<Vec<u8>>) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::Cite { subject: subject.to_vec(), field: field.to_string(), source: source.to_vec(), claim }))
+    }
+    #[wasm_bindgen(js_name = uncite)]
+    pub fn uncite(&mut self, subject: &[u8], field: &str, source: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::Uncite { subject: subject.to_vec(), field: field.to_string(), source: source.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = addMediaRecord)]
+    pub fn add_media_record(&mut self, media: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AddMediaRecord { media: media.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = removeMediaRecord)]
+    pub fn remove_media_record(&mut self, media: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RemoveMediaRecord { media: media.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = addMediaLink)]
+    pub fn add_media_link(&mut self, subject: &[u8], link: &[u8], media: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::AddMediaLink { subject: subject.to_vec(), link: link.to_vec(), media: media.to_vec() }))
+    }
+    #[wasm_bindgen(js_name = removeMediaLink)]
+    pub fn remove_media_link(&mut self, subject: &[u8], link: &[u8]) -> Vec<u8> {
+        encode_ops(&self.inner.apply(TreeOp::RemoveMediaLink { subject: subject.to_vec(), link: link.to_vec() }))
     }
 
     // ---- sync ----
@@ -196,9 +250,46 @@ impl WasmTree {
         let ids: Vec<String> = self.inner.spouses_of(family).iter().map(|s| hex(s)).collect();
         serde_json::to_string(&ids).expect("serialize spouses")
     }
-    /// A subject's attached media (refs) as a JSON array of hex strings.
+    /// A subject's media links as JSON `[{link, media}]` (link id + the media-record id it points at).
     pub fn media(&self, subject: &[u8]) -> String {
-        let ids: Vec<String> = self.inner.media_of(subject).iter().map(|m| hex(m)).collect();
-        serde_json::to_string(&ids).expect("serialize media")
+        let links: Vec<MediaLinkView> =
+            self.inner.media_of(subject).into_iter().map(|(l, m)| MediaLinkView { link: hex(&l), media: hex(&m) }).collect();
+        serde_json::to_string(&links).expect("serialize media")
+    }
+    /// The doc-level media-record ids as a JSON array of hex strings.
+    #[wasm_bindgen(js_name = mediaRecords)]
+    pub fn media_records(&self) -> String {
+        let ids: Vec<String> = self.inner.media_records().iter().map(|m| hex(m)).collect();
+        serde_json::to_string(&ids).expect("serialize media records")
+    }
+    /// A subject's name-entity ids as a JSON array of hex strings.
+    pub fn names(&self, subject: &[u8]) -> String {
+        let ids: Vec<String> = self.inner.names_of(subject).iter().map(|n| hex(n)).collect();
+        serde_json::to_string(&ids).expect("serialize names")
+    }
+    /// A subject's preferred (display) name-entity id as a hex string, or `null`.
+    #[wasm_bindgen(js_name = primaryName)]
+    pub fn primary_name(&self, subject: &[u8]) -> Option<String> {
+        self.inner.primary_name(subject).map(|n| hex(&n))
+    }
+    /// A subject's event-entity ids as a JSON array of hex strings.
+    pub fn events(&self, subject: &[u8]) -> String {
+        let ids: Vec<String> = self.inner.events_of(subject).iter().map(|e| hex(e)).collect();
+        serde_json::to_string(&ids).expect("serialize events")
+    }
+    /// The doc-level source-record ids as a JSON array of hex strings.
+    pub fn sources(&self) -> String {
+        let ids: Vec<String> = self.inner.sources().iter().map(|s| hex(s)).collect();
+        serde_json::to_string(&ids).expect("serialize sources")
+    }
+    /// The sources citing a fact as JSON `[{source, claim}]` (claim = the supported claim id or null).
+    pub fn cites(&self, subject: &[u8], field: &str) -> String {
+        let cites: Vec<CiteView> = self
+            .inner
+            .cites_of(subject, field)
+            .into_iter()
+            .map(|(s, c)| CiteView { source: hex(&s), claim: c.map(|c| hex(&c)) })
+            .collect();
+        serde_json::to_string(&cites).expect("serialize cites")
     }
 }

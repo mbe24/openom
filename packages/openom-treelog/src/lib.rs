@@ -44,6 +44,15 @@ pub type SubjectId = Vec<u8>;
 /// An opaque reference to an encrypted media blob (its remote id / ciphertext hash) — the merge key
 /// for one attachment.
 pub type MediaRef = Vec<u8>;
+/// A caller-minted name-entity id (a person's name, with its own leaf facts: given/family/type/…).
+pub type NameId = Vec<u8>;
+/// A caller-minted event-entity id (a life event, with leaf facts: type/date/place).
+pub type EventId = Vec<u8>;
+/// A caller-minted source-record id (a citation source, with leaf facts: title/detail).
+pub type SourceId = Vec<u8>;
+/// A caller-minted media-link id (one attachment of a media record to a subject, with leaf facts:
+/// role/order/caption/crop). Its OR-set element value is the media-record id it points at.
+pub type MediaLinkId = Vec<u8>;
 
 /// How a child belongs to a family. A child can legitimately belong to more than one family (a birth
 /// family and an adoptive one), so this is per child-link, not per person.
@@ -78,14 +87,25 @@ impl Pedigree {
     }
 }
 
-// Cell-kind tags — the first byte of every [`CellId`], keeping the address spaces disjoint.
+// Cell-kind tags — the first byte of every [`CellId`], keeping the address spaces disjoint. Facts
+// (2/3) are keyed by *subject*, which is any entity id — a person, a family, or a sub-entity (a name,
+// event, source, or media record/link). Sub-entities carry their own leaf facts through 2/3.
 const KIND_PERSONS: u8 = 1; // the set of live person ids
-const KIND_FACT_CLAIMS: u8 = 2; // per (person, field): the OR-set of claims
-const KIND_FACT_PREFERRED: u8 = 3; // per (person, field): the preferred-claim register
+const KIND_FACT_CLAIMS: u8 = 2; // per (subject, field): the OR-set of claims
+const KIND_FACT_PREFERRED: u8 = 3; // per (subject, field): the preferred-claim register (also name.primary)
 const KIND_FAMILIES: u8 = 4; // the set of live family ids
 const KIND_CHILDREN: u8 = 5; // per family: the OR-set of child person ids (value = pedigree)
 const KIND_SPOUSES: u8 = 6; // per family: the OR-set of spouse/partner person ids
-const KIND_MEDIA: u8 = 7; // per subject (person/family): the OR-set of attached media refs
+const KIND_MEDIA: u8 = 7; // per subject: the OR-set of media-LINK ids (value = media-record id)
+const KIND_NAMES: u8 = 8; // per subject: the OR-set of name-entity ids
+const KIND_EVENTS: u8 = 9; // per subject: the OR-set of event-entity ids
+const KIND_SOURCES: u8 = 10; // doc-level: the OR-set of source-record ids
+const KIND_CITES: u8 = 11; // per (subject, field): OR-set of source ids (value = claim id | none)
+const KIND_MEDIA_RECORDS: u8 = 12; // doc-level: the OR-set of media-record ids
+
+/// The register field holding a person's preferred (display) name-entity id — a reserved fact field
+/// on [`KIND_FACT_PREFERRED`], never a claim set, so it shares no address with a real fact.
+const FIELD_NAME_PRIMARY: &str = "name.primary";
 
 /// Build a length-prefixed, kind-tagged cell address from its parts (collision-free across kinds).
 fn cell(kind: u8, parts: &[&[u8]]) -> CellId {
@@ -114,6 +134,21 @@ fn children_cell(family: &[u8]) -> CellId {
 }
 fn spouses_cell(family: &[u8]) -> CellId {
     cell(KIND_SPOUSES, &[family])
+}
+fn names_cell(subject: &[u8]) -> CellId {
+    cell(KIND_NAMES, &[subject])
+}
+fn events_cell(subject: &[u8]) -> CellId {
+    cell(KIND_EVENTS, &[subject])
+}
+fn sources_cell() -> CellId {
+    cell(KIND_SOURCES, &[])
+}
+fn cites_cell(subject: &[u8], field: &str) -> CellId {
+    cell(KIND_CITES, &[subject, field.as_bytes()])
+}
+fn media_records_cell() -> CellId {
+    cell(KIND_MEDIA_RECORDS, &[])
 }
 fn media_cell(subject: &[u8]) -> CellId {
     cell(KIND_MEDIA, &[subject])
@@ -177,8 +212,19 @@ pub enum Change {
     ChildMoved { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
     SpouseLinked { family: FamilyId, person: PersonId },
     SpouseUnlinked { family: FamilyId, person: PersonId },
-    MediaAttached { subject: Vec<u8>, media: MediaRef },
-    MediaDetached { subject: Vec<u8>, media: MediaRef },
+    NameAdded { subject: SubjectId, name: NameId },
+    NameRemoved { subject: SubjectId, name: NameId },
+    PrimaryNameSet { subject: SubjectId, name: NameId },
+    EventAdded { subject: SubjectId, event: EventId },
+    EventRemoved { subject: SubjectId, event: EventId },
+    SourceAdded { source: SourceId },
+    SourceRemoved { source: SourceId },
+    Cited { subject: SubjectId, field: FieldKey, source: SourceId, claim: Option<ClaimId> },
+    Uncited { subject: SubjectId, field: FieldKey, source: SourceId },
+    MediaRecordAdded { media: MediaRef },
+    MediaRecordRemoved { media: MediaRef },
+    MediaLinked { subject: SubjectId, link: MediaLinkId, media: MediaRef },
+    MediaUnlinked { subject: SubjectId, link: MediaLinkId },
 }
 
 /// A fact the proposal edits that ALSO moved since the proposal's base — the approver decides
@@ -215,10 +261,34 @@ pub enum TreeOp {
     MoveChild { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
     LinkSpouse { family: FamilyId, person: PersonId },
     UnlinkSpouse { family: FamilyId, person: PersonId },
-    /// Attach a media blob to a subject (a person or a family). `DetachMedia` tombstones it, so a
-    /// re-delivered attach never resurrects a detached blob.
-    AttachMedia { subject: Vec<u8>, media: MediaRef },
-    DetachMedia { subject: Vec<u8>, media: MediaRef },
+    // ---- sub-entities: names / events (own id + leaf facts via AddClaim on that id) ----
+    /// Add a name-entity to a subject's name set. Its parts (given/family/type/…) are `AddClaim`s on
+    /// `name`. `SetPrimaryName` chooses which drives the display name.
+    AddName { subject: SubjectId, name: NameId },
+    RemoveName { subject: SubjectId, name: NameId },
+    /// Point a subject's preferred-name register at `name` (an LWW register, not a claim set — display
+    /// preference is not a competing genealogical claim).
+    SetPrimaryName { subject: SubjectId, name: NameId },
+    /// Add an event-entity to a subject's event set. Its `type`/`date`/`place` are `AddClaim`s on `event`.
+    AddEvent { subject: SubjectId, event: EventId },
+    RemoveEvent { subject: SubjectId, event: EventId },
+    // ---- sources + citations ----
+    /// Add a shared source-record (doc-level). Its `title`/`detail` are `AddClaim`s on `source`.
+    AddSource { source: SourceId },
+    RemoveSource { source: SourceId },
+    /// Cite a source for a fact. `claim` names the specific competing claim the source supports, or
+    /// `None` to cite the field generally.
+    Cite { subject: SubjectId, field: FieldKey, source: SourceId, claim: Option<ClaimId> },
+    Uncite { subject: SubjectId, field: FieldKey, source: SourceId },
+    // ---- media: shared records + per-subject links ----
+    /// Add a shared media-record (doc-level). Its `mime`/`hash`/`w`/`h`/`kind` are `AddClaim`s on `media`.
+    AddMediaRecord { media: MediaRef },
+    RemoveMediaRecord { media: MediaRef },
+    /// Attach a media-record to a subject via a link-entity (element value = the media-record id). The
+    /// link's `role`/`order`/`caption`/`crop` are `AddClaim`s on `link`. `RemoveMediaLink` tombstones
+    /// it, so a re-delivered attach never resurrects a detached link.
+    AddMediaLink { subject: SubjectId, link: MediaLinkId, media: MediaRef },
+    RemoveMediaLink { subject: SubjectId, link: MediaLinkId },
 }
 
 impl TreeOp {
@@ -257,11 +327,49 @@ impl TreeOp {
             TreeOp::UnlinkSpouse { family, person } => {
                 vec![OpIntent::RemoveElement { cell: spouses_cell(&family), elem: person }]
             }
-            TreeOp::AttachMedia { subject, media } => {
-                vec![OpIntent::AddElement { cell: media_cell(&subject), elem: media, value: Value::Null }]
+            TreeOp::AddName { subject, name } => {
+                vec![OpIntent::AddElement { cell: names_cell(&subject), elem: name, value: Value::Null }]
             }
-            TreeOp::DetachMedia { subject, media } => {
-                vec![OpIntent::RemoveElement { cell: media_cell(&subject), elem: media }]
+            TreeOp::RemoveName { subject, name } => {
+                vec![OpIntent::RemoveElement { cell: names_cell(&subject), elem: name }]
+            }
+            TreeOp::SetPrimaryName { subject, name } => {
+                vec![OpIntent::SetRegister { cell: fact_preferred_cell(&subject, FIELD_NAME_PRIMARY), value: Value::Bytes(name) }]
+            }
+            TreeOp::AddEvent { subject, event } => {
+                vec![OpIntent::AddElement { cell: events_cell(&subject), elem: event, value: Value::Null }]
+            }
+            TreeOp::RemoveEvent { subject, event } => {
+                vec![OpIntent::RemoveElement { cell: events_cell(&subject), elem: event }]
+            }
+            TreeOp::AddSource { source } => {
+                vec![OpIntent::AddElement { cell: sources_cell(), elem: source, value: Value::Null }]
+            }
+            TreeOp::RemoveSource { source } => {
+                vec![OpIntent::RemoveElement { cell: sources_cell(), elem: source }]
+            }
+            TreeOp::Cite { subject, field, source, claim } => vec![OpIntent::AddElement {
+                cell: cites_cell(&subject, &field),
+                elem: source,
+                value: match claim {
+                    Some(c) => Value::Bytes(c),
+                    None => Value::Null,
+                },
+            }],
+            TreeOp::Uncite { subject, field, source } => {
+                vec![OpIntent::RemoveElement { cell: cites_cell(&subject, &field), elem: source }]
+            }
+            TreeOp::AddMediaRecord { media } => {
+                vec![OpIntent::AddElement { cell: media_records_cell(), elem: media, value: Value::Null }]
+            }
+            TreeOp::RemoveMediaRecord { media } => {
+                vec![OpIntent::RemoveElement { cell: media_records_cell(), elem: media }]
+            }
+            TreeOp::AddMediaLink { subject, link, media } => {
+                vec![OpIntent::AddElement { cell: media_cell(&subject), elem: link, value: Value::Bytes(media) }]
+            }
+            TreeOp::RemoveMediaLink { subject, link } => {
+                vec![OpIntent::RemoveElement { cell: media_cell(&subject), elem: link }]
             }
         }
     }
@@ -346,8 +454,19 @@ impl Tree {
             TreeOp::MoveChild { person, from, to, pedi } => Change::ChildMoved { person, from, to, pedi },
             TreeOp::LinkSpouse { family, person } => Change::SpouseLinked { family, person },
             TreeOp::UnlinkSpouse { family, person } => Change::SpouseUnlinked { family, person },
-            TreeOp::AttachMedia { subject, media } => Change::MediaAttached { subject, media },
-            TreeOp::DetachMedia { subject, media } => Change::MediaDetached { subject, media },
+            TreeOp::AddName { subject, name } => Change::NameAdded { subject, name },
+            TreeOp::RemoveName { subject, name } => Change::NameRemoved { subject, name },
+            TreeOp::SetPrimaryName { subject, name } => Change::PrimaryNameSet { subject, name },
+            TreeOp::AddEvent { subject, event } => Change::EventAdded { subject, event },
+            TreeOp::RemoveEvent { subject, event } => Change::EventRemoved { subject, event },
+            TreeOp::AddSource { source } => Change::SourceAdded { source },
+            TreeOp::RemoveSource { source } => Change::SourceRemoved { source },
+            TreeOp::Cite { subject, field, source, claim } => Change::Cited { subject, field, source, claim },
+            TreeOp::Uncite { subject, field, source } => Change::Uncited { subject, field, source },
+            TreeOp::AddMediaRecord { media } => Change::MediaRecordAdded { media },
+            TreeOp::RemoveMediaRecord { media } => Change::MediaRecordRemoved { media },
+            TreeOp::AddMediaLink { subject, link, media } => Change::MediaLinked { subject, link, media },
+            TreeOp::RemoveMediaLink { subject, link } => Change::MediaUnlinked { subject, link },
         }
     }
 
@@ -395,9 +514,67 @@ impl Tree {
         self.doc.set_elements(&spouses_cell(family)).into_iter().map(|(id, _)| id.clone()).collect()
     }
 
-    /// The media attached to a subject (person or family), in deterministic order.
-    pub fn media_of(&self, subject: &[u8]) -> Vec<MediaRef> {
-        self.doc.set_elements(&media_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
+    /// The media LINKS attached to a subject, each as `(link id, media-record id)`, in deterministic
+    /// order. The link's own facts (role/order/caption/crop) and the record's facts (mime/hash/…) are
+    /// read via [`Tree::fact`] on the respective id.
+    pub fn media_of(&self, subject: &[u8]) -> Vec<(MediaLinkId, MediaRef)> {
+        self.doc
+            .set_elements(&media_cell(subject))
+            .into_iter()
+            .filter_map(|(id, v)| match v {
+                Value::Bytes(rec) => Some((id.clone(), rec.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The live media-record ids (doc-level), in deterministic order.
+    pub fn media_records(&self) -> Vec<MediaRef> {
+        self.doc.set_elements(&media_records_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// A subject's name-entity ids, in deterministic (id) order.
+    pub fn names_of(&self, subject: &[u8]) -> Vec<NameId> {
+        self.doc.set_elements(&names_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// A subject's preferred (display) name entity: the register pointer if it still names a live name,
+    /// else the greatest live name id (deterministic across replicas), else `None` if there are none.
+    /// A read adapter may prefer a `birth`-type name over the greatest id; that policy lives above.
+    pub fn primary_name(&self, subject: &[u8]) -> Option<NameId> {
+        let names = self.names_of(subject);
+        let pointer = match self.doc.register(&fact_preferred_cell(subject, FIELD_NAME_PRIMARY)) {
+            Some(Value::Bytes(id)) => Some(id.clone()),
+            _ => None,
+        };
+        pointer.filter(|p| names.iter().any(|n| n == p)).or_else(|| names.last().cloned())
+    }
+
+    /// A subject's event-entity ids, in deterministic (id) order. Ordering by date is a read-adapter
+    /// concern (the leaf `date` fact), not the engine's.
+    pub fn events_of(&self, subject: &[u8]) -> Vec<EventId> {
+        self.doc.set_elements(&events_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The live source-record ids (doc-level), in deterministic order.
+    pub fn sources(&self) -> Vec<SourceId> {
+        self.doc.set_elements(&sources_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// The sources citing a fact, each as `(source id, the specific claim it supports or None for the
+    /// field in general)`, in deterministic order.
+    pub fn cites_of(&self, subject: &[u8], field: &str) -> Vec<(SourceId, Option<ClaimId>)> {
+        self.doc
+            .set_elements(&cites_cell(subject, field))
+            .into_iter()
+            .map(|(id, v)| {
+                let claim = match v {
+                    Value::Bytes(c) => Some(c.clone()),
+                    _ => None,
+                };
+                (id.clone(), claim)
+            })
+            .collect()
     }
 
     /// A person's fact: every retained claim + the preferred one. Empty if the fact has no claims.
