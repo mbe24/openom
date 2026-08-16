@@ -347,6 +347,24 @@ fn sub_entities_round_trip_names_events_sources_cites() {
 }
 
 #[test]
+fn fields_of_lists_a_subjects_live_fact_fields() {
+    // A read adapter uses this to reconstruct open-ended field sets (e.g. custom.*) with no registry.
+    let mut t = Tree::new(rid(1));
+    let p = pid(1);
+    t.apply(TreeOp::AddClaim { subject: p.clone(), field: "sex".into(), claim: cid(1), value: "F".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: p.clone(), field: "custom.occupation".into(), claim: cid(2), value: "Organist".into(), source: None });
+    t.apply(TreeOp::AddClaim { subject: p.clone(), field: "custom.emigrated".into(), claim: cid(3), value: "true".into(), source: None });
+    let mut fields = t.fields_of(&p);
+    fields.sort();
+    assert_eq!(fields, vec!["custom.emigrated".to_string(), "custom.occupation".into(), "sex".into()]);
+    // Retracting the only claim of a field drops it from the listing.
+    t.apply(TreeOp::RetractClaim { subject: p.clone(), field: "sex".into(), claim: cid(1) });
+    assert!(!t.fields_of(&p).contains(&"sex".to_string()));
+    // A different subject's fields don't leak in.
+    assert!(t.fields_of(&pid(2)).is_empty());
+}
+
+#[test]
 fn concurrent_sub_entity_edits_converge() {
     // A adds a name to a person; B concurrently adds an event to the same person. Both survive.
     let mut a = Tree::new(rid(1));

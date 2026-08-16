@@ -556,6 +556,36 @@ impl Tree {
         self.doc.set_elements(&events_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
     }
 
+    /// The fact field keys that currently have at least one live claim on `subject` (e.g. `"sex"`,
+    /// `"note"`, `"custom.occupation"`). Lets a read adapter reconstruct open-ended field sets — such
+    /// as user-defined custom fields — without a side registry, so a value never disappears from the
+    /// read model just because its field was dropped from a schema.
+    pub fn fields_of(&self, subject: &[u8]) -> Vec<FieldKey> {
+        // Every fact-claims cell for this subject shares the prefix `KIND ‖ len(subject) ‖ subject`;
+        // the remainder is `len(field) ‖ field` (the second part `cell()` length-prefixes).
+        let mut prefix = vec![KIND_FACT_CLAIMS];
+        prefix.extend_from_slice(&(subject.len() as u32).to_be_bytes());
+        prefix.extend_from_slice(subject);
+        let mut out = Vec::new();
+        for c in self.doc.set_cell_ids() {
+            if !c.starts_with(&prefix) {
+                continue;
+            }
+            let rest = &c[prefix.len()..];
+            if rest.len() < 4 {
+                continue;
+            }
+            let n = u32::from_be_bytes(rest[0..4].try_into().expect("4")) as usize;
+            if rest.len() < 4 + n {
+                continue;
+            }
+            if let Ok(field) = String::from_utf8(rest[4..4 + n].to_vec()) {
+                out.push(field);
+            }
+        }
+        out
+    }
+
     /// The live source-record ids (doc-level), in deterministic order.
     pub fn sources(&self) -> Vec<SourceId> {
         self.doc.set_elements(&sources_cell()).into_iter().map(|(id, _)| id.clone()).collect()

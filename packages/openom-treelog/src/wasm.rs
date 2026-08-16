@@ -277,6 +277,11 @@ impl WasmTree {
         let ids: Vec<String> = self.inner.events_of(subject).iter().map(|e| hex(e)).collect();
         serde_json::to_string(&ids).expect("serialize events")
     }
+    /// The fact field keys with a live claim on a subject, as a JSON array of strings.
+    #[wasm_bindgen(js_name = fieldsOf)]
+    pub fn fields_of(&self, subject: &[u8]) -> String {
+        serde_json::to_string(&self.inner.fields_of(subject)).expect("serialize fields")
+    }
     /// The doc-level source-record ids as a JSON array of hex strings.
     pub fn sources(&self) -> String {
         let ids: Vec<String> = self.inner.sources().iter().map(|s| hex(s)).collect();
