@@ -26,6 +26,21 @@ describe.skipIf(!built)('treelog wasm engine (via the JS shim)', () => {
     expect(fact.preferred).not.toBeNull();
   });
 
+  it('matches the native golden vector byte-for-byte (native<->wasm parity)', async () => {
+    // The SAME fixed script + hex is asserted in the native Rust test
+    // (openom-treelog treelog_snapshot_golden_vector). Equal bytes here = the wasm build agrees
+    // with native; a divergence fails one side.
+    const t = await createTree({ initInput, replica: new Uint8Array(16).fill(7) });
+    t.addPerson(new Uint8Array([1]));
+    t.addClaim(new Uint8Array([1]), 'birth.date', new Uint8Array([9]), '1901', null);
+    const hex = [...t.snapshot()].map((b) => b.toString(16).padStart(2, '0')).join('');
+    expect(hex).toBe(
+      '01000000000000000200000000000000010707070707070707070707070707070701000000000000000101' +
+        '000000000000000101000000000000000002070707070707070707070707070707070100000000000000140200000001010000000a' +
+        '62697274682e64617465000000000000000109040000000000000009000000043139303100',
+    );
+  });
+
   it('rebuilds from a snapshot with an identical read model', async () => {
     const a = await createTree({ initInput });
     const p = a.newId();

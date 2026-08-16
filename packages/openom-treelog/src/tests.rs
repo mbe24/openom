@@ -98,6 +98,25 @@ fn fid(i: u8) -> FamilyId {
     vec![0xF0 | i]
 }
 
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A fixed script → a fixed snapshot. The SAME script + hex is asserted in the wasm build
+/// (`apps/test/treelog.int.js`), so this pins native↔wasm byte-for-byte parity: if either build
+/// diverges, one of the two golden tests fails.
+#[test]
+fn treelog_snapshot_golden_vector() {
+    let mut t = Tree::new([7u8; 16]);
+    t.apply(TreeOp::AddPerson { id: vec![1] });
+    t.apply(TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None });
+    let got = hex(&t.doc().snapshot());
+    let expected = "01000000000000000200000000000000010707070707070707070707070707070701000000000000000101\
+000000000000000101000000000000000002070707070707070707070707070707070100000000000000140200000001010000000a\
+62697274682e64617465000000000000000109040000000000000009000000043139303100";
+    assert_eq!(got, expected, "treelog snapshot encoding changed — update BOTH goldens (native + wasm)");
+}
+
 #[test]
 fn a_marriage_added_as_one_batch_lands_atomically() {
     // "Add a marriage" spans records: a family, two spouses, a child. One batch, one action.
