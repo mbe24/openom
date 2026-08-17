@@ -655,6 +655,38 @@ pub fn verify_entry_wasm(version: u32, envelope: &[u8], plaintext: &[u8], govern
     verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
 }
 
+/// An entry's attribution coordinates, read from its (AAD-bound) header — enough for the client to decide
+/// which keyring revision governs it and whether its epoch requires signatures.
+#[wasm_bindgen]
+pub struct EntryAttribution {
+    keyring_revision: u32,
+    key_id: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl EntryAttribution {
+    /// The keyring revision that governed this entry when authored.
+    #[wasm_bindgen(getter, js_name = keyringRevision)]
+    pub fn keyring_revision(&self) -> u32 {
+        self.keyring_revision
+    }
+    /// The DEK epoch (key_id) this entry was sealed under.
+    #[wasm_bindgen(getter, js_name = keyId)]
+    pub fn key_id(&self) -> Vec<u8> {
+        self.key_id.clone()
+    }
+}
+
+/// Read an entry's attribution coordinates (governing keyring revision + sealing key_id) from its header,
+/// so the client can pick the governing keyring + check whether the epoch is attributed. Both fields are
+/// AAD-bound (a keyless server can't rewrite them without failing the AEAD open), so they're trustworthy.
+#[wasm_bindgen(js_name = entryAttribution)]
+pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
+    let env = Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
+    let header = env.header.as_ref().ok_or_else(|| JsError::new("envelope has no header"))?;
+    Ok(EntryAttribution { keyring_revision: header.keyring_revision, key_id: header.key_id.clone() })
+}
+
 /// Whether the epoch `key_id` is attributed in `keyring` — i.e. its DEK was wrapped beyond the sole
 /// founder (the tree is shared under it), so entries under it MUST be signed. The client uses this,
 /// derived from the VERIFIED keyring (never an entry's own emptiness), to decide whether an unattributed

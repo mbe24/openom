@@ -16,6 +16,7 @@ import init, {
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
+  entryAttribution as wasmEntryAttribution,
   WasmSealer,
 } from '../../vendor/sealer/openom_sealer.js';
 
@@ -103,6 +104,16 @@ const api = {
   async epochIsAttributed(keyring, keyId) {
     await ensureInit();
     return wasmEpochIsAttributed(keyring, keyId);
+  },
+
+  // An entry's attribution coordinates from its (AAD-bound) header: which keyring revision governs it and
+  // which epoch key_id sealed it. Feeds the verify composer's governing-keyring + attributed decision.
+  async entryAttribution(envelope) {
+    await ensureInit();
+    const a = wasmEntryAttribution(envelope);
+    const out = { keyringRevision: a.keyringRevision, keyId: a.keyId };
+    a.free();
+    return out;
   },
 
   // Verify a keyring chain pulled from the untrusted server and return the validated head to store.
