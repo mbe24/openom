@@ -1,5 +1,5 @@
-//! Shared protocol — the wire format used identically by the server and the Tauri
-//! client (through `openom-store`).
+//! Shared protocol — the wire format used identically by the server and the
+//! client (through the sealer / sync layer).
 //!
 //! The Rust types in [`v1`] are generated from `proto/openom/v1/openom.proto` with
 //! `buf generate` (the neoeinstein-prost plugin) and checked into `src/generated/`.

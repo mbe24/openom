@@ -63,7 +63,7 @@ fn sqlite_store_conforms() {
 fn sqlite_open_survives_a_reopen() {
     // A durable, file-backed store must return committed data after being dropped and reopened —
     // the property in_memory can't have and the whole point of `open(path)`.
-    let path = std::env::temp_dir().join(format!("openom-store-durable-{}.sqlite", std::process::id()));
+    let path = std::env::temp_dir().join(format!("journal-durable-{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
     {
         let store = SqliteStore::open(&path).unwrap();

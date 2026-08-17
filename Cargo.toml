@@ -12,7 +12,7 @@ members = [
     "packages/openom-keyring",
     "packages/openom-sealer",
     "packages/openom-vault-host",
-    "packages/openom-store",
+    "packages/journal",
     "packages/commute",
     "packages/openom-treelog",
     "packages/openom-sync",
@@ -36,7 +36,7 @@ openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
-openom-store = { path = "packages/openom-store" }
+journal = { path = "packages/journal" }
 commute = { path = "packages/commute" }
 
 # Protocol / serialization.

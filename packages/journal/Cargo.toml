@@ -1,0 +1,17 @@
+[package]
+name = "journal"
+description = "A local-first sync backend: per-document snapshot + append-only update-log with compare-and-swap and capability negotiation, over opaque bytes. Backend-agnostic (memory, sqlite, …); domain- and crypto-agnostic."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Local backends (memory + sqlite) and the conformance suite. Deliberately no openom-*
+# deps: journal is the generic contract — it stores opaque bytes and knows nothing about
+# the tree model, crypto, or the wire format. The openom server-backed implementation of
+# this contract lives above it (today the JS RemoteStore; a future Rust `openom-store`).
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true

@@ -9,9 +9,9 @@
 // SAME `cargo` invocation succeeds there unchanged — the build is byte-for-byte
 // normal, only the process that runs it moves.
 //
-//   node scripts/cargo.mjs test -p openom-store -p openom
+//   node scripts/cargo.mjs test -p journal -p openom
 //   node scripts/cargo.mjs build -p openom
-//   node scripts/cargo.mjs clippy -p openom-store -p openom --all-targets
+//   node scripts/cargo.mjs clippy -p journal -p openom --all-targets
 //   node scripts/cargo.mjs fmt --all
 //
 // Runner selection — OPENOM_RUNNER = auto (default) | local | docker
@@ -33,7 +33,7 @@
 // Scope note: the Tauri shell (apps/src-tauri) is intentionally NOT built here —
 // headless it needs the whole WebKitGTK stack. It builds through its own path
 // (`pnpm tauri dev|build`) and the desktop CI. This runner is for the pure crates:
-// openom-store (the DocStore contract + conformance suite) and openom (the server).
+// journal (the DocStore contract + conformance suite) and openom (the server).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';

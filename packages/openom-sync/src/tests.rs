@@ -4,8 +4,8 @@
 use super::*;
 use openom_crypto::generate_dek;
 use openom_sealer::Sealer;
-use openom_store::memory::MemoryStore;
-use openom_store::{Caps, DocStore, Snapshot, StoreError, Update};
+use journal::memory::MemoryStore;
+use journal::{Caps, DocStore, Snapshot, StoreError, Update};
 use openom_treelog::{Pedigree, Tree, TreeOp};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,26 +20,26 @@ impl DocStore for FaultStore {
     fn caps(&self) -> Caps {
         self.inner.caps()
     }
-    fn list(&self) -> openom_store::Result<Vec<String>> {
+    fn list(&self) -> journal::Result<Vec<String>> {
         self.inner.list()
     }
-    fn read_snapshot(&self, doc: &str) -> openom_store::Result<Option<Snapshot>> {
+    fn read_snapshot(&self, doc: &str) -> journal::Result<Option<Snapshot>> {
         self.inner.read_snapshot(doc)
     }
-    fn read_updates(&self, doc: &str, since: Option<u64>) -> openom_store::Result<(Vec<Update>, u64)> {
+    fn read_updates(&self, doc: &str, since: Option<u64>) -> journal::Result<(Vec<Update>, u64)> {
         self.inner.read_updates(doc, since)
     }
-    fn append(&self, doc: &str, updates: &[Update]) -> openom_store::Result<u64> {
+    fn append(&self, doc: &str, updates: &[Update]) -> journal::Result<u64> {
         if self.fail_appends.load(Ordering::SeqCst) > 0 {
             self.fail_appends.fetch_sub(1, Ordering::SeqCst);
             return Err(StoreError::Backend("injected append failure".into()));
         }
         self.inner.append(doc, updates)
     }
-    fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> openom_store::Result<String> {
+    fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> journal::Result<String> {
         self.inner.put_snapshot(doc, bytes, expected)
     }
-    fn delete(&self, doc: &str) -> openom_store::Result<()> {
+    fn delete(&self, doc: &str) -> journal::Result<()> {
         self.inner.delete(doc)
     }
 }

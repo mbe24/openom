@@ -1,7 +1,7 @@
 # openom
 
 openom is a privacy-first family tree for desktop, mobile, and the browser: a
-Rust core (`openom`, `openom-store`) and Tauri-based apps for the different
+Rust core (`openom`, `journal`) and Tauri-based apps for the different
 platforms (`apps`).
 
 ## Commits

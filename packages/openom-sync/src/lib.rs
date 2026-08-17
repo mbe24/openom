@@ -18,7 +18,7 @@ use commute::Op;
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
-use openom_store::{DocStore, StoreError};
+use journal::{DocStore, StoreError};
 use openom_treelog::{Proposal, ProposalError, Tree, TreeOp};
 
 /// A sync failure — one of the three layers said no.

@@ -2581,6 +2581,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3359,26 +3369,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-store"
-version = "0.1.0"
-dependencies = [
- "openom-crypto",
- "openom-protocol",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "openom-sync"
 version = "0.1.0"
 dependencies = [
  "commute",
+ "journal",
  "openom-crypto",
  "openom-protocol",
  "openom-sealer",
- "openom-store",
  "openom-treelog",
  "thiserror 2.0.20",
 ]
@@ -3387,7 +3385,7 @@ dependencies = [
 name = "openom-tauri"
 version = "0.1.0"
 dependencies = [
- "openom-store",
+ "journal",
  "openom-vault-host",
  "serde",
  "serde_json",

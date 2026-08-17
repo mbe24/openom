@@ -10,7 +10,7 @@ rust-version.workspace = true
 commute = { path = "../commute" }
 openom-treelog = { path = "../openom-treelog" }
 openom-sealer = { path = "../openom-sealer" }
-openom-store = { path = "../openom-store" }
+journal = { path = "../journal" }
 openom-protocol = { path = "../openom-protocol" }
 thiserror.workspace = true
 

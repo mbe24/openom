@@ -73,7 +73,7 @@ moves. The repo is bind-mounted at `/work`; the cargo registry and target dir ar
 cached in named volumes, so rebuilds stay incremental.
 
 ```powershell
-node scripts/cargo.mjs test -p openom-store -p openom   # the conformance suite
+node scripts/cargo.mjs test -p journal -p openom        # the conformance suite
 node scripts/cargo.mjs build -p openom                  # the server crate
 ```
 
@@ -82,7 +82,7 @@ node scripts/cargo.mjs build -p openom                  # the server crate
 at the repo root (copy `.env.example`). `docker` skips the host attempt entirely,
 so no policy popup. The Tauri shell is **not** built this way: headless it needs
 the WebKitGTK stack, so it builds through `pnpm tauri dev|build` and the desktop
-CI. This wrapper is for the pure crates — `openom-store` and `openom`.
+CI. This wrapper is for the pure crates — `journal` and `openom`.
 
 ### Mobile
 
@@ -110,7 +110,7 @@ openom/
 │  ├─ scripts/            statischer Server, Sprachpruefung
 │  └─ package.json
 ├─ packages/
-│  └─ openom-store/       DocStore-Trait + memory + sqlite + Konformitaetssuite
+│  └─ journal/            DocStore-Trait + memory + sqlite + Konformitaetssuite
 ├─ openom/                Server: S3 hinter demselben Trait
 ├─ docs/                  Handoff, Datenmodell, Designregeln, Svelte-Portierung
 ├─ Cargo.toml             Workspace
@@ -120,7 +120,7 @@ openom/
 `app/` ist nicht "das Web" — auf Android laeuft derselbe Ordner. Tauri fuegt
 nichts hinzu ausser Fenster und SQLite-Store.
 
-`openom-store` liegt bewusst weder in der Huelle noch im Server: beide brauchen
+`journal` liegt bewusst weder in der Huelle noch im Server: beide brauchen
 dieselbe Fassung des Vertrags, und die Konformitaetssuite laeuft gegen jede
 Implementierung — auch spaeter gegen S3.
 
@@ -138,7 +138,7 @@ bytes — which is exactly what makes S3 or a zero-knowledge server possible lat
 
 ### Swapping the store
 
-1. Implement `DocStore` (Rust: `packages/openom-store/src/`, JS: `apps/app/src/core/store.js`).
+1. Implement `DocStore` (Rust: `packages/journal/src/`, JS: `apps/app/src/core/store.js`).
 2. Run the conformance suite against the new implementation:
 
 ```powershell

@@ -16,7 +16,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 # Der Store liegt im eigenen Crate: App und Server brauchen dieselbe Fassung.
-openom-store = { path = "../../packages/openom-store" }
+journal = { path = "../../packages/journal" }
 # The key-custody host: the DEK lives here in Rust, never in the webview. `sqlite` turns on the
 # durable keyring/watermark store.
 openom-vault-host = { path = "../../packages/openom-vault-host", features = ["sqlite"] }

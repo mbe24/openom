@@ -4,7 +4,7 @@
 //!     crosses to the webview; JS gets an opaque `sealerId` handle back.
 //!
 //! The commands are THIN wrappers — all the substance (and its tests) live in
-//! `openom-vault-host` / `openom-store`, which build without `tauri`. This file therefore can't
+//! `openom-vault-host` / `journal`, which build without `tauri`. This file therefore can't
 //! be `cargo test`-ed in the headless container (the `tauri` crate needs system webview libs);
 //! it is verified by `tauri dev` / `cargo check` on a machine with the Tauri toolchain.
 //!
@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use openom_store::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
+use journal::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
     AcceptedKeyring, CoOwnerChanged, MemberAdded, MemberProvisioned, MemberRemoved, Provisioned,
