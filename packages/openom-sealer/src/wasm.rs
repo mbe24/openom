@@ -14,7 +14,10 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
-use openom_crypto::{epoch_is_attributed, verify_entry, verify_walk, Key32, KeyringAnchor, VerifyingKey, KEY_LEN};
+use openom_crypto::{
+    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, Key32, KeyringAnchor,
+    VerifyingKey, KEY_LEN,
+};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
@@ -695,6 +698,32 @@ pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
 pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
     Ok(epoch_is_attributed(&kr, key_id))
+}
+
+/// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —
+/// the read-side counterpart to the server accepting one. A reset changes the authorized-signer set
+/// WITHOUT the old set's endorsement (the old key is lost), so `verify_walk`/`verify_transition` reject it
+/// as an unendorsed change; this instead accepts it, but ONLY if it can't roll back or fork: it must be a
+/// structurally valid, self-signed, wrap-complete keyring (`verify_reset`) that chains onto the anchor by
+/// hash at exactly `anchor.revision + 1`. Trust in the *new signer set* is NOT established here — the
+/// CALLER must have shown the new signer fingerprints for out-of-band re-verification and gotten explicit
+/// user confirmation BEFORE calling this (it is the commit step). Returns the validated keyring to store.
+#[wasm_bindgen(js_name = acceptResetKeyring)]
+pub fn accept_reset_keyring(anchor: &[u8], tree_id: &[u8], candidate: &[u8]) -> Result<VaultResult, JsError> {
+    let anchor_kr = Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
+    let cand = Keyring::decode(candidate).map_err(|e| JsError::new(&format!("bad candidate keyring: {e}")))?;
+    if anchor_kr.tree_id != tree_id || cand.tree_id != tree_id {
+        return Err(JsError::new("keyring is for a different tree"));
+    }
+    // Must supersede our trusted head — never roll back or fork.
+    if cand.revision != anchor_kr.revision + 1 {
+        return Err(JsError::new("a reset must be exactly the next revision after the trusted head"));
+    }
+    if cand.prev_keyring_hash.as_slice() != keyring_hash(&anchor_kr) {
+        return Err(JsError::new("reset does not chain onto the trusted head"));
+    }
+    let new_anchor = verify_reset(&cand).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(VaultResult { keyring: candidate.to_vec(), recovery_code: String::new(), revision: new_anchor.revision, sealer: None })
 }
 
 /// Split a buffer of `[u32-be length][bytes]…` frames into slices. The framing keeps a list of

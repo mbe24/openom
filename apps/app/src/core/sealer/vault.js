@@ -125,5 +125,23 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { revision: r.revision, changed: true };
     },
+
+    /**
+     * Adopt a recovery/succession RESET (§B3 slice 4). A reset changes the authorized-signer set without
+     * the old set's endorsement, so `syncKeyring` refuses it (verify_walk throws) — this is the deliberate
+     * override, and the CALLER MUST have shown the new signer fingerprints for OUT-OF-BAND re-verification
+     * and gotten explicit user confirmation FIRST. This only does the crypto: verify the reset is a valid
+     * keyring chaining onto our trusted head, then persist it + watermark. Throws if it isn't a valid reset
+     * onto the head (so a fork/rollback dressed up as a reset can't slip through). `candidate` is the
+     * served reset keyring bytes.
+     * @returns {Promise<{ revision: number }>}
+     */
+    async adoptReset(treeKey, treeId, candidate) {
+      const anchor = await requireKeyring(treeKey);
+      const r = await worker.acceptResetKeyring(anchor, treeId, candidate);
+      await keyringStore.save(treeKey, r.revision, r.keyring);
+      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      return { revision: r.revision };
+    },
   };
 }

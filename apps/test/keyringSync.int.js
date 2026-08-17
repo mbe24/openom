@@ -126,3 +126,40 @@ describe('RemoteStore.readKeyring', () => {
     expect(await rs.readKeyring('t1')).toEqual({ revisions: [], head: 0 });
   });
 });
+
+describe('vault.adoptReset (recovery/succession)', () => {
+  const treeKey = 'k1';
+  const treeId = new Uint8Array(16);
+
+  async function setup(worker) {
+    const keyringStore = memoryKeyringStore();
+    const watermarks = new Watermarks();
+    await keyringStore.save(treeKey, 1, bytes(7, 7)); // trusted head at rev 1
+    watermarks.observe(treeKey, { keyringRevision: 1 });
+    const vault = createVault({ worker, keyringStore, watermarks });
+    return { vault, keyringStore, watermarks };
+  }
+
+  it('adopts a validated reset after OOB confirm: stores it + advances the watermark', async () => {
+    // The worker (Rust) has validated the reset chains onto the trusted head; this asserts the vault
+    // persists + watermarks it. (The OOB signer re-verification is the caller's job, before this.)
+    const worker = { acceptResetKeyring: async (_a, _t, candidate) => ({ keyring: candidate, revision: 2 }) };
+    const { vault, keyringStore, watermarks } = await setup(worker);
+    const r = await vault.adoptReset(treeKey, treeId, bytes(2, 2));
+    expect(r).toEqual({ revision: 2 });
+    expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]);
+    expect(watermarks.current(treeKey).keyringRevision).toBe(2);
+  });
+
+  it('a candidate that is not a valid reset onto the head is refused; stored state untouched', async () => {
+    const worker = {
+      acceptResetKeyring: async () => {
+        throw new Error('reset does not chain onto the trusted head');
+      },
+    };
+    const { vault, keyringStore, watermarks } = await setup(worker);
+    await expect(vault.adoptReset(treeKey, treeId, bytes(9))).rejects.toThrow(/does not chain/);
+    expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // head unchanged
+    expect(watermarks.current(treeKey).keyringRevision).toBe(1); // not advanced
+  });
+});

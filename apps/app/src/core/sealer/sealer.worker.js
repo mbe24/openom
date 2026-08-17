@@ -14,6 +14,7 @@ import init, {
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
+  acceptResetKeyring as wasmAcceptResetKeyring,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
   entryAttribution as wasmEntryAttribution,
@@ -123,6 +124,18 @@ const api = {
   async acceptRemoteKeyring(anchor, treeId, hops) {
     await ensureInit();
     const r = wasmAcceptRemoteKeyring(anchor, treeId, hops);
+    const out = { keyring: r.keyring, revision: r.revision };
+    r.free();
+    return out;
+  },
+
+  // Validate a recovery/succession RESET candidate against the trusted `anchor` (§B3 slice 4): it must be
+  // a valid self-signed keyring chaining onto the anchor by hash at anchor.revision+1. The CALLER must
+  // have done the out-of-band signer re-verification first — this is only the crypto commit step. Throws
+  // if it's not a valid reset onto the head.
+  async acceptResetKeyring(anchor, treeId, candidate) {
+    await ensureInit();
+    const r = wasmAcceptResetKeyring(anchor, treeId, candidate);
     const out = { keyring: r.keyring, revision: r.revision };
     r.free();
     return out;
