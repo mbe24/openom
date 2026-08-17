@@ -234,8 +234,14 @@ impl Sealer {
     /// (shared trees). Builder-style; set at unlock from the verified keyring's member identity + the
     /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
     pub fn with_author(mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) -> Self {
-        self.author = Some(AuthorIdentity { signing_key, member_id, keyring_revision });
+        self.set_author(signing_key, member_id, keyring_revision);
         self
+    }
+
+    /// Mutating form of [`with_author`](Self::with_author), for setting the author on a sealer already
+    /// inside a collection (see [`SealerSet::with_author`]).
+    pub fn set_author(&mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) {
+        self.author = Some(AuthorIdentity { signing_key, member_id, keyring_revision });
     }
 
     /// A local-development sealer using the reserved dev key (§16): real ciphertext,
@@ -364,6 +370,17 @@ impl SealerSet {
             })
             .collect();
         SealerSet { tree_id, write_key_id, sealers }
+    }
+
+    /// Attach the member's author identity to the WRITE-epoch sealer, so new entries are signed +
+    /// attributed (§B3 shared trees). Old-epoch sealers only open (never seal new entries), so they need
+    /// no author. Set at unlock, gated on the write epoch being attributed (shared).
+    pub fn with_author(mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+        let write = self.write_key_id.clone();
+        if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == write) {
+            w.set_author(signing_key, member_id, keyring_revision);
+        }
+        self
     }
 
     /// A single-epoch set — the local-development / demo path (one dev sealer).

@@ -151,13 +151,20 @@ pub fn unlock(
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<Unlocked, SealerError> {
-    let Opened { key_id: write_key_id, revision, rrk_secret, keyring, .. } =
+    let Opened { key_id: write_key_id, revision, rrk_secret, keyring, identity, .. } =
         open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
     let epochs = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?
         .into_iter()
         .map(|(k, _e, d)| (k, d))
         .collect();
-    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
+    // Sign entries only on an ATTRIBUTED (shared) write epoch — one wrapped beyond the sole founder.
+    // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
+    // skips verification for them); the moment the tree is shared, the sealer starts signing (§B3).
+    let attributed = openom_crypto::epoch_is_attributed(&keyring, &write_key_id);
+    let mut sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
+    if attributed {
+        sealer = sealer.with_author(identity, member_id.to_string(), revision);
+    }
     Ok(Unlocked { sealer, revision })
 }
 
