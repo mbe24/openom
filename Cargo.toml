@@ -124,15 +124,19 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # fuzz-style coverage of the decode/open paths without a nightly libFuzzer setup.
 proptest = "1"
 
-# The wasm sealer's build profile. MUST live in this ROOT manifest — Cargo ignores
-# `[profile.*]` in member manifests. `scripts/build-sealer.mjs` builds with
-# `--profile wasm-release`. Tuned for a small, fast-to-download module: size-level opt
-# (the crypto stays plenty fast), fat LTO + one codegen unit to inline across the
-# openom-crypto/protocol boundary, abort-on-panic (no unwinding tables in wasm), and
-# strip (wasm-bindgen + wasm-opt trim the rest).
+# The wasm build profile (sealer + treelog). MUST live in this ROOT manifest — Cargo
+# ignores `[profile.*]` in member manifests. `scripts/build-{sealer,treelog}.mjs` build
+# with `--profile wasm-release`. Tuned for STARTUP, not smallest module: opt-level=3, so
+# the compute on the critical path (Argon2id unlock, seal/open, CRDT snapshot decode)
+# runs fast — the same trade the chatletting/libzaungast browser demos landed on, where
+# execution-during-init dominated startup over the extra download/compile of a bigger
+# module. Fat LTO + one codegen unit inline across the crate boundaries, abort-on-panic
+# (no unwinding tables in wasm), strip (wasm-bindgen + wasm-opt trim the rest). Revisit
+# size vs. startup with a real measurement (see the deferred profiling task) before
+# trading opt-level=3 back down to "s"/"z".
 [profile.wasm-release]
 inherits = "release"
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
