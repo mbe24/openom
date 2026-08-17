@@ -218,11 +218,16 @@ AGPL-3.0-or-later — see `LICENSE`.
 
 ## Brand
 
-`apps/app/brand/` holds the mark: `wordmark.svg` (+ dark), `mark.svg` (the
-monogram tile), `tree.svg`, `icon.svg` (tree in a filled disc — app icon),
-`favicon.svg`, and the two 1280 × 640 previews `social-github.png` and
-`social-web.png`. The source for the two PNGs is `apps/preview/social-source.html`;
+`assets/` (repo root) is the single source of truth for the mark, shared by every surface —
+`wordmark.svg` (+ dark), `mark.svg` (the monogram tile), `tree.svg`, `icon.svg` (tree in a
+filled disc — app icon), `favicon.svg`, and the two 1280 × 640 previews `social-github.png`
+and `social-web.png`. The source for the two PNGs is `apps/preview/social-source.html`;
 re-render it if the wording changes.
+
+The web app serves these from `/assets` (dev via `scripts/serve.mjs`, deploy via the Pages
+"Prepare site" copy). The Tauri shell doesn't reference them at runtime — its committed
+`apps/src-tauri/icons/` set is generated from the source icon; regenerate with
+`pnpm tauri icon ../../assets/icon.svg` when the brand changes.
 
 Upload `social-github.png` under Settings → Social preview. The web app carries
 `social-web.png` itself through `og:image` — it promises something different

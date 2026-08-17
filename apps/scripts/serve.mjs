@@ -41,9 +41,18 @@ createServer(async (req, res) => {
     return;
   }
   const path = url.pathname;
-  // normalize + prefix check: no escaping the project folder.
-  const file = join(ROOT, normalize(path).replace(/^(\.\.[/\\])+/, ''));
-  if (!file.startsWith(ROOT)) { res.writeHead(403).end('forbidden'); return; }
+  // Brand assets are the repo-root `assets/` (../assets from this server's apps/ cwd) — the single
+  // source shared with Tauri/docs. Serve them under /assets, matching what the deploy stages into _site.
+  let base, file;
+  if (path === '/assets' || path.startsWith('/assets/')) {
+    base = join(ROOT, '..', 'assets');
+    file = join(base, normalize(path.slice('/assets'.length)).replace(/^(\.\.[/\\])+/, ''));
+  } else {
+    base = ROOT;
+    file = join(base, normalize(path).replace(/^(\.\.[/\\])+/, ''));
+  }
+  // normalize + prefix check: no escaping the served root.
+  if (!file.startsWith(base)) { res.writeHead(403).end('forbidden'); return; }
   try {
     let body = await readFile(file);
     // Same substitution the deploy does, so the placeholder never reaches a

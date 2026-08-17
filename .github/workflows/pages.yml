@@ -39,6 +39,7 @@ jobs:
         run: |
           mkdir -p _site
           cp -r apps/app/. _site/
+          cp -r assets _site/assets
           cp apps/preview/desktop.html _site/preview.html
           sed -i 's#\.\./app/index.html#index.html#g' _site/preview.html
           touch _site/.nojekyll
