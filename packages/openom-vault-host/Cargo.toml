@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 openom-sealer = { path = "../openom-sealer" }
 openom-crypto.workspace = true
+# Keyring chain verification (verify_walk/verify_transition/verify_reset) the host re-checks on sync.
+openom-keyring.workspace = true
 openom-protocol.workspace = true
 serde = { workspace = true }
 zeroize.workspace = true

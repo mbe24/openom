@@ -8,6 +8,8 @@ resolver = "2"
 members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
+    "packages/openom-roles",
+    "packages/openom-keyring",
     "packages/openom-sealer",
     "packages/openom-vault-host",
     "packages/openom-store",
@@ -32,6 +34,8 @@ rust-version = "1.85"
 # Internal crates (path relative to this root manifest).
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
+openom-roles = { path = "packages/openom-roles" }
+openom-keyring = { path = "packages/openom-keyring" }
 openom-store = { path = "packages/openom-store" }
 commute = { path = "packages/commute" }
 

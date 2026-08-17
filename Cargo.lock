@@ -3269,7 +3269,9 @@ dependencies = [
  "jsonwebtoken",
  "lambda_http",
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
+ "openom-roles",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -3313,6 +3315,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-keyring"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "openom-crypto",
+ "openom-protocol",
+ "openom-roles",
+ "proptest",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "zeroize",
+]
+
+[[package]]
 name = "openom-protocol"
 version = "0.1.0"
 dependencies = [
@@ -3320,10 +3339,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-roles"
+version = "0.1.0"
+dependencies = [
+ "openom-protocol",
+]
+
+[[package]]
 name = "openom-sealer"
 version = "0.1.0"
 dependencies = [
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
  "proptest",
  "thiserror 2.0.20",
@@ -3384,6 +3411,7 @@ name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
  "openom-sealer",
  "rusqlite",

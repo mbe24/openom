@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use openom_crypto::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
+use openom_keyring::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 use openom_sealer::vault;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
@@ -639,7 +639,7 @@ impl<S: VaultStore> VaultHost<S> {
                     .map_err(|e| VaultError::new(VaultErrorCode::BadKeyring, format!("served keyring failed to decode: {e}")))
             })
             .collect::<Result<_>>()?;
-        let new_anchor = openom_crypto::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+        let new_anchor = openom_keyring::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
             .map_err(remote_chain_err)?;
         // Persist the validated head (the last hop) + advance the floor, atomically.
         let head = hops.last().expect("non-empty run");
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
-        use openom_crypto::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
         use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
 
         let h = host();
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
-        use openom_crypto::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
         use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
 
         let a = host();

@@ -1,0 +1,11 @@
+[package]
+name = "openom-roles"
+description = "openom — the authorization role model + capability→role policy (one source of truth, server ACL + client verify)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The role/kind vocabulary (MemberRole, Kind) lives in the wire types.
+openom-protocol.workspace = true

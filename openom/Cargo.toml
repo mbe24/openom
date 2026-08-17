@@ -17,6 +17,10 @@ profiling = []
 # trees (zero-knowledge), but it validates and serialises against the same code.
 openom-protocol.workspace = true
 openom-crypto.workspace = true
+# The capability→role policy (advisory ACL gate) and the keyring chain the server re-verifies as
+# honest-server defense-in-depth. Both are content-agnostic — the server still never decrypts.
+openom-roles.workspace = true
+openom-keyring.workspace = true
 
 # The whole HTTP surface in one Lambda: Axum routing over the Lambda runtime.
 axum.workspace = true

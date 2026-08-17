@@ -53,21 +53,13 @@ pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 
-mod chain;
-mod entry;
 mod envelope;
 mod hpke_wrap;
 mod kdf;
-mod keyring;
 mod recovery;
 mod root;
 mod seal;
 mod wrap;
-pub use chain::{
-    bootstrap_from_genesis, bootstrap_from_oob, verify_reset, verify_transition, verify_walk,
-    ChainError, KeyringAnchor,
-};
-pub use entry::{epoch_is_attributed, verify_entry, EntryError};
 pub use envelope::{open_envelope, seal_envelope, AuthorContext, SealParams};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap,
@@ -76,10 +68,6 @@ pub use hpke_wrap::{
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
-};
-pub use keyring::{
-    generate_identity, keyring_hash, sign_keyring, verify_keyring, verify_keyring_all,
-    verify_keyring_any, Signature, SigningKey, VerifyingKey,
 };
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,

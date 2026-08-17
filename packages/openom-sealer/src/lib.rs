@@ -203,7 +203,7 @@ pub struct Sealer {
 /// keyring head at unlock — the revision that governs the entries they seal this session (a keyring
 /// change re-unlocks and refreshes it). `None` → unattributed entries (V1 communal-DEK model).
 pub struct AuthorIdentity {
-    pub signing_key: openom_crypto::SigningKey,
+    pub signing_key: openom_keyring::SigningKey,
     pub member_id: String,
     pub keyring_revision: u32,
 }
@@ -233,14 +233,14 @@ impl Sealer {
     /// Attach the member's author identity so entries this sealer seals are SIGNED + attributed
     /// (shared trees). Builder-style; set at unlock from the verified keyring's member identity + the
     /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
-    pub fn with_author(mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+    pub fn with_author(mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) -> Self {
         self.set_author(signing_key, member_id, keyring_revision);
         self
     }
 
     /// Mutating form of [`with_author`](Self::with_author), for setting the author on a sealer already
     /// inside a collection (see [`SealerSet::with_author`]).
-    pub fn set_author(&mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) {
+    pub fn set_author(&mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) {
         self.author = Some(AuthorIdentity { signing_key, member_id, keyring_revision });
     }
 
@@ -375,7 +375,7 @@ impl SealerSet {
     /// Attach the member's author identity to the WRITE-epoch sealer, so new entries are signed +
     /// attributed (§B3 shared trees). Old-epoch sealers only open (never seal new entries), so they need
     /// no author. Set at unlock, gated on the write epoch being attributed (shared).
-    pub fn with_author(mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+    pub fn with_author(mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) -> Self {
         let write = self.write_key_id.clone();
         if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == write) {
             w.set_author(signing_key, member_id, keyring_revision);
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn with_author_signs_and_attributes_the_entry() {
-        let author = openom_crypto::generate_identity().unwrap();
+        let author = openom_keyring::generate_identity().unwrap();
         let s = sealer().with_author(author, "m1".into(), 3);
         let delta = SealContext {
             kind: EntryKind::Delta,

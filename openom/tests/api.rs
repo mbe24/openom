@@ -30,7 +30,7 @@ use openom_protocol::v1::{
     SignerRole, WrapMethod,
 };
 use openom_protocol::Message;
-use openom_crypto::{generate_identity, keyring_hash, sign_keyring, SigningKey};
+use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;

@@ -12,7 +12,8 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use openom_protocol::aad::author_signing_bytes;
-use openom_protocol::v1::{Header, Keyring, Kind, MemberRole, SignerRole};
+use openom_protocol::v1::{Header, Keyring, Kind, SignerRole};
+use openom_roles::required_role_for_kind;
 use sha2::{Digest, Sha256};
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
@@ -33,16 +34,6 @@ pub enum EntryError {
     BadSignature,
     #[error("the author's role does not grant this entry's capability")]
     InsufficientRole,
-}
-
-/// The weakest role (largest MemberRole value; lower = stronger) allowed to author an entry of `kind`.
-/// Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+. Mirrors the server matrix.
-fn required_role_for_kind(kind: Kind) -> Option<i32> {
-    match kind {
-        Kind::Snapshot | Kind::Delta => Some(MemberRole::Admin as i32), // Commit = Maintainer+
-        Kind::Proposal | Kind::Media => Some(MemberRole::Editor as i32), // Propose / StageMedia = Editor+
-        Kind::Unspecified => None,
-    }
 }
 
 /// Verify a landed entry's author attribution against `governing` — the keyring at
@@ -86,7 +77,7 @@ pub fn verify_entry(version: u32, header: &Header, plaintext: &[u8], governing: 
     key.verify(&msg, &signature).map_err(|_| EntryError::BadSignature)?;
 
     // Role (numeric, lower = stronger): the author's role must be at least as strong as required.
-    if member.role > required {
+    if member.role > required as i32 {
         return Err(EntryError::InsufficientRole);
     }
     Ok(())
@@ -118,7 +109,7 @@ mod tests {
     use super::*;
     use crate::{generate_identity, SigningKey};
     use ed25519_dalek::Signer;
-    use openom_protocol::v1::{KeyEpoch, Member};
+    use openom_protocol::v1::{KeyEpoch, Member, MemberRole};
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;
@@ -224,6 +215,45 @@ mod tests {
         let kr = governing(vec![]);
         let h = Header { kind: Kind::Delta as i32, key_id: KID.to_vec(), ..Default::default() };
         assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::Unattributed));
+    }
+
+    #[test]
+    fn seal_envelope_round_trips_through_verify_entry() {
+        // The cross-crate round-trip: openom-crypto seals + signs the entry, this crate verifies it.
+        // (Lives here, not in openom-crypto, because verify_entry moved out and openom-keyring is the only
+        // crate that can depend on both directions.)
+        use openom_crypto::{generate_dek, open_envelope, seal_envelope, AuthorContext, SealParams};
+        use openom_protocol::v1::{Aead, Compression, Format};
+
+        let dek = generate_dek().unwrap();
+        let author = generate_identity().unwrap();
+        let params = SealParams {
+            version: VERSION,
+            kind: Kind::Delta,
+            format: Format::OpenomTreelog,
+            aead: Aead::Xchacha20Poly1305,
+            compression: Compression::None,
+            key_id: KID,
+            tree_id: b"tree-uuid-16byte",
+            replica_id: b"r",
+            replica_counter: 1,
+            prev_ciphertext_hash: b"",
+            covers_through_seq: 0,
+            blob_id: b"",
+            author: Some(AuthorContext { signing_key: &author, member_id: "m1", keyring_revision: 3 }),
+        };
+        let env = seal_envelope(&dek, &params, b"a change").unwrap();
+        let header = env.header.as_ref().unwrap();
+        assert!(!header.author_signature.is_empty(), "signed");
+        assert_eq!(header.author_member_id, "m1");
+        assert_eq!(header.keyring_revision, 3);
+
+        // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
+        let kr = governing(vec![member("m1", MemberRole::Admin, &author)]);
+        let plaintext = open_envelope(&dek, &env).unwrap();
+        assert_eq!(verify_entry(VERSION, header, &plaintext, &kr), Ok(()), "the sealed entry verifies");
+        // A different plaintext against the same signature → rejected (content binding).
+        assert_eq!(verify_entry(VERSION, header, b"tampered", &kr), Err(EntryError::BadSignature));
     }
 
     #[test]

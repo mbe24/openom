@@ -14,9 +14,10 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
-use openom_crypto::{
-    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, Key32, KeyringAnchor,
-    VerifyingKey, KEY_LEN,
+use openom_crypto::{Key32, KEY_LEN};
+use openom_keyring::{
+    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, KeyringAnchor,
+    VerifyingKey,
 };
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};

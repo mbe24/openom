@@ -17,7 +17,7 @@ use crate::{open, seal, CryptoError, KEY_LEN};
 
 /// Optional author attribution for a shared-tree entry (§B3 launch gate). When present, the member's
 /// Ed25519 author key signs the entry — naming them (`member_id`) and the keyring revision that governs
-/// it — so peers can verify authorship + role via [`crate::verify_entry`]. `None` seals an *unattributed*
+/// it — so peers can verify authorship + role via `openom_keyring::verify_entry`. `None` seals an *unattributed*
 /// entry (empty `author_signature`), the V1 communal-DEK model.
 pub struct AuthorContext<'a> {
     pub signing_key: &'a SigningKey,
@@ -158,43 +158,8 @@ mod tests {
         assert_ne!(a.ciphertext, b.ciphertext); // different nonce → different ciphertext
     }
 
-    #[test]
-    fn author_seal_round_trips_through_verify_entry() {
-        use crate::{generate_identity, verify_entry, EntryError};
-        use openom_protocol::v1::{KeyEpoch, Keyring, Member, MemberRole};
-        let dek = generate_dek().unwrap();
-        let author = generate_identity().unwrap();
-        let mut p = params(Aead::Xchacha20Poly1305);
-        p.kind = Kind::Delta;
-        p.author = Some(AuthorContext { signing_key: &author, member_id: "m1", keyring_revision: 3 });
-        let env = seal_envelope(&dek, &p, b"a change").unwrap();
-        let header = env.header.as_ref().unwrap();
-        assert!(!header.author_signature.is_empty(), "signed");
-        assert_eq!(header.author_member_id, "m1");
-        assert_eq!(header.keyring_revision, 3);
-
-        // A governing keyring at rev 3: m1 is a Maintainer, newest epoch key_id matches params.key_id.
-        let kr = Keyring {
-            tree_id: b"tree-uuid-16byte".to_vec(),
-            revision: 3,
-            layout_version: 1,
-            prev_keyring_hash: vec![],
-            authorized_signers: vec![],
-            members: vec![Member {
-                member_id: "m1".into(),
-                role: MemberRole::Admin as i32,
-                author_public_key: author.verifying_key().to_bytes().to_vec(),
-                hpke_public_key: vec![9; 32],
-            }],
-            signatures: vec![],
-            recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: p.key_id.to_vec(), epoch: 0, wraps: vec![] }],
-        };
-        let plaintext = open_envelope(&dek, &env).unwrap();
-        assert_eq!(verify_entry(1, header, &plaintext, &kr), Ok(()), "the sealed entry verifies");
-        // A different plaintext against the same signature → rejected (content binding).
-        assert_eq!(verify_entry(1, header, b"tampered", &kr), Err(EntryError::BadSignature));
-    }
+    // (The seal→verify_entry round-trip lives in openom-keyring's entry tests, which can depend on both
+    // this crate's seal_envelope and its own verify_entry.)
 
     #[test]
     fn no_author_leaves_entry_unattributed() {

@@ -12,39 +12,9 @@ use uuid::Uuid;
 
 use crate::trees::ApiError;
 
-// Role values — mirror the keyring `MemberRole` enum (design.sharing §2.2). Lower = more powerful.
-pub const ROLE_OWNER: i16 = 1;
-pub const ROLE_CO_OWNER: i16 = 2;
-pub const ROLE_MAINTAINER: i16 = 3; // keyring ADMIN
-pub const ROLE_EDITOR: i16 = 4;
-pub const ROLE_VIEWER: i16 = 5;
-
-/// The capability a request needs. Each maps to the weakest role that may perform it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Access {
-    /// Read any of the tree's channels (snapshot, log, media, proposals, keyring). Viewer+.
-    Read,
-    /// Submit a proposal for review. Editor+.
-    Propose,
-    /// Stage media bytes (upload/confirm) — e.g. to reference from a proposal. Editor+.
-    StageMedia,
-    /// Write authoritative state: append a delta, replace the snapshot, attach/detach media. Maintainer+.
-    Commit,
-    /// Administer ordinary members (add/remove/role). Maintainer+. (Signer ops — keyring PUT, co-owner
-    /// changes — are gated at the endpoint as Owner/Co-owner, not here.)
-    Administer,
-}
-
-impl Access {
-    /// The weakest (highest-numbered) role allowed to exercise this capability.
-    fn min_role(self) -> i16 {
-        match self {
-            Access::Read => ROLE_VIEWER,
-            Access::Propose | Access::StageMedia => ROLE_EDITOR,
-            Access::Commit | Access::Administer => ROLE_MAINTAINER,
-        }
-    }
-}
+// The capability→role policy is domain logic shared with the client (verify_entry enforces the same
+// mapping): it lives in `openom-roles`. This module keeps only the server-side ACL query.
+pub use openom_roles::Access;
 
 /// Authorize `member` for `need` access to the tree `tree_id` owned by `owner`. `Ok(())` if permitted,
 /// [`ApiError::Forbidden`] otherwise.

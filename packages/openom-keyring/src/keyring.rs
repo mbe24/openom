@@ -21,7 +21,7 @@ use openom_protocol::aad::keyring_signing_bytes;
 use openom_protocol::v1::{Keyring, KeyringSignature};
 use sha2::{Digest, Sha256};
 
-use crate::CryptoError;
+use openom_crypto::CryptoError;
 
 pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 

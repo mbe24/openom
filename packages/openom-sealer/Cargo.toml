@@ -13,6 +13,8 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 openom-protocol.workspace = true
 openom-crypto.workspace = true
+# The keyring/membership mechanism (chain verify, entry authorship, keyring signing) the vault drives.
+openom-keyring.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
 

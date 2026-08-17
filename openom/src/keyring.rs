@@ -2,7 +2,7 @@
 //!
 //! The signed keyring is the AUTHORITATIVE membership/role list. The server stores every revision
 //! (append-only) so clients walk the hash chain hop-by-hop, verifies each candidate against the stored
-//! head (honest-server defense-in-depth — `openom_crypto::chain`), and DERIVES the advisory `tree_access`
+//! head (honest-server defense-in-depth — `openom_keyring::chain`), and DERIVES the advisory `tree_access`
 //! ACL from the keyring's non-secret `members` list. Zero-knowledge is intact: the server reads only the
 //! non-secret member ids/roles + the signatures it verifies; the wraps/keys stay opaque, never decrypted.
 //!
@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use openom_crypto::{keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor};
+use openom_keyring::{keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};

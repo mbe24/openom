@@ -15,10 +15,10 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
-    generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, keyring_hash,
-    parse_recovery_code, recovery_kdf_params, sign_keyring, unwrap_rrk_secret, verify_keyring_any,
-    wrap_rrk_secret, CryptoError, Key32, RootKeys, SigningKey, VerifyingKey, KEY_LEN,
+    generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code,
+    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Key32, RootKeys, KEY_LEN,
 };
+use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
 use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
@@ -160,7 +160,7 @@ pub fn unlock(
     // Sign entries only on an ATTRIBUTED (shared) write epoch — one wrapped beyond the sole founder.
     // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
     // skips verification for them); the moment the tree is shared, the sealer starts signing (§B3).
-    let attributed = openom_crypto::epoch_is_attributed(&keyring, &write_key_id);
+    let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
     let mut sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
     if attributed {
         sealer = sealer.with_author(identity, member_id.to_string(), revision);
@@ -1073,7 +1073,8 @@ mod tests {
         unlock, unlock_as_member,
     };
     use crate::{EntryKind, SealContext, SealerError, SealerSet};
-    use openom_crypto::{derive_root, generate_recovery_code, keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
+    use openom_crypto::{derive_root, generate_recovery_code};
+    use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
 

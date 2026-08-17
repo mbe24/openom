@@ -1,0 +1,30 @@
+[package]
+name = "openom-keyring"
+description = "openom — the keyring/membership mechanism: keyring chain verification, entry authorship, signing"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Wire types (Keyring / Member / Header) + the canonical signing-byte encoders.
+openom-protocol.workspace = true
+# Primitives layer — the shared CryptoError this crate returns (keyring/membership builds on crypto).
+openom-crypto.workspace = true
+# The capability→role policy verify_entry enforces.
+openom-roles.workspace = true
+ed25519-dalek.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# generate_identity uses getrandom; on wasm (via openom-sealer) enable the browser backend, mirroring
+# openom-crypto. Pair with RUSTFLAGS=--cfg getrandom_backend="wasm_js" at the wasm build step.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
