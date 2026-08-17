@@ -35,7 +35,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 11.20.0
 
       # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
       # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
@@ -74,7 +74,7 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 11.20.0
 
       # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
       # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
