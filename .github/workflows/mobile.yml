@@ -41,7 +41,7 @@ jobs:
       # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
       # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
@@ -80,7 +80,7 @@ jobs:
       # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
       # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
