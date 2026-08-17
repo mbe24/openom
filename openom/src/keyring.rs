@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use openom_crypto::{verify_reset, verify_transition, ChainError, KeyringAnchor};
+use openom_crypto::{keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,8 @@ use crate::AppState;
 const MAX_KEYRING_BYTES: usize = 512 * 1024;
 /// Cap a history response's revision count (keyrings are small; bound it for the Lambda ceiling anyway).
 const HISTORY_MAX: i64 = 512;
+/// Per-tree cooldown between recovery/succession resets (a reset is a rare life event; this bounds abuse).
+const RESET_COOLDOWN_SECS: f64 = 3600.0;
 
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
@@ -84,12 +86,13 @@ pub async fn put_keyring(
     // real authorization — a non-signer's candidate fails verify_transition even if they pass this.
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
 
-    // Verify: genesis (no keyring yet) via verify_reset; otherwise a strict successor of the stored head.
-    let anchor = if head_rev == 0 {
+    // Verify: genesis (no keyring yet) via verify_reset; otherwise a strict successor of the stored head,
+    // OR a recovery/succession RESET (slice 4).
+    let (anchor, is_reset) = if head_rev == 0 {
         if candidate.revision != 1 {
             return Err(ApiError::BadRequest("first keyring must be revision 1".into()));
         }
-        verify_reset(&candidate).map_err(keyring_err)?
+        (verify_reset(&candidate).map_err(keyring_err)?, false)
     } else {
         let prior_bytes: Vec<u8> =
             sqlx::query_scalar("SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2")
@@ -100,19 +103,57 @@ pub async fn put_keyring(
                 .map_err(internal)?;
         let prior = Keyring::decode(prior_bytes.as_slice())
             .map_err(|_| ApiError::Internal("stored keyring is corrupt".into()))?;
-        verify_transition(&KeyringAnchor::from_keyring(&prior), &candidate).map_err(keyring_err)?
+        match verify_transition(&KeyringAnchor::from_keyring(&prior), &candidate) {
+            Ok(a) => (a, false),
+            // A recovery/succession reset: it chains onto our head by hash + revision (so it can't roll
+            // back or fork), but changes the authorized-signer set without the old set's endorsement
+            // (the old signing key is presumed lost) — which verify_transition reports as
+            // UnendorsedSetChange. verify_reset confirms it's a self-consistent, wrap-complete,
+            // self-signed keyring. The server can't tell a legitimate recovery from a founder-substitution
+            // attack; the CLIENT re-verifies the new signer set out-of-band (is_reset surfaces it). The
+            // revision + prev-hash guards are redundant with UnendorsedSetChange (which is only reached
+            // after those pass) but stated explicitly as the reset's defining shape.
+            Err(ChainError::UnendorsedSetChange)
+                if candidate.revision == head_rev as u32 + 1
+                    && candidate.prev_keyring_hash == keyring_hash(&prior) =>
+            {
+                (verify_reset(&candidate).map_err(keyring_err)?, true)
+            }
+            Err(e) => return Err(keyring_err(e)),
+        }
     };
+
+    // A reset bypasses the prior-signer signature gate, so rate-cap it per tree (a stolen Administer token
+    // could otherwise spam resets, forking every member into an OOB-reverify prompt). Atomic in SQL: the
+    // UPDATE lands only outside the cooldown, and stamps the new reset time.
+    if is_reset {
+        let capped = sqlx::query(
+            "UPDATE trees SET last_reset_at = now()
+              WHERE id = $1 AND (last_reset_at IS NULL OR last_reset_at <= now() - make_interval(secs => $2))",
+        )
+        .bind(tree_id)
+        .bind(RESET_COOLDOWN_SECS)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        if capped.rows_affected() != 1 {
+            tracing::info!(event = "rate_rejected", resource = "keyring_reset", %tree_id);
+            return Err(ApiError::TooManyRequests(RESET_COOLDOWN_SECS as u64));
+        }
+        tracing::info!(event = "keyring_reset", %tree_id, revision = candidate.revision);
+    }
 
     // Persist append-only. The PK (tree_id, revision) is the CAS backstop: a racing PUT that verified
     // against the same head inserts 0 rows here and loses.
     let inserted = sqlx::query(
-        "INSERT INTO tree_keyrings (tree_id, revision, payload, keyring_hash)
-         VALUES ($1, $2, $3, $4) ON CONFLICT (tree_id, revision) DO NOTHING",
+        "INSERT INTO tree_keyrings (tree_id, revision, payload, keyring_hash, is_reset)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tree_id, revision) DO NOTHING",
     )
     .bind(tree_id)
     .bind(candidate.revision as i32)
     .bind(body.as_ref())
     .bind(anchor.keyring_hash.as_slice())
+    .bind(is_reset)
     .execute(&mut *tx)
     .await
     .map_err(internal)?;
@@ -185,6 +226,10 @@ pub struct HistoryQuery {
 struct KeyringRevision {
     revision: i32,
     payload: String, // base64 of the opaque signed keyring bytes
+    /// True if this revision is a recovery/succession reset (the signer set changed unendorsed). A UX
+    /// hint so the client can prompt out-of-band re-verification — NOT a trust gate (the client decides
+    /// from the crypto, never this flag).
+    is_reset: bool,
 }
 
 #[derive(Serialize)]
@@ -212,8 +257,8 @@ pub async fn get_keyring(
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
     let from = q.from.unwrap_or(1);
-    let rows: Vec<(i32, Vec<u8>)> = sqlx::query_as(
-        "SELECT revision, payload FROM tree_keyrings WHERE tree_id = $1 AND revision >= $2 ORDER BY revision LIMIT $3",
+    let rows: Vec<(i32, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT revision, payload, is_reset FROM tree_keyrings WHERE tree_id = $1 AND revision >= $2 ORDER BY revision LIMIT $3",
     )
     .bind(tree_id)
     .bind(from)
@@ -222,8 +267,10 @@ pub async fn get_keyring(
     .await
     .map_err(internal)?;
 
-    let revisions =
-        rows.into_iter().map(|(revision, payload)| KeyringRevision { revision, payload: b64(&payload) }).collect();
+    let revisions = rows
+        .into_iter()
+        .map(|(revision, payload, is_reset)| KeyringRevision { revision, payload: b64(&payload), is_reset })
+        .collect();
     Ok((StatusCode::OK, Json(KeyringHistory { revisions, head })).into_response())
 }
 

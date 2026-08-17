@@ -714,6 +714,65 @@ async fn keyring_put_requires_privilege() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_accepts_a_recovery_reset() {
+    // A recovery/succession reset: chains onto the head (hash + revision+1) but installs a NEW founder
+    // without the old founder's endorsement (old key lost). The server accepts it (can't roll back / fork)
+    // and flags it is_reset; the client re-verifies the signer change out of band.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let founder_a = generate_identity().unwrap();
+    let rev1 = build_keyring(tree, 1, vec![], &founder_a, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+
+    // Recovery: a fresh founder identity, chaining onto rev1 by hash at revision 2.
+    let founder_b = generate_identity().unwrap();
+    let reset = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder_b, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &reset, owner)).await.0, StatusCode::OK, "recovery reset accepted");
+    assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner ACL preserved across the reset");
+
+    // GET flags the reset revision (a UX hint for the OOB re-verify prompt).
+    let (_, _, b) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
+    let h: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(h["head"].as_i64().unwrap(), 2);
+    assert_eq!(h["revisions"][0]["is_reset"].as_bool().unwrap(), true, "revision 2 is flagged a reset");
+
+    // A plain fork (wrong prev_hash) is NOT a reset — still refused.
+    let forked = build_keyring(tree, 3, vec![0u8; 32], &founder_b, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &forked, owner)).await.0, StatusCode::CONFLICT, "a fork is not a reset");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn keyring_reset_rate_capped() {
+    // A reset bypasses the prior-signer signature gate, so per-tree resets are cooldown-capped.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+
+    let fa = generate_identity().unwrap();
+    let rev1 = build_keyring(tree, 1, vec![], &fa, owner, &[]);
+    send(&app, put_keyring_as(tree, &rev1, owner)).await;
+
+    let fb = generate_identity().unwrap();
+    let reset2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &fb, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &reset2, owner)).await.0, StatusCode::OK, "first reset");
+
+    // A second reset immediately after → within the cooldown → 429.
+    let fc = generate_identity().unwrap();
+    let reset3 = build_keyring(tree, 3, keyring_hash(&reset2).to_vec(), &fc, owner, &[]);
+    assert_eq!(send(&app, put_keyring_as(tree, &reset3, owner)).await.0, StatusCode::TOO_MANY_REQUESTS, "reset cooldown");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn keyring_removal_purges_and_access_list() {
     // Removing a member (via a keyring transition) drops their ACL row AND reclaims their transient
     // state — open proposals + rate bucket — so they leave nothing behind. GET /access reflects it.
