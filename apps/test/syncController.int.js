@@ -102,4 +102,31 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     expect(c.allPeople().length).toBe(2);
     expect(c.allPeople().map((x) => x.given).sort()).toEqual(['Grace', 'Hopper']);
   });
+
+  it('drops an entry that fails verification and merges the rest (order-insensitive)', async () => {
+    const remote = new FakeRemote();
+    const a = new FamilyTree(new MemoryStore(), 'doc');
+    const b = new FamilyTree(new MemoryStore(), 'doc');
+    await a.hydrate();
+    await b.hydrate();
+    const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
+    // B's verifier rejects the FIRST entry it's asked about (stands in for an unauthorized author /
+    // bad signature the sealer's verifyEntry would throw on); the rest must still merge.
+    let seen = 0;
+    const verify = async () => {
+      seen += 1;
+      if (seen === 1) throw new Error('unauthorized author');
+    };
+    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, verify });
+
+    await a.createPerson({ given: 'Ada' });
+    await a.createPerson({ given: 'Grace' });
+    await sa.push();
+    const r = await sb.pull();
+
+    expect(r.rejected.length).toBe(1); // exactly the refused entry
+    expect(r.merged).toBeGreaterThanOrEqual(1); // the rest still merged — one bad entry doesn't stall the log
+    // Nothing verified-bad reached the tree without also blocking the good entries.
+    expect(seen).toBeGreaterThanOrEqual(2);
+  });
 });

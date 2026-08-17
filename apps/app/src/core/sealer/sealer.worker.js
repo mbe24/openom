@@ -14,6 +14,8 @@ import init, {
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
+  verifyEntry as wasmVerifyEntry,
+  epochIsAttributed as wasmEpochIsAttributed,
   WasmSealer,
 } from '../../vendor/sealer/openom_sealer.js';
 
@@ -86,6 +88,21 @@ const api = {
     const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision };
     r.free();
     return out;
+  },
+
+  // Verify a landed entry's author attribution (§B3 launch gate). Throws if the entry wasn't validly
+  // authored by a member with the required capability at its governing keyring revision — the caller
+  // then refuses to merge it. `governing` is the keyring bytes at the entry's header.keyring_revision.
+  async verifyEntry(version, envelope, plaintext, governing) {
+    await ensureInit();
+    wasmVerifyEntry(version, envelope, plaintext, governing); // throws on reject
+  },
+
+  // Whether an epoch (by key_id) is attributed in `keyring` — the tree is shared under it, so entries
+  // under it must be signed. Derived from the verified keyring, never an entry's own emptiness.
+  async epochIsAttributed(keyring, keyId) {
+    await ensureInit();
+    return wasmEpochIsAttributed(keyring, keyId);
   },
 
   // Verify a keyring chain pulled from the untrusted server and return the validated head to store.

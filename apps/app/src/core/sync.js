@@ -42,6 +42,7 @@ export class SyncController {
   #open;
   #persist;
   #replicaKey;
+  #verify;
   #outbox = [];
   #pulledCursor;
   #unsub;
@@ -55,8 +56,14 @@ export class SyncController {
    * @param {(sealed: Uint8Array) => Promise<Uint8Array>|Uint8Array} o.open sealed bytes → raw delta
    * @param {object} [o.persist]   durable KV for the pull cursor (defaults to localStorage/in-memory)
    * @param {string|null} [o.replicaKey]  our own base64 replica id, to skip our echoes on pull
+   * @param {(sealed: Uint8Array, plaintext: Uint8Array) => Promise<void>} [o.verify]  landed-entry author
+   *        verification (§B3 launch gate): throws to REJECT an entry (unauthorized author / wrong role /
+   *        bad signature at its governing keyring revision). Omit for unattributed (V1 single-owner) trees
+   *        — the app injects one that syncs the keyring, then calls the sealer's verifyEntry per attributed
+   *        epoch. A rejected entry is dropped (not merged) and reported; the rest still merge (the engine
+   *        is order-insensitive), so one bad entry can't stall the log.
    */
-  constructor({ tree, remote, docId, seal, open, persist, replicaKey = null }) {
+  constructor({ tree, remote, docId, seal, open, persist, replicaKey = null, verify = null }) {
     this.#tree = tree;
     this.#remote = remote;
     this.#docId = docId;
@@ -64,6 +71,7 @@ export class SyncController {
     this.#open = open;
     this.#persist = persist ?? defaultPersist();
     this.#replicaKey = replicaKey;
+    this.#verify = verify;
     this.#pulledCursor = this.#loadCursor();
     this.#unsub = tree.onDelta((raw) => this.#outbox.push(raw));
   }
@@ -81,19 +89,35 @@ export class SyncController {
     return { pushed };
   }
 
-  /** Pull the remote tail after our cursor and merge each delta into the tree. */
+  /**
+   * Pull the remote tail after our cursor, VERIFY each entry's author attribution (§B3), and merge the
+   * ones that pass. An entry that fails verification is dropped (never merged) and returned in `rejected`;
+   * the rest still merge (order-insensitive), so a single unauthorized entry from a hostile server can't
+   * stall or poison the log. Own echoes (replicaKey) are skipped without verifying.
+   */
   async pull() {
     const tail = await this.#remote.readLog(this.#docId, this.#pulledCursor);
     let merged = 0;
+    const rejected = [];
     for (const e of tail.entries) {
       if (!(this.#replicaKey && e.replica === this.#replicaKey)) {
-        await this.#tree.mergeRemote(await this.#open(e.payload));
+        const plain = await this.#open(e.payload);
+        if (this.#verify) {
+          try {
+            await this.#verify(e.payload, plain);
+          } catch (err) {
+            rejected.push({ seq: e.seq, member: e.member ?? null, reason: String(err?.message ?? err) });
+            this.#pulledCursor = e.seq; // drop it and move on — a bad entry doesn't block the good ones
+            continue;
+          }
+        }
+        await this.#tree.mergeRemote(plain);
         merged += 1;
       }
       this.#pulledCursor = e.seq;
     }
     this.#saveCursor();
-    return { merged, headSeq: tail.headSeq };
+    return { merged, rejected, headSeq: tail.headSeq };
   }
 
   /** A fresh device: adopt the remote snapshot baseline (if any) then pull the tail. */

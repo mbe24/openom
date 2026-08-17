@@ -14,8 +14,8 @@
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
-use openom_crypto::{verify_walk, Key32, KeyringAnchor, VerifyingKey, KEY_LEN};
-use openom_protocol::v1::{Aead, Compression, Format, KdfParams, Keyring, MemberRole};
+use openom_crypto::{epoch_is_attributed, verify_entry, verify_walk, Key32, KeyringAnchor, VerifyingKey, KEY_LEN};
+use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::{vault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
@@ -640,6 +640,29 @@ pub fn accept_remote_keyring(anchor: &[u8], tree_id: &[u8], hops: &[u8]) -> Resu
         revision: new_anchor.revision,
         sealer: None,
     })
+}
+
+/// Verify a landed entry's author attribution (§B3 launch gate). `envelope` is the sealed entry (its
+/// header carries the attribution fields), `plaintext` its AEAD-opened payload, `governing` the keyring
+/// bytes at `header.keyring_revision` (which the caller fetched + chain-verified). Throws if the entry
+/// wasn't validly authored by a member with the capability its kind requires at the governing revision —
+/// the caller then refuses to merge it. The trust decision is the Rust `verify_entry`'s; this only marshals.
+#[wasm_bindgen(js_name = verifyEntry)]
+pub fn verify_entry_wasm(version: u32, envelope: &[u8], plaintext: &[u8], governing: &[u8]) -> Result<(), JsError> {
+    let env = Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
+    let header = env.header.as_ref().ok_or_else(|| JsError::new("envelope has no header"))?;
+    let kr = Keyring::decode(governing).map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
+    verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Whether the epoch `key_id` is attributed in `keyring` — i.e. its DEK was wrapped beyond the sole
+/// founder (the tree is shared under it), so entries under it MUST be signed. The client uses this,
+/// derived from the VERIFIED keyring (never an entry's own emptiness), to decide whether an unattributed
+/// entry is acceptable — closing the downgrade attack.
+#[wasm_bindgen(js_name = epochIsAttributed)]
+pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, JsError> {
+    let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+    Ok(epoch_is_attributed(&kr, key_id))
 }
 
 /// Split a buffer of `[u32-be length][bytes]…` frames into slices. The framing keeps a list of
