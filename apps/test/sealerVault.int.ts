@@ -121,16 +121,15 @@ describe('createVault (worker orchestration)', () => {
     await expect(vault.unlock(TREE, TID, 'wrong', MEMBER)).rejects.toThrow(/wrong passphrase/);
   });
 
-  it('refuses to unlock a keyring rolled back below the watermark', async () => {
+  it('refuses to unlock a keyring below the watermark (min_revision backstop)', async () => {
     const store = memoryKeyringStore();
     const { vault, watermarks } = newVault(store);
-    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1
-    const stale = await store.load(TREE);
-    await vault.changePassphrase(TREE, TID, 'old', 'new', MEMBER); // rev 2 → watermark 2
-
-    await store.save(TREE, stale!); // a server serves the old rev-1 keyring back
-    // The worker refuses (min_revision) BEFORE exposing a sealer — the watermark never even
-    // gets a chance to regress. (Belt and suspenders: observe would also reject it.)
+    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1, stored head = 1
+    // The watermark has advanced past the stored head (e.g. a keyring sync saw a newer revision) — the
+    // worker refuses unlocking a below-watermark keyring BEFORE exposing a sealer. (The store now retains
+    // every revision + always unlocks with its head, so a server can't roll the head back by serving an
+    // old keyring; this min_revision check is the deeper backstop.)
+    watermarks.observe(TREE, { keyringRevision: 2 });
     await expect(vault.unlock(TREE, TID, 'old', MEMBER)).rejects.toThrow(/rollback/i);
     expect(watermarks.current(TREE).keyringRevision).toBe(2);
   });
@@ -160,13 +159,11 @@ describe('createVault (worker orchestration)', () => {
     await expect(vault.unlock(TREE, TID, 'old', MEMBER)).rejects.toThrow();
   });
 
-  it('passes the watermark as min_revision so a stale keyring is refused on recover', async () => {
+  it('passes the watermark as min_revision so a below-watermark keyring is refused on recover', async () => {
     const store = memoryKeyringStore();
-    const { vault } = newVault(store);
-    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1
-    const stale = await store.load(TREE);
-    await vault.changePassphrase(TREE, TID, 'old', 'new', MEMBER); // watermark → 2
-    await store.save(TREE, stale!); // roll the stored keyring back to rev 1
+    const { vault, watermarks } = newVault(store);
+    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1, stored head = 1
+    watermarks.observe(TREE, { keyringRevision: 2 }); // watermark advanced past the stored head
     await expect(vault.recover(TREE, TID, 'CODE-1', 'x', MEMBER)).rejects.toThrow(/rollback/);
   });
 

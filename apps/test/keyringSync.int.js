@@ -60,7 +60,7 @@ describe('vault.syncKeyring', () => {
   async function setup(worker) {
     const keyringStore = memoryKeyringStore();
     const watermarks = new Watermarks();
-    await keyringStore.save(treeKey, bytes(7, 7)); // a stored anchor …
+    await keyringStore.save(treeKey, 1, bytes(7, 7)); // a stored anchor …
     watermarks.observe(treeKey, { keyringRevision: 1 }); // … at revision 1
     const vault = createVault({ worker, keyringStore, watermarks });
     return { vault, keyringStore, watermarks };
@@ -71,12 +71,19 @@ describe('vault.syncKeyring', () => {
     const { vault, keyringStore, watermarks } = await setup(worker);
     const r = await vault.syncKeyring(treeKey, treeId, async (since) => {
       expect(since).toBe(1); // fetches successors AFTER our current revision
-      return [bytes(2, 2), bytes(3, 3)];
+      return [
+        { revision: 2, bytes: bytes(2, 2) },
+        { revision: 3, bytes: bytes(3, 3) },
+      ];
     });
     expect(r).toEqual({ revision: 3, changed: true });
-    expect(Array.from(await keyringStore.load(treeKey))).toEqual([3, 3]); // the worker-validated head
+    expect(Array.from(await keyringStore.load(treeKey))).toEqual([3, 3]); // head = the newest revision
     expect(watermarks.current(treeKey).keyringRevision).toBe(3);
     expect(worker.state.seen.map((u) => Array.from(u))).toEqual([[2, 2], [3, 3]]); // framing round-tripped
+    // Every validated revision is RETAINED (governs entries stamped at it) — not just the head.
+    expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]);
+    expect(Array.from(await keyringStore.at(treeKey, 3))).toEqual([3, 3]);
+    expect(Array.from(await keyringStore.at(treeKey, 1))).toEqual([7, 7]); // the original anchor stays
   });
 
   it('nothing newer → no-op: no verify call, stored keyring + watermark unchanged', async () => {
@@ -92,7 +99,7 @@ describe('vault.syncKeyring', () => {
   it('a refused chain (fork/rollback from a hostile server) leaves stored keyring + watermark UNTOUCHED', async () => {
     const worker = fakeWorker({ reject: true });
     const { vault, keyringStore, watermarks } = await setup(worker);
-    await expect(vault.syncKeyring(treeKey, treeId, async () => [bytes(9)])).rejects.toThrow(/refused/);
+    await expect(vault.syncKeyring(treeKey, treeId, async () => [{ revision: 2, bytes: bytes(9) }])).rejects.toThrow(/refused/);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // NOT overwritten
     expect(watermarks.current(treeKey).keyringRevision).toBe(1); // NOT advanced
   });
@@ -111,7 +118,7 @@ describe('RemoteStore.readKeyring', () => {
     });
     const r = await rs.readKeyring('t1', 2);
     expect(r.head).toBe(2);
-    expect(r.revisions.map((u) => Array.from(u))).toEqual([[5, 6]]);
+    expect(r.revisions.map((x) => ({ revision: x.revision, bytes: Array.from(x.bytes) }))).toEqual([{ revision: 2, bytes: [5, 6] }]);
   });
 
   it('404 (no keyring yet) → empty chain', async () => {

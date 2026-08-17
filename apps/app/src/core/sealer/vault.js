@@ -46,7 +46,7 @@ export function frameHops(revisions) {
 /**
  * @param {object} deps
  * @param {object} deps.worker         the crypto worker proxy (provision/unlock/recover/changePassphrase/sealEntry/openEntry/lock)
- * @param {object} deps.keyringStore   { load(treeKey), save(treeKey, bytes) }
+ * @param {object} deps.keyringStore   { save(treeKey, revision, bytes), at(treeKey, revision), head, load }
  * @param {object} deps.watermarks     a Watermarks instance
  * @param {() => Uint8Array} [deps.makeReplicaId]  fresh replica id per unlock (default: CSPRNG)
  */
@@ -69,7 +69,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
 
     async provision(treeKey, treeId, passphrase, memberId) {
       const r = await worker.provision(passphrase, treeId, memberId, makeReplicaId());
-      await keyringStore.save(treeKey, r.keyring);
+      await keyringStore.save(treeKey, r.revision, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
     },
@@ -86,7 +86,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       const keyring = await requireKeyring(treeKey);
       const min = watermarks.current(treeKey).keyringRevision;
       const r = await worker.recover(keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), min);
-      await keyringStore.save(treeKey, r.keyring);
+      await keyringStore.save(treeKey, r.revision, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
     },
@@ -95,7 +95,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       const keyring = await requireKeyring(treeKey);
       const min = watermarks.current(treeKey).keyringRevision;
       const r = await worker.changePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, min);
-      await keyringStore.save(treeKey, r.keyring);
+      await keyringStore.save(treeKey, r.revision, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { recoveryCode: r.recoveryCode };
     },
@@ -104,22 +104,24 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
      * Pull newer keyring revisions from the server and adopt them if they verify. `fetchSuccessors` is
      * given our current revision and returns the successor keyring byte-arrays after it (ascending);
      * the worker (Rust) decides whether they form a legitimate chain onto our stored anchor — a fork,
-     * rollback, or withheld hop is refused there and this throws without touching stored state. Only the
-     * worker-validated head is persisted + watermarked, so an untrusted server can never plant a keyring
-     * we didn't verify or roll us backward (§10). No-op (and no fetch cost beyond the one call) when
-     * there's nothing newer.
+     * rollback, or withheld hop is refused there and this throws without touching stored state. Every
+     * worker-validated revision is RETAINED (each governs entries stamped at it) + the head watermarked, so
+     * an untrusted server can never plant a keyring we didn't verify or roll us backward (§10). No-op (and
+     * no fetch cost beyond the one call) when there's nothing newer.
      * @returns {Promise<{ revision: number, changed: boolean }>}
      */
     async syncKeyring(treeKey, treeId, fetchSuccessors) {
       const anchor = await requireKeyring(treeKey);
       const since = watermarks.current(treeKey).keyringRevision;
-      const successors = await fetchSuccessors(since);
+      const successors = await fetchSuccessors(since); // [{ revision, bytes }] ascending, revisions > since
       if (!successors || successors.length === 0) {
         return { revision: since, changed: false };
       }
-      const r = await worker.acceptRemoteKeyring(anchor, treeId, frameHops(successors));
-      // Persist + watermark ONLY after the worker validated the walk.
-      await keyringStore.save(treeKey, r.keyring);
+      const r = await worker.acceptRemoteKeyring(anchor, treeId, frameHops(successors.map((s) => s.bytes)));
+      // The worker validated the whole run as a legitimate chain → RETAIN every revision (each is the
+      // governing keyring for entries stamped at it, §B3 launch gate) and watermark the new head. Persist
+      // only after validation, so an untrusted server can never plant an unverified revision.
+      for (const s of successors) await keyringStore.save(treeKey, s.revision, s.bytes);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
       return { revision: r.revision, changed: true };
     },

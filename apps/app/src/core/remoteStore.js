@@ -145,8 +145,9 @@ export class RemoteStore {
 
   /**
    * The keyring revision chain from `from` (inclusive) to head, for the client to verify + adopt via
-   * the sealer's `acceptRemoteKeyring`. Returns `{ revisions, head }` where `revisions` is the opaque
-   * signed keyring bytes ascending (Uint8Array[]). A 404 (no keyring yet) → empty.
+   * the sealer's `acceptRemoteKeyring` and RETAIN per revision. Returns `{ revisions, head }` where
+   * `revisions` is `[{ revision, bytes }]` ascending (bytes = the opaque signed keyring). A 404 (no
+   * keyring yet) → empty.
    */
   async readKeyring(id, from = 1) {
     const res = await this.#fetch(`${this.#tree(id)}/keyring?from=${from}`, { headers: this.#headers() });
@@ -154,7 +155,7 @@ export class RemoteStore {
     if (!res.ok) throw new Error(`readKeyring ${id}: HTTP ${res.status}`);
     const body = await res.json();
     return {
-      revisions: (body.revisions ?? []).map((r) => b64decode(r.payload)),
+      revisions: (body.revisions ?? []).map((r) => ({ revision: r.revision, bytes: b64decode(r.payload) })),
       head: body.head ?? 0,
     };
   }
