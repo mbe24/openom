@@ -64,7 +64,7 @@ fn two_devices_converge_through_the_full_stack() {
 
     // Concurrent edits on both devices (each pushes its sealed delta to the shared log).
     a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
-    a.apply(TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: Some("parish".into()) }).unwrap();
+    a.apply(TreeOp::AddClaim { subject: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: Some("parish".into()) }).unwrap();
     b.apply_batch(vec![
         TreeOp::AddFamily { id: vec![0xF0] },
         TreeOp::LinkChild { family: vec![0xF0], person: vec![1], pedi: Pedigree::Birth },
@@ -93,7 +93,7 @@ fn a_second_round_of_edits_syncs_and_pull_is_idempotent() {
     a.apply(TreeOp::AddPerson { id: vec![1] }).unwrap();
     b.pull().unwrap();
     // A second round: B edits, A catches up.
-    b.apply(TreeOp::AddClaim { person: vec![1], field: "name.given".into(), claim: vec![7], value: "Mary".into(), source: None }).unwrap();
+    b.apply(TreeOp::AddClaim { subject: vec![1], field: "name.given".into(), claim: vec![7], value: "Mary".into(), source: None }).unwrap();
     a.pull().unwrap();
     assert_eq!(a.tree().doc().snapshot(), b.tree().doc().snapshot());
 
@@ -116,7 +116,7 @@ fn a_proposal_travels_through_the_store_and_is_approved() {
 
     // Editor drafts + pushes a proposal — NOT applied to its own tree.
     let drafted = editor
-        .push_proposal(vec![TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: Some("record".into()) }])
+        .push_proposal(vec![TreeOp::AddClaim { subject: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: Some("record".into()) }])
         .unwrap();
     assert!(editor.tree().fact(&[1], "birth.date").claims.is_empty(), "a proposal is not applied locally");
 
@@ -152,7 +152,7 @@ fn a_crashed_client_rebuilds_its_tree_from_the_durable_log() {
             TreeOp::LinkChild { family: vec![0xF0], person: vec![1], pedi: Pedigree::Birth },
         ])
         .unwrap();
-        a.apply(TreeOp::AddClaim { person: vec![1], field: "name.given".into(), claim: vec![7], value: "Ada".into(), source: None }).unwrap();
+        a.apply(TreeOp::AddClaim { subject: vec![1], field: "name.given".into(), claim: vec![7], value: "Ada".into(), source: None }).unwrap();
         a.tree().doc().snapshot()
         // a drops here — the crash.
     };
@@ -171,7 +171,7 @@ fn a_fresh_client_bootstraps_from_a_snapshot_plus_the_tail() {
     a.apply(TreeOp::AddPerson { id: vec![2] }).unwrap();
     a.compact().unwrap(); // the snapshot covers the two people
                           // A tail edit after the snapshot.
-    a.apply(TreeOp::AddClaim { person: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None }).unwrap();
+    a.apply(TreeOp::AddClaim { subject: vec![1], field: "birth.date".into(), claim: vec![9], value: "1901".into(), source: None }).unwrap();
 
     // A fresh client bootstraps: the snapshot (two people) + only the tail (the claim).
     let mut c = client(3, b"replica-c", dek, store.clone());
