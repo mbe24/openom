@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { createTree } from '../app/src/core/treelog/index.js';
 import { FamilyTree } from '../app/src/core/familyTree.js';
 import { SyncController } from '../app/src/core/sync.js';
+import { createSyncedDeltaSync } from '../app/src/core/syncedDeltaSync.js';
+import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 import { MemoryStore } from '../app/src/core/store.js';
 
 const wasmUrl = new URL('../app/src/vendor/treelog/openom_treelog_bg.wasm', import.meta.url);
@@ -128,5 +130,51 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     expect(r.merged).toBeGreaterThanOrEqual(1); // the rest still merged — one bad entry doesn't stall the log
     // Nothing verified-bad reached the tree without also blocking the good entries.
     expect(seen).toBeGreaterThanOrEqual(2);
+  });
+
+  it('createSyncedDeltaSync wires the verifier: a forged entry is dropped, the rest merge', async () => {
+    const remote = new FakeRemote();
+    const a = new FamilyTree(new MemoryStore(), 'doc');
+    const b = new FamilyTree(new MemoryStore(), 'doc');
+    await a.hydrate();
+    await b.hydrate();
+    const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
+    // A fake worker (the composer's primitives) + a keyring retained at the governing revision, so the
+    // composer runs the real decision flow (attributed epoch → verifyEntry). verifyEntry rejects the first.
+    let seen = 0;
+    const worker = {
+      entryAttribution: async () => ({ keyringRevision: 2, keyId: new Uint8Array([1]) }),
+      epochIsAttributed: async () => true,
+      verifyEntry: async () => {
+        seen += 1;
+        if (seen === 1) throw new Error('unauthorized author');
+      },
+    };
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('doc', 2, new Uint8Array([9])); // the governing keyring the composer fetches
+    const sb = createSyncedDeltaSync({ version: 1, tree: b, remote, docId: 'doc', seal: identity, open: identity, worker, keyringStore });
+
+    await a.createPerson({ given: 'Ada' });
+    await a.createPerson({ given: 'Grace' });
+    await sa.push();
+    const r = await sb.pull();
+    expect(r.rejected.length).toBe(1);
+    expect(r.merged).toBeGreaterThanOrEqual(1);
+  });
+
+  it('bootstrap refuses a snapshot that fails verification (never adopts it)', async () => {
+    const forged = new Uint8Array([0xde, 0xad]);
+    const remote = {
+      readSnapshot: async () => ({ bytes: forged }),
+      readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
+    };
+    const b = new FamilyTree(new MemoryStore(), 'doc');
+    await b.hydrate();
+    const verify = async () => {
+      throw new Error('forged snapshot');
+    };
+    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, verify });
+    await expect(sb.bootstrap()).rejects.toThrow(/forged snapshot/);
+    expect(b.allPeople().length).toBe(0); // nothing adopted from the unverified snapshot
   });
 });

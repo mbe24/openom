@@ -120,10 +120,18 @@ export class SyncController {
     return { merged, rejected, headSeq: tail.headSeq };
   }
 
-  /** A fresh device: adopt the remote snapshot baseline (if any) then pull the tail. */
+  /**
+   * A fresh device: adopt the remote snapshot baseline (if any) then pull the tail. The snapshot is
+   * VERIFIED before adoption (§B3) — a forged snapshot is the worst injection (a fresh device swallows the
+   * whole tree from it), so if verification throws we do NOT adopt it and the error propagates (fail-closed).
+   */
   async bootstrap() {
     const snap = await this.#remote.readSnapshot(this.#docId);
-    if (snap && snap.bytes) await this.#tree.mergeRemote(await this.#open(snap.bytes));
+    if (snap && snap.bytes) {
+      const plain = await this.#open(snap.bytes);
+      if (this.#verify) await this.#verify(snap.bytes, plain); // throws → refuse to bootstrap from it
+      await this.#tree.mergeRemote(plain);
+    }
     return this.pull();
   }
 
