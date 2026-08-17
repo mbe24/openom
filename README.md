@@ -1,9 +1,12 @@
 # openom — Tauri prototype
 
-Privacy-first family tree. This prototype implements the design spec and shows the
+Local-first family tree. This prototype implements the design spec and shows the
 architecture: **one Rust core library, three shells** (desktop, Android/iOS,
 browser). The store is volatile — this is about navigation, layout and the
 interfaces, not about persistence.
+
+**The name.** *openom* is *open* + *om* — ኦም (*om*) is "tree" in Tigrinya, a language
+of the Tigray Region of Ethiopia and of Eritrea. An open, local-first family tree.
 
 ## Running it
 
