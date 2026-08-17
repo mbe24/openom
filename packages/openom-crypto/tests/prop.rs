@@ -23,6 +23,7 @@ fn params(aead: Aead) -> SealParams<'static> {
         prev_ciphertext_hash: b"",
         covers_through_seq: 0,
         blob_id: b"",
+        author: None,
     }
 }
 

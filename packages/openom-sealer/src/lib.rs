@@ -195,6 +195,17 @@ pub struct Sealer {
     tree_id: Vec<u8>,
     key_id: Vec<u8>,
     replica_id: Vec<u8>,
+    author: Option<AuthorIdentity>,
+}
+
+/// A member's author identity for attributing sealed entries on a shared tree (§B3 launch gate). Set on
+/// the sealer at unlock via [`Sealer::with_author`]. `keyring_revision` is the member's watermarked
+/// keyring head at unlock — the revision that governs the entries they seal this session (a keyring
+/// change re-unlocks and refreshes it). `None` → unattributed entries (V1 communal-DEK model).
+pub struct AuthorIdentity {
+    pub signing_key: openom_crypto::SigningKey,
+    pub member_id: String,
+    pub keyring_revision: u32,
 }
 
 impl Sealer {
@@ -215,7 +226,16 @@ impl Sealer {
             tree_id,
             key_id,
             replica_id,
+            author: None,
         }
+    }
+
+    /// Attach the member's author identity so entries this sealer seals are SIGNED + attributed
+    /// (shared trees). Builder-style; set at unlock from the verified keyring's member identity + the
+    /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
+    pub fn with_author(mut self, signing_key: openom_crypto::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+        self.author = Some(AuthorIdentity { signing_key, member_id, keyring_revision });
+        self
     }
 
     /// A local-development sealer using the reserved dev key (§16): real ciphertext,
@@ -265,6 +285,12 @@ impl Sealer {
             prev_ciphertext_hash: &ctx.prev_ciphertext_hash,
             covers_through_seq: ctx.covers_through_seq,
             blob_id: &ctx.blob_id,
+            // Sign + attribute the entry when this sealer carries an author identity (shared trees).
+            author: self.author.as_ref().map(|a| openom_crypto::AuthorContext {
+                signing_key: &a.signing_key,
+                member_id: &a.member_id,
+                keyring_revision: a.keyring_revision,
+            }),
         };
         let envelope = seal_envelope(&self.dek, &params, plaintext)?;
         // seal_envelope always sets ciphertext_hash after sealing; the header is present.
@@ -424,6 +450,26 @@ mod tests {
         assert_eq!(s.open_entry(EntryKind::Proposal, &pout.envelope).unwrap(), b"proposal-op-bundle");
         // A proposal must not open as a delta (domain separation via the kind AAD binding).
         assert!(matches!(s.open_entry(EntryKind::Delta, &pout.envelope), Err(SealerError::WrongKind)));
+    }
+
+    #[test]
+    fn with_author_signs_and_attributes_the_entry() {
+        let author = openom_crypto::generate_identity().unwrap();
+        let s = sealer().with_author(author, "m1".into(), 3);
+        let delta = SealContext {
+            kind: EntryKind::Delta,
+            format: Format::OpenomTreelog,
+            ..SealContext::snapshot(1, Vec::new(), 0)
+        };
+        let out = s.seal_entry(&delta, b"a change").unwrap();
+        let h = Envelope::decode(out.envelope.as_slice()).unwrap().header.unwrap();
+        assert!(!h.author_signature.is_empty(), "an author-bearing sealer signs the entry");
+        assert_eq!(h.author_member_id, "m1");
+        assert_eq!(h.keyring_revision, 3);
+        // Default (no author) → unattributed, V1 communal-DEK behaviour.
+        let plain = sealer().seal_entry(&delta, b"a change").unwrap().envelope;
+        let h2 = Envelope::decode(plain.as_slice()).unwrap().header.unwrap();
+        assert!(h2.author_signature.is_empty() && h2.author_member_id.is_empty() && h2.keyring_revision == 0);
     }
 
     #[test]

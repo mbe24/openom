@@ -68,7 +68,7 @@ pub use chain::{
     ChainError, KeyringAnchor,
 };
 pub use entry::{epoch_is_attributed, verify_entry, EntryError};
-pub use envelope::{open_envelope, seal_envelope, SealParams};
+pub use envelope::{open_envelope, seal_envelope, AuthorContext, SealParams};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap,
     HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,

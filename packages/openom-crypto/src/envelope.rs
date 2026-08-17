@@ -8,10 +8,22 @@
 //! concern: `seal_envelope` seals the plaintext **as given** and just records
 //! `params.compression`, so zstd (and its WASM cost) stays out of this layer.
 
+use ed25519_dalek::{Signer, SigningKey};
+use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use sha2::{Digest, Sha256};
 
 use crate::{open, seal, CryptoError, KEY_LEN};
+
+/// Optional author attribution for a shared-tree entry (§B3 launch gate). When present, the member's
+/// Ed25519 author key signs the entry — naming them (`member_id`) and the keyring revision that governs
+/// it — so peers can verify authorship + role via [`crate::verify_entry`]. `None` seals an *unattributed*
+/// entry (empty `author_signature`), the V1 communal-DEK model.
+pub struct AuthorContext<'a> {
+    pub signing_key: &'a SigningKey,
+    pub member_id: &'a str,
+    pub keyring_revision: u32,
+}
 
 /// Inputs for a sealed envelope's header (everything but the nonce + ciphertext_hash,
 /// which [`seal_envelope`] fills in).
@@ -29,6 +41,8 @@ pub struct SealParams<'a> {
     pub covers_through_seq: u64,
     /// KIND_MEDIA only; empty otherwise.
     pub blob_id: &'a [u8],
+    /// Author attribution for a shared tree (§B3). `None` → unattributed (V1).
+    pub author: Option<AuthorContext<'a>>,
 }
 
 fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
@@ -63,11 +77,20 @@ pub fn seal_envelope(
         prev_ciphertext_hash: params.prev_ciphertext_hash.to_vec(),
         covers_through_seq: params.covers_through_seq,
         replaces_ciphertext_hash: Vec::new(),
-        author_signature: Vec::new(), // populated on shared trees when an author key is present (LG2)
+        author_signature: Vec::new(),
         blob_id: params.blob_id.to_vec(),
-        author_member_id: String::new(),
-        keyring_revision: 0,
+        author_member_id: params.author.as_ref().map(|a| a.member_id.to_string()).unwrap_or_default(),
+        keyring_revision: params.author.as_ref().map_or(0, |a| a.keyring_revision),
     };
+
+    // Attribution (§B3): sign the entry with the member's author key BEFORE sealing, so the signature
+    // lands inside the AAD (stripping it then breaks the AEAD tag — fail-closed). author_signing_bytes
+    // binds SHA-256(plaintext) + the attribution fields and excludes nonce/ciphertext_hash/itself, so
+    // it's computable here (pre-seal).
+    if let Some(author) = &params.author {
+        let msg = author_signing_bytes(params.version, &header, Sha256::digest(plaintext).as_slice());
+        header.author_signature = author.signing_key.sign(&msg).to_bytes().to_vec();
+    }
 
     let ciphertext = seal(params.version, &header, dek, plaintext)?;
     header.ciphertext_hash = Sha256::digest(&ciphertext).to_vec();
@@ -104,6 +127,7 @@ mod tests {
             prev_ciphertext_hash: b"",
             covers_through_seq: 0,
             blob_id: b"",
+            author: None,
         }
     }
 
@@ -132,6 +156,52 @@ mod tests {
         let b = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
         assert_ne!(a.header.unwrap().nonce, b.header.unwrap().nonce);
         assert_ne!(a.ciphertext, b.ciphertext); // different nonce → different ciphertext
+    }
+
+    #[test]
+    fn author_seal_round_trips_through_verify_entry() {
+        use crate::{generate_identity, verify_entry, EntryError};
+        use openom_protocol::v1::{KeyEpoch, Keyring, Member, MemberRole};
+        let dek = generate_dek().unwrap();
+        let author = generate_identity().unwrap();
+        let mut p = params(Aead::Xchacha20Poly1305);
+        p.kind = Kind::Delta;
+        p.author = Some(AuthorContext { signing_key: &author, member_id: "m1", keyring_revision: 3 });
+        let env = seal_envelope(&dek, &p, b"a change").unwrap();
+        let header = env.header.as_ref().unwrap();
+        assert!(!header.author_signature.is_empty(), "signed");
+        assert_eq!(header.author_member_id, "m1");
+        assert_eq!(header.keyring_revision, 3);
+
+        // A governing keyring at rev 3: m1 is a Maintainer, newest epoch key_id matches params.key_id.
+        let kr = Keyring {
+            tree_id: b"tree-uuid-16byte".to_vec(),
+            revision: 3,
+            layout_version: 1,
+            prev_keyring_hash: vec![],
+            authorized_signers: vec![],
+            members: vec![Member {
+                member_id: "m1".into(),
+                role: MemberRole::Admin as i32,
+                author_public_key: author.verifying_key().to_bytes().to_vec(),
+                hpke_public_key: vec![9; 32],
+            }],
+            signatures: vec![],
+            recovery_keys: vec![],
+            epochs: vec![KeyEpoch { key_id: p.key_id.to_vec(), epoch: 0, wraps: vec![] }],
+        };
+        let plaintext = open_envelope(&dek, &env).unwrap();
+        assert_eq!(verify_entry(1, header, &plaintext, &kr), Ok(()), "the sealed entry verifies");
+        // A different plaintext against the same signature → rejected (content binding).
+        assert_eq!(verify_entry(1, header, b"tampered", &kr), Err(EntryError::BadSignature));
+    }
+
+    #[test]
+    fn no_author_leaves_entry_unattributed() {
+        let dek = generate_dek().unwrap();
+        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
+        let h = env.header.unwrap();
+        assert!(h.author_signature.is_empty() && h.author_member_id.is_empty() && h.keyring_revision == 0);
     }
 
     #[test]
