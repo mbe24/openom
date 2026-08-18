@@ -10,7 +10,7 @@
 desktop/mobile app (Tauri) and a buildless web app — and syncs through a **zero-knowledge** server that
 only ever stores opaque encrypted blobs. Your genealogy, your keys, your device.
 
-**The name.** *openom* is *open* + *om* — ኦም (*om*) is "tree" in Tigrinya, a language of the Tigray
+**The name.** *openom* is **open** + **ኦም** (*om*), which is "tree" in Tigrinya, a language of the Tigray 
 Region of Ethiopia and of Eritrea. An open, local-first family tree.
 
 - **Local-first** — the tree lives on your device and works offline; the server is a sync relay, not the source of truth.
@@ -67,4 +67,13 @@ generates its own `apps/src-tauri/icons/` from `assets/icon.svg`.
 
 ## License
 
-AGPL-3.0-or-later — see [`LICENSE`](LICENSE).
+This project is licensed under the GNU Affero General Public License v3.0 or later.
+
+```text
+SPDX-License-Identifier: AGPL-3.0-or-later
+```
+
+For full license details, please see the [LICENSE](LICENSE) file.
+
+**openom** — local-first family tree  
+Copyright (C) 2026 Mikael Beyene
