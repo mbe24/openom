@@ -1,0 +1,7 @@
+# Revisions git blame should skip, so lines are attributed to their real author
+# rather than a mechanical reformat. Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# (GitHub applies it automatically.)
+
+# style: format the workspace with rustfmt — the first cargo fmt pass (whitespace only)
+4a56bb1d7963f4274681b04b4b6adf5bd6339a22
