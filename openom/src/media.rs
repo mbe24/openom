@@ -40,11 +40,14 @@ pub struct IntentRequest {
     object_sha256: String,
 }
 
+// Media keys route through the one key service (crate::storage::keys) so staging and
+// final blobs shard and namespace exactly like snapshots and deltas.
+use crate::storage::keys;
 fn staging_key(tree: Uuid, blob: Uuid) -> String {
-    format!("staging/{}/{}", tree.simple(), blob.simple())
+    keys::staging(tree, blob)
 }
 fn final_key(tree: Uuid, blob: Uuid) -> String {
-    format!("blobs/{}/{}", tree.simple(), blob.simple())
+    keys::blob(tree, blob)
 }
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())

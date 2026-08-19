@@ -244,6 +244,86 @@ fn sha256_b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes))
 }
 
+/// Object-key construction — the **one** place R2/S3 keys are built, so every caller
+/// (snapshots, spilled deltas, media) shards and namespaces identically instead of
+/// re-`format!`ing the layout at each site.
+///
+/// Every key is `{namespace}/{shard}/{tree}/…`: a readable resource namespace, then a
+/// two-hex **shard** derived from the tree id, then the tree id. The shard sits *after*
+/// the namespace so the `trees/`/`blobs/` grouping stays legible while each namespace
+/// still splits across 256 partitions; deriving it from the *tree* (not the leaf) keeps
+/// one tree's objects clustered under a single `{ns}/{shard}/{tree}/` prefix while trees
+/// spread evenly. On S3 that avoids a hot partition on the constant `trees/`/`blobs/`
+/// leading token (SERVER-DATA-FORMAT §12); R2 has no per-prefix rate ceiling, so there
+/// the prefix costs nothing and just keeps the layout portable.
+pub mod keys {
+    use sha2::{Digest, Sha256};
+    use uuid::Uuid;
+
+    /// Two hex chars (256 buckets) of SHA-256(tree) — a stable, uniform partition token.
+    /// Hashing rather than slicing the uuid keeps the split uniform even if ids ever
+    /// stop being random v4.
+    fn shard(tree: Uuid) -> String {
+        format!("{:02x}", Sha256::digest(tree.simple().to_string().as_bytes())[0])
+    }
+
+    /// `trees/{shard}/{tree}/snapshot/{version}` — a versioned, immutable snapshot.
+    pub fn snapshot(tree: Uuid, version: &str) -> String {
+        format!("trees/{}/{}/snapshot/{}", shard(tree), tree.simple(), version)
+    }
+
+    /// `trees/{shard}/{tree}/log/{seq}` — a delta spilled out of Postgres to R2 when it
+    /// exceeds the inline cap (OPE-81); immutable, append-only.
+    pub fn delta(tree: Uuid, seq: i64) -> String {
+        format!("trees/{}/{}/log/{}", shard(tree), tree.simple(), seq)
+    }
+
+    /// `staging/{shard}/{tree}/{blob}` — a media upload not yet confirmed (§9.10).
+    pub fn staging(tree: Uuid, blob: Uuid) -> String {
+        format!("staging/{}/{}/{}", shard(tree), tree.simple(), blob.simple())
+    }
+
+    /// `blobs/{shard}/{tree}/{blob}` — a confirmed, immutable, per-tree-DEK media blob.
+    pub fn blob(tree: Uuid, blob: Uuid) -> String {
+        format!("blobs/{}/{}/{}", shard(tree), tree.simple(), blob.simple())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn keys_are_deterministic_sharded_and_namespaced() {
+            let tree = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+            let bid = Uuid::from_u128(0x0fed_cba9_8765_4321_0fed_cba9_8765_4321);
+
+            // Deterministic: same inputs → same key.
+            assert_eq!(snapshot(tree, "v1"), snapshot(tree, "v1"));
+
+            // Shape: `{ns}/{2-hex shard}/{tree-simple}/…`, namespace preserved.
+            let s = snapshot(tree, "v1");
+            let parts: Vec<&str> = s.split('/').collect();
+            assert_eq!(parts[0], "trees");
+            assert_eq!(parts[1].len(), 2);
+            assert!(parts[1].chars().all(|c| c.is_ascii_hexdigit()));
+            assert_eq!(parts[2], tree.simple().to_string());
+            assert_eq!(&parts[3..], &["snapshot", "v1"]);
+
+            // One tree's objects share a shard across every namespace (prefix locality).
+            let shard_of = |k: &str| k.split('/').nth(1).unwrap().to_string();
+            let sh = shard_of(&snapshot(tree, "v1"));
+            assert_eq!(shard_of(&delta(tree, 7)), sh);
+            assert_eq!(shard_of(&staging(tree, bid)), sh);
+            assert_eq!(shard_of(&blob(tree, bid)), sh);
+
+            // Distinct namespaces, `.simple()` (hyphenless) ids throughout.
+            assert!(blob(tree, bid).starts_with("blobs/"));
+            assert!(staging(tree, bid).starts_with("staging/"));
+            assert!(!blob(tree, bid).contains('-'));
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("bad S3 endpoint url: {0}")]

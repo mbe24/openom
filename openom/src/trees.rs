@@ -105,7 +105,7 @@ pub async fn put_tree(
 
     // New opaque version + fresh key; the object is written before the pointer CAS.
     let version = Uuid::new_v4().to_string();
-    let r2_key = format!("trees/{tree_id}/snapshot/{version}");
+    let r2_key = crate::storage::keys::snapshot(tree_id, &version);
     let size = body.len() as i64;
 
     state
