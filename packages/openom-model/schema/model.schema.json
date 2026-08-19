@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openom.dev/schema/model.schema.json",
+  "title": "openom canonical data model",
+  "$comment": "The flat, id-keyed family-tree model (plan/design.data-model.md), matching openom-model's serialization: each table is a JSON object keyed by the entity's opaque UUID. `type`/`tag`/role vocabularies are OPEN; the enums here are append-only (never renumber or reuse a value). The name model embeds into `node.names` in a later step (OPE-98) via name.schema.json. Bounds are generous and increasable — bump x-openom-bounds-version when a bound widens; that version is independent of Envelope/LAYOUT/Keyring versions (a future ZK circuit keys off it).",
+  "x-openom-bounds-version": 1,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tree", "nodes", "edges", "events", "sources", "media",
+    "field_defs", "field_values", "cross_tree_links"
+  ],
+  "properties": {
+    "tree": { "$ref": "#/$defs/uuid" },
+    "nodes": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/node" } },
+    "edges": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/edge" } },
+    "events": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/event" } },
+    "sources": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/source" } },
+    "media": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/media" } },
+    "field_defs": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/fieldDef" } },
+    "field_values": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/fieldValue" } },
+    "cross_tree_links": { "$ref": "#/$defs/table", "additionalProperties": { "$ref": "#/$defs/crossTreeLink" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "maxLength": 36 },
+    "table": {
+      "type": "object",
+      "propertyNames": { "type": "string", "format": "uuid" },
+      "maxProperties": 8000000,
+      "$comment": "an id-keyed table; keys are opaque UUIDs"
+    },
+    "nodeKind": { "enum": ["Person", "Family"] },
+    "relationshipType": { "enum": ["ParentChild", "Spouse", "Partner"], "$comment": "append-only" },
+    "eventType": {
+      "enum": ["Birth", "Death", "Marriage", "Divorce", "Baptism", "Burial", "Immigration", "Other"],
+      "$comment": "append-only"
+    },
+    "mergeClass": { "enum": ["lww", "text"] },
+    "sha256": {
+      "type": "array",
+      "minItems": 32,
+      "maxItems": 32,
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "kind": { "$ref": "#/$defs/nodeKind" },
+        "scope": { "type": "string", "maxLength": 128, "$comment": "reserved subtree-scope seam" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "relationship", "from", "to"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "relationship": { "$ref": "#/$defs/relationshipType" },
+        "from": { "$ref": "#/$defs/uuid" },
+        "to": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "event_type", "primary"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "event_type": { "$ref": "#/$defs/eventType" },
+        "primary": { "$ref": "#/$defs/uuid" },
+        "secondary": { "$ref": "#/$defs/uuid" },
+        "timestamp": { "type": "integer", "$comment": "Unix seconds (i64)" },
+        "image": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "citation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "citation": { "type": "string", "maxLength": 8192 }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "content_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "fieldDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "merge": { "$ref": "#/$defs/mergeClass" }
+      }
+    },
+    "fieldValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "node", "def", "value"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "node": { "$ref": "#/$defs/uuid" },
+        "def": { "$ref": "#/$defs/uuid" },
+        "value": { "type": "string", "maxLength": 8192 }
+      }
+    },
+    "crossTreeLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "local", "remote_tree", "remote_node"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "local": { "$ref": "#/$defs/uuid" },
+        "remote_tree": { "$ref": "#/$defs/uuid" },
+        "remote_node": { "$ref": "#/$defs/uuid" }
+      }
+    }
+  }
+}

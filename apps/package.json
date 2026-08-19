@@ -22,6 +22,8 @@
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "^2.11.4",
+    "ajv": "^8",
+    "ajv-formats": "^3",
     "fast-check": "^3",
     "vitest": "^3"
   },

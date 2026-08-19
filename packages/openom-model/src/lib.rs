@@ -16,6 +16,9 @@ pub use id::*;
 pub mod name;
 pub use name::{Name, NameError, Part, Position};
 
+#[cfg(feature = "validation")]
+pub mod schema;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -78,8 +81,13 @@ pub struct Event {
     pub id: EventId,
     pub event_type: EventType,
     pub primary: NodeId,
+    // Optionals are skipped when absent so canonical bytes match "absent == default" — the
+    // hash-stability rule (an entity without an optional hashes identically to an explicit-none one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<MediaId>,
 }
 
@@ -262,6 +270,17 @@ impl Model {
     }
 }
 
+/// Canonical bytes of the model — the input to hashing / attestation binding. RFC 8785 (JCS)-
+/// equivalent for our data: routing through `serde_json::Value` (whose objects are a sorted
+/// `BTreeMap`) and serializing compactly yields sorted keys, no whitespace, and canonical integers.
+/// This equals JCS here because the model is float-free (JCS's ES6 number rule only bites on floats)
+/// and its keys are ASCII (byte order == UTF-16 order). If arbitrary/float data ever needs
+/// canonicalizing, swap in a full JCS implementation behind this function.
+pub fn canonicalize(model: &Model) -> Result<Vec<u8>, serde_json::Error> {
+    let value = serde_json::to_value(model)?;
+    serde_json::to_vec(&value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +375,22 @@ mod tests {
         // Round-trip still holds with the new reserved fields.
         let json = serde_json::to_string(&m).unwrap();
         assert_eq!(m, serde_json::from_str::<Model>(&json).unwrap());
+    }
+
+    #[test]
+    fn canonicalize_is_deterministic_and_sorted() {
+        let mut src = seeded();
+        let mut m = Model::new(TreeId::generate(&mut src));
+        let p = m.create_node(NodeKind::Person, &mut src);
+        m.add_event(EventType::Birth, p, Some(1990), &mut src).unwrap();
+
+        // Stable across a serialize → parse round-trip: same materialized state → identical bytes.
+        let a = canonicalize(&m).unwrap();
+        let reparsed: Model = serde_json::from_slice(&serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(a, canonicalize(&reparsed).unwrap());
+
+        // Object keys are emitted in sorted (JCS) order: `cross_tree_links` precedes `tree`.
+        let s = String::from_utf8(a).unwrap();
+        assert!(s.find("cross_tree_links").unwrap() < s.find("\"tree\"").unwrap());
     }
 }
