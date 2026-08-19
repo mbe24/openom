@@ -548,15 +548,15 @@ async fn oversized_delta_spills_to_r2_and_reads_back() {
         .unwrap();
 
     // It really spilled: the row keeps no inline payload, only the R2 key.
-    let (payload, r2_key): (Option<Vec<u8>>, Option<String>) =
-        sqlx::query_as("SELECT payload, r2_key FROM tree_log WHERE tree_id = $1 AND seq = $2")
+    let (payload, object_key): (Option<Vec<u8>>, Option<String>) =
+        sqlx::query_as("SELECT payload, object_key FROM tree_log WHERE tree_id = $1 AND seq = $2")
             .bind(tree)
             .bind(seq)
             .fetch_one(&db)
             .await
             .unwrap();
     assert!(payload.is_none(), "a spilled row stores no inline payload");
-    assert!(r2_key.is_some(), "a spilled row records its R2 key");
+    assert!(object_key.is_some(), "a spilled row records its R2 key");
 
     // …yet the tail read resolves it transparently — the client gets the exact sealed bytes back,
     // indistinguishable from an inline delta.
@@ -808,7 +808,7 @@ async fn roles_media() {
 
     // Attach = Commit. Insert a live blob directly (no MinIO round-trip needed to test the gate).
     let blob = Uuid::new_v4();
-    sqlx::query("INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state, ref_count) VALUES ($1,$2,$3,10,1,0)")
+    sqlx::query("INSERT INTO tree_blobs (tree_id, blob_id, object_key, size_bytes, state, ref_count) VALUES ($1,$2,$3,10,1,0)")
         .bind(tree).bind(blob.as_bytes().as_slice()).bind(format!("k/{blob}"))
         .execute(&db).await.unwrap();
     assert_eq!(

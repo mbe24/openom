@@ -10,7 +10,7 @@
 //! visible before an earlier one and a tail-puller would skip an entry. The idempotency dot
 //! `(tree_id, replica_id, replica_counter)` makes a re-delivered append a no-op that returns the
 //! original seq. Small payloads are stored inline in Postgres; a payload over `INLINE_MAX_BYTES` spills
-//! to an R2 object (`payload` NULL + `r2_key` set) and is resolved back transparently on tail-pull, so
+//! to an R2 object (`payload` NULL + `object_key` set) and is resolved back transparently on tail-pull, so
 //! the client sees the same bytes either way.
 //!
 //! A new append is metered against the tree owner (owner-pays, §17): a per-account token bucket
@@ -115,7 +115,7 @@ struct AppendResult {
 }
 
 /// Insert the log row and bump the tree's seq counter, inside the caller's transaction. `inline_payload`
-/// and `r2_key` are mutually exclusive: inline rows carry the bytes, spilled rows carry the R2 key.
+/// and `object_key` are mutually exclusive: inline rows carry the bytes, spilled rows carry the R2 key.
 /// The caller owns the commit (so a spilled object can be GC'd if the commit itself fails).
 #[allow(clippy::too_many_arguments)]
 async fn insert_delta_row(
@@ -125,11 +125,11 @@ async fn insert_delta_row(
     d: &DeltaValidated,
     member_id: Uuid,
     inline_payload: Option<&[u8]>,
-    r2_key: Option<&str>,
+    object_key: Option<&str>,
 ) -> Result<(), ApiError> {
     sqlx::query(
         "INSERT INTO tree_log
-             (tree_id, seq, kind, replica_id, replica_counter, member_id, payload, r2_key, ciphertext_hash, size_bytes)
+             (tree_id, seq, kind, replica_id, replica_counter, member_id, payload, object_key, ciphertext_hash, size_bytes)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(tree_id)
@@ -139,7 +139,7 @@ async fn insert_delta_row(
     .bind(d.replica_counter)
     .bind(member_id)
     .bind(inline_payload)
-    .bind(r2_key)
+    .bind(object_key)
     .bind(&d.ciphertext_hash)
     .bind(d.size)
     .execute(&mut **tx)
@@ -156,8 +156,8 @@ async fn insert_delta_row(
 
 /// Best-effort delete of a spilled object orphaned by a failed append transaction. A leftover object is
 /// harmless (no row references it) and would otherwise wait for a future sweep; we clean it up eagerly.
-async fn spill_gc(state: &AppState, r2_key: Option<&str>) {
-    if let Some(key) = r2_key {
+async fn spill_gc(state: &AppState, object_key: Option<&str>) {
+    if let Some(key) = object_key {
         if let Err(e) = state.storage.delete_object(key).await {
             tracing::warn!(%e, key = %key, "could not delete orphaned spilled delta object");
         }
@@ -282,7 +282,7 @@ pub async fn append_log(
     // so the extra time the tree row lock is held across the PUT is paid only on that uncommon path. If
     // the transaction fails after the PUT, the object is orphaned — GC'd best-effort below, mirroring the
     // snapshot path in `trees::put_tree`.
-    let r2_key = if body.len() > INLINE_MAX_BYTES {
+    let object_key = if body.len() > INLINE_MAX_BYTES {
         let key = crate::storage::keys::delta(tree_id, seq);
         state
             .storage
@@ -294,7 +294,7 @@ pub async fn append_log(
         None
     };
     // Inline rows carry the sealed bytes; spilled rows carry a NULL payload + the R2 key.
-    let inline_payload: Option<&[u8]> = if r2_key.is_some() {
+    let inline_payload: Option<&[u8]> = if object_key.is_some() {
         None
     } else {
         Some(body.as_ref())
@@ -308,18 +308,18 @@ pub async fn append_log(
         &d,
         identity.member_id,
         inline_payload,
-        r2_key.as_deref(),
+        object_key.as_deref(),
     )
     .await
     {
-        spill_gc(&state, r2_key.as_deref()).await;
+        spill_gc(&state, object_key.as_deref()).await;
         return Err(e);
     }
     if let Err(e) = tx.commit().await.map_err(internal) {
-        spill_gc(&state, r2_key.as_deref()).await;
+        spill_gc(&state, object_key.as_deref()).await;
         return Err(e);
     }
-    tracing::info!(event = "log_append", %tree_id, seq, spilled = r2_key.is_some(), "delta appended");
+    tracing::info!(event = "log_append", %tree_id, seq, spilled = object_key.is_some(), "delta appended");
     Ok((StatusCode::OK, Json(AppendResult { seq })).into_response())
 }
 
@@ -386,7 +386,7 @@ pub async fn get_log(
 
     let rows: Vec<(i64, Option<Uuid>, Vec<u8>, i64, Option<Vec<u8>>, Option<String>, i64, String)> =
         sqlx::query_as(
-            "SELECT seq, member_id, replica_id, replica_counter, payload, r2_key, size_bytes, created_at::text
+            "SELECT seq, member_id, replica_id, replica_counter, payload, object_key, size_bytes, created_at::text
                FROM tree_log
               WHERE tree_id = $1 AND seq > $2
               ORDER BY seq
@@ -402,7 +402,7 @@ pub async fn get_log(
     let mut entries = Vec::new();
     let mut budget = 0usize;
     let mut next_cursor = since;
-    for (seq, member, replica, counter, payload, r2_key, size, created_at) in rows {
+    for (seq, member, replica, counter, payload, object_key, size, created_at) in rows {
         if !entries.is_empty() && budget + size as usize > TAIL_BYTE_BUDGET {
             break; // page here; the client pulls again from next_cursor
         }
@@ -411,7 +411,7 @@ pub async fn get_log(
         // R2 (checked before the budget cap, so we never fetch beyond what we return). A spilled row whose
         // object is missing is a data-integrity fault (the row asserts the payload exists), not a
         // graceful-404 like an absent snapshot — surface it rather than return a truncated delta.
-        let payload_b64 = match (payload, &r2_key) {
+        let payload_b64 = match (payload, &object_key) {
             (Some(bytes), _) => Some(b64(&bytes)),
             (None, Some(key)) => {
                 let bytes = state

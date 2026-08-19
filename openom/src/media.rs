@@ -117,7 +117,7 @@ pub async fn intent(
     let blob = Uuid::new_v4();
     let staging = staging_key(tree_id, blob);
     if let Err(e) = sqlx::query(
-        "INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state, uploaded_by)
+        "INSERT INTO tree_blobs (tree_id, blob_id, object_key, size_bytes, state, uploaded_by)
          VALUES ($1, $2, $3, $4, 0, $5)",
     )
     .bind(tree_id)
@@ -157,7 +157,7 @@ pub async fn confirm(
 ) -> Result<Response, ApiError> {
     let blob_bytes = blob_id.as_bytes().as_slice();
     let row: Option<(Uuid, String, i64, i16)> = sqlx::query_as(
-        "SELECT t.owner_id, b.r2_key, b.size_bytes, b.state
+        "SELECT t.owner_id, b.object_key, b.size_bytes, b.state
            FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
           WHERE b.tree_id = $1 AND b.blob_id = $2",
     )
@@ -215,7 +215,7 @@ pub async fn confirm(
         .copy_object(&key, &final_k)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    sqlx::query("UPDATE tree_blobs SET state = 1, r2_key = $3, size_bytes = $4 WHERE tree_id = $1 AND blob_id = $2")
+    sqlx::query("UPDATE tree_blobs SET state = 1, object_key = $3, size_bytes = $4 WHERE tree_id = $1 AND blob_id = $2")
         .bind(tree_id)
         .bind(blob_bytes)
         .bind(&final_k)
@@ -236,7 +236,7 @@ pub async fn get_media(
     Path((tree_id, blob_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, ApiError> {
     let row: Option<(Uuid, String, i16)> = sqlx::query_as(
-        "SELECT t.owner_id, b.r2_key, b.state
+        "SELECT t.owner_id, b.object_key, b.state
            FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
           WHERE b.tree_id = $1 AND b.blob_id = $2",
     )
@@ -465,7 +465,7 @@ async fn run_sweep(
 ) -> Result<(usize, usize, usize), ApiError> {
     // 1. Expired tombstones → physical delete + meter credit.
     let tombs: Vec<(Uuid, Vec<u8>, String, i64, Uuid)> = sqlx::query_as(
-        "SELECT b.tree_id, b.blob_id, b.r2_key, b.size_bytes, t.owner_id
+        "SELECT b.tree_id, b.blob_id, b.object_key, b.size_bytes, t.owner_id
            FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
           WHERE b.state = 2
             AND b.tombstoned_at <= now() - make_interval(secs => $1::double precision)",
@@ -488,7 +488,7 @@ async fn run_sweep(
 
     // 2. Expired pending intents → release reservation + delete the staging object.
     let pend: Vec<(Uuid, Vec<u8>, String, i64, Uuid)> = sqlx::query_as(
-        "SELECT b.tree_id, b.blob_id, b.r2_key, b.size_bytes, t.owner_id
+        "SELECT b.tree_id, b.blob_id, b.object_key, b.size_bytes, t.owner_id
            FROM tree_blobs b JOIN trees t ON t.id = b.tree_id
           WHERE b.state = 0
             AND b.created_at <= now() - make_interval(secs => $1::double precision)",

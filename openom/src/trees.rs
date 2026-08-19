@@ -105,12 +105,12 @@ pub async fn put_tree(
 
     // New opaque version + fresh key; the object is written before the pointer CAS.
     let version = Uuid::new_v4().to_string();
-    let r2_key = crate::storage::keys::snapshot(tree_id, &version);
+    let object_key = crate::storage::keys::snapshot(tree_id, &version);
     let size = body.len() as i64;
 
     state
         .storage
-        .put_object(&r2_key, body.to_vec())
+        .put_object(&object_key, body.to_vec())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -120,7 +120,7 @@ pub async fn put_tree(
                 &state,
                 tree_id,
                 identity.member_id,
-                &r2_key,
+                &object_key,
                 &version,
                 size,
                 &valid,
@@ -132,7 +132,7 @@ pub async fn put_tree(
                 &state,
                 tree_id,
                 identity.member_id,
-                &r2_key,
+                &object_key,
                 &version,
                 size,
                 &valid,
@@ -146,8 +146,8 @@ pub async fn put_tree(
         Ok(()) => Ok((StatusCode::OK, [(ETAG, etag(&version))]).into_response()),
         Err(err) => {
             // GC the orphan we wrote before the failed CAS (best effort).
-            if let Err(e) = state.storage.delete_object(&r2_key).await {
-                tracing::warn!(%e, key = %r2_key, "could not delete orphaned snapshot object");
+            if let Err(e) = state.storage.delete_object(&object_key).await {
+                tracing::warn!(%e, key = %object_key, "could not delete orphaned snapshot object");
             }
             Err(err)
         }
@@ -162,13 +162,13 @@ pub async fn get_tree(
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("tree.get");
     let row: Option<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT owner_id, r2_key, snapshot_version FROM trees WHERE id = $1")
+        sqlx::query_as("SELECT owner_id, object_key, snapshot_version FROM trees WHERE id = $1")
             .bind(tree_id)
             .fetch_optional(&state.db)
             .await
             .map_err(internal)?;
 
-    let (owner_id, r2_key, version) = row.ok_or(ApiError::NotFound)?;
+    let (owner_id, object_key, version) = row.ok_or(ApiError::NotFound)?;
     crate::authz::authorize(
         &state.db,
         tree_id,
@@ -181,7 +181,7 @@ pub async fn get_tree(
 
     let bytes = state
         .storage
-        .get_object(&r2_key)
+        .get_object(&object_key)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::NotFound)?; // pointer present, object gone → graceful 404
@@ -203,14 +203,14 @@ async fn cas_create(
     state: &AppState,
     tree_id: Uuid,
     owner: Uuid,
-    r2_key: &str,
+    object_key: &str,
     version: &str,
     size: i64,
     valid: &Validated,
 ) -> Result<(), ApiError> {
     let res = sqlx::query(
         "INSERT INTO trees
-             (id, owner_id, r2_key, snapshot_version, envelope_version, aead,
+             (id, owner_id, object_key, snapshot_version, envelope_version, aead,
               size_bytes, ciphertext_hash, covers_through_seq)
          SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
          WHERE (SELECT count(*) FROM trees WHERE owner_id = $2)
@@ -219,7 +219,7 @@ async fn cas_create(
     )
     .bind(tree_id)
     .bind(owner)
-    .bind(r2_key)
+    .bind(object_key)
     .bind(version)
     .bind(ENVELOPE_VERSION as i32)
     .bind(valid.aead)
@@ -280,7 +280,7 @@ async fn cas_update(
     state: &AppState,
     tree_id: Uuid,
     caller: Uuid,
-    r2_key: &str,
+    object_key: &str,
     version: &str,
     size: i64,
     valid: &Validated,
@@ -301,13 +301,13 @@ async fn cas_update(
 
     let res = sqlx::query(
         "UPDATE trees
-            SET r2_key = $1, snapshot_version = $2, envelope_version = $3, aead = $4,
+            SET object_key = $1, snapshot_version = $2, envelope_version = $3, aead = $4,
                 size_bytes = $5, ciphertext_hash = $6, covers_through_seq = $7,
                 updated_at = now()
           WHERE id = $8 AND snapshot_version = $9
             AND $7 >= covers_through_seq",
     )
-    .bind(r2_key)
+    .bind(object_key)
     .bind(version)
     .bind(ENVELOPE_VERSION as i32)
     .bind(valid.aead)
