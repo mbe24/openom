@@ -1589,4 +1589,56 @@ mod tests {
             Err(SealerError::MemberNotFound)
         ));
     }
+
+    #[test]
+    fn recover_preserves_a_co_owner_signer_and_their_access() {
+        // Regression for design.sharing §2.5 bug 2: recover() must SPLICE only the founder's own
+        // slot, never rebuild the keyring — a rebuild would wipe the other co-owners. Provision,
+        // add a member, promote them to co-owner, then recover the founder and assert the co-owner
+        // survives both structurally (still in the signer set) and functionally (still reads).
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let co = provision_member(b"co pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &co.hpke_public, &co.author_public).unwrap();
+        let promoted = add_co_owner(&added.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2).unwrap();
+
+        let rec = recover(&promoted.keyring, &owner.recovery_code, b"new pass", TREE, MEMBER, b"r-o2", 0).unwrap();
+        let k = Keyring::decode(rec.keyring.as_slice()).unwrap();
+
+        // The co-owner's signer entry survived recovery, unchanged.
+        assert!(
+            k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
+                && s.role == SignerRole::CoOwner as i32
+                && s.public_key == co.author_public),
+            "recover must not drop a co-owner from the signer set"
+        );
+        // …and they still read the tree — re-pinning the new founder, per the succession boundary
+        // (recover can't co-sign with the old identity, so old pins no longer verify).
+        let new_founder = founder_key(&rec.keyring);
+        assert!(unlock_as_member(&rec.keyring, b"co pass", &co.kdf_params, TREE, MEMBER2, &[new_founder], b"r-co", 0).is_ok());
+    }
+
+    #[test]
+    fn change_passphrase_preserves_a_co_owner_and_bridges_their_trust() {
+        // Regression for design.sharing §2.5 bug 1: the OLD founder must co-sign the change (not a
+        // self-signed new key that a member can't distinguish from a forgery), and co-owners are
+        // left intact. Assert the co-owner's signer entry survives and, because the old founder
+        // co-signed, the co-owner still verifies against the key it pinned before the change.
+        let owner = provision(b"owner pass", TREE, MEMBER, b"r-o").unwrap();
+        let co = provision_member(b"co pass").unwrap();
+        let added = add_member(&owner.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2, MemberRole::Editor, &co.hpke_public, &co.author_public).unwrap();
+        let promoted = add_co_owner(&added.keyring, b"owner pass", TREE, MEMBER, 0, MEMBER2).unwrap();
+        let old_founder = founder_key(&promoted.keyring);
+
+        let re = change_passphrase(&promoted.keyring, b"owner pass", b"new pass", TREE, MEMBER, 0).unwrap();
+        let k = Keyring::decode(re.keyring.as_slice()).unwrap();
+
+        assert!(
+            k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
+                && s.role == SignerRole::CoOwner as i32
+                && s.public_key == co.author_public),
+            "change_passphrase must leave co-owners untouched"
+        );
+        // The old founder co-signed, so the co-owner still verifies against its pre-change pin.
+        assert!(unlock_as_member(&re.keyring, b"co pass", &co.kdf_params, TREE, MEMBER2, &[old_founder], b"r-co", 0).is_ok());
+    }
 }
