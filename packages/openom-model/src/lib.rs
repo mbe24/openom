@@ -20,6 +20,7 @@ pub use name::{Name, NameError, Part, Position};
 pub mod schema;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -270,15 +271,32 @@ impl Model {
     }
 }
 
-/// Canonical bytes of the model — the input to hashing / attestation binding. RFC 8785 (JCS)-
-/// equivalent for our data: routing through `serde_json::Value` (whose objects are a sorted
-/// `BTreeMap`) and serializing compactly yields sorted keys, no whitespace, and canonical integers.
-/// This equals JCS here because the model is float-free (JCS's ES6 number rule only bites on floats)
-/// and its keys are ASCII (byte order == UTF-16 order). If arbitrary/float data ever needs
-/// canonicalizing, swap in a full JCS implementation behind this function.
+/// Canonical bytes of any serializable value — RFC 8785 (JCS)-equivalent for our data. Routing
+/// through `serde_json::Value` (whose objects are a sorted `BTreeMap`) and serializing compactly
+/// yields sorted keys, no whitespace, and canonical integers. This equals JCS here because the model
+/// is float-free (JCS's ES6 number rule only bites on floats) and its keys are ASCII (byte order ==
+/// UTF-16 order). If arbitrary/float data ever needs canonicalizing, swap in a full JCS impl here.
+pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&serde_json::to_value(value)?)
+}
+
+/// Canonical bytes of the whole model.
 pub fn canonicalize(model: &Model) -> Result<Vec<u8>, serde_json::Error> {
-    let value = serde_json::to_value(model)?;
-    serde_json::to_vec(&value)
+    canonical_json(model)
+}
+
+/// The **per-entity canonical content hash** — the value an attestation binds to. SHA-256 over the
+/// entity's canonical bytes ([`canonical_json`]). It is:
+/// - **deterministic + identical across clients** — a pure function of the canonical form;
+/// - **stable through compaction** — it depends only on the entity's own fields, never on log
+///   position (byte-preservation through GC is enforced separately);
+/// - **high-entropy** — the entity's opaque, random id is part of the hashed bytes, so a low-entropy
+///   fact ("born 1901") can't be confirmed by guessing its fields.
+///
+/// Editing a fact changes its hash *by design*: an attestation on the old value then reads as
+/// "attested an earlier value".
+pub fn content_hash<T: Serialize>(value: &T) -> Result<[u8; 32], serde_json::Error> {
+    Ok(Sha256::digest(canonical_json(value)?).into())
 }
 
 #[cfg(test)]
@@ -392,5 +410,44 @@ mod tests {
         // Object keys are emitted in sorted (JCS) order: `cross_tree_links` precedes `tree`.
         let s = String::from_utf8(a).unwrap();
         assert!(s.find("cross_tree_links").unwrap() < s.find("\"tree\"").unwrap());
+    }
+
+    #[test]
+    fn content_hash_binds_to_the_fact_not_the_tree() {
+        let mut src = seeded();
+        let mut m = Model::new(TreeId::generate(&mut src));
+        let a = m.create_node(NodeKind::Person, &mut src);
+        let b = m.create_node(NodeKind::Person, &mut src);
+        let ea = m.add_event(EventType::Birth, a, Some(1901), &mut src).unwrap();
+        let eb = m.add_event(EventType::Death, b, Some(1980), &mut src).unwrap();
+
+        let h = content_hash(&m.events[&ea]).unwrap();
+
+        // Editing ANOTHER fact leaves this fact's hash untouched (binds to the fact, not the tree).
+        m.correct_event_timestamp(eb, Some(1981)).unwrap();
+        assert_eq!(content_hash(&m.events[&ea]).unwrap(), h);
+
+        // Editing THIS fact changes its hash — the "attested an earlier value" behaviour.
+        m.correct_event_timestamp(ea, Some(1902)).unwrap();
+        assert_ne!(content_hash(&m.events[&ea]).unwrap(), h);
+    }
+
+    #[test]
+    fn content_hash_is_deterministic_and_high_entropy() {
+        let mut src = seeded();
+        let mut m = Model::new(TreeId::generate(&mut src));
+        let p = m.create_node(NodeKind::Person, &mut src);
+        let e = m.add_event(EventType::Birth, p, Some(2000), &mut src).unwrap();
+
+        // Pure function of the canonical bytes: a re-parse hashes identically (cross-client stable).
+        let ev = m.events[&e].clone();
+        let reparsed: Event = serde_json::from_slice(&serde_json::to_vec(&ev).unwrap()).unwrap();
+        assert_eq!(content_hash(&reparsed).unwrap(), content_hash(&ev).unwrap());
+
+        // Two facts with identical fields but different random ids hash differently — the id is the
+        // high-entropy component, so the fields alone can't be confirmed by guessing.
+        let e1 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
+        let e2 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
+        assert_ne!(content_hash(&m.events[&e1]).unwrap(), content_hash(&m.events[&e2]).unwrap());
     }
 }

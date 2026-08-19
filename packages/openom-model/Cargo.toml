@@ -15,6 +15,8 @@ serde_json.workspace = true
 # UUIDv4 (v4 feature) with serde support — the opaque, high-entropy id primitive.
 uuid.workspace = true
 thiserror.workspace = true
+# SHA-256 for the per-entity canonical content hash (attestation binding).
+sha2.workspace = true
 # JSON Schema (Draft 2020-12) validator — optional, off the default/wasm build.
 jsonschema = { workspace = true, optional = true }
 
