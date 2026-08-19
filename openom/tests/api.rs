@@ -432,6 +432,46 @@ async fn delta_log_lifecycle() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn oversized_delta_spills_to_r2_and_reads_back() {
+    let app = router().await;
+    let db = db().await;
+    let tree = Uuid::new_v4();
+    send(&app, put_tree(tree, &snapshot_envelope(tree, b"ct", None), None)).await;
+
+    // A ciphertext well over the 32 KiB inline cap forces the spill path.
+    let big = vec![0x5au8; 40 * 1024];
+    let ra = b"replica-spill000".to_vec();
+    let d = delta_envelope(tree, &big, &ra, 0);
+    assert!(d.len() > 32 * 1024, "the envelope must exceed the inline cap to exercise spill");
+
+    let (s, _, b) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d)).await;
+    assert_eq!(s, StatusCode::OK, "append oversized delta");
+    let seq = serde_json::from_slice::<Value>(&b).unwrap()["seq"].as_i64().unwrap();
+
+    // It really spilled: the row keeps no inline payload, only the R2 key.
+    let (payload, r2_key): (Option<Vec<u8>>, Option<String>) =
+        sqlx::query_as("SELECT payload, r2_key FROM tree_log WHERE tree_id = $1 AND seq = $2")
+            .bind(tree)
+            .bind(seq)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(payload.is_none(), "a spilled row stores no inline payload");
+    assert!(r2_key.is_some(), "a spilled row records its R2 key");
+
+    // …yet the tail read resolves it transparently — the client gets the exact sealed bytes back,
+    // indistinguishable from an inline delta.
+    let (s, _, tb) = send(&app, get(format!("/trees/{tree}/log?since=-1"))).await;
+    assert_eq!(s, StatusCode::OK, "read tail");
+    let tail: Value = serde_json::from_slice(&tb).unwrap();
+    let got = base64::engine::general_purpose::STANDARD
+        .decode(tail["entries"][0]["payload"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(got, d, "the spilled payload round-trips the exact sealed delta bytes");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn cross_owner_access_forbidden() {
     // The single-owner boundary the authz seam enforces: a member who doesn't own a
     // tree gets 403 on every access. This is exactly the predicate B3 will widen to
