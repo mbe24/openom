@@ -18,8 +18,11 @@
 //! canonical form).
 //!
 //! This first slice provides two cell kinds — an **LWW register** and a **tombstoned OR-set** — plus
-//! the Lamport kernel and merge. Richer cells (sourced-claim sets, keyed-ordered collections), the
-//! canonical byte codec, and snapshot/compaction land in later slices behind the same op model.
+//! the Lamport kernel and merge. Richer cells land in later slices behind the same op model:
+//! sourced-claim sets, keyed-ordered collections, and a **RESERVED `text`/`sequence` cell** for
+//! free-text fields (e.g. a biography) that must merge character/span-level rather than whole-value
+//! LWW — its CRDT algorithm is deferred (see `plan/design.schema-evolution.md`, OPE-150/OPE-151). The
+//! canonical byte codec and snapshot/compaction also land later.
 
 #![forbid(unsafe_code)]
 

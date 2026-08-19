@@ -10,6 +10,7 @@ members = [
     "packages/openom-crypto",
     "packages/openom-roles",
     "packages/openom-keyring",
+    "packages/openom-model",
     "packages/openom-sealer",
     "packages/openom-vault-host",
     "packages/journal",

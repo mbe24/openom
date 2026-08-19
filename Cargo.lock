@@ -3342,6 +3342,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "openom-protocol"
 version = "0.1.0"
 dependencies = [

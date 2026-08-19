@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openom.dev/schema/name.schema.json",
+  "title": "openom name model",
+  "$comment": "Name/Part fragment for the canonical data model. See plan/design.data-name-mode.md. `type` and part `tag` are OPEN vocabularies (any string) — the registry is documented, not enforced. Byte-precise bounds are re-checked Rust-side (OPE-96); maxLength here is a generous code-point ceiling. The canonical schema (OPE-96) $refs the $defs below and carries the bounds_version.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "maxLength": 36,
+      "$comment": "opaque, random, high-entropy id (UUIDv4-class) — see design.data-model.md Addressing"
+    },
+    "position": {
+      "enum": ["prefix", "suffix"],
+      "$comment": "where a particle renders relative to its part; default `prefix` when absent"
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "value"],
+      "properties": {
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "$comment": "open vocabulary: given/family/patronymic/matronymic/title/suffix/byname/nisba/kunya/…"
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 256,
+          "$comment": "generous, increasable per-part budget — enough for Ge'ez/Arabic/CJK"
+        },
+        "particle": {
+          "type": "string",
+          "maxLength": 64,
+          "$comment": "separable connector (van/de/ibn/al-/'von und zu'); ignored for sort/match"
+        },
+        "position": { "$ref": "#/$defs/position" }
+      }
+    },
+    "name": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "parts"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "type": {
+          "type": "string",
+          "maxLength": 64,
+          "$comment": "OPEN soft label (role: birth/married/nickname/public/…); non-structural"
+        },
+        "ref": {
+          "allOf": [{ "$ref": "#/$defs/uuid" }],
+          "$comment": "this name is a form of that one (its id) — borrow unstated parts (the family)"
+        },
+        "primary": {
+          "type": "boolean",
+          "$comment": "the default known-by name — at most one per person (checked in code, not schema)"
+        },
+        "script": { "type": "string", "maxLength": 16, "$comment": "ISO 15924 code (Latn, Cyrl, …)" },
+        "culture": { "type": "string", "maxLength": 35, "$comment": "BCP-47-ish language/region hint" },
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/part" }
+        }
+      }
+    },
+    "names": {
+      "type": "array",
+      "maxItems": 64,
+      "$comment": "a person's list of names",
+      "items": { "$ref": "#/$defs/name" }
+    }
+  },
+  "$ref": "#/$defs/name"
+}

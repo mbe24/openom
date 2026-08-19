@@ -1,0 +1,19 @@
+# The canonical, flat, id-keyed data model (nodes/edges/events/sources/media/custom-fields) with
+# opaque, random, stable ids. See plan/design.data-model.md. Canonicalization + hashing (RFC 8785,
+# per-entity hash) and the embedded name model land in later tasks; this crate is the shape + ids.
+[package]
+name = "openom-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+# UUIDv4 (v4 feature) with serde support — the opaque, high-entropy id primitive.
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Round-trip test standing in for compaction (serialize → deserialize preserves ids).
+serde_json.workspace = true
