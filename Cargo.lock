@@ -3432,6 +3432,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-attestations"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ members = [
     "packages/openom-roles",
     "packages/openom-keyring",
     "packages/openom-model",
+    "packages/openom-attestations",
     "packages/openom-sealer",
     "packages/openom-vault-host",
     "packages/journal",
