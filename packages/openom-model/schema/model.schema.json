@@ -49,6 +49,12 @@
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "kind": { "$ref": "#/$defs/nodeKind" },
+        "names": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "https://openom.dev/schema/name.schema.json#/$defs/name" },
+          "$comment": "embedded name model — resolved from name.schema.json, registered as a resource"
+        },
         "scope": { "type": "string", "maxLength": 128, "$comment": "reserved subtree-scope seam" }
       }
     },

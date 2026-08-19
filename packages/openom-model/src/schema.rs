@@ -14,10 +14,19 @@ pub struct ModelSchema {
 impl ModelSchema {
     /// Compile the checked-in canonical-model schema.
     pub fn new() -> Self {
-        let schema: Value = serde_json::from_str(include_str!("../schema/model.schema.json"))
+        let model: Value = serde_json::from_str(include_str!("../schema/model.schema.json"))
             .expect("model.schema.json is valid JSON");
-        let validator =
-            jsonschema::validator_for(&schema).expect("model.schema.json is a valid schema");
+        let name: Value = serde_json::from_str(include_str!("../schema/name.schema.json"))
+            .expect("name.schema.json is valid JSON");
+        // Register the name fragment so the model's `$ref` to it (by $id) resolves.
+        let validator = jsonschema::options()
+            .with_resource(
+                "https://openom.dev/schema/name.schema.json",
+                jsonschema::Resource::from_contents(name)
+                    .expect("name.schema.json is a valid schema resource"),
+            )
+            .build(&model)
+            .expect("model.schema.json is a valid schema");
         Self { validator }
     }
 
@@ -48,9 +57,23 @@ mod tests {
         let f = m.create_node(NodeKind::Family, &mut src);
         m.add_edge(RelationshipType::ParentChild, f, p, &mut src).unwrap();
         m.add_event(EventType::Birth, p, Some(2000), &mut src).unwrap();
+        // An embedded name exercises the cross-schema $ref into name.schema.json.
+        m.add_name(
+            p,
+            Name {
+                id: NameId::generate(&mut src),
+                role: Some("birth".into()),
+                form_of: None,
+                primary: true,
+                script: None,
+                culture: None,
+                parts: vec![Part::new("given", "Ada"), Part::new("family", "Lovelace")],
+            },
+        )
+        .unwrap();
 
         let v = serde_json::to_value(&m).unwrap();
-        assert!(s.is_valid(&v), "a real serialized Model must satisfy model.schema.json");
+        assert!(s.is_valid(&v), "a real serialized Model (with an embedded name) must satisfy the schema");
 
         // Missing the required tables → invalid.
         assert!(!s.is_valid(&serde_json::json!({})));

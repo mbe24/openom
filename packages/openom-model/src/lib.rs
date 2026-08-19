@@ -59,6 +59,10 @@ pub enum EventType {
 pub struct Node {
     pub id: NodeId,
     pub kind: NodeKind,
+    /// The node's names (the name model — see [`name`] / `design.data-name-mode.md`). Empty for a
+    /// family node or a person with no recorded name yet. Part of the node's canonical content hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<Name>,
     /// RESERVED SEAM (OPE-99): an opaque subtree-scope tag for future subtree-scoped visibility
     /// (`design.subtree-scope.md`). `None` = unscoped (the whole-tree default). No feature reads it
     /// today; it exists so adding scoping later is not a schema break.
@@ -212,7 +216,7 @@ impl Model {
     /// Create a node, minting a fresh opaque id.
     pub fn create_node(&mut self, kind: NodeKind, src: &mut impl IdSource) -> NodeId {
         let id = NodeId::generate(src);
-        self.nodes.insert(id, Node { id, kind, scope: None });
+        self.nodes.insert(id, Node { id, kind, names: Vec::new(), scope: None });
         id
     }
 
@@ -255,6 +259,13 @@ impl Model {
             Event { id, event_type, primary, secondary: None, timestamp, image: None },
         );
         Ok(id)
+    }
+
+    /// Attach a name (the name model) to a node.
+    pub fn add_name(&mut self, node: NodeId, name: Name) -> Result<(), ModelError> {
+        let n = self.nodes.get_mut(&node).ok_or(ModelError::DanglingNode(node))?;
+        n.names.push(name);
+        Ok(())
     }
 
     /// Correct an event's timestamp **in place** — the event's id (and any reference to it) is
@@ -449,5 +460,47 @@ mod tests {
         let e1 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
         let e2 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
         assert_ne!(content_hash(&m.events[&e1]).unwrap(), content_hash(&m.events[&e2]).unwrap());
+    }
+
+    #[test]
+    fn node_embeds_the_name_model() {
+        let mut src = seeded();
+        let mut m = Model::new(TreeId::generate(&mut src));
+        let p = m.create_node(NodeKind::Person, &mut src);
+        m.add_name(
+            p,
+            Name {
+                id: NameId::generate(&mut src),
+                role: Some("birth".into()),
+                form_of: None,
+                primary: true,
+                script: Some("Latn".into()),
+                culture: Some("en-GB".into()),
+                parts: vec![Part::new("given", "Jane"), Part::new("family", "Austen")],
+            },
+        )
+        .unwrap();
+        assert_eq!(m.nodes[&p].names.len(), 1);
+
+        // Round-trips with the embedded name.
+        let json = serde_json::to_vec(&m).unwrap();
+        assert_eq!(m, serde_json::from_slice::<Model>(&json).unwrap());
+
+        // Names are part of the node's content hash — adding one changes it.
+        let h = content_hash(&m.nodes[&p]).unwrap();
+        m.add_name(
+            p,
+            Name {
+                id: NameId::generate(&mut src),
+                role: Some("nickname".into()),
+                form_of: None,
+                primary: false,
+                script: None,
+                culture: None,
+                parts: vec![Part::new("given", "Jenny")],
+            },
+        )
+        .unwrap();
+        assert_ne!(content_hash(&m.nodes[&p]).unwrap(), h);
     }
 }
