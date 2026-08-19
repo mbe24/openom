@@ -95,8 +95,18 @@ function runLocal() {
   return spawnSync('cargo', cargoArgs, { cwd: REPO, stdio: 'inherit' });
 }
 
+// clippy and rustfmt are rustup COMPONENTS the base rust image doesn't ship. When the
+// subcommand needs one, add it first (idempotent; a no-op once present). The container is
+// --rm so this re-runs each time, but the download is small and cached in the registry layer.
+const COMPONENT_FOR = { clippy: 'clippy', fmt: 'rustfmt' };
+
+// Minimal POSIX single-quote escaping for building an `sh -c` command line.
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 function runDocker() {
-  const args = [
+  const base = [
     'run',
     '--rm',
     '--init', // reap zombies + forward Ctrl-C to cargo
@@ -111,9 +121,17 @@ function runDocker() {
     '-e',
     'CARGO_TARGET_DIR=/tmp/target',
     IMAGE,
-    'cargo',
-    ...cargoArgs,
   ];
+  const component = COMPONENT_FOR[cargoArgs[0]];
+  let args;
+  if (component) {
+    const inner = `rustup component add ${component} >/dev/null 2>&1 || true; exec cargo ${cargoArgs
+      .map(shQuote)
+      .join(' ')}`;
+    args = [...base, 'sh', '-c', inner];
+  } else {
+    args = [...base, 'cargo', ...cargoArgs];
+  }
   console.error(`[cargo runner=docker] image=${IMAGE}  cargo ${cargoArgs.join(' ')}`);
   return spawnSync('docker', args, { stdio: 'inherit' });
 }
