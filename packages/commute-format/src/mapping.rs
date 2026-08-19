@@ -124,7 +124,7 @@ pub fn export(
             }
         }
         if let Some(FieldPolicy::KeyedOrdered { order_field, .. }) = spec.policy(&field) {
-            arr.sort_by(|a, b| order_rank(a, order_field).cmp(&order_rank(b, order_field)));
+            arr.sort_by_key(|a| order_rank(a, order_field));
         }
         fields.push((field, ValueTree::Seq(arr)));
     }

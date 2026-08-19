@@ -502,7 +502,7 @@ mod tests {
             .unwrap();
 
         // Pure function of the canonical bytes: a re-parse hashes identically (cross-client stable).
-        let ev = m.events[&e].clone();
+        let ev = m.events[&e];
         let reparsed: Event = serde_json::from_slice(&serde_json::to_vec(&ev).unwrap()).unwrap();
         assert_eq!(content_hash(&reparsed).unwrap(), content_hash(&ev).unwrap());
 

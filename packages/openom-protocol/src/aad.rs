@@ -131,7 +131,7 @@ pub fn rrk_wrap_aad(tree_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8
 /// `layout_version` is first (after the tag) and is the sole version axis — a
 /// fail-closed forward selector, like `Envelope.version` — so any future keyring layout
 /// is byte-disjoint from this one. Covered: `revision`/`prev_keyring_hash` (anti-rollback
-/// + history chain), the `authorized_signers` trust set, the `members` role/key manifest,
+/// and history chain), the `authorized_signers` trust set, the `members` role/key manifest,
 /// and the epochs/wraps. `signatures` is excluded, so every signer signs identical bytes
 /// and their signatures collect independently.
 pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {

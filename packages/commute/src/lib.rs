@@ -194,7 +194,7 @@ impl Doc {
                     .or_default()
                     .entry(elem.clone())
                     .or_default();
-                if e.tomb.map_or(true, |t| op.stamp > t) {
+                if e.tomb.is_none_or(|t| op.stamp > t) {
                     e.tomb = Some(op.stamp);
                 }
             }
@@ -313,7 +313,7 @@ impl Doc {
             }
         }
         for (cell, elems) in &self.sets {
-            for (_, e) in elems {
+            for e in elems.values() {
                 let newer = e.add.as_ref().is_some_and(|(s, _)| !Self::covered(vv, s))
                     || e.tomb.is_some_and(|s| !Self::covered(vv, &s));
                 if newer {
