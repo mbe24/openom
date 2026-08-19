@@ -38,7 +38,11 @@ impl SeededIdSource {
     /// Seed the stream. A zero seed is remapped so the generator never gets stuck at 0.
     pub fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed },
+            state: if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            },
         }
     }
 
@@ -89,16 +93,28 @@ macro_rules! id_type {
     };
 }
 
-id_type!(TreeId, "Identity of a whole tree — namespaces node ids for cross-tree references.");
-id_type!(NodeId, "Identity of a person or family node — the stable graph key.");
+id_type!(
+    TreeId,
+    "Identity of a whole tree — namespaces node ids for cross-tree references."
+);
+id_type!(
+    NodeId,
+    "Identity of a person or family node — the stable graph key."
+);
 id_type!(EdgeId, "Identity of a relationship edge.");
 id_type!(EventId, "Identity of an event record.");
 id_type!(SourceId, "Identity of a shared source record.");
 id_type!(MediaId, "Identity of a shared media record.");
 id_type!(FieldDefId, "Identity of a custom-field definition.");
 id_type!(FieldValueId, "Identity of a custom-field value.");
-id_type!(NameId, "Identity of a name entry (see the name model — embedded by a later task).");
-id_type!(LinkId, "Identity of a cross-tree link record (federation seam).");
+id_type!(
+    NameId,
+    "Identity of a name entry (see the name model — embedded by a later task)."
+);
+id_type!(
+    LinkId,
+    "Identity of a cross-tree link record (federation seam)."
+);
 
 #[cfg(test)]
 mod tests {

@@ -99,7 +99,11 @@ pub struct SealContext {
 impl SealContext {
     /// A snapshot at the chain head — the common case. `format` defaults to openom-json,
     /// uncompressed; adjust the fields for compressed payloads or media.
-    pub fn snapshot(replica_counter: u64, prev_ciphertext_hash: Vec<u8>, covers_through_seq: u64) -> Self {
+    pub fn snapshot(
+        replica_counter: u64,
+        prev_ciphertext_hash: Vec<u8>,
+        covers_through_seq: u64,
+    ) -> Self {
         SealContext {
             kind: EntryKind::Snapshot,
             format: Format::OpenomJson,
@@ -233,15 +237,29 @@ impl Sealer {
     /// Attach the member's author identity so entries this sealer seals are SIGNED + attributed
     /// (shared trees). Builder-style; set at unlock from the verified keyring's member identity + the
     /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
-    pub fn with_author(mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+    pub fn with_author(
+        mut self,
+        signing_key: openom_keyring::SigningKey,
+        member_id: String,
+        keyring_revision: u32,
+    ) -> Self {
         self.set_author(signing_key, member_id, keyring_revision);
         self
     }
 
     /// Mutating form of [`with_author`](Self::with_author), for setting the author on a sealer already
     /// inside a collection (see [`SealerSet::with_author`]).
-    pub fn set_author(&mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) {
-        self.author = Some(AuthorIdentity { signing_key, member_id, keyring_revision });
+    pub fn set_author(
+        &mut self,
+        signing_key: openom_keyring::SigningKey,
+        member_id: String,
+        keyring_revision: u32,
+    ) {
+        self.author = Some(AuthorIdentity {
+            signing_key,
+            member_id,
+            keyring_revision,
+        });
     }
 
     /// A local-development sealer using the reserved dev key (§16): real ciphertext,
@@ -277,7 +295,11 @@ impl Sealer {
     /// Seal `plaintext` into a wire-ready envelope under this sealer's DEK and scope,
     /// using the caller-supplied chain state in `ctx`. Returns the encoded bytes plus the
     /// `ciphertext_hash` to thread into the next call.
-    pub fn seal_entry(&self, ctx: &SealContext, plaintext: &[u8]) -> Result<SealOutcome, SealerError> {
+    pub fn seal_entry(
+        &self,
+        ctx: &SealContext,
+        plaintext: &[u8],
+    ) -> Result<SealOutcome, SealerError> {
         let params = openom_crypto::SealParams {
             version: self.version,
             kind: ctx.kind.to_proto(),
@@ -314,7 +336,11 @@ impl Sealer {
 
     /// Decode `envelope_bytes`, verify it belongs to this sealer's `(tree_id, key_id)`
     /// scope and is the `expect` kind, then AEAD-open it. Returns the plaintext.
-    pub fn open_entry(&self, expect: EntryKind, envelope_bytes: &[u8]) -> Result<Vec<u8>, SealerError> {
+    pub fn open_entry(
+        &self,
+        expect: EntryKind,
+        envelope_bytes: &[u8],
+    ) -> Result<Vec<u8>, SealerError> {
         let envelope =
             Envelope::decode(envelope_bytes).map_err(|e| SealerError::Decode(e.to_string()))?;
         let header = envelope.header.as_ref().ok_or(SealerError::NoHeader)?;
@@ -369,13 +395,22 @@ impl SealerSet {
                 )
             })
             .collect();
-        SealerSet { tree_id, write_key_id, sealers }
+        SealerSet {
+            tree_id,
+            write_key_id,
+            sealers,
+        }
     }
 
     /// Attach the member's author identity to the WRITE-epoch sealer, so new entries are signed +
     /// attributed (§B3 shared trees). Old-epoch sealers only open (never seal new entries), so they need
     /// no author. Set at unlock, gated on the write epoch being attributed (shared).
-    pub fn with_author(mut self, signing_key: openom_keyring::SigningKey, member_id: String, keyring_revision: u32) -> Self {
+    pub fn with_author(
+        mut self,
+        signing_key: openom_keyring::SigningKey,
+        member_id: String,
+        keyring_revision: u32,
+    ) -> Self {
         let write = self.write_key_id.clone();
         if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == write) {
             w.set_author(signing_key, member_id, keyring_revision);
@@ -385,7 +420,11 @@ impl SealerSet {
 
     /// A single-epoch set — the local-development / demo path (one dev sealer).
     pub fn single(sealer: Sealer) -> Self {
-        SealerSet { tree_id: sealer.tree_id.clone(), write_key_id: sealer.key_id.clone(), sealers: vec![sealer] }
+        SealerSet {
+            tree_id: sealer.tree_id.clone(),
+            write_key_id: sealer.key_id.clone(),
+            sealers: vec![sealer],
+        }
     }
 
     /// The tree this set is scoped to.
@@ -394,7 +433,11 @@ impl SealerSet {
     }
 
     /// Seal a new entry under the **write** (latest) epoch.
-    pub fn seal_entry(&self, ctx: &SealContext, plaintext: &[u8]) -> Result<SealOutcome, SealerError> {
+    pub fn seal_entry(
+        &self,
+        ctx: &SealContext,
+        plaintext: &[u8],
+    ) -> Result<SealOutcome, SealerError> {
         self.sealers
             .iter()
             .find(|s| s.key_id == self.write_key_id)
@@ -405,7 +448,11 @@ impl SealerSet {
     /// Open an envelope by routing to the sealer for its epoch. A `tree_id` mismatch is a
     /// misrouted blob (`WrongScope`); a `key_id` the set doesn't hold is an access boundary
     /// (`EpochUnreachable`).
-    pub fn open_entry(&self, expect: EntryKind, envelope_bytes: &[u8]) -> Result<Vec<u8>, SealerError> {
+    pub fn open_entry(
+        &self,
+        expect: EntryKind,
+        envelope_bytes: &[u8],
+    ) -> Result<Vec<u8>, SealerError> {
         let envelope =
             Envelope::decode(envelope_bytes).map_err(|e| SealerError::Decode(e.to_string()))?;
         let header = envelope.header.as_ref().ok_or(SealerError::NoHeader)?;
@@ -440,7 +487,10 @@ mod tests {
         let ctx = SealContext::snapshot(1, Vec::new(), 0);
         let out = s.seal_entry(&ctx, b"the family tree").unwrap();
         assert!(!out.ciphertext_hash.is_empty());
-        assert_eq!(s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"the family tree");
+        assert_eq!(
+            s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(),
+            b"the family tree"
+        );
     }
 
     #[test]
@@ -456,7 +506,10 @@ mod tests {
         let out = s.seal_entry(&delta, b"commute-delta-bytes").unwrap();
         let env = Envelope::decode(out.envelope.as_slice()).unwrap();
         assert_eq!(env.header.unwrap().format, Format::OpenomTreelog as i32);
-        assert_eq!(s.open_entry(EntryKind::Delta, &out.envelope).unwrap(), b"commute-delta-bytes");
+        assert_eq!(
+            s.open_entry(EntryKind::Delta, &out.envelope).unwrap(),
+            b"commute-delta-bytes"
+        );
 
         let proposal = SealContext {
             kind: EntryKind::Proposal,
@@ -464,9 +517,15 @@ mod tests {
             ..SealContext::snapshot(2, out.ciphertext_hash.clone(), 0)
         };
         let pout = s.seal_entry(&proposal, b"proposal-op-bundle").unwrap();
-        assert_eq!(s.open_entry(EntryKind::Proposal, &pout.envelope).unwrap(), b"proposal-op-bundle");
+        assert_eq!(
+            s.open_entry(EntryKind::Proposal, &pout.envelope).unwrap(),
+            b"proposal-op-bundle"
+        );
         // A proposal must not open as a delta (domain separation via the kind AAD binding).
-        assert!(matches!(s.open_entry(EntryKind::Delta, &pout.envelope), Err(SealerError::WrongKind)));
+        assert!(matches!(
+            s.open_entry(EntryKind::Delta, &pout.envelope),
+            Err(SealerError::WrongKind)
+        ));
     }
 
     #[test]
@@ -479,26 +538,44 @@ mod tests {
             ..SealContext::snapshot(1, Vec::new(), 0)
         };
         let out = s.seal_entry(&delta, b"a change").unwrap();
-        let h = Envelope::decode(out.envelope.as_slice()).unwrap().header.unwrap();
-        assert!(!h.author_signature.is_empty(), "an author-bearing sealer signs the entry");
+        let h = Envelope::decode(out.envelope.as_slice())
+            .unwrap()
+            .header
+            .unwrap();
+        assert!(
+            !h.author_signature.is_empty(),
+            "an author-bearing sealer signs the entry"
+        );
         assert_eq!(h.author_member_id, "m1");
         assert_eq!(h.keyring_revision, 3);
         // Default (no author) → unattributed, V1 communal-DEK behaviour.
         let plain = sealer().seal_entry(&delta, b"a change").unwrap().envelope;
         let h2 = Envelope::decode(plain.as_slice()).unwrap().header.unwrap();
-        assert!(h2.author_signature.is_empty() && h2.author_member_id.is_empty() && h2.keyring_revision == 0);
+        assert!(
+            h2.author_signature.is_empty()
+                && h2.author_member_id.is_empty()
+                && h2.keyring_revision == 0
+        );
     }
 
     #[test]
     fn returns_the_chain_hash_for_the_next_entry() {
         let s = sealer();
-        let first = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"a").unwrap();
+        let first = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"a")
+            .unwrap();
         let second = s
-            .seal_entry(&SealContext::snapshot(2, first.ciphertext_hash.clone(), 1), b"b")
+            .seal_entry(
+                &SealContext::snapshot(2, first.ciphertext_hash.clone(), 1),
+                b"b",
+            )
             .unwrap();
         // The second envelope's header records the first's hash as its prev.
         let env = Envelope::decode(second.envelope.as_slice()).unwrap();
-        assert_eq!(env.header.unwrap().prev_ciphertext_hash, first.ciphertext_hash);
+        assert_eq!(
+            env.header.unwrap().prev_ciphertext_hash,
+            first.ciphertext_hash
+        );
     }
 
     #[test]
@@ -511,7 +588,9 @@ mod tests {
             b"epoch-0".to_vec(),
             b"replica-9".to_vec(),
         );
-        let out = a.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"secret").unwrap();
+        let out = a
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"secret")
+            .unwrap();
         assert!(matches!(
             b.open_entry(EntryKind::Snapshot, &out.envelope),
             Err(SealerError::WrongScope)
@@ -521,7 +600,9 @@ mod tests {
     #[test]
     fn rejects_the_wrong_kind() {
         let s = sealer();
-        let out = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"x").unwrap();
+        let out = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"x")
+            .unwrap();
         assert!(matches!(
             s.open_entry(EntryKind::Media, &out.envelope),
             Err(SealerError::WrongKind)
@@ -531,16 +612,23 @@ mod tests {
     #[test]
     fn dev_sealer_tags_the_reserved_key_id() {
         let s = Sealer::dev(b"tree-uuid-16byte".to_vec(), b"replica-0".to_vec());
-        let out = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"local dev").unwrap();
+        let out = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"local dev")
+            .unwrap();
         let env = Envelope::decode(out.envelope.as_slice()).unwrap();
         assert_eq!(env.header.unwrap().key_id, openom_crypto::DEV_KEY_ID);
-        assert_eq!(s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"local dev");
+        assert_eq!(
+            s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(),
+            b"local dev"
+        );
     }
 
     #[test]
     fn corrupted_ciphertext_fails_to_open() {
         let s = sealer();
-        let mut out = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"payload").unwrap();
+        let mut out = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"payload")
+            .unwrap();
         // Flip a byte deep in the encoded envelope (the ciphertext lives near the end).
         let n = out.envelope.len();
         out.envelope[n - 1] ^= 0xFF;
@@ -550,9 +638,14 @@ mod tests {
     #[test]
     fn seals_under_aes_gcm_when_selected() {
         let s = sealer().with_aead(Aead::Aes256Gcm);
-        let out = s.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"aes path").unwrap();
+        let out = s
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"aes path")
+            .unwrap();
         let env = Envelope::decode(out.envelope.as_slice()).unwrap();
         assert_eq!(env.header.as_ref().unwrap().aead, Aead::Aes256Gcm as i32);
-        assert_eq!(s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"aes path");
+        assert_eq!(
+            s.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(),
+            b"aes path"
+        );
     }
 }

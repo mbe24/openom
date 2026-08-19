@@ -208,15 +208,30 @@ impl Model {
             return Err(ModelError::DanglingNode(local));
         }
         let id = LinkId::generate(src);
-        self.cross_tree_links
-            .insert(id, CrossTreeLink { id, local, remote_tree, remote_node });
+        self.cross_tree_links.insert(
+            id,
+            CrossTreeLink {
+                id,
+                local,
+                remote_tree,
+                remote_node,
+            },
+        );
         Ok(id)
     }
 
     /// Create a node, minting a fresh opaque id.
     pub fn create_node(&mut self, kind: NodeKind, src: &mut impl IdSource) -> NodeId {
         let id = NodeId::generate(src);
-        self.nodes.insert(id, Node { id, kind, names: Vec::new(), scope: None });
+        self.nodes.insert(
+            id,
+            Node {
+                id,
+                kind,
+                names: Vec::new(),
+                scope: None,
+            },
+        );
         id
     }
 
@@ -238,7 +253,15 @@ impl Model {
             return Err(ModelError::DanglingNode(to));
         }
         let id = EdgeId::generate(src);
-        self.edges.insert(id, Edge { id, relationship, from, to });
+        self.edges.insert(
+            id,
+            Edge {
+                id,
+                relationship,
+                from,
+                to,
+            },
+        );
         Ok(id)
     }
 
@@ -256,14 +279,24 @@ impl Model {
         let id = EventId::generate(src);
         self.events.insert(
             id,
-            Event { id, event_type, primary, secondary: None, timestamp, image: None },
+            Event {
+                id,
+                event_type,
+                primary,
+                secondary: None,
+                timestamp,
+                image: None,
+            },
         );
         Ok(id)
     }
 
     /// Attach a name (the name model) to a node.
     pub fn add_name(&mut self, node: NodeId, name: Name) -> Result<(), ModelError> {
-        let n = self.nodes.get_mut(&node).ok_or(ModelError::DanglingNode(node))?;
+        let n = self
+            .nodes
+            .get_mut(&node)
+            .ok_or(ModelError::DanglingNode(node))?;
         n.names.push(name);
         Ok(())
     }
@@ -276,7 +309,10 @@ impl Model {
         event: EventId,
         timestamp: Option<i64>,
     ) -> Result<(), ModelError> {
-        let e = self.events.get_mut(&event).ok_or(ModelError::NoSuchEvent(event))?;
+        let e = self
+            .events
+            .get_mut(&event)
+            .ok_or(ModelError::NoSuchEvent(event))?;
         e.timestamp = timestamp;
         Ok(())
     }
@@ -325,8 +361,12 @@ mod tests {
 
         let parent = m.create_node(NodeKind::Person, &mut src);
         let child = m.create_node(NodeKind::Person, &mut src);
-        let edge = m.add_edge(RelationshipType::ParentChild, parent, child, &mut src).unwrap();
-        let birth = m.add_event(EventType::Birth, child, Some(1900), &mut src).unwrap();
+        let edge = m
+            .add_edge(RelationshipType::ParentChild, parent, child, &mut src)
+            .unwrap();
+        let birth = m
+            .add_event(EventType::Birth, child, Some(1900), &mut src)
+            .unwrap();
 
         // Correct a wrong birth year — a real edit.
         m.correct_event_timestamp(birth, Some(1901)).unwrap();
@@ -368,8 +408,10 @@ mod tests {
         let mut m = Model::new(TreeId::generate(&mut src));
         let p = m.create_node(NodeKind::Person, &mut src);
         let f = m.create_node(NodeKind::Family, &mut src);
-        m.add_edge(RelationshipType::ParentChild, f, p, &mut src).unwrap();
-        m.add_event(EventType::Birth, p, Some(2000), &mut src).unwrap();
+        m.add_edge(RelationshipType::ParentChild, f, p, &mut src)
+            .unwrap();
+        m.add_event(EventType::Birth, p, Some(2000), &mut src)
+            .unwrap();
 
         let json = serde_json::to_string(&m).unwrap();
         let back: Model = serde_json::from_str(&json).unwrap();
@@ -389,7 +431,9 @@ mod tests {
         // OPE-99: a cross-tree link record (federation seam).
         let other_tree = TreeId::generate(&mut src);
         let other_node = NodeId::generate(&mut src);
-        let link = m.add_cross_tree_link(a, other_tree, other_node, &mut src).unwrap();
+        let link = m
+            .add_cross_tree_link(a, other_tree, other_node, &mut src)
+            .unwrap();
         assert_eq!(m.cross_tree_links[&link].remote_node, other_node);
 
         // OPE-150: the field merge-class marker — default Lww, Text opt-in.
@@ -411,7 +455,8 @@ mod tests {
         let mut src = seeded();
         let mut m = Model::new(TreeId::generate(&mut src));
         let p = m.create_node(NodeKind::Person, &mut src);
-        m.add_event(EventType::Birth, p, Some(1990), &mut src).unwrap();
+        m.add_event(EventType::Birth, p, Some(1990), &mut src)
+            .unwrap();
 
         // Stable across a serialize → parse round-trip: same materialized state → identical bytes.
         let a = canonicalize(&m).unwrap();
@@ -429,8 +474,12 @@ mod tests {
         let mut m = Model::new(TreeId::generate(&mut src));
         let a = m.create_node(NodeKind::Person, &mut src);
         let b = m.create_node(NodeKind::Person, &mut src);
-        let ea = m.add_event(EventType::Birth, a, Some(1901), &mut src).unwrap();
-        let eb = m.add_event(EventType::Death, b, Some(1980), &mut src).unwrap();
+        let ea = m
+            .add_event(EventType::Birth, a, Some(1901), &mut src)
+            .unwrap();
+        let eb = m
+            .add_event(EventType::Death, b, Some(1980), &mut src)
+            .unwrap();
 
         let h = content_hash(&m.events[&ea]).unwrap();
 
@@ -448,7 +497,9 @@ mod tests {
         let mut src = seeded();
         let mut m = Model::new(TreeId::generate(&mut src));
         let p = m.create_node(NodeKind::Person, &mut src);
-        let e = m.add_event(EventType::Birth, p, Some(2000), &mut src).unwrap();
+        let e = m
+            .add_event(EventType::Birth, p, Some(2000), &mut src)
+            .unwrap();
 
         // Pure function of the canonical bytes: a re-parse hashes identically (cross-client stable).
         let ev = m.events[&e].clone();
@@ -457,9 +508,16 @@ mod tests {
 
         // Two facts with identical fields but different random ids hash differently — the id is the
         // high-entropy component, so the fields alone can't be confirmed by guessing.
-        let e1 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
-        let e2 = m.add_event(EventType::Birth, p, Some(1901), &mut src).unwrap();
-        assert_ne!(content_hash(&m.events[&e1]).unwrap(), content_hash(&m.events[&e2]).unwrap());
+        let e1 = m
+            .add_event(EventType::Birth, p, Some(1901), &mut src)
+            .unwrap();
+        let e2 = m
+            .add_event(EventType::Birth, p, Some(1901), &mut src)
+            .unwrap();
+        assert_ne!(
+            content_hash(&m.events[&e1]).unwrap(),
+            content_hash(&m.events[&e2]).unwrap()
+        );
     }
 
     #[test]

@@ -51,7 +51,11 @@ impl Attestation {
     /// Sign a vouch for `fact_hash` with `key`.
     pub fn create(key: &SigningKey, fact_hash: FactHash) -> Self {
         let signature = key.sign(&Self::message(&fact_hash)).to_bytes().to_vec();
-        Attestation { attester: key.verifying_key().to_bytes(), fact_hash, signature }
+        Attestation {
+            attester: key.verifying_key().to_bytes(),
+            fact_hash,
+            signature,
+        }
     }
 
     /// Verify the signature attributes `fact_hash` to `attester`. Pure cryptography — independent of
@@ -63,7 +67,11 @@ impl Attestation {
         let Ok(sig_bytes): Result<[u8; 64], _> = self.signature.as_slice().try_into() else {
             return false;
         };
-        vk.verify(&Self::message(&self.fact_hash), &Signature::from_bytes(&sig_bytes)).is_ok()
+        vk.verify(
+            &Self::message(&self.fact_hash),
+            &Signature::from_bytes(&sig_bytes),
+        )
+        .is_ok()
     }
 
     /// Check this attestation against the fact's CURRENT canonical content hash (recomputed by the
@@ -95,7 +103,10 @@ impl Attestation {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AttestOp {
     Attest(Attestation),
-    Revoke { attester: PubKey, fact_hash: FactHash },
+    Revoke {
+        attester: PubKey,
+        fact_hash: FactHash,
+    },
 }
 
 /// Errors applying or decoding ops.
@@ -139,7 +150,10 @@ impl AttestationDoc {
                     self.active.push(a);
                 }
             }
-            AttestOp::Revoke { attester, fact_hash } => {
+            AttestOp::Revoke {
+                attester,
+                fact_hash,
+            } => {
                 let key = (attester, fact_hash);
                 self.active.retain(|x| x.key() != key);
                 if !self.is_revoked(&key) {
@@ -151,13 +165,20 @@ impl AttestationDoc {
     }
 
     /// Active vouches for a given fact.
-    pub fn for_fact<'a>(&'a self, fact_hash: &'a FactHash) -> impl Iterator<Item = &'a Attestation> {
-        self.active.iter().filter(move |a| &a.fact_hash == fact_hash)
+    pub fn for_fact<'a>(
+        &'a self,
+        fact_hash: &'a FactHash,
+    ) -> impl Iterator<Item = &'a Attestation> {
+        self.active
+            .iter()
+            .filter(move |a| &a.fact_hash == fact_hash)
     }
 
     /// Is there an active vouch by `attester` on `fact_hash`?
     pub fn is_attested(&self, attester: &PubKey, fact_hash: &FactHash) -> bool {
-        self.active.iter().any(|a| &a.attester == attester && &a.fact_hash == fact_hash)
+        self.active
+            .iter()
+            .any(|a| &a.attester == attester && &a.fact_hash == fact_hash)
     }
 
     /// Compaction: **hard-purge** — drop the revoke tombstones so a revoked vouch leaves no trace
@@ -220,10 +241,14 @@ mod tests {
     fn concurrent_attests_union_and_are_idempotent() {
         let mut doc = AttestationDoc::new();
         let f = hash(9);
-        doc.apply(AttestOp::Attest(Attestation::create(&key(1), f))).unwrap();
-        doc.apply(AttestOp::Attest(Attestation::create(&key(2), f))).unwrap(); // different attester, same fact
-        doc.apply(AttestOp::Attest(Attestation::create(&key(1), hash(8)))).unwrap(); // same attester, other fact
-        doc.apply(AttestOp::Attest(Attestation::create(&key(1), f))).unwrap(); // idempotent re-attest
+        doc.apply(AttestOp::Attest(Attestation::create(&key(1), f)))
+            .unwrap();
+        doc.apply(AttestOp::Attest(Attestation::create(&key(2), f)))
+            .unwrap(); // different attester, same fact
+        doc.apply(AttestOp::Attest(Attestation::create(&key(1), hash(8))))
+            .unwrap(); // same attester, other fact
+        doc.apply(AttestOp::Attest(Attestation::create(&key(1), f)))
+            .unwrap(); // idempotent re-attest
 
         assert_eq!(doc.for_fact(&f).count(), 2);
         assert!(doc.is_attested(&key(1).verifying_key().to_bytes(), &f));
@@ -235,20 +260,27 @@ mod tests {
         let mut doc = AttestationDoc::new();
         let (k, f) = (key(1), hash(9));
         let pk = k.verifying_key().to_bytes();
-        doc.apply(AttestOp::Attest(Attestation::create(&k, f))).unwrap();
+        doc.apply(AttestOp::Attest(Attestation::create(&k, f)))
+            .unwrap();
         assert!(doc.is_attested(&pk, &f));
 
         // Revoke removes it and tombstones the key.
-        doc.apply(AttestOp::Revoke { attester: pk, fact_hash: f }).unwrap();
+        doc.apply(AttestOp::Revoke {
+            attester: pk,
+            fact_hash: f,
+        })
+        .unwrap();
         assert!(!doc.is_attested(&pk, &f));
         // A re-delivered attest is suppressed by the tombstone.
-        doc.apply(AttestOp::Attest(Attestation::create(&k, f))).unwrap();
+        doc.apply(AttestOp::Attest(Attestation::create(&k, f)))
+            .unwrap();
         assert!(!doc.is_attested(&pk, &f));
 
         // Compaction hard-purges the tombstone — no trace remains (accepted caveat: a lagging
         // re-delivered attest could now resurrect it).
         doc.compact();
-        doc.apply(AttestOp::Attest(Attestation::create(&k, f))).unwrap();
+        doc.apply(AttestOp::Attest(Attestation::create(&k, f)))
+            .unwrap();
         assert!(doc.is_attested(&pk, &f));
     }
 
@@ -257,7 +289,10 @@ mod tests {
         let mut doc = AttestationDoc::new();
         let mut a = Attestation::create(&key(1), hash(9));
         a.signature[0] ^= 0xFF; // corrupt
-        assert_eq!(doc.apply(AttestOp::Attest(a)), Err(AttestError::BadSignature));
+        assert_eq!(
+            doc.apply(AttestOp::Attest(a)),
+            Err(AttestError::BadSignature)
+        );
         assert_eq!(doc.for_fact(&hash(9)).count(), 0);
     }
 

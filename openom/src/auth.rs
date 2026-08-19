@@ -29,7 +29,10 @@ struct Claims {
 impl FromRequestParts<AppState> for Identity {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let bearer = parts
             .headers
             .get(AUTHORIZATION)
@@ -46,10 +49,10 @@ impl FromRequestParts<AppState> for Identity {
         }
 
         let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-        let key = state
-            .jwt_key
-            .as_ref()
-            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "jwt secret not configured"))?;
+        let key = state.jwt_key.as_ref().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "jwt secret not configured",
+        ))?;
         let member_id = validate_token(token, key, state.config.jwt_audience.as_deref())
             .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))?;
         Ok(Identity { member_id })
@@ -61,7 +64,11 @@ impl FromRequestParts<AppState> for Identity {
 /// token's `aud` to match — `None` skips the audience check (the pre-hardening
 /// behaviour, still used locally and for non-standard deployments). Pure over its
 /// inputs so it's unit-testable without an AppState.
-fn validate_token(token: &str, key: &DecodingKey, audience: Option<&str>) -> Result<Uuid, &'static str> {
+fn validate_token(
+    token: &str,
+    key: &DecodingKey,
+    audience: Option<&str>,
+) -> Result<Uuid, &'static str> {
     let mut validation = Validation::new(Algorithm::HS256);
     match audience {
         Some(aud) => validation.set_audience(&[aud]), // keeps validate_aud on, pins the expected aud
@@ -85,8 +92,17 @@ mod tests {
     }
 
     fn token(secret: &[u8], sub: &str, aud: &str) -> String {
-        let claims = TestClaims { sub: sub.into(), aud: aud.into(), exp: 4_102_444_800 }; // ~year 2100
-        encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret)).unwrap()
+        let claims = TestClaims {
+            sub: sub.into(),
+            aud: aud.into(),
+            exp: 4_102_444_800,
+        }; // ~year 2100
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap()
     }
 
     const SECRET: &[u8] = b"test-secret";
@@ -104,7 +120,10 @@ mod tests {
     fn rejects_wrong_audience() {
         let key = DecodingKey::from_secret(SECRET);
         let t = token(SECRET, MEMBER, "some-other-service");
-        assert!(validate_token(&t, &key, Some("authenticated")).is_err(), "mismatched aud rejected");
+        assert!(
+            validate_token(&t, &key, Some("authenticated")).is_err(),
+            "mismatched aud rejected"
+        );
     }
 
     #[test]
@@ -112,13 +131,19 @@ mod tests {
         let key = DecodingKey::from_secret(SECRET);
         // A token whose aud we'd otherwise reject still passes when the check is off.
         let t = token(SECRET, MEMBER, "anything-goes");
-        assert!(validate_token(&t, &key, None).is_ok(), "aud not checked when None");
+        assert!(
+            validate_token(&t, &key, None).is_ok(),
+            "aud not checked when None"
+        );
     }
 
     #[test]
     fn rejects_wrong_signature() {
         let key = DecodingKey::from_secret(b"a-different-secret");
         let t = token(SECRET, MEMBER, "authenticated");
-        assert!(validate_token(&t, &key, Some("authenticated")).is_err(), "bad signature rejected");
+        assert!(
+            validate_token(&t, &key, Some("authenticated")).is_err(),
+            "bad signature rejected"
+        );
     }
 }

@@ -202,29 +202,100 @@ impl Proposal {
 pub enum Change {
     PersonAdded(PersonId),
     PersonRemoved(PersonId),
-    ClaimAdded { subject: SubjectId, field: FieldKey, value: String, source: Option<String>, current_preferred: Option<String> },
-    PreferredChanged { subject: SubjectId, field: FieldKey, claim: ClaimId },
-    ClaimRetracted { subject: SubjectId, field: FieldKey, claim: ClaimId },
+    ClaimAdded {
+        subject: SubjectId,
+        field: FieldKey,
+        value: String,
+        source: Option<String>,
+        current_preferred: Option<String>,
+    },
+    PreferredChanged {
+        subject: SubjectId,
+        field: FieldKey,
+        claim: ClaimId,
+    },
+    ClaimRetracted {
+        subject: SubjectId,
+        field: FieldKey,
+        claim: ClaimId,
+    },
     FamilyAdded(FamilyId),
     FamilyRemoved(FamilyId),
-    ChildLinked { family: FamilyId, person: PersonId, pedi: Pedigree },
-    ChildUnlinked { family: FamilyId, person: PersonId },
-    ChildMoved { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
-    SpouseLinked { family: FamilyId, person: PersonId },
-    SpouseUnlinked { family: FamilyId, person: PersonId },
-    NameAdded { subject: SubjectId, name: NameId },
-    NameRemoved { subject: SubjectId, name: NameId },
-    PrimaryNameSet { subject: SubjectId, name: NameId },
-    EventAdded { subject: SubjectId, event: EventId },
-    EventRemoved { subject: SubjectId, event: EventId },
-    SourceAdded { source: SourceId },
-    SourceRemoved { source: SourceId },
-    Cited { subject: SubjectId, field: FieldKey, source: SourceId, claim: Option<ClaimId> },
-    Uncited { subject: SubjectId, field: FieldKey, source: SourceId },
-    MediaRecordAdded { media: MediaRef },
-    MediaRecordRemoved { media: MediaRef },
-    MediaLinked { subject: SubjectId, link: MediaLinkId, media: MediaRef },
-    MediaUnlinked { subject: SubjectId, link: MediaLinkId },
+    ChildLinked {
+        family: FamilyId,
+        person: PersonId,
+        pedi: Pedigree,
+    },
+    ChildUnlinked {
+        family: FamilyId,
+        person: PersonId,
+    },
+    ChildMoved {
+        person: PersonId,
+        from: FamilyId,
+        to: FamilyId,
+        pedi: Pedigree,
+    },
+    SpouseLinked {
+        family: FamilyId,
+        person: PersonId,
+    },
+    SpouseUnlinked {
+        family: FamilyId,
+        person: PersonId,
+    },
+    NameAdded {
+        subject: SubjectId,
+        name: NameId,
+    },
+    NameRemoved {
+        subject: SubjectId,
+        name: NameId,
+    },
+    PrimaryNameSet {
+        subject: SubjectId,
+        name: NameId,
+    },
+    EventAdded {
+        subject: SubjectId,
+        event: EventId,
+    },
+    EventRemoved {
+        subject: SubjectId,
+        event: EventId,
+    },
+    SourceAdded {
+        source: SourceId,
+    },
+    SourceRemoved {
+        source: SourceId,
+    },
+    Cited {
+        subject: SubjectId,
+        field: FieldKey,
+        source: SourceId,
+        claim: Option<ClaimId>,
+    },
+    Uncited {
+        subject: SubjectId,
+        field: FieldKey,
+        source: SourceId,
+    },
+    MediaRecordAdded {
+        media: MediaRef,
+    },
+    MediaRecordRemoved {
+        media: MediaRef,
+    },
+    MediaLinked {
+        subject: SubjectId,
+        link: MediaLinkId,
+        media: MediaRef,
+    },
+    MediaUnlinked {
+        subject: SubjectId,
+        link: MediaLinkId,
+    },
 }
 
 /// A fact the proposal edits that ALSO moved since the proposal's base — the approver decides
@@ -247,48 +318,127 @@ pub struct Review {
 /// retried op is idempotent.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TreeOp {
-    AddPerson { id: PersonId },
-    RemovePerson { id: PersonId },
-    AddClaim { subject: SubjectId, field: FieldKey, claim: ClaimId, value: String, source: Option<String> },
-    SetPreferredClaim { subject: SubjectId, field: FieldKey, claim: ClaimId },
-    RetractClaim { subject: SubjectId, field: FieldKey, claim: ClaimId },
-    AddFamily { id: FamilyId },
-    RemoveFamily { id: FamilyId },
-    LinkChild { family: FamilyId, person: PersonId, pedi: Pedigree },
-    UnlinkChild { family: FamilyId, person: PersonId },
+    AddPerson {
+        id: PersonId,
+    },
+    RemovePerson {
+        id: PersonId,
+    },
+    AddClaim {
+        subject: SubjectId,
+        field: FieldKey,
+        claim: ClaimId,
+        value: String,
+        source: Option<String>,
+    },
+    SetPreferredClaim {
+        subject: SubjectId,
+        field: FieldKey,
+        claim: ClaimId,
+    },
+    RetractClaim {
+        subject: SubjectId,
+        field: FieldKey,
+        claim: ClaimId,
+    },
+    AddFamily {
+        id: FamilyId,
+    },
+    RemoveFamily {
+        id: FamilyId,
+    },
+    LinkChild {
+        family: FamilyId,
+        person: PersonId,
+        pedi: Pedigree,
+    },
+    UnlinkChild {
+        family: FamilyId,
+        person: PersonId,
+    },
     /// Re-parent a child atomically: drop the `from` link and add the `to` link. First-class so the
     /// intent survives in a proposal bundle ("moved child Y from F1 to F2"), not an inferred pair.
-    MoveChild { person: PersonId, from: FamilyId, to: FamilyId, pedi: Pedigree },
-    LinkSpouse { family: FamilyId, person: PersonId },
-    UnlinkSpouse { family: FamilyId, person: PersonId },
+    MoveChild {
+        person: PersonId,
+        from: FamilyId,
+        to: FamilyId,
+        pedi: Pedigree,
+    },
+    LinkSpouse {
+        family: FamilyId,
+        person: PersonId,
+    },
+    UnlinkSpouse {
+        family: FamilyId,
+        person: PersonId,
+    },
     // ---- sub-entities: names / events (own id + leaf facts via AddClaim on that id) ----
     /// Add a name-entity to a subject's name set. Its parts (given/family/type/…) are `AddClaim`s on
     /// `name`. `SetPrimaryName` chooses which drives the display name.
-    AddName { subject: SubjectId, name: NameId },
-    RemoveName { subject: SubjectId, name: NameId },
+    AddName {
+        subject: SubjectId,
+        name: NameId,
+    },
+    RemoveName {
+        subject: SubjectId,
+        name: NameId,
+    },
     /// Point a subject's preferred-name register at `name` (an LWW register, not a claim set — display
     /// preference is not a competing genealogical claim).
-    SetPrimaryName { subject: SubjectId, name: NameId },
+    SetPrimaryName {
+        subject: SubjectId,
+        name: NameId,
+    },
     /// Add an event-entity to a subject's event set. Its `type`/`date`/`place` are `AddClaim`s on `event`.
-    AddEvent { subject: SubjectId, event: EventId },
-    RemoveEvent { subject: SubjectId, event: EventId },
+    AddEvent {
+        subject: SubjectId,
+        event: EventId,
+    },
+    RemoveEvent {
+        subject: SubjectId,
+        event: EventId,
+    },
     // ---- sources + citations ----
     /// Add a shared source-record (doc-level). Its `title`/`detail` are `AddClaim`s on `source`.
-    AddSource { source: SourceId },
-    RemoveSource { source: SourceId },
+    AddSource {
+        source: SourceId,
+    },
+    RemoveSource {
+        source: SourceId,
+    },
     /// Cite a source for a fact. `claim` names the specific competing claim the source supports, or
     /// `None` to cite the field generally.
-    Cite { subject: SubjectId, field: FieldKey, source: SourceId, claim: Option<ClaimId> },
-    Uncite { subject: SubjectId, field: FieldKey, source: SourceId },
+    Cite {
+        subject: SubjectId,
+        field: FieldKey,
+        source: SourceId,
+        claim: Option<ClaimId>,
+    },
+    Uncite {
+        subject: SubjectId,
+        field: FieldKey,
+        source: SourceId,
+    },
     // ---- media: shared records + per-subject links ----
     /// Add a shared media-record (doc-level). Its `mime`/`hash`/`w`/`h`/`kind` are `AddClaim`s on `media`.
-    AddMediaRecord { media: MediaRef },
-    RemoveMediaRecord { media: MediaRef },
+    AddMediaRecord {
+        media: MediaRef,
+    },
+    RemoveMediaRecord {
+        media: MediaRef,
+    },
     /// Attach a media-record to a subject via a link-entity (element value = the media-record id). The
     /// link's `role`/`order`/`caption`/`crop` are `AddClaim`s on `link`. `RemoveMediaLink` tombstones
     /// it, so a re-delivered attach never resurrects a detached link.
-    AddMediaLink { subject: SubjectId, link: MediaLinkId, media: MediaRef },
-    RemoveMediaLink { subject: SubjectId, link: MediaLinkId },
+    AddMediaLink {
+        subject: SubjectId,
+        link: MediaLinkId,
+        media: MediaRef,
+    },
+    RemoveMediaLink {
+        subject: SubjectId,
+        link: MediaLinkId,
+    },
 }
 
 impl TreeOp {
@@ -296,59 +446,152 @@ impl TreeOp {
     /// intent; `MoveChild` is two (an unlink then a link) applied as one atomic action.
     fn into_intents(self) -> Vec<OpIntent> {
         match self {
-            TreeOp::AddPerson { id } => vec![OpIntent::AddElement { cell: persons_cell(), elem: id, value: Value::Null }],
-            TreeOp::RemovePerson { id } => vec![OpIntent::RemoveElement { cell: persons_cell(), elem: id }],
-            TreeOp::AddClaim { subject, field, claim, value, source } => vec![OpIntent::AddElement {
+            TreeOp::AddPerson { id } => vec![OpIntent::AddElement {
+                cell: persons_cell(),
+                elem: id,
+                value: Value::Null,
+            }],
+            TreeOp::RemovePerson { id } => vec![OpIntent::RemoveElement {
+                cell: persons_cell(),
+                elem: id,
+            }],
+            TreeOp::AddClaim {
+                subject,
+                field,
+                claim,
+                value,
+                source,
+            } => vec![OpIntent::AddElement {
                 cell: fact_claims_cell(&subject, &field),
                 elem: claim,
                 value: Value::Bytes(encode_claim(&value, source.as_deref())),
             }],
-            TreeOp::SetPreferredClaim { subject, field, claim } => {
-                vec![OpIntent::SetRegister { cell: fact_preferred_cell(&subject, &field), value: Value::Bytes(claim) }]
+            TreeOp::SetPreferredClaim {
+                subject,
+                field,
+                claim,
+            } => {
+                vec![OpIntent::SetRegister {
+                    cell: fact_preferred_cell(&subject, &field),
+                    value: Value::Bytes(claim),
+                }]
             }
-            TreeOp::RetractClaim { subject, field, claim } => {
-                vec![OpIntent::RemoveElement { cell: fact_claims_cell(&subject, &field), elem: claim }]
+            TreeOp::RetractClaim {
+                subject,
+                field,
+                claim,
+            } => {
+                vec![OpIntent::RemoveElement {
+                    cell: fact_claims_cell(&subject, &field),
+                    elem: claim,
+                }]
             }
-            TreeOp::AddFamily { id } => vec![OpIntent::AddElement { cell: families_cell(), elem: id, value: Value::Null }],
-            TreeOp::RemoveFamily { id } => vec![OpIntent::RemoveElement { cell: families_cell(), elem: id }],
-            TreeOp::LinkChild { family, person, pedi } => {
-                vec![OpIntent::AddElement { cell: children_cell(&family), elem: person, value: Value::I64(pedi.tag()) }]
+            TreeOp::AddFamily { id } => vec![OpIntent::AddElement {
+                cell: families_cell(),
+                elem: id,
+                value: Value::Null,
+            }],
+            TreeOp::RemoveFamily { id } => vec![OpIntent::RemoveElement {
+                cell: families_cell(),
+                elem: id,
+            }],
+            TreeOp::LinkChild {
+                family,
+                person,
+                pedi,
+            } => {
+                vec![OpIntent::AddElement {
+                    cell: children_cell(&family),
+                    elem: person,
+                    value: Value::I64(pedi.tag()),
+                }]
             }
             TreeOp::UnlinkChild { family, person } => {
-                vec![OpIntent::RemoveElement { cell: children_cell(&family), elem: person }]
+                vec![OpIntent::RemoveElement {
+                    cell: children_cell(&family),
+                    elem: person,
+                }]
             }
-            TreeOp::MoveChild { person, from, to, pedi } => vec![
-                OpIntent::RemoveElement { cell: children_cell(&from), elem: person.clone() },
-                OpIntent::AddElement { cell: children_cell(&to), elem: person, value: Value::I64(pedi.tag()) },
+            TreeOp::MoveChild {
+                person,
+                from,
+                to,
+                pedi,
+            } => vec![
+                OpIntent::RemoveElement {
+                    cell: children_cell(&from),
+                    elem: person.clone(),
+                },
+                OpIntent::AddElement {
+                    cell: children_cell(&to),
+                    elem: person,
+                    value: Value::I64(pedi.tag()),
+                },
             ],
             TreeOp::LinkSpouse { family, person } => {
-                vec![OpIntent::AddElement { cell: spouses_cell(&family), elem: person, value: Value::Null }]
+                vec![OpIntent::AddElement {
+                    cell: spouses_cell(&family),
+                    elem: person,
+                    value: Value::Null,
+                }]
             }
             TreeOp::UnlinkSpouse { family, person } => {
-                vec![OpIntent::RemoveElement { cell: spouses_cell(&family), elem: person }]
+                vec![OpIntent::RemoveElement {
+                    cell: spouses_cell(&family),
+                    elem: person,
+                }]
             }
             TreeOp::AddName { subject, name } => {
-                vec![OpIntent::AddElement { cell: names_cell(&subject), elem: name, value: Value::Null }]
+                vec![OpIntent::AddElement {
+                    cell: names_cell(&subject),
+                    elem: name,
+                    value: Value::Null,
+                }]
             }
             TreeOp::RemoveName { subject, name } => {
-                vec![OpIntent::RemoveElement { cell: names_cell(&subject), elem: name }]
+                vec![OpIntent::RemoveElement {
+                    cell: names_cell(&subject),
+                    elem: name,
+                }]
             }
             TreeOp::SetPrimaryName { subject, name } => {
-                vec![OpIntent::SetRegister { cell: fact_preferred_cell(&subject, FIELD_NAME_PRIMARY), value: Value::Bytes(name) }]
+                vec![OpIntent::SetRegister {
+                    cell: fact_preferred_cell(&subject, FIELD_NAME_PRIMARY),
+                    value: Value::Bytes(name),
+                }]
             }
             TreeOp::AddEvent { subject, event } => {
-                vec![OpIntent::AddElement { cell: events_cell(&subject), elem: event, value: Value::Null }]
+                vec![OpIntent::AddElement {
+                    cell: events_cell(&subject),
+                    elem: event,
+                    value: Value::Null,
+                }]
             }
             TreeOp::RemoveEvent { subject, event } => {
-                vec![OpIntent::RemoveElement { cell: events_cell(&subject), elem: event }]
+                vec![OpIntent::RemoveElement {
+                    cell: events_cell(&subject),
+                    elem: event,
+                }]
             }
             TreeOp::AddSource { source } => {
-                vec![OpIntent::AddElement { cell: sources_cell(), elem: source, value: Value::Null }]
+                vec![OpIntent::AddElement {
+                    cell: sources_cell(),
+                    elem: source,
+                    value: Value::Null,
+                }]
             }
             TreeOp::RemoveSource { source } => {
-                vec![OpIntent::RemoveElement { cell: sources_cell(), elem: source }]
+                vec![OpIntent::RemoveElement {
+                    cell: sources_cell(),
+                    elem: source,
+                }]
             }
-            TreeOp::Cite { subject, field, source, claim } => vec![OpIntent::AddElement {
+            TreeOp::Cite {
+                subject,
+                field,
+                source,
+                claim,
+            } => vec![OpIntent::AddElement {
                 cell: cites_cell(&subject, &field),
                 elem: source,
                 value: match claim {
@@ -356,20 +599,45 @@ impl TreeOp {
                     None => Value::Null,
                 },
             }],
-            TreeOp::Uncite { subject, field, source } => {
-                vec![OpIntent::RemoveElement { cell: cites_cell(&subject, &field), elem: source }]
+            TreeOp::Uncite {
+                subject,
+                field,
+                source,
+            } => {
+                vec![OpIntent::RemoveElement {
+                    cell: cites_cell(&subject, &field),
+                    elem: source,
+                }]
             }
             TreeOp::AddMediaRecord { media } => {
-                vec![OpIntent::AddElement { cell: media_records_cell(), elem: media, value: Value::Null }]
+                vec![OpIntent::AddElement {
+                    cell: media_records_cell(),
+                    elem: media,
+                    value: Value::Null,
+                }]
             }
             TreeOp::RemoveMediaRecord { media } => {
-                vec![OpIntent::RemoveElement { cell: media_records_cell(), elem: media }]
+                vec![OpIntent::RemoveElement {
+                    cell: media_records_cell(),
+                    elem: media,
+                }]
             }
-            TreeOp::AddMediaLink { subject, link, media } => {
-                vec![OpIntent::AddElement { cell: media_cell(&subject), elem: link, value: Value::Bytes(media) }]
+            TreeOp::AddMediaLink {
+                subject,
+                link,
+                media,
+            } => {
+                vec![OpIntent::AddElement {
+                    cell: media_cell(&subject),
+                    elem: link,
+                    value: Value::Bytes(media),
+                }]
             }
             TreeOp::RemoveMediaLink { subject, link } => {
-                vec![OpIntent::RemoveElement { cell: media_cell(&subject), elem: link }]
+                vec![OpIntent::RemoveElement {
+                    cell: media_cell(&subject),
+                    elem: link,
+                }]
             }
         }
     }
@@ -384,25 +652,35 @@ pub struct Tree {
 impl Tree {
     /// A fresh, empty tree for `replica`.
     pub fn new(replica: ReplicaId) -> Self {
-        Tree { doc: Doc::new(replica) }
+        Tree {
+            doc: Doc::new(replica),
+        }
     }
 
     /// Rebuild from a `commute` snapshot.
     pub fn from_snapshot(replica: ReplicaId, bytes: &[u8]) -> Result<Self, commute::DecodeError> {
-        Ok(Tree { doc: Doc::from_snapshot(replica, bytes)? })
+        Ok(Tree {
+            doc: Doc::from_snapshot(replica, bytes)?,
+        })
     }
 
     /// Apply a local edit; returns the stamped `commute` op(s) to seal and sync (usually one, two
     /// for `MoveChild`).
     pub fn apply(&mut self, op: TreeOp) -> Vec<Op> {
-        op.into_intents().into_iter().map(|i| self.doc.apply_local(i)).collect()
+        op.into_intents()
+            .into_iter()
+            .map(|i| self.doc.apply_local(i))
+            .collect()
     }
 
     /// Apply several edits as **one atomic action** — the natural unit for a user action that spans
     /// records (e.g. "add a marriage" = a family + links). The returned ops are sealed/persisted
     /// together by the caller, so a crash never lands half an action.
     pub fn apply_batch(&mut self, ops: Vec<TreeOp>) -> Vec<Op> {
-        ops.into_iter().flat_map(TreeOp::into_intents).map(|i| self.doc.apply_local(i)).collect()
+        ops.into_iter()
+            .flat_map(TreeOp::into_intents)
+            .map(|i| self.doc.apply_local(i))
+            .collect()
     }
 
     /// Capture the current version — a proposer stamps their [`Proposal`] with this as its `base`.
@@ -417,7 +695,8 @@ impl Tree {
         let mut review = Review::default();
         for op in &proposal.ops {
             if let Some((subject, field)) = fact_target(op) {
-                let touched = changed.contains(&fact_claims_cell(&subject, &field)) || changed.contains(&fact_preferred_cell(&subject, &field));
+                let touched = changed.contains(&fact_claims_cell(&subject, &field))
+                    || changed.contains(&fact_preferred_cell(&subject, &field));
                 if touched {
                     let c = Conflict { subject, field };
                     if !review.conflicts.contains(&c) {
@@ -441,17 +720,63 @@ impl Tree {
         match op.clone() {
             TreeOp::AddPerson { id } => Change::PersonAdded(id),
             TreeOp::RemovePerson { id } => Change::PersonRemoved(id),
-            TreeOp::AddClaim { subject, field, value, source, .. } => {
+            TreeOp::AddClaim {
+                subject,
+                field,
+                value,
+                source,
+                ..
+            } => {
                 let current_preferred = self.fact(&subject, &field).preferred.map(|c| c.value);
-                Change::ClaimAdded { subject, field, value, source, current_preferred }
+                Change::ClaimAdded {
+                    subject,
+                    field,
+                    value,
+                    source,
+                    current_preferred,
+                }
             }
-            TreeOp::SetPreferredClaim { subject, field, claim } => Change::PreferredChanged { subject, field, claim },
-            TreeOp::RetractClaim { subject, field, claim } => Change::ClaimRetracted { subject, field, claim },
+            TreeOp::SetPreferredClaim {
+                subject,
+                field,
+                claim,
+            } => Change::PreferredChanged {
+                subject,
+                field,
+                claim,
+            },
+            TreeOp::RetractClaim {
+                subject,
+                field,
+                claim,
+            } => Change::ClaimRetracted {
+                subject,
+                field,
+                claim,
+            },
             TreeOp::AddFamily { id } => Change::FamilyAdded(id),
             TreeOp::RemoveFamily { id } => Change::FamilyRemoved(id),
-            TreeOp::LinkChild { family, person, pedi } => Change::ChildLinked { family, person, pedi },
+            TreeOp::LinkChild {
+                family,
+                person,
+                pedi,
+            } => Change::ChildLinked {
+                family,
+                person,
+                pedi,
+            },
             TreeOp::UnlinkChild { family, person } => Change::ChildUnlinked { family, person },
-            TreeOp::MoveChild { person, from, to, pedi } => Change::ChildMoved { person, from, to, pedi },
+            TreeOp::MoveChild {
+                person,
+                from,
+                to,
+                pedi,
+            } => Change::ChildMoved {
+                person,
+                from,
+                to,
+                pedi,
+            },
             TreeOp::LinkSpouse { family, person } => Change::SpouseLinked { family, person },
             TreeOp::UnlinkSpouse { family, person } => Change::SpouseUnlinked { family, person },
             TreeOp::AddName { subject, name } => Change::NameAdded { subject, name },
@@ -461,11 +786,37 @@ impl Tree {
             TreeOp::RemoveEvent { subject, event } => Change::EventRemoved { subject, event },
             TreeOp::AddSource { source } => Change::SourceAdded { source },
             TreeOp::RemoveSource { source } => Change::SourceRemoved { source },
-            TreeOp::Cite { subject, field, source, claim } => Change::Cited { subject, field, source, claim },
-            TreeOp::Uncite { subject, field, source } => Change::Uncited { subject, field, source },
+            TreeOp::Cite {
+                subject,
+                field,
+                source,
+                claim,
+            } => Change::Cited {
+                subject,
+                field,
+                source,
+                claim,
+            },
+            TreeOp::Uncite {
+                subject,
+                field,
+                source,
+            } => Change::Uncited {
+                subject,
+                field,
+                source,
+            },
             TreeOp::AddMediaRecord { media } => Change::MediaRecordAdded { media },
             TreeOp::RemoveMediaRecord { media } => Change::MediaRecordRemoved { media },
-            TreeOp::AddMediaLink { subject, link, media } => Change::MediaLinked { subject, link, media },
+            TreeOp::AddMediaLink {
+                subject,
+                link,
+                media,
+            } => Change::MediaLinked {
+                subject,
+                link,
+                media,
+            },
             TreeOp::RemoveMediaLink { subject, link } => Change::MediaUnlinked { subject, link },
         }
     }
@@ -481,17 +832,28 @@ impl Tree {
 
     /// The live person ids, in deterministic order.
     pub fn persons(&self) -> Vec<PersonId> {
-        self.doc.set_elements(&persons_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&persons_cell())
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Whether a person currently exists (added and not tombstoned).
     pub fn has_person(&self, id: &[u8]) -> bool {
-        self.doc.set_elements(&persons_cell()).iter().any(|(e, _)| e.as_slice() == id)
+        self.doc
+            .set_elements(&persons_cell())
+            .iter()
+            .any(|(e, _)| e.as_slice() == id)
     }
 
     /// The live family ids, in deterministic order.
     pub fn families(&self) -> Vec<FamilyId> {
-        self.doc.set_elements(&families_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&families_cell())
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// The children of a family, each with its pedigree, in deterministic person-id order.
@@ -511,7 +873,11 @@ impl Tree {
 
     /// The spouses/partners of a family, in deterministic person-id order.
     pub fn spouses_of(&self, family: &[u8]) -> Vec<PersonId> {
-        self.doc.set_elements(&spouses_cell(family)).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&spouses_cell(family))
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// The media LINKS attached to a subject, each as `(link id, media-record id)`, in deterministic
@@ -530,12 +896,20 @@ impl Tree {
 
     /// The live media-record ids (doc-level), in deterministic order.
     pub fn media_records(&self) -> Vec<MediaRef> {
-        self.doc.set_elements(&media_records_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&media_records_cell())
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// A subject's name-entity ids, in deterministic (id) order.
     pub fn names_of(&self, subject: &[u8]) -> Vec<NameId> {
-        self.doc.set_elements(&names_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&names_cell(subject))
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// A subject's preferred (display) name entity: the register pointer if it still names a live name,
@@ -543,17 +917,26 @@ impl Tree {
     /// A read adapter may prefer a `birth`-type name over the greatest id; that policy lives above.
     pub fn primary_name(&self, subject: &[u8]) -> Option<NameId> {
         let names = self.names_of(subject);
-        let pointer = match self.doc.register(&fact_preferred_cell(subject, FIELD_NAME_PRIMARY)) {
+        let pointer = match self
+            .doc
+            .register(&fact_preferred_cell(subject, FIELD_NAME_PRIMARY))
+        {
             Some(Value::Bytes(id)) => Some(id.clone()),
             _ => None,
         };
-        pointer.filter(|p| names.iter().any(|n| n == p)).or_else(|| names.last().cloned())
+        pointer
+            .filter(|p| names.iter().any(|n| n == p))
+            .or_else(|| names.last().cloned())
     }
 
     /// A subject's event-entity ids, in deterministic (id) order. Ordering by date is a read-adapter
     /// concern (the leaf `date` fact), not the engine's.
     pub fn events_of(&self, subject: &[u8]) -> Vec<EventId> {
-        self.doc.set_elements(&events_cell(subject)).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&events_cell(subject))
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// The fact field keys that currently have at least one live claim on `subject` (e.g. `"sex"`,
@@ -585,7 +968,11 @@ impl Tree {
 
     /// The live source-record ids (doc-level), in deterministic order.
     pub fn sources(&self) -> Vec<SourceId> {
-        self.doc.set_elements(&sources_cell()).into_iter().map(|(id, _)| id.clone()).collect()
+        self.doc
+            .set_elements(&sources_cell())
+            .into_iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// The sources citing a fact, each as `(source id, the specific claim it supports or None for the
@@ -611,7 +998,11 @@ impl Tree {
             .set_elements(&fact_claims_cell(subject, field))
             .into_iter()
             .filter_map(|(id, v)| match v {
-                Value::Bytes(b) => decode_claim(b).map(|(value, source)| Claim { id: id.clone(), value, source }),
+                Value::Bytes(b) => decode_claim(b).map(|(value, source)| Claim {
+                    id: id.clone(),
+                    value,
+                    source,
+                }),
                 _ => None,
             })
             .collect();

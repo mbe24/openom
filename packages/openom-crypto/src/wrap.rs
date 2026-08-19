@@ -39,9 +39,18 @@ pub fn wrap_dek(
 ) -> Result<WrappedDek, CryptoError> {
     let mut nonce = [0u8; WRAP_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
-    let aad = wrap_aad(ctx.tree_id, ctx.key_id, ctx.member_id, ctx.wrap_method, ctx.epoch);
+    let aad = wrap_aad(
+        ctx.tree_id,
+        ctx.key_id,
+        ctx.member_id,
+        ctx.wrap_method,
+        ctx.epoch,
+    );
     let wrapped_dek = xchacha_seal(kek, &nonce, &aad, dek)?;
-    Ok(WrappedDek { nonce: nonce.to_vec(), wrapped_dek })
+    Ok(WrappedDek {
+        nonce: nonce.to_vec(),
+        wrapped_dek,
+    })
 }
 
 /// Unwrap a DEK: verify the wrap against `kek` + `ctx` and return the DEK (zeroizing).
@@ -53,7 +62,13 @@ pub fn unwrap_dek(
     wrapped_dek: &[u8],
     ctx: &WrapContext,
 ) -> Result<Key32, CryptoError> {
-    let aad = wrap_aad(ctx.tree_id, ctx.key_id, ctx.member_id, ctx.wrap_method, ctx.epoch);
+    let aad = wrap_aad(
+        ctx.tree_id,
+        ctx.key_id,
+        ctx.member_id,
+        ctx.wrap_method,
+        ctx.epoch,
+    );
     let dek_bytes = Zeroizing::new(xchacha_open(kek, nonce, &aad, wrapped_dek)?);
     let dek: [u8; KEY_LEN] = dek_bytes
         .as_slice()
@@ -76,7 +91,10 @@ pub fn wrap_rrk_secret(
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
     let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
     let wrapped_dek = xchacha_seal(kek, &nonce, &aad, secret)?;
-    Ok(WrappedDek { nonce: nonce.to_vec(), wrapped_dek })
+    Ok(WrappedDek {
+        nonce: nonce.to_vec(),
+        wrapped_dek,
+    })
 }
 
 /// Unwrap the recovery root key's private key under `kek`, verifying the tree-scoped rrk
@@ -91,7 +109,10 @@ pub fn unwrap_rrk_secret(
 ) -> Result<Key32, CryptoError> {
     let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
     let bytes = Zeroizing::new(xchacha_open(kek, nonce, &aad, wrapped)?);
-    let secret: [u8; KEY_LEN] = bytes.as_slice().try_into().map_err(|_| CryptoError::KeyLength)?;
+    let secret: [u8; KEY_LEN] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| CryptoError::KeyLength)?;
     Ok(Zeroizing::new(secret))
 }
 
@@ -139,11 +160,23 @@ mod tests {
         let dek = generate_dek().unwrap();
         let w = wrap_dek(&kek(), &dek, &ctx()).unwrap();
         for tampered in [
-            WrapContext { member_id: "acct-999", ..ctx() },
-            WrapContext { tree_id: b"other-tree-16byt", ..ctx() },
-            WrapContext { key_id: b"epoch-1-key", ..ctx() },
+            WrapContext {
+                member_id: "acct-999",
+                ..ctx()
+            },
+            WrapContext {
+                tree_id: b"other-tree-16byt",
+                ..ctx()
+            },
+            WrapContext {
+                key_id: b"epoch-1-key",
+                ..ctx()
+            },
             WrapContext { epoch: 1, ..ctx() },
-            WrapContext { wrap_method: 2, ..ctx() },
+            WrapContext {
+                wrap_method: 2,
+                ..ctx()
+            },
         ] {
             assert!(matches!(
                 unwrap_dek(&kek(), &w.nonce, &w.wrapped_dek, &tampered),

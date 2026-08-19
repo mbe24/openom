@@ -70,7 +70,11 @@ pub enum OpIntent {
     /// Set an LWW register cell to `value` (last writer by Lamport stamp wins).
     SetRegister { cell: CellId, value: Value },
     /// Add (or update) element `elem` in a set cell, carrying an opaque `value` payload.
-    AddElement { cell: CellId, elem: ElemId, value: Value },
+    AddElement {
+        cell: CellId,
+        elem: ElemId,
+        value: Value,
+    },
     /// Tombstone element `elem` in a set cell. Later stamp wins between an element's add and remove.
     RemoveElement { cell: CellId, elem: ElemId },
 }
@@ -115,7 +119,13 @@ pub struct Doc {
 impl Doc {
     /// A fresh, empty document for `replica`.
     pub fn new(replica: ReplicaId) -> Self {
-        Doc { replica, lamport: 0, vv: VersionVector::new(), registers: BTreeMap::new(), sets: BTreeMap::new() }
+        Doc {
+            replica,
+            lamport: 0,
+            vv: VersionVector::new(),
+            registers: BTreeMap::new(),
+            sets: BTreeMap::new(),
+        }
     }
 
     /// Reconstruct a document from a snapshot (or any op run) produced by [`Doc::snapshot`].
@@ -130,7 +140,13 @@ impl Doc {
     /// caller can never mint a stamp itself.
     pub fn apply_local(&mut self, intent: OpIntent) -> Op {
         self.lamport += 1;
-        let op = Op { stamp: Stamp { lamport: self.lamport, replica: self.replica }, intent };
+        let op = Op {
+            stamp: Stamp {
+                lamport: self.lamport,
+                replica: self.replica,
+            },
+            intent,
+        };
         self.integrate(&op);
         op
     }
@@ -155,18 +171,29 @@ impl Doc {
             OpIntent::SetRegister { cell, value } => match self.registers.get(cell) {
                 Some((s, _)) if *s >= op.stamp => {}
                 _ => {
-                    self.registers.insert(cell.clone(), (op.stamp, value.clone()));
+                    self.registers
+                        .insert(cell.clone(), (op.stamp, value.clone()));
                 }
             },
             OpIntent::AddElement { cell, elem, value } => {
-                let e = self.sets.entry(cell.clone()).or_default().entry(elem.clone()).or_default();
+                let e = self
+                    .sets
+                    .entry(cell.clone())
+                    .or_default()
+                    .entry(elem.clone())
+                    .or_default();
                 match &e.add {
                     Some((s, _)) if *s >= op.stamp => {}
                     _ => e.add = Some((op.stamp, value.clone())),
                 }
             }
             OpIntent::RemoveElement { cell, elem } => {
-                let e = self.sets.entry(cell.clone()).or_default().entry(elem.clone()).or_default();
+                let e = self
+                    .sets
+                    .entry(cell.clone())
+                    .or_default()
+                    .entry(elem.clone())
+                    .or_default();
                 if e.tomb.map_or(true, |t| op.stamp > t) {
                     e.tomb = Some(op.stamp);
                 }
@@ -182,7 +209,10 @@ impl Doc {
     /// Every register cell and its value, in deterministic cell order — for a domain/bridge layer
     /// that needs to walk the whole document (e.g. export).
     pub fn register_cells(&self) -> Vec<(CellId, Value)> {
-        self.registers.iter().map(|(c, (_, v))| (c.clone(), v.clone())).collect()
+        self.registers
+            .iter()
+            .map(|(c, (_, v))| (c.clone(), v.clone()))
+            .collect()
     }
 
     /// The ids of every set cell that has at least one live element, in deterministic order.
@@ -234,19 +264,38 @@ impl Doc {
         let mut ops = Vec::new();
         for (cell, (s, v)) in &self.registers {
             if !Self::covered(vv, s) {
-                ops.push(Op { stamp: *s, intent: OpIntent::SetRegister { cell: cell.clone(), value: v.clone() } });
+                ops.push(Op {
+                    stamp: *s,
+                    intent: OpIntent::SetRegister {
+                        cell: cell.clone(),
+                        value: v.clone(),
+                    },
+                });
             }
         }
         for (cell, elems) in &self.sets {
             for (elem, e) in elems {
                 if let Some((s, v)) = &e.add {
                     if !Self::covered(vv, s) {
-                        ops.push(Op { stamp: *s, intent: OpIntent::AddElement { cell: cell.clone(), elem: elem.clone(), value: v.clone() } });
+                        ops.push(Op {
+                            stamp: *s,
+                            intent: OpIntent::AddElement {
+                                cell: cell.clone(),
+                                elem: elem.clone(),
+                                value: v.clone(),
+                            },
+                        });
                     }
                 }
                 if let Some(s) = &e.tomb {
                     if !Self::covered(vv, s) {
-                        ops.push(Op { stamp: *s, intent: OpIntent::RemoveElement { cell: cell.clone(), elem: elem.clone() } });
+                        ops.push(Op {
+                            stamp: *s,
+                            intent: OpIntent::RemoveElement {
+                                cell: cell.clone(),
+                                elem: elem.clone(),
+                            },
+                        });
                     }
                 }
             }
@@ -305,7 +354,10 @@ impl Doc {
     /// (a later slice replaces it with canonical-CBOR byte equality). The local replica id and
     /// Lamport counter are deliberately excluded, since they legitimately differ between replicas.
     pub fn checkpoint(&self) -> Checkpoint {
-        Checkpoint { registers: self.registers.clone(), sets: self.sets.clone() }
+        Checkpoint {
+            registers: self.registers.clone(),
+            sets: self.sets.clone(),
+        }
     }
 }
 

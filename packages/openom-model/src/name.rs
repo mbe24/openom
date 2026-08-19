@@ -47,7 +47,12 @@ pub struct Part {
 impl Part {
     /// A plain tagged part (no particle).
     pub fn new(tag: impl Into<String>, value: impl Into<String>) -> Self {
-        Self { tag: tag.into(), value: value.into(), particle: None, position: None }
+        Self {
+            tag: tag.into(),
+            value: value.into(),
+            particle: None,
+            position: None,
+        }
     }
 
     /// A part carrying a connector particle (default `Prefix` position).
@@ -130,8 +135,12 @@ pub fn effective_parts(names: &[Name], id: NameId) -> Result<Vec<Part>, NameErro
                 return Err(NameError::CyclicRef(rid));
             }
             let referenced = find(names, rid).ok_or(NameError::DanglingRef(rid))?;
-            let family: Vec<Part> =
-                referenced.parts.iter().filter(|p| p.tag == TAG_FAMILY).cloned().collect();
+            let family: Vec<Part> = referenced
+                .parts
+                .iter()
+                .filter(|p| p.tag == TAG_FAMILY)
+                .cloned()
+                .collect();
             if !family.is_empty() {
                 parts.extend(family);
                 break;
@@ -146,7 +155,11 @@ pub fn effective_parts(names: &[Name], id: NameId) -> Result<Vec<Part>, NameErro
 /// its particle on the stated side. (Particles are for display only — ignored for sort/match.)
 pub fn render(names: &[Name], id: NameId) -> Result<String, NameError> {
     let parts = effective_parts(names, id)?;
-    Ok(parts.iter().map(Part::rendered).collect::<Vec<_>>().join(" "))
+    Ok(parts
+        .iter()
+        .map(Part::rendered)
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// The `primary` name, if exactly one is marked. Errors if more than one is; `None` if none is.
@@ -207,7 +220,11 @@ mod tests {
             NameId::generate(&mut s),
         );
         let names = vec![
-            birth(n1, vec![given("William"), given("Jefferson"), family("Clinton")], false),
+            birth(
+                n1,
+                vec![given("William"), given("Jefferson"), family("Clinton")],
+                false,
+            ),
             nick(n2, n1, vec![given("Bill")], true),
             nick(n3, n1, vec![given("Bill"), given("Jefferson")], false),
             nick(n4, n1, vec![given("William"), given("Jeff")], false),
@@ -233,7 +250,15 @@ mod tests {
         let mut s = SeededIdSource::new(2);
         let (m1, m2) = (NameId::generate(&mut s), NameId::generate(&mut s));
         let names = vec![
-            birth(m1, vec![given("Earvin"), family("Johnson"), Part::new(TAG_SUFFIX, "Jr.")], false),
+            birth(
+                m1,
+                vec![
+                    given("Earvin"),
+                    family("Johnson"),
+                    Part::new(TAG_SUFFIX, "Jr."),
+                ],
+                false,
+            ),
             nick(m2, m1, vec![Part::new(TAG_BYNAME, "Magic")], true),
         ];
         // Borrows the family (Johnson) — not the given (Earvin), not the suffix (Jr.).
@@ -266,7 +291,11 @@ mod tests {
                 primary: false,
                 script: Some("Latn".into()),
                 culture: None,
-                parts: vec![given("Pyotr"), Part::new(TAG_PATRONYMIC, "Ilyich"), family("Tchaikovsky")],
+                parts: vec![
+                    given("Pyotr"),
+                    Part::new(TAG_PATRONYMIC, "Ilyich"),
+                    family("Tchaikovsky"),
+                ],
             },
         ];
         // Has its own family → borrows nothing.
@@ -311,8 +340,11 @@ mod tests {
     #[test]
     fn transitive_borrow_and_cycle_and_primary() {
         let mut s = SeededIdSource::new(5);
-        let (robert, bob, bobby) =
-            (NameId::generate(&mut s), NameId::generate(&mut s), NameId::generate(&mut s));
+        let (robert, bob, bobby) = (
+            NameId::generate(&mut s),
+            NameId::generate(&mut s),
+            NameId::generate(&mut s),
+        );
         // Bobby → Bob → Robert (family Kennedy) — transitive borrow.
         let names = vec![
             birth(robert, vec![given("Robert"), family("Kennedy")], true),
@@ -323,11 +355,17 @@ mod tests {
 
         // Cycle: x → y → x, neither has family.
         let (x, y) = (NameId::generate(&mut s), NameId::generate(&mut s));
-        let cyclic = vec![nick(x, y, vec![given("X")], false), nick(y, x, vec![given("Y")], false)];
+        let cyclic = vec![
+            nick(x, y, vec![given("X")], false),
+            nick(y, x, vec![given("Y")], false),
+        ];
         assert_eq!(effective_parts(&cyclic, x), Err(NameError::CyclicRef(x)));
 
         // Two primaries → error; zero primaries → Ok(None).
-        let two = vec![birth(x, vec![given("A")], true), birth(y, vec![given("B")], true)];
+        let two = vec![
+            birth(x, vec![given("A")], true),
+            birth(y, vec![given("B")], true),
+        ];
         assert_eq!(primary(&two), Err(NameError::MultiplePrimary));
         let none = vec![birth(x, vec![given("A")], false)];
         assert_eq!(primary(&none).unwrap(), None);
@@ -336,7 +374,12 @@ mod tests {
     #[test]
     fn name_round_trips_through_json() {
         let mut s = SeededIdSource::new(6);
-        let n = nick(NameId::generate(&mut s), NameId::generate(&mut s), vec![given("Bill")], true);
+        let n = nick(
+            NameId::generate(&mut s),
+            NameId::generate(&mut s),
+            vec![given("Bill")],
+            true,
+        );
         let json = serde_json::to_string(&n).unwrap();
         assert!(json.contains("\"ref\":"), "field renamed to `ref`");
         assert!(json.contains("\"type\":"), "field renamed to `type`");

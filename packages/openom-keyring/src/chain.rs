@@ -95,7 +95,10 @@ pub enum ChainError {
 }
 
 /// Validate `candidate` as the successor of `prior` and return the new anchor. Pure; no I/O.
-pub fn verify_transition(prior: &KeyringAnchor, candidate: &Keyring) -> Result<KeyringAnchor, ChainError> {
+pub fn verify_transition(
+    prior: &KeyringAnchor,
+    candidate: &Keyring,
+) -> Result<KeyringAnchor, ChainError> {
     if candidate.tree_id != prior.tree_id {
         return Err(ChainError::TreeMismatch);
     }
@@ -105,7 +108,10 @@ pub fn verify_transition(prior: &KeyringAnchor, candidate: &Keyring) -> Result<K
     check_structure(candidate)?;
 
     // Exactly one past the anchor — never `>=`, so a withheld hop can't hide a set change.
-    let expected = prior.revision.checked_add(1).ok_or(ChainError::RevisionOverflow)?;
+    let expected = prior
+        .revision
+        .checked_add(1)
+        .ok_or(ChainError::RevisionOverflow)?;
     if candidate.revision != expected {
         return Err(ChainError::NonSequential);
     }
@@ -123,12 +129,17 @@ pub fn verify_transition(prior: &KeyringAnchor, candidate: &Keyring) -> Result<K
             .map(|k| verify_keyring(candidate, &k).is_ok())
             .unwrap_or(false);
         let unanimous = verify_keyring_all(candidate, &prior_keys).is_ok();
-        let self_removal = is_self_removal(&prior.trusted_signers, &candidate.authorized_signers, candidate);
+        let self_removal = is_self_removal(
+            &prior.trusted_signers,
+            &candidate.authorized_signers,
+            candidate,
+        );
         if !(founder_signed || unanimous || self_removal) {
             return Err(ChainError::UnendorsedSetChange);
         }
     } else {
-        verify_keyring_any(candidate, &prior_keys).map_err(|_| ChainError::UnendorsedOrdinaryChange)?;
+        verify_keyring_any(candidate, &prior_keys)
+            .map_err(|_| ChainError::UnendorsedOrdinaryChange)?;
     }
 
     if !wrap_complete(candidate) {
@@ -159,7 +170,10 @@ pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnc
 /// revision 1, have exactly one founder whose key is the caller's own, and be signed by it.
 /// This is cryptographic (the founder's own key signs it), so it closes the first-sight gap
 /// for the founder path with no out-of-band material.
-pub fn bootstrap_from_genesis(genesis: &Keyring, own_founder_key: &VerifyingKey) -> Result<KeyringAnchor, ChainError> {
+pub fn bootstrap_from_genesis(
+    genesis: &Keyring,
+    own_founder_key: &VerifyingKey,
+) -> Result<KeyringAnchor, ChainError> {
     check_structure(genesis)?;
     if genesis.revision != 1 || !genesis.prev_keyring_hash.is_empty() {
         return Err(ChainError::BadBootstrap);
@@ -199,7 +213,8 @@ pub fn bootstrap_from_oob(
     }
     // Hygiene: the pinned keyring must be self-consistently signed by one of its own signers
     // (non-circular — the whole document is pinned by the OOB hash).
-    verify_keyring_any(head, &signer_keys(&head.authorized_signers)).map_err(|_| ChainError::BadBootstrap)?;
+    verify_keyring_any(head, &signer_keys(&head.authorized_signers))
+        .map_err(|_| ChainError::BadBootstrap)?;
     if !wrap_complete(head) {
         return Err(ChainError::WrapIncomplete);
     }
@@ -233,11 +248,19 @@ pub fn verify_reset(keyring: &Keyring) -> Result<KeyringAnchor, ChainError> {
 // ---- structural + policy helpers ----
 
 fn check_structure(k: &Keyring) -> Result<(), ChainError> {
-    if k.authorized_signers.len() > MAX_SIGNERS || k.members.len() > MAX_MEMBERS || k.epochs.len() > MAX_EPOCHS {
+    if k.authorized_signers.len() > MAX_SIGNERS
+        || k.members.len() > MAX_MEMBERS
+        || k.epochs.len() > MAX_EPOCHS
+    {
         return Err(ChainError::BadStructure("list too large"));
     }
     // Exactly one founder.
-    if k.authorized_signers.iter().filter(|s| s.role == FOUNDER).count() != 1 {
+    if k.authorized_signers
+        .iter()
+        .filter(|s| s.role == FOUNDER)
+        .count()
+        != 1
+    {
         return Err(ChainError::BadStructure("must have exactly one founder"));
     }
     // No duplicate signer member_id or public_key; every signer key is 32 bytes and parses.
@@ -245,7 +268,10 @@ fn check_structure(k: &Keyring) -> Result<(), ChainError> {
         if s.public_key.len() != 32 || signer_key(s).is_none() {
             return Err(ChainError::BadStructure("signer key malformed"));
         }
-        if k.authorized_signers[..i].iter().any(|o| o.member_id == s.member_id || o.public_key == s.public_key) {
+        if k.authorized_signers[..i]
+            .iter()
+            .any(|o| o.member_id == s.member_id || o.public_key == s.public_key)
+        {
             return Err(ChainError::BadStructure("duplicate signer"));
         }
         // Every signer must be a member whose author key is this signer key (signers can't be
@@ -253,7 +279,11 @@ fn check_structure(k: &Keyring) -> Result<(), ChainError> {
         let member = k.members.iter().find(|m| m.member_id == s.member_id);
         match member {
             Some(m) if m.author_public_key == s.public_key => {}
-            _ => return Err(ChainError::BadStructure("signer is not a member with a matching key")),
+            _ => {
+                return Err(ChainError::BadStructure(
+                    "signer is not a member with a matching key",
+                ))
+            }
         }
     }
     // At least one epoch, and the newest carries the founder's recovery-root wrap.
@@ -282,7 +312,11 @@ fn wrap_complete(k: &Keyring) -> bool {
         if &m.member_id == founder_id && m.role == OWNER_MEMBER {
             continue;
         }
-        if !newest.wraps.iter().any(|w| w.member_id == m.member_id && w.wrap_method == HPKE) {
+        if !newest
+            .wraps
+            .iter()
+            .any(|w| w.member_id == m.member_id && w.wrap_method == HPKE)
+        {
             return false;
         }
     }
@@ -297,17 +331,29 @@ fn same_signer(a: &AuthorizedSigner, b: &AuthorizedSigner) -> bool {
 /// in-place change — a founder key rotation, a role flip, add/remove — counts.
 fn signer_set_differs(prior: &[AuthorizedSigner], candidate: &[AuthorizedSigner]) -> bool {
     prior.len() != candidate.len()
-        || prior.iter().any(|p| !candidate.iter().any(|c| same_signer(p, c)))
-        || candidate.iter().any(|c| !prior.iter().any(|p| same_signer(p, c)))
+        || prior
+            .iter()
+            .any(|p| !candidate.iter().any(|c| same_signer(p, c)))
+        || candidate
+            .iter()
+            .any(|c| !prior.iter().any(|p| same_signer(p, c)))
 }
 
 /// The signer-set delta is **exactly** one CO_OWNER entry removed (nothing else added or
 /// changed) and that co-owner's own key signed the candidate. Scoped tightly so a mutineer
 /// can't bundle "remove myself AND the founder" — any second signer-set change fails this.
-fn is_self_removal(prior: &[AuthorizedSigner], candidate: &[AuthorizedSigner], keyring: &Keyring) -> bool {
-    let removed: Vec<&AuthorizedSigner> =
-        prior.iter().filter(|p| !candidate.iter().any(|c| same_signer(p, c))).collect();
-    let added = candidate.iter().any(|c| !prior.iter().any(|p| same_signer(p, c)));
+fn is_self_removal(
+    prior: &[AuthorizedSigner],
+    candidate: &[AuthorizedSigner],
+    keyring: &Keyring,
+) -> bool {
+    let removed: Vec<&AuthorizedSigner> = prior
+        .iter()
+        .filter(|p| !candidate.iter().any(|c| same_signer(p, c)))
+        .collect();
+    let added = candidate
+        .iter()
+        .any(|c| !prior.iter().any(|p| same_signer(p, c)));
     if added || removed.len() != 1 || removed[0].role != CO_OWNER {
         return false;
     }
@@ -353,16 +399,37 @@ mod tests {
         k.verifying_key().to_bytes().to_vec()
     }
     fn signer(k: &SigningKey, id: &str, role: i32) -> AuthorizedSigner {
-        AuthorizedSigner { public_key: pubv(k), member_id: id.into(), role }
+        AuthorizedSigner {
+            public_key: pubv(k),
+            member_id: id.into(),
+            role,
+        }
     }
     fn keyed_member(k: &SigningKey, id: &str, role: i32) -> Member {
-        Member { member_id: id.into(), role, author_public_key: pubv(k), hpke_public_key: vec![9; 32] }
+        Member {
+            member_id: id.into(),
+            role,
+            author_public_key: pubv(k),
+            hpke_public_key: vec![9; 32],
+        }
     }
     fn dummy_member(id: &str) -> Member {
-        Member { member_id: id.into(), role: EDITOR, author_public_key: vec![7; 32], hpke_public_key: vec![9; 32] }
+        Member {
+            member_id: id.into(),
+            role: EDITOR,
+            author_public_key: vec![7; 32],
+            hpke_public_key: vec![9; 32],
+        }
     }
     fn wrap(id: &str, method: i32) -> KeyWrap {
-        KeyWrap { member_id: id.into(), wrap_method: method, nonce: vec![], wrapped_dek: vec![1], kdf_params: None, ephemeral_public_key: vec![] }
+        KeyWrap {
+            member_id: id.into(),
+            wrap_method: method,
+            nonce: vec![],
+            wrapped_dek: vec![1],
+            kdf_params: None,
+            ephemeral_public_key: vec![],
+        }
     }
 
     /// A genesis keyring: founder "owner" + the given co-owner signers + the given plain
@@ -389,7 +456,11 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+            epochs: vec![KeyEpoch {
+                key_id: vec![0],
+                epoch: 0,
+                wraps,
+            }],
         };
         sign_keyring(&mut k, founder);
         k
@@ -397,7 +468,11 @@ mod tests {
 
     /// A well-formed successor: revision+1, chained hash, `mutate` applied, then signed by
     /// each key in `sign_with`.
-    fn next(prior: &Keyring, mutate: impl FnOnce(&mut Keyring), sign_with: &[&SigningKey]) -> Keyring {
+    fn next(
+        prior: &Keyring,
+        mutate: impl FnOnce(&mut Keyring),
+        sign_with: &[&SigningKey],
+    ) -> Keyring {
         let mut k = prior.clone();
         k.revision = prior.revision + 1;
         k.prev_keyring_hash = keyring_hash(prior).to_vec();
@@ -419,13 +494,30 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
 
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&f]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                k.epochs[0].wraps.push(wrap("bob", HPKE));
+            },
+            &[&f],
+        );
         let out = verify_transition(&a, &ok).unwrap();
         assert_eq!(out.revision, 2);
 
         let stranger = key();
-        let bad = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&stranger]);
-        assert_eq!(verify_transition(&a, &bad), Err(ChainError::UnendorsedOrdinaryChange));
+        let bad = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                k.epochs[0].wraps.push(wrap("bob", HPKE));
+            },
+            &[&stranger],
+        );
+        assert_eq!(
+            verify_transition(&a, &bad),
+            Err(ChainError::UnendorsedOrdinaryChange)
+        );
     }
 
     #[test]
@@ -434,7 +526,14 @@ mod tests {
         let c = key();
         let g = genesis(&f, &[(&c, "carol")], &[]);
         let a = anchor(&g);
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&c]);
+        let ok = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                k.epochs[0].wraps.push(wrap("bob", HPKE));
+            },
+            &[&c],
+        );
         verify_transition(&a, &ok).unwrap();
     }
 
@@ -470,12 +569,23 @@ mod tests {
         let a = anchor(&g);
 
         // Founder promotes carol → accepted.
-        let promote = next(&g, |k| k.authorized_signers.push(signer(&carol, "carol", CO_OWNER)), &[&f]);
+        let promote = next(
+            &g,
+            |k| k.authorized_signers.push(signer(&carol, "carol", CO_OWNER)),
+            &[&f],
+        );
         verify_transition(&a, &promote).unwrap();
 
         // Carol signs her own promotion (mutiny) → rejected.
-        let mutiny = next(&g, |k| k.authorized_signers.push(signer(&carol, "carol", CO_OWNER)), &[&carol]);
-        assert_eq!(verify_transition(&a, &mutiny), Err(ChainError::UnendorsedSetChange));
+        let mutiny = next(
+            &g,
+            |k| k.authorized_signers.push(signer(&carol, "carol", CO_OWNER)),
+            &[&carol],
+        );
+        assert_eq!(
+            verify_transition(&a, &mutiny),
+            Err(ChainError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -486,12 +596,19 @@ mod tests {
         let rogue = key();
         // The attacker adds the rogue as member AND signer (so structure passes) and signs
         // with the rogue — the headline attack.
-        let attack = next(&g, |k| {
-            k.members.push(keyed_member(&rogue, "rogue", EDITOR));
-            k.epochs[0].wraps.push(wrap("rogue", HPKE));
-            k.authorized_signers.push(signer(&rogue, "rogue", CO_OWNER));
-        }, &[&rogue]);
-        assert_eq!(verify_transition(&a, &attack), Err(ChainError::UnendorsedSetChange));
+        let attack = next(
+            &g,
+            |k| {
+                k.members.push(keyed_member(&rogue, "rogue", EDITOR));
+                k.epochs[0].wraps.push(wrap("rogue", HPKE));
+                k.authorized_signers.push(signer(&rogue, "rogue", CO_OWNER));
+            },
+            &[&rogue],
+        );
+        assert_eq!(
+            verify_transition(&a, &attack),
+            Err(ChainError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -500,8 +617,15 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
         let rogue = key();
-        let bad = next(&g, |k| k.authorized_signers.push(signer(&rogue, "ghost", CO_OWNER)), &[&f]);
-        assert!(matches!(verify_transition(&a, &bad), Err(ChainError::BadStructure(_))));
+        let bad = next(
+            &g,
+            |k| k.authorized_signers.push(signer(&rogue, "ghost", CO_OWNER)),
+            &[&f],
+        );
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(ChainError::BadStructure(_))
+        ));
     }
 
     #[test]
@@ -513,12 +637,26 @@ mod tests {
         let a = anchor(&g);
 
         // Carol removes only herself, self-signed → accepted.
-        let ok = next(&g, |k| k.authorized_signers.retain(|s| s.member_id != "carol"), &[&carol]);
+        let ok = next(
+            &g,
+            |k| k.authorized_signers.retain(|s| s.member_id != "carol"),
+            &[&carol],
+        );
         verify_transition(&a, &ok).unwrap();
 
         // Carol tries to remove herself AND dave, self-signed → rejected (not a lone self-removal).
-        let bundled = next(&g, |k| k.authorized_signers.retain(|s| s.member_id != "carol" && s.member_id != "dave"), &[&carol]);
-        assert_eq!(verify_transition(&a, &bundled), Err(ChainError::UnendorsedSetChange));
+        let bundled = next(
+            &g,
+            |k| {
+                k.authorized_signers
+                    .retain(|s| s.member_id != "carol" && s.member_id != "dave")
+            },
+            &[&carol],
+        );
+        assert_eq!(
+            verify_transition(&a, &bundled),
+            Err(ChainError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -542,7 +680,10 @@ mod tests {
         // Dual-signed (old + new) → accepted (alive succession / change_passphrase).
         verify_transition(&a, &next(&g, rotate, &[&f, &f2])).unwrap();
         // Signed only by the new key (recover / server splice) → rejected.
-        assert_eq!(verify_transition(&a, &next(&g, rotate, &[&f2])), Err(ChainError::UnendorsedSetChange));
+        assert_eq!(
+            verify_transition(&a, &next(&g, rotate, &[&f2])),
+            Err(ChainError::UnendorsedSetChange)
+        );
     }
 
     #[test]
@@ -552,15 +693,25 @@ mod tests {
         let a = anchor(&g);
         // Add a member with NO wrap in the newest epoch.
         let no_wrap = next(&g, |k| k.members.push(dummy_member("bob")), &[&f]);
-        assert_eq!(verify_transition(&a, &no_wrap), Err(ChainError::WrapIncomplete));
+        assert_eq!(
+            verify_transition(&a, &no_wrap),
+            Err(ChainError::WrapIncomplete)
+        );
         // Two founders.
         let carol = key();
-        let two = next(&g, |k| {
-            k.members.push(keyed_member(&carol, "carol", EDITOR));
-            k.epochs[0].wraps.push(wrap("carol", HPKE));
-            k.authorized_signers.push(signer(&carol, "carol", FOUNDER));
-        }, &[&f]);
-        assert!(matches!(verify_transition(&a, &two), Err(ChainError::BadStructure(_))));
+        let two = next(
+            &g,
+            |k| {
+                k.members.push(keyed_member(&carol, "carol", EDITOR));
+                k.epochs[0].wraps.push(wrap("carol", HPKE));
+                k.authorized_signers.push(signer(&carol, "carol", FOUNDER));
+            },
+            &[&f],
+        );
+        assert!(matches!(
+            verify_transition(&a, &two),
+            Err(ChainError::BadStructure(_))
+        ));
     }
 
     #[test]
@@ -605,14 +756,29 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
     // Fixed, distinct identities (deterministic, so proptest shrinking reproduces).
-    fn founder_k() -> SigningKey { sk(1) }
-    fn co_k(i: usize) -> SigningKey { sk(2 + i as u8) } // co0=2, co1=3, co2=4
-    fn pend_k() -> SigningKey { sk(5) }
-    fn new_founder_k() -> SigningKey { sk(6) }
-    fn stranger_k() -> SigningKey { sk(7) }
+    fn founder_k() -> SigningKey {
+        sk(1)
+    }
+    fn co_k(i: usize) -> SigningKey {
+        sk(2 + i as u8)
+    } // co0=2, co1=3, co2=4
+    fn pend_k() -> SigningKey {
+        sk(5)
+    }
+    fn new_founder_k() -> SigningKey {
+        sk(6)
+    }
+    fn stranger_k() -> SigningKey {
+        sk(7)
+    }
 
     #[derive(Clone, Copy, Debug)]
-    enum Mutation { Ordinary, Promote, RemoveCoOwner, RotateFounder }
+    enum Mutation {
+        Ordinary,
+        Promote,
+        RemoveCoOwner,
+        RotateFounder,
+    }
 
     /// Prior keyring: founder + `n_co` co-owners + a promotable keyed member "pend".
     fn scenario_prior(n_co: usize) -> Keyring {
@@ -637,7 +803,11 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+            epochs: vec![KeyEpoch {
+                key_id: vec![0],
+                epoch: 0,
+                wraps,
+            }],
         };
         sign_keyring(&mut k, &f);
         k
@@ -649,7 +819,9 @@ mod tests {
                 k.members.push(dummy_member("new"));
                 k.epochs[0].wraps.push(wrap("new", HPKE));
             }
-            Mutation::Promote => k.authorized_signers.push(signer(&pend_k(), "pend", CO_OWNER)),
+            Mutation::Promote => k
+                .authorized_signers
+                .push(signer(&pend_k(), "pend", CO_OWNER)),
             Mutation::RemoveCoOwner => k.authorized_signers.retain(|s| s.member_id != "co0"),
             Mutation::RotateFounder => {
                 let np = pubv(&new_founder_k());
@@ -666,8 +838,14 @@ mod tests {
             }
         };
         // The signer roster the mask can draw from, bit 0..=5.
-        let roster: [SigningKey; 6] =
-            [founder_k(), co_k(0), co_k(1), co_k(2), pend_k(), stranger_k()];
+        let roster: [SigningKey; 6] = [
+            founder_k(),
+            co_k(0),
+            co_k(1),
+            co_k(2),
+            pend_k(),
+            stranger_k(),
+        ];
         let signers: Vec<&SigningKey> = (0..6)
             .filter(|i| sign_mask & (1 << i) != 0)
             .map(|i| &roster[i])
@@ -734,12 +912,32 @@ mod tests {
         // OOB member bootstrap: pinned (revision, hash) must match.
         let h = keyring_hash(&g);
         bootstrap_from_oob(&g, TREE, 1, &h).unwrap();
-        assert!(matches!(bootstrap_from_oob(&g, TREE, 1, &[0u8; 32]), Err(ChainError::BadBootstrap)));
+        assert!(matches!(
+            bootstrap_from_oob(&g, TREE, 1, &[0u8; 32]),
+            Err(ChainError::BadBootstrap)
+        ));
 
         // Walk two hops; a gap (skipping a hop) is rejected.
-        let c1 = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&f]);
-        let c2 = next(&c1, |k| { k.members.push(dummy_member("eve")); k.epochs[0].wraps.push(wrap("eve", HPKE)); }, &[&f]);
-        assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, 3);
+        let c1 = next(
+            &g,
+            |k| {
+                k.members.push(dummy_member("bob"));
+                k.epochs[0].wraps.push(wrap("bob", HPKE));
+            },
+            &[&f],
+        );
+        let c2 = next(
+            &c1,
+            |k| {
+                k.members.push(dummy_member("eve"));
+                k.epochs[0].wraps.push(wrap("eve", HPKE));
+            },
+            &[&f],
+        );
+        assert_eq!(
+            verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision,
+            3
+        );
         assert_eq!(verify_walk(&a, &[c2]), Err(ChainError::NonSequential));
     }
 }

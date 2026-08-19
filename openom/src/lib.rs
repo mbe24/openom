@@ -74,15 +74,24 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/whoami", get(whoami))
-        .route("/trees/{tree_id}", get(trees::get_tree).put(trees::put_tree))
+        .route(
+            "/trees/{tree_id}",
+            get(trees::get_tree).put(trees::put_tree),
+        )
         // Delta-log: append a sealed delta / pull the ordered tail (sync + change history, §B1).
-        .route("/trees/{tree_id}/log", post(log::append_log).get(log::get_log))
+        .route(
+            "/trees/{tree_id}/log",
+            post(log::append_log).get(log::get_log),
+        )
         // Proposals: the transient, off-history approval channel for review-changes (§B2).
         .route(
             "/trees/{tree_id}/proposals",
             post(proposals::create_proposal).get(proposals::list_proposals),
         )
-        .route("/trees/{tree_id}/proposals/{proposal_id}", delete(proposals::delete_proposal))
+        .route(
+            "/trees/{tree_id}/proposals/{proposal_id}",
+            delete(proposals::delete_proposal),
+        )
         // Keyring: the authoritative signed membership/role chain; PUT verifies + derives the ACL (§B3).
         .route(
             "/trees/{tree_id}/keyring",
@@ -94,11 +103,20 @@ pub fn app(state: AppState) -> Router {
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
         .route("/trees/{tree_id}/media/{blob_id}", get(media::get_media))
-        .route("/trees/{tree_id}/media/{blob_id}/confirm", post(media::confirm))
+        .route(
+            "/trees/{tree_id}/media/{blob_id}/confirm",
+            post(media::confirm),
+        )
         // Presence-based GC (§9.11): the client drives refcount as it references /
         // dereferences a blob in its tree doc.
-        .route("/trees/{tree_id}/media/{blob_id}/attach", post(media::attach))
-        .route("/trees/{tree_id}/media/{blob_id}/detach", post(media::detach));
+        .route(
+            "/trees/{tree_id}/media/{blob_id}/attach",
+            post(media::attach),
+        )
+        .route(
+            "/trees/{tree_id}/media/{blob_id}/detach",
+            post(media::detach),
+        );
     if state.config.is_local() {
         router = router.route("/dev/gc", post(media::sweep_dev));
     }
@@ -143,7 +161,12 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
         }
     }
 
-    Ok(AppState { db, config: Arc::new(config.clone()), jwt_key, storage })
+    Ok(AppState {
+        db,
+        config: Arc::new(config.clone()),
+        jwt_key,
+        storage,
+    })
 }
 
 /// Seed the fake-auth member locally (no Supabase to create accounts). Generous

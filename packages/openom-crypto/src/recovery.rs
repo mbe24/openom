@@ -97,14 +97,20 @@ mod tests {
         let code = generate_recovery_code().unwrap();
         // Grouped + parseable back to 16 bytes of entropy.
         assert!(code.contains('-'));
-        assert_eq!(parse_recovery_code(&code).unwrap().len(), RECOVERY_ENTROPY_LEN);
+        assert_eq!(
+            parse_recovery_code(&code).unwrap().len(),
+            RECOVERY_ENTROPY_LEN
+        );
     }
 
     #[test]
     fn tolerant_of_formatting() {
         let code = generate_recovery_code().unwrap();
         let messy = format!("  {}  ", code.to_lowercase().replace('-', " "));
-        assert_eq!(*parse_recovery_code(&messy).unwrap(), *parse_recovery_code(&code).unwrap());
+        assert_eq!(
+            *parse_recovery_code(&messy).unwrap(),
+            *parse_recovery_code(&code).unwrap()
+        );
     }
 
     #[test]
@@ -112,7 +118,10 @@ mod tests {
         let code = generate_recovery_code().unwrap();
         // Flip the first alphanumeric char to a different valid base32 char.
         let mut chars: Vec<char> = code.chars().collect();
-        let i = chars.iter().position(|c| c.is_ascii_alphanumeric()).unwrap();
+        let i = chars
+            .iter()
+            .position(|c| c.is_ascii_alphanumeric())
+            .unwrap();
         chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
         let typo: String = chars.into_iter().collect();
         assert!(matches!(
@@ -123,8 +132,14 @@ mod tests {
 
     #[test]
     fn malformed_rejected() {
-        assert!(matches!(parse_recovery_code("not base32 !!!"), Err(CryptoError::RecoveryFormat)));
-        assert!(matches!(parse_recovery_code("AAAA"), Err(CryptoError::RecoveryFormat)));
+        assert!(matches!(
+            parse_recovery_code("not base32 !!!"),
+            Err(CryptoError::RecoveryFormat)
+        ));
+        assert!(matches!(
+            parse_recovery_code("AAAA"),
+            Err(CryptoError::RecoveryFormat)
+        ));
     }
 
     #[test]

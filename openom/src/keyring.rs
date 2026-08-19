@@ -65,12 +65,16 @@ pub async fn put_keyring(
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("keyring.put");
     if body.len() > MAX_KEYRING_BYTES {
-        return Err(ApiError::BadRequest("keyring exceeds the size limit".into()));
+        return Err(ApiError::BadRequest(
+            "keyring exceeds the size limit".into(),
+        ));
     }
-    let candidate =
-        Keyring::decode(body.as_ref()).map_err(|e| ApiError::BadRequest(format!("not a valid keyring: {e}")))?;
+    let candidate = Keyring::decode(body.as_ref())
+        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring: {e}")))?;
     if candidate.tree_id.as_slice() != tree_id.as_bytes() {
-        return Err(ApiError::BadRequest("keyring tree_id does not match the url".into()));
+        return Err(ApiError::BadRequest(
+            "keyring tree_id does not match the url".into(),
+        ));
     }
 
     let mut tx = state.db.begin().await.map_err(internal)?;
@@ -84,23 +88,33 @@ pub async fn put_keyring(
     let (owner, head_rev) = row.ok_or(ApiError::NotFound)?;
     // Coarse cost-control gate (owner via fast-path; a maintainer+ may attempt). The crypto below is the
     // real authorization — a non-signer's candidate fails verify_transition even if they pass this.
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Administer,
+    )
+    .await?;
 
     // Verify: genesis (no keyring yet) via verify_reset; otherwise a strict successor of the stored head,
     // OR a recovery/succession RESET (slice 4).
     let (anchor, is_reset) = if head_rev == 0 {
         if candidate.revision != 1 {
-            return Err(ApiError::BadRequest("first keyring must be revision 1".into()));
+            return Err(ApiError::BadRequest(
+                "first keyring must be revision 1".into(),
+            ));
         }
         (verify_reset(&candidate).map_err(keyring_err)?, false)
     } else {
-        let prior_bytes: Vec<u8> =
-            sqlx::query_scalar("SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2")
-                .bind(tree_id)
-                .bind(head_rev)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(internal)?;
+        let prior_bytes: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
+        )
+        .bind(tree_id)
+        .bind(head_rev)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal)?;
         let prior = Keyring::decode(prior_bytes.as_slice())
             .map_err(|_| ApiError::Internal("stored keyring is corrupt".into()))?;
         match verify_transition(&KeyringAnchor::from_keyring(&prior), &candidate) {
@@ -213,7 +227,11 @@ pub async fn put_keyring(
 
     tx.commit().await.map_err(internal)?;
     tracing::info!(event = "keyring_put", %tree_id, revision = candidate.revision, members = ids.len());
-    Ok((StatusCode::OK, Json(json!({ "revision": candidate.revision }))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "revision": candidate.revision })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -269,7 +287,11 @@ pub async fn get_keyring(
 
     let revisions = rows
         .into_iter()
-        .map(|(revision, payload, is_reset)| KeyringRevision { revision, payload: b64(&payload), is_reset })
+        .map(|(revision, payload, is_reset)| KeyringRevision {
+            revision,
+            payload: b64(&payload),
+            is_reset,
+        })
         .collect();
     Ok((StatusCode::OK, Json(KeyringHistory { revisions, head })).into_response())
 }
@@ -301,7 +323,12 @@ pub async fn get_access(
             .fetch_all(&state.db)
             .await
             .map_err(internal)?;
-    let members: Vec<AccessMember> =
-        rows.into_iter().map(|(id, role)| AccessMember { member_id: id.to_string(), role }).collect();
+    let members: Vec<AccessMember> = rows
+        .into_iter()
+        .map(|(id, role)| AccessMember {
+            member_id: id.to_string(),
+            role,
+        })
+        .collect();
     Ok((StatusCode::OK, Json(json!({ "members": members }))).into_response())
 }

@@ -94,7 +94,9 @@ impl WasmSealer {
         if let Some(name) = aead {
             sealer = sealer.with_aead(parse_aead(&name)?);
         }
-        Ok(WasmSealer { inner: SealerSet::single(sealer) })
+        Ok(WasmSealer {
+            inner: SealerSet::single(sealer),
+        })
     }
 
     /// Seal `plaintext` under this sealer's DEK/scope with the caller-supplied chain state.
@@ -251,7 +253,8 @@ pub fn provision(
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
     let passphrase = Zeroizing::new(passphrase);
-    let p = vault::provision(passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
+    let p =
+        vault::provision(passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
     Ok(VaultResult {
         keyring: p.keyring,
         recovery_code: p.recovery_code,
@@ -270,7 +273,14 @@ pub fn unlock(
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
     let passphrase = Zeroizing::new(passphrase);
-    let u = vault::unlock(keyring, passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
+    let u = vault::unlock(
+        keyring,
+        passphrase.as_bytes(),
+        tree_id,
+        member_id,
+        replica_id,
+    )
+    .map_err(to_js)?;
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
@@ -526,7 +536,12 @@ pub fn add_member_as_co_owner(
         member_author_public,
     )
     .map_err(to_js)?;
-    Ok(VaultResult { keyring: added.keyring, recovery_code: String::new(), revision: added.revision, sealer: None })
+    Ok(VaultResult {
+        keyring: added.keyring,
+        recovery_code: String::new(),
+        revision: added.revision,
+        sealer: None,
+    })
 }
 
 /// Remove an ordinary member **as a co-owner** (any-of). Returns the re-keyed keyring, new
@@ -560,7 +575,12 @@ pub fn remove_member_as_co_owner(
         replica_id,
     )
     .map_err(to_js)?;
-    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: Some(WasmSealer { inner: r.sealer }) })
+    Ok(VaultResult {
+        keyring: r.keyring,
+        recovery_code: String::new(),
+        revision: r.revision,
+        sealer: Some(WasmSealer { inner: r.sealer }),
+    })
 }
 
 /// Promote an existing member to co-owner (founder action). Returns the new keyring +
@@ -584,7 +604,12 @@ pub fn add_co_owner(
         target_member_id,
     )
     .map_err(to_js)?;
-    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: None })
+    Ok(VaultResult {
+        keyring: r.keyring,
+        recovery_code: String::new(),
+        revision: r.revision,
+        sealer: None,
+    })
 }
 
 /// Demote a co-owner to an ordinary `new_role` (founder action). Revokes signing authority,
@@ -611,7 +636,12 @@ pub fn remove_co_owner(
         parse_member_role(new_role)?,
     )
     .map_err(to_js)?;
-    Ok(VaultResult { keyring: r.keyring, recovery_code: String::new(), revision: r.revision, sealer: None })
+    Ok(VaultResult {
+        keyring: r.keyring,
+        recovery_code: String::new(),
+        revision: r.revision,
+        sealer: None,
+    })
 }
 
 /// Accept a keyring run pulled from the **untrusted network** — the chain-walk read-side (its
@@ -623,14 +653,24 @@ pub fn remove_co_owner(
 /// success returns the validated head keyring to store + its revision (no sealer — keyring state
 /// only; re-unlock to read a newly-rotated epoch). An empty run is a no-op at the current head.
 #[wasm_bindgen(js_name = acceptRemoteKeyring)]
-pub fn accept_remote_keyring(anchor: &[u8], tree_id: &[u8], hops: &[u8]) -> Result<VaultResult, JsError> {
-    let anchor_keyring = Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
+pub fn accept_remote_keyring(
+    anchor: &[u8],
+    tree_id: &[u8],
+    hops: &[u8],
+) -> Result<VaultResult, JsError> {
+    let anchor_keyring =
+        Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
     if anchor_keyring.tree_id != tree_id {
         return Err(JsError::new("anchor keyring is for a different tree"));
     }
     let raw = split_length_prefixed(hops)?;
     if raw.is_empty() {
-        return Ok(VaultResult { keyring: Vec::new(), recovery_code: String::new(), revision: anchor_keyring.revision, sealer: None });
+        return Ok(VaultResult {
+            keyring: Vec::new(),
+            recovery_code: String::new(),
+            revision: anchor_keyring.revision,
+            sealer: None,
+        });
     }
     let decoded = raw
         .iter()
@@ -652,10 +692,20 @@ pub fn accept_remote_keyring(anchor: &[u8], tree_id: &[u8], hops: &[u8]) -> Resu
 /// wasn't validly authored by a member with the capability its kind requires at the governing revision —
 /// the caller then refuses to merge it. The trust decision is the Rust `verify_entry`'s; this only marshals.
 #[wasm_bindgen(js_name = verifyEntry)]
-pub fn verify_entry_wasm(version: u32, envelope: &[u8], plaintext: &[u8], governing: &[u8]) -> Result<(), JsError> {
-    let env = Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
-    let header = env.header.as_ref().ok_or_else(|| JsError::new("envelope has no header"))?;
-    let kr = Keyring::decode(governing).map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
+pub fn verify_entry_wasm(
+    version: u32,
+    envelope: &[u8],
+    plaintext: &[u8],
+    governing: &[u8],
+) -> Result<(), JsError> {
+    let env =
+        Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
+    let header = env
+        .header
+        .as_ref()
+        .ok_or_else(|| JsError::new("envelope has no header"))?;
+    let kr = Keyring::decode(governing)
+        .map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
     verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
 }
 
@@ -686,9 +736,16 @@ impl EntryAttribution {
 /// AAD-bound (a keyless server can't rewrite them without failing the AEAD open), so they're trustworthy.
 #[wasm_bindgen(js_name = entryAttribution)]
 pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
-    let env = Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
-    let header = env.header.as_ref().ok_or_else(|| JsError::new("envelope has no header"))?;
-    Ok(EntryAttribution { keyring_revision: header.keyring_revision, key_id: header.key_id.clone() })
+    let env =
+        Envelope::decode(envelope).map_err(|e| JsError::new(&format!("bad envelope: {e}")))?;
+    let header = env
+        .header
+        .as_ref()
+        .ok_or_else(|| JsError::new("envelope has no header"))?;
+    Ok(EntryAttribution {
+        keyring_revision: header.keyring_revision,
+        key_id: header.key_id.clone(),
+    })
 }
 
 /// Whether the epoch `key_id` is attributed in `keyring` — i.e. its DEK was wrapped beyond the sole
@@ -710,21 +767,34 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 /// CALLER must have shown the new signer fingerprints for out-of-band re-verification and gotten explicit
 /// user confirmation BEFORE calling this (it is the commit step). Returns the validated keyring to store.
 #[wasm_bindgen(js_name = acceptResetKeyring)]
-pub fn accept_reset_keyring(anchor: &[u8], tree_id: &[u8], candidate: &[u8]) -> Result<VaultResult, JsError> {
-    let anchor_kr = Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
-    let cand = Keyring::decode(candidate).map_err(|e| JsError::new(&format!("bad candidate keyring: {e}")))?;
+pub fn accept_reset_keyring(
+    anchor: &[u8],
+    tree_id: &[u8],
+    candidate: &[u8],
+) -> Result<VaultResult, JsError> {
+    let anchor_kr =
+        Keyring::decode(anchor).map_err(|e| JsError::new(&format!("bad anchor keyring: {e}")))?;
+    let cand = Keyring::decode(candidate)
+        .map_err(|e| JsError::new(&format!("bad candidate keyring: {e}")))?;
     if anchor_kr.tree_id != tree_id || cand.tree_id != tree_id {
         return Err(JsError::new("keyring is for a different tree"));
     }
     // Must supersede our trusted head — never roll back or fork.
     if cand.revision != anchor_kr.revision + 1 {
-        return Err(JsError::new("a reset must be exactly the next revision after the trusted head"));
+        return Err(JsError::new(
+            "a reset must be exactly the next revision after the trusted head",
+        ));
     }
     if cand.prev_keyring_hash.as_slice() != keyring_hash(&anchor_kr) {
         return Err(JsError::new("reset does not chain onto the trusted head"));
     }
     let new_anchor = verify_reset(&cand).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(VaultResult { keyring: candidate.to_vec(), recovery_code: String::new(), revision: new_anchor.revision, sealer: None })
+    Ok(VaultResult {
+        keyring: candidate.to_vec(),
+        recovery_code: String::new(),
+        revision: new_anchor.revision,
+        sealer: None,
+    })
 }
 
 /// Split a buffer of `[u32-be length][bytes]…` frames into slices. The framing keeps a list of
@@ -738,7 +808,9 @@ fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, JsError> {
         }
         let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
         i += 4;
-        let end = i.checked_add(len).ok_or_else(|| JsError::new("length prefix overflow"))?;
+        let end = i
+            .checked_add(len)
+            .ok_or_else(|| JsError::new("length prefix overflow"))?;
         if end > buf.len() {
             return Err(JsError::new("length prefix overruns hops buffer"));
         }
@@ -763,7 +835,9 @@ fn parse_member_role(s: &str) -> Result<MemberRole, JsError> {
 /// At least one is required, and the length must be a whole multiple of 32.
 fn parse_trusted_signers(bytes: &[u8]) -> Result<Vec<VerifyingKey>, JsError> {
     if bytes.is_empty() || bytes.len() % 32 != 0 {
-        return Err(JsError::new("trustedSigners must be one or more concatenated 32-byte keys"));
+        return Err(JsError::new(
+            "trustedSigners must be one or more concatenated 32-byte keys",
+        ));
     }
     bytes
         .chunks_exact(32)

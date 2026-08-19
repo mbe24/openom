@@ -108,7 +108,9 @@ impl S3Store {
     pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), StorageError> {
         let checksum = sha256_b64(&body);
         let mut action = self.bucket.put_object(Some(&self.credentials), key);
-        action.headers_mut().insert(CHECKSUM_HEADER, checksum.clone());
+        action
+            .headers_mut()
+            .insert(CHECKSUM_HEADER, checksum.clone());
         let url = action.sign(PROXY_TTL);
         let resp = self
             .http
@@ -222,7 +224,9 @@ impl S3Store {
         ttl: Duration,
     ) -> PresignedUpload {
         let mut action = self.public_bucket.put_object(Some(&self.credentials), key);
-        action.headers_mut().insert(CHECKSUM_HEADER, object_sha256_b64);
+        action
+            .headers_mut()
+            .insert(CHECKSUM_HEADER, object_sha256_b64);
         let url = action.sign(ttl);
         PresignedUpload {
             url: url.to_string(),
@@ -264,12 +268,20 @@ pub mod keys {
     /// Hashing rather than slicing the uuid keeps the split uniform even if ids ever
     /// stop being random v4.
     fn shard(tree: Uuid) -> String {
-        format!("{:02x}", Sha256::digest(tree.simple().to_string().as_bytes())[0])
+        format!(
+            "{:02x}",
+            Sha256::digest(tree.simple().to_string().as_bytes())[0]
+        )
     }
 
     /// `trees/{shard}/{tree}/snapshot/{version}` — a versioned, immutable snapshot.
     pub fn snapshot(tree: Uuid, version: &str) -> String {
-        format!("trees/{}/{}/snapshot/{}", shard(tree), tree.simple(), version)
+        format!(
+            "trees/{}/{}/snapshot/{}",
+            shard(tree),
+            tree.simple(),
+            version
+        )
     }
 
     /// `trees/{shard}/{tree}/log/{seq}` — a delta spilled out of Postgres to R2 when it
@@ -280,7 +292,12 @@ pub mod keys {
 
     /// `staging/{shard}/{tree}/{blob}` — a media upload not yet confirmed (§9.10).
     pub fn staging(tree: Uuid, blob: Uuid) -> String {
-        format!("staging/{}/{}/{}", shard(tree), tree.simple(), blob.simple())
+        format!(
+            "staging/{}/{}/{}",
+            shard(tree),
+            tree.simple(),
+            blob.simple()
+        )
     }
 
     /// `blobs/{shard}/{tree}/{blob}` — a confirmed, immutable, per-tree-DEK media blob.
@@ -378,7 +395,10 @@ mod tests {
         // Correct body against the signed checksum → accepted.
         let upload = store.presign_put(key, &checksum, Duration::from_secs(120));
         let ok = put_via(&store.http, &upload, good.clone()).await;
-        assert!(ok.is_success(), "correct checksum should be accepted, got {ok}");
+        assert!(
+            ok.is_success(),
+            "correct checksum should be accepted, got {ok}"
+        );
 
         // Wrong body against the same signed checksum → rejected at PUT.
         let tampered = b"openom checksum-enforcement probe -- tampered".to_vec();

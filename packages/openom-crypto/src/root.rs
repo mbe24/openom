@@ -61,7 +61,12 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
         .map_err(|_| CryptoError::Kdf("hkdf expand (hpke)".into()))?;
     let (hpke_secret, hpke_public) = derive_hpke_keypair(&hpke_ikm);
 
-    Ok(RootKeys { kek, identity, hpke_secret: Zeroizing::new(hpke_secret), hpke_public })
+    Ok(RootKeys {
+        kek,
+        identity,
+        hpke_secret: Zeroizing::new(hpke_secret),
+        hpke_public,
+    })
 }
 
 // Compile-time confirmation (not an assumption) that the derived owner identity scrubs its
@@ -124,18 +129,25 @@ mod tests {
         use crate::{hpke_unwrap_dek, hpke_wrap_dek};
         let a = derive_root(b"member pass", &params()).unwrap();
         let b = derive_root(b"member pass", &params()).unwrap();
-        assert_eq!(*a.hpke_secret, *b.hpke_secret, "same passphrase => same HPKE key");
+        assert_eq!(
+            *a.hpke_secret, *b.hpke_secret,
+            "same passphrase => same HPKE key"
+        );
         assert_eq!(a.hpke_public, b.hpke_public);
         // Independent from the KEK and the identity seed (siblings).
         assert_ne!(a.kek.as_slice(), a.hpke_secret.as_slice());
         assert_ne!(&a.identity.to_bytes(), &*a.hpke_secret);
         // The derived public/secret actually form a working HPKE pair.
         let w = hpke_wrap_dek(&a.hpke_public, &[9u8; KEY_LEN], b"info").unwrap();
-        let out = hpke_unwrap_dek(&*a.hpke_secret, &w.encapped_key, &w.ciphertext, b"info").unwrap();
+        let out =
+            hpke_unwrap_dek(&*a.hpke_secret, &w.encapped_key, &w.ciphertext, b"info").unwrap();
         assert_eq!(&*out, &[9u8; KEY_LEN]);
 
         let c = derive_root(b"other pass", &params()).unwrap();
-        assert_ne!(a.hpke_public, c.hpke_public, "different passphrase => different HPKE key");
+        assert_ne!(
+            a.hpke_public, c.hpke_public,
+            "different passphrase => different HPKE key"
+        );
     }
 
     #[test]

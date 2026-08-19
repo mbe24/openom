@@ -63,27 +63,43 @@ struct DeltaValidated {
 
 /// Validate a delta envelope against the log contract: decodable, supported version, `KIND_DELTA`,
 /// bound to this tree, non-dev key (prod), and a recomputable `ciphertext_hash`.
-fn validate_delta(body: &[u8], tree_id: Uuid, reject_dev_key: bool) -> Result<DeltaValidated, ApiError> {
-    let env = Envelope::decode(body).map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
+fn validate_delta(
+    body: &[u8],
+    tree_id: Uuid,
+    reject_dev_key: bool,
+) -> Result<DeltaValidated, ApiError> {
+    let env = Envelope::decode(body)
+        .map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
     if env.version != ENVELOPE_VERSION {
         return Err(ApiError::BadRequest(format!(
             "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",
             env.version
         )));
     }
-    let header = env.header.as_ref().ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
+    let header = env
+        .header
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
     if header.kind() != Kind::Delta {
-        return Err(ApiError::BadRequest("the log path accepts only KIND_DELTA".into()));
+        return Err(ApiError::BadRequest(
+            "the log path accepts only KIND_DELTA".into(),
+        ));
     }
     if header.tree_id.as_slice() != tree_id.as_bytes() {
-        return Err(ApiError::BadRequest("header tree_id does not match the url".into()));
+        return Err(ApiError::BadRequest(
+            "header tree_id does not match the url".into(),
+        ));
     }
     if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
-        return Err(ApiError::BadRequest("dev key_id refused under RUN_MODE=production (§16)".into()));
+        return Err(ApiError::BadRequest(
+            "dev key_id refused under RUN_MODE=production (§16)".into(),
+        ));
     }
     let computed = Sha256::digest(&env.ciphertext);
     if header.ciphertext_hash.as_slice() != computed.as_slice() {
-        return Err(ApiError::BadRequest("ciphertext_hash does not match the ciphertext".into()));
+        return Err(ApiError::BadRequest(
+            "ciphertext_hash does not match the ciphertext".into(),
+        ));
     }
     Ok(DeltaValidated {
         ciphertext_hash: header.ciphertext_hash.clone(),
@@ -158,7 +174,9 @@ pub async fn append_log(
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("log.append");
     if body.len() > MAX_DELTA_BYTES {
-        return Err(ApiError::BadRequest("delta exceeds the per-append size limit".into()));
+        return Err(ApiError::BadRequest(
+            "delta exceeds the per-append size limit".into(),
+        ));
     }
     let d = validate_delta(&body, tree_id, !state.config.is_local())?;
 
@@ -171,7 +189,14 @@ pub async fn append_log(
             .await
             .map_err(internal)?;
     let (owner, next_seq) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Commit,
+    )
+    .await?;
 
     // Idempotent re-delivery: the dot is already present → return its seq, assign nothing new.
     let existing: Option<(i64,)> = sqlx::query_as(
@@ -219,7 +244,11 @@ pub async fn append_log(
     .await
     .map_err(internal)?;
     if member_ok.rows_affected() != 1 {
-        let retry = if m_rate > 0.0 { (1.0 / m_rate).ceil() as u64 } else { 60 };
+        let retry = if m_rate > 0.0 {
+            (1.0 / m_rate).ceil() as u64
+        } else {
+            60
+        };
         tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %identity.member_id);
         return Err(ApiError::TooManyRequests(retry.max(1)));
     }
@@ -265,10 +294,24 @@ pub async fn append_log(
         None
     };
     // Inline rows carry the sealed bytes; spilled rows carry a NULL payload + the R2 key.
-    let inline_payload: Option<&[u8]> = if r2_key.is_some() { None } else { Some(body.as_ref()) };
+    let inline_payload: Option<&[u8]> = if r2_key.is_some() {
+        None
+    } else {
+        Some(body.as_ref())
+    };
 
     // From here on a failure orphans any spilled object, so every error path GCs it first.
-    if let Err(e) = insert_delta_row(&mut tx, tree_id, seq, &d, identity.member_id, inline_payload, r2_key.as_deref()).await {
+    if let Err(e) = insert_delta_row(
+        &mut tx,
+        tree_id,
+        seq,
+        &d,
+        identity.member_id,
+        inline_payload,
+        r2_key.as_deref(),
+    )
+    .await
+    {
         spill_gc(&state, r2_key.as_deref()).await;
         return Err(e);
     }
@@ -292,7 +335,7 @@ struct LogEntry {
     member: Option<String>,
     replica: String,
     counter: i64,
-    time: String,            // created_at as text — for the change-history / activity feed
+    time: String, // created_at as text — for the change-history / activity feed
     payload: Option<String>, // base64 of the sealed delta bytes, inline or resolved from R2 (§12 spill)
 }
 
@@ -325,16 +368,19 @@ pub async fn get_log(
     let (owner, next_seq) = meta.ok_or(ApiError::NotFound)?;
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
-    let oldest: Option<i64> = sqlx::query_scalar("SELECT MIN(seq) FROM tree_log WHERE tree_id = $1")
-        .bind(tree_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(internal)?;
+    let oldest: Option<i64> =
+        sqlx::query_scalar("SELECT MIN(seq) FROM tree_log WHERE tree_id = $1")
+            .bind(tree_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(internal)?;
     // Gap check: if the client's cursor is before the oldest retained entry, entries it still needs
     // were reclaimed — it must bootstrap from a snapshot rather than get a silently truncated tail.
     if let Some(o) = oldest {
         if since + 1 < o {
-            return Err(ApiError::Gone("log tail no longer retained — bootstrap from a snapshot".into()));
+            return Err(ApiError::Gone(
+                "log tail no longer retained — bootstrap from a snapshot".into(),
+            ));
         }
     }
 
@@ -393,7 +439,12 @@ pub async fn get_log(
 
     Ok((
         StatusCode::OK,
-        Json(LogTail { entries, next_cursor, oldest_retained_seq: oldest.unwrap_or(0), head_seq: next_seq - 1 }),
+        Json(LogTail {
+            entries,
+            next_cursor,
+            oldest_retained_seq: oldest.unwrap_or(0),
+            head_seq: next_seq - 1,
+        }),
     )
         .into_response())
 }

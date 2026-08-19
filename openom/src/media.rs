@@ -83,7 +83,14 @@ pub async fn intent(
         .await
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::StageMedia).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::StageMedia,
+    )
+    .await?;
 
     // Atomic entitlement gate + reservation (the cas_create pattern, §9.9): media
     // allowed, blob ≤ per-blob cap, pool + count have room. Reserved at intent so
@@ -125,7 +132,9 @@ pub async fn intent(
         return Err(internal(e));
     }
 
-    let upload = state.storage.presign_put(&staging, &req.object_sha256, UPLOAD_TTL);
+    let upload = state
+        .storage
+        .presign_put(&staging, &req.object_sha256, UPLOAD_TTL);
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -158,7 +167,14 @@ pub async fn confirm(
     .await
     .map_err(internal)?;
     let (owner, key, declared, statev) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::StageMedia).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::StageMedia,
+    )
+    .await?;
     if statev == 1 {
         // Already confirmed — idempotent success (clients retry).
         return Ok(live_response(blob_id, declared));
@@ -184,11 +200,13 @@ pub async fn confirm(
     }
     if actual < declared {
         // Reconcile the meter down to observed size (§9.9b).
-        let _ = sqlx::query("UPDATE accounts SET media_used_bytes = media_used_bytes - $2 WHERE id = $1")
-            .bind(owner)
-            .bind(declared - actual)
-            .execute(&state.db)
-            .await;
+        let _ = sqlx::query(
+            "UPDATE accounts SET media_used_bytes = media_used_bytes - $2 WHERE id = $1",
+        )
+        .bind(owner)
+        .bind(declared - actual)
+        .execute(&state.db)
+        .await;
     }
 
     let final_k = final_key(tree_id, blob_id);
@@ -243,7 +261,9 @@ pub async fn get_media(
 fn live_response(blob_id: Uuid, size: i64) -> Response {
     (
         StatusCode::OK,
-        Json(json!({ "blob_id": blob_id.simple().to_string(), "state": "live", "size_bytes": size })),
+        Json(
+            json!({ "blob_id": blob_id.simple().to_string(), "state": "live", "size_bytes": size }),
+        ),
     )
         .into_response()
 }
@@ -324,7 +344,14 @@ async fn load_for_ref(
     .map_err(internal)?;
     let (owner, statev) = row.ok_or(ApiError::NotFound)?;
     // attach/detach mutate the refcount, which tracks the tree doc's actual references — a commit.
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Commit,
+    )
+    .await?;
     if statev == 0 {
         return Err(ApiError::Conflict); // pending — confirm before attaching
     }
@@ -414,7 +441,8 @@ pub async fn sweep_dev(
 ) -> Result<Response, ApiError> {
     let (deleted, expired, proposals_expired) = run_sweep(
         &state,
-        p.tombstone_grace_secs.unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
+        p.tombstone_grace_secs
+            .unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
         p.pending_expiry_secs.unwrap_or(DEFAULT_PENDING_EXPIRY_SECS),
     )
     .await?;

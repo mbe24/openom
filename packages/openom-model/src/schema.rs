@@ -55,8 +55,10 @@ mod tests {
         let mut m = Model::new(TreeId::generate(&mut src));
         let p = m.create_node(NodeKind::Person, &mut src);
         let f = m.create_node(NodeKind::Family, &mut src);
-        m.add_edge(RelationshipType::ParentChild, f, p, &mut src).unwrap();
-        m.add_event(EventType::Birth, p, Some(2000), &mut src).unwrap();
+        m.add_edge(RelationshipType::ParentChild, f, p, &mut src)
+            .unwrap();
+        m.add_event(EventType::Birth, p, Some(2000), &mut src)
+            .unwrap();
         // An embedded name exercises the cross-schema $ref into name.schema.json.
         m.add_name(
             p,
@@ -73,7 +75,10 @@ mod tests {
         .unwrap();
 
         let v = serde_json::to_value(&m).unwrap();
-        assert!(s.is_valid(&v), "a real serialized Model (with an embedded name) must satisfy the schema");
+        assert!(
+            s.is_valid(&v),
+            "a real serialized Model (with an embedded name) must satisfy the schema"
+        );
 
         // Missing the required tables → invalid.
         assert!(!s.is_valid(&serde_json::json!({})));
@@ -88,6 +93,9 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("kind".into(), serde_json::json!("Alien"));
-        assert!(!s.is_valid(&bad), "an illegal node kind must fail validation");
+        assert!(
+            !s.is_valid(&bad),
+            "an illegal node kind must fail validation"
+        );
     }
 }

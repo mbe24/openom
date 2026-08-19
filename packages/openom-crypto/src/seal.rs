@@ -65,7 +65,13 @@ pub(crate) fn xchacha_seal(
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
     let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Seal)
 }
 
@@ -79,7 +85,13 @@ pub(crate) fn xchacha_open(
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
     let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .decrypt(&nonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Open)
 }
 
@@ -93,7 +105,13 @@ fn aesgcm_seal(
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
     let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Seal)
 }
 
@@ -107,7 +125,13 @@ fn aesgcm_open(
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
     let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
     cipher
-        .decrypt(&nonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| CryptoError::Open)
 }
 
@@ -168,14 +192,20 @@ mod tests {
         let ct = seal(1, &h, &KEY, b"payload").unwrap();
         let mut tampered = h.clone();
         tampered.tree_id = vec![0x22; 16];
-        assert!(matches!(open(1, &tampered, &KEY, &ct), Err(CryptoError::Open)));
+        assert!(matches!(
+            open(1, &tampered, &KEY, &ct),
+            Err(CryptoError::Open)
+        ));
     }
 
     #[test]
     fn wrong_key_fails() {
         let h = header(AeadAlg::Xchacha20Poly1305, vec![1u8; 24]);
         let ct = seal(1, &h, &KEY, b"payload").unwrap();
-        assert!(matches!(open(1, &h, &[9u8; KEY_LEN], &ct), Err(CryptoError::Open)));
+        assert!(matches!(
+            open(1, &h, &[9u8; KEY_LEN], &ct),
+            Err(CryptoError::Open)
+        ));
     }
 
     #[test]
@@ -189,12 +219,18 @@ mod tests {
     #[test]
     fn wrong_nonce_length_errs() {
         let h = header(AeadAlg::Xchacha20Poly1305, vec![1u8; 12]); // 12 != 24
-        assert!(matches!(seal(1, &h, &KEY, b"x"), Err(CryptoError::NonceLength)));
+        assert!(matches!(
+            seal(1, &h, &KEY, b"x"),
+            Err(CryptoError::NonceLength)
+        ));
     }
 
     #[test]
     fn unspecified_aead_errs() {
         let h = header(AeadAlg::Unspecified, vec![1u8; 24]);
-        assert!(matches!(seal(1, &h, &KEY, b"x"), Err(CryptoError::UnsupportedAead(0))));
+        assert!(matches!(
+            seal(1, &h, &KEY, b"x"),
+            Err(CryptoError::UnsupportedAead(0))
+        ));
     }
 }

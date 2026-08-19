@@ -71,7 +71,10 @@ mod tests {
     #[test]
     fn kind_required_roles_match_the_matrix() {
         assert_eq!(required_role_for_kind(Kind::Delta), Some(ROLE_MAINTAINER));
-        assert_eq!(required_role_for_kind(Kind::Snapshot), Some(ROLE_MAINTAINER));
+        assert_eq!(
+            required_role_for_kind(Kind::Snapshot),
+            Some(ROLE_MAINTAINER)
+        );
         assert_eq!(required_role_for_kind(Kind::Proposal), Some(ROLE_EDITOR));
         assert_eq!(required_role_for_kind(Kind::Media), Some(ROLE_EDITOR));
         assert_eq!(required_role_for_kind(Kind::Unspecified), None);

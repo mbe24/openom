@@ -35,8 +35,13 @@ fn suite(store: &dyn DocStore) {
 
     // Compare-and-swap: falsche Erwartung wird abgelehnt
     let err = store.put_snapshot(doc, b"snap-x", None).unwrap_err();
-    assert!(matches!(err, StoreError::Conflict { .. }), "stale write must fail");
-    let err = store.put_snapshot(doc, b"snap-x", Some("nope")).unwrap_err();
+    assert!(
+        matches!(err, StoreError::Conflict { .. }),
+        "stale write must fail"
+    );
+    let err = store
+        .put_snapshot(doc, b"snap-x", Some("nope"))
+        .unwrap_err();
     assert!(matches!(err, StoreError::Conflict { .. }));
 
     // mit der richtigen Version geht es
@@ -67,7 +72,9 @@ fn sqlite_open_survives_a_reopen() {
     let _ = std::fs::remove_file(&path);
     {
         let store = SqliteStore::open(&path).unwrap();
-        store.append("d", &[b"one".to_vec(), b"two".to_vec()]).unwrap();
+        store
+            .append("d", &[b"one".to_vec(), b"two".to_vec()])
+            .unwrap();
         store.put_snapshot("d", b"snap", None).unwrap();
     } // dropped: connection closed
     {

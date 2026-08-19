@@ -76,10 +76,7 @@ pub fn verify_keyring_any(
 
 /// Convenience for the single-trusted-key case (a single owner verifying with its own
 /// derived identity): the keyring must carry a valid signature from `verifying_key`.
-pub fn verify_keyring(
-    keyring: &Keyring,
-    verifying_key: &VerifyingKey,
-) -> Result<(), CryptoError> {
+pub fn verify_keyring(keyring: &Keyring, verifying_key: &VerifyingKey) -> Result<(), CryptoError> {
     verify_keyring_any(keyring, std::slice::from_ref(verifying_key)).map(|_| ())
 }
 
@@ -184,13 +181,19 @@ mod tests {
         let mut kr = sample_keyring();
         sign_keyring(&mut kr, &b);
         let trusted = [a.verifying_key(), b.verifying_key()];
-        assert_eq!(verify_keyring_any(&kr, &trusted).unwrap(), b.verifying_key());
+        assert_eq!(
+            verify_keyring_any(&kr, &trusted).unwrap(),
+            b.verifying_key()
+        );
 
         // A keyring signed by neither trusted key fails.
         let rogue = generate_identity().unwrap();
         let mut kr2 = sample_keyring();
         sign_keyring(&mut kr2, &rogue);
-        assert!(matches!(verify_keyring_any(&kr2, &trusted), Err(CryptoError::Signature)));
+        assert!(matches!(
+            verify_keyring_any(&kr2, &trusted),
+            Err(CryptoError::Signature)
+        ));
     }
 
     #[test]
@@ -213,25 +216,40 @@ mod tests {
         // Bump the revision (a rollback/replay attempt) — signature no longer verifies.
         let mut rolled = kr.clone();
         rolled.revision = 2;
-        assert!(matches!(verify_keyring(&rolled, &id.verifying_key()), Err(CryptoError::Signature)));
+        assert!(matches!(
+            verify_keyring(&rolled, &id.verifying_key()),
+            Err(CryptoError::Signature)
+        ));
 
         // Swap a member's wrapped DEK — detected.
         let mut swapped = kr.clone();
         swapped.epochs[0].wraps[0].wrapped_dek = vec![0; 48];
-        assert!(matches!(verify_keyring(&swapped, &id.verifying_key()), Err(CryptoError::Signature)));
+        assert!(matches!(
+            verify_keyring(&swapped, &id.verifying_key()),
+            Err(CryptoError::Signature)
+        ));
 
         // Change a member's role (would-be privilege escalation) — detected.
         let mut escalated = kr.clone();
         escalated.members[0].role = 3; // OWNER -> ADMIN
-        assert!(matches!(verify_keyring(&escalated, &id.verifying_key()), Err(CryptoError::Signature)));
+        assert!(matches!(
+            verify_keyring(&escalated, &id.verifying_key()),
+            Err(CryptoError::Signature)
+        ));
     }
 
     #[test]
     fn malformed_signature_rejected() {
         let id = generate_identity().unwrap();
         let mut kr = sample_keyring();
-        kr.signatures = vec![KeyringSignature { signer_public_key: vec![], signature: vec![0u8; 10] }];
-        assert!(matches!(verify_keyring(&kr, &id.verifying_key()), Err(CryptoError::Signature)));
+        kr.signatures = vec![KeyringSignature {
+            signer_public_key: vec![],
+            signature: vec![0u8; 10],
+        }];
+        assert!(matches!(
+            verify_keyring(&kr, &id.verifying_key()),
+            Err(CryptoError::Signature)
+        ));
     }
 
     #[test]
@@ -249,7 +267,10 @@ mod tests {
         sign_keyring(&mut kr, &b);
         verify_keyring_all(&kr, &[a.verifying_key(), b.verifying_key()]).unwrap();
         // No required keys is not "vacuously true" — there must be a trust anchor.
-        assert!(matches!(verify_keyring_all(&kr, &[]), Err(CryptoError::Signature)));
+        assert!(matches!(
+            verify_keyring_all(&kr, &[]),
+            Err(CryptoError::Signature)
+        ));
     }
 
     #[test]
@@ -258,7 +279,11 @@ mod tests {
         let mut kr = sample_keyring();
         let h0 = keyring_hash(&kr);
         sign_keyring(&mut kr, &id);
-        assert_eq!(h0, keyring_hash(&kr), "signatures are excluded from the chain hash");
+        assert_eq!(
+            h0,
+            keyring_hash(&kr),
+            "signatures are excluded from the chain hash"
+        );
         kr.revision = 2;
         assert_ne!(h0, keyring_hash(&kr), "content changes the chain hash");
     }

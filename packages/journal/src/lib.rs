@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("version conflict: expected {expected:?}, found {found:?}")]
-    Conflict { expected: Option<String>, found: Option<String> },
+    Conflict {
+        expected: Option<String>,
+        found: Option<String>,
+    },
     #[error("document not found: {0}")]
     NotFound(String),
     #[error("backend error: {0}")]

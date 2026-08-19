@@ -15,10 +15,10 @@
 
 use commute::codec::encode_ops;
 use commute::Op;
+use journal::{DocStore, StoreError};
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
-use journal::{DocStore, StoreError};
 use openom_treelog::{Proposal, ProposalError, Tree, TreeOp};
 
 /// A sync failure — one of the three layers said no.
@@ -178,7 +178,9 @@ impl<S: DocStore> SyncClient<S> {
             blob_id: Vec::new(),
         };
         let out = self.sealer.seal_entry(&ctx, &self.tree.doc().snapshot())?;
-        let version = self.store.put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
+        let version =
+            self.store
+                .put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
         self.snapshot_version = Some(version);
         self.next_counter += 1;
         self.prev_hash = out.ciphertext_hash;
@@ -207,7 +209,10 @@ impl<S: DocStore> SyncClient<S> {
     /// Draft a proposal against the current head and push it to the proposals channel — sealed as
     /// `KIND_PROPOSAL`, NOT applied to the local tree (an editor proposes; an approver commits).
     pub fn push_proposal(&mut self, ops: Vec<TreeOp>) -> Result<Proposal> {
-        let proposal = Proposal { base: self.tree.version_cursor(), ops };
+        let proposal = Proposal {
+            base: self.tree.version_cursor(),
+            ops,
+        };
         let ctx = SealContext {
             kind: EntryKind::Proposal,
             format: Format::OpenomTreelog,
@@ -218,7 +223,8 @@ impl<S: DocStore> SyncClient<S> {
             blob_id: Vec::new(),
         };
         let out = self.sealer.seal_entry(&ctx, &proposal.encode())?;
-        self.store.append(&self.proposals_doc(), std::slice::from_ref(&out.envelope))?;
+        self.store
+            .append(&self.proposals_doc(), std::slice::from_ref(&out.envelope))?;
         self.prop_counter += 1;
         self.prop_prev = out.ciphertext_hash;
         Ok(proposal)
@@ -226,7 +232,9 @@ impl<S: DocStore> SyncClient<S> {
 
     /// Pull newly-staged proposals for review (open + decode). Read-only w.r.t. the tree.
     pub fn pull_proposals(&mut self) -> Result<Vec<Proposal>> {
-        let (updates, new_cursor) = self.store.read_updates(&self.proposals_doc(), self.proposals_cursor)?;
+        let (updates, new_cursor) = self
+            .store
+            .read_updates(&self.proposals_doc(), self.proposals_cursor)?;
         let mut out = Vec::with_capacity(updates.len());
         for envelope in &updates {
             let bytes = self.sealer.open_entry(EntryKind::Proposal, envelope)?;

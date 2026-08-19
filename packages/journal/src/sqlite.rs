@@ -30,7 +30,9 @@ impl SqliteStore {
         let conn = Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.execute_batch(&format!("PRAGMA journal_mode = MEMORY;\n{SCHEMA}"))
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Dauerhaft, dateigestützt. WAL + `synchronous = NORMAL`, weil der Crash-Retry-Entwurf
@@ -42,19 +44,29 @@ impl SqliteStore {
             "PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"
         ))
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn ensure(conn: &Connection, doc: &str) -> Result<()> {
-        conn.execute("INSERT OR IGNORE INTO docs (doc_id) VALUES (?1)", params![doc])
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO docs (doc_id) VALUES (?1)",
+            params![doc],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(())
     }
 }
 
 impl DocStore for SqliteStore {
     fn caps(&self) -> Caps {
-        Caps { remote: false, conditional_writes: true, durable: false, max_blob_bytes: 1 << 30 }
+        Caps {
+            remote: false,
+            conditional_writes: true,
+            durable: false,
+            max_blob_bytes: 1 << 30,
+        }
     }
 
     fn list(&self) -> Result<Vec<String>> {
@@ -74,8 +86,13 @@ impl DocStore for SqliteStore {
         let mut stmt = conn
             .prepare("SELECT snapshot, version FROM docs WHERE doc_id = ?1")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
-        let mut rows = stmt.query(params![doc]).map_err(|e| StoreError::Backend(e.to_string()))?;
-        if let Some(row) = rows.next().map_err(|e| StoreError::Backend(e.to_string()))? {
+        let mut rows = stmt
+            .query(params![doc])
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| StoreError::Backend(e.to_string()))?
+        {
             let bytes: Option<Vec<u8>> = row.get(0).ok();
             let version: Option<String> = row.get(1).ok();
             if let (Some(bytes), Some(version)) = (bytes, version) {
@@ -112,7 +129,11 @@ impl DocStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         Self::ensure(&conn, doc)?;
         let mut seq: i64 = conn
-            .query_row("SELECT counter FROM docs WHERE doc_id = ?1", params![doc], |r| r.get(0))
+            .query_row(
+                "SELECT counter FROM docs WHERE doc_id = ?1",
+                params![doc],
+                |r| r.get(0),
+            )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         for bytes in updates {
             seq += 1;
@@ -122,8 +143,11 @@ impl DocStore for SqliteStore {
             )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         }
-        conn.execute("UPDATE docs SET counter = ?2 WHERE doc_id = ?1", params![doc, seq])
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        conn.execute(
+            "UPDATE docs SET counter = ?2 WHERE doc_id = ?1",
+            params![doc, seq],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(seq as u64)
     }
 
@@ -131,13 +155,24 @@ impl DocStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         Self::ensure(&conn, doc)?;
         let found: Option<String> = conn
-            .query_row("SELECT version FROM docs WHERE doc_id = ?1", params![doc], |r| r.get(0))
+            .query_row(
+                "SELECT version FROM docs WHERE doc_id = ?1",
+                params![doc],
+                |r| r.get(0),
+            )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         if found.as_deref() != expected {
-            return Err(StoreError::Conflict { expected: expected.map(String::from), found });
+            return Err(StoreError::Conflict {
+                expected: expected.map(String::from),
+                found,
+            });
         }
         let counter: i64 = conn
-            .query_row("SELECT counter FROM docs WHERE doc_id = ?1", params![doc], |r| r.get(0))
+            .query_row(
+                "SELECT counter FROM docs WHERE doc_id = ?1",
+                params![doc],
+                |r| r.get(0),
+            )
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let version = format!("v{}", counter + 1);
         conn.execute(

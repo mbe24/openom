@@ -45,7 +45,12 @@ pub enum EntryError {
 /// The caller decides separately whether an *unattributed* entry (empty `author_signature`) is acceptable
 /// — that's a per-epoch property of the verified keyring, not something this function can judge from the
 /// entry alone (a hostile server must never be able to downgrade to "unattributed").
-pub fn verify_entry(version: u32, header: &Header, plaintext: &[u8], governing: &Keyring) -> Result<(), EntryError> {
+pub fn verify_entry(
+    version: u32,
+    header: &Header,
+    plaintext: &[u8],
+    governing: &Keyring,
+) -> Result<(), EntryError> {
     if header.author_signature.is_empty() {
         return Err(EntryError::Unattributed);
     }
@@ -55,7 +60,11 @@ pub fn verify_entry(version: u32, header: &Header, plaintext: &[u8], governing: 
     // B+ epoch-consistency: the sealing epoch must be the newest at the governing revision. Closes the
     // "seal under the CURRENT key, stamp an OLD revision" forge (the current key belongs to a newer epoch
     // than any old revision, so it won't match that revision's newest epoch).
-    let newest = governing.epochs.iter().max_by_key(|e| e.epoch).ok_or(EntryError::EpochMismatch)?;
+    let newest = governing
+        .epochs
+        .iter()
+        .max_by_key(|e| e.epoch)
+        .ok_or(EntryError::EpochMismatch)?;
     if newest.key_id != header.key_id {
         return Err(EntryError::EpochMismatch);
     }
@@ -66,15 +75,22 @@ pub fn verify_entry(version: u32, header: &Header, plaintext: &[u8], governing: 
         .iter()
         .find(|m| m.member_id == header.author_member_id)
         .ok_or(EntryError::UnknownAuthor)?;
-    let key_bytes: [u8; 32] =
-        member.author_public_key.as_slice().try_into().map_err(|_| EntryError::BadAuthorKey)?;
+    let key_bytes: [u8; 32] = member
+        .author_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| EntryError::BadAuthorKey)?;
     let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| EntryError::BadAuthorKey)?;
-    let sig_bytes: [u8; 64] =
-        header.author_signature.as_slice().try_into().map_err(|_| EntryError::BadSignature)?;
+    let sig_bytes: [u8; 64] = header
+        .author_signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| EntryError::BadSignature)?;
     let signature = Signature::from_bytes(&sig_bytes);
     let plaintext_hash = Sha256::digest(plaintext);
     let msg = author_signing_bytes(version, header, plaintext_hash.as_slice());
-    key.verify(&msg, &signature).map_err(|_| EntryError::BadSignature)?;
+    key.verify(&msg, &signature)
+        .map_err(|_| EntryError::BadSignature)?;
 
     // Role (numeric, lower = stronger): the author's role must be at least as strong as required.
     if member.role > required as i32 {
@@ -134,7 +150,11 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: KID.to_vec(), epoch: 0, wraps: vec![] }],
+            epochs: vec![KeyEpoch {
+                key_id: KID.to_vec(),
+                epoch: 0,
+                wraps: vec![],
+            }],
         }
     }
 
@@ -168,8 +188,14 @@ mod tests {
     fn rejects_an_editor_commit_but_accepts_their_proposal() {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("e1", MemberRole::Editor, &k)]);
-        assert_eq!(verify_entry(VERSION, &signed(Kind::Delta, "e1", &k, b"x"), b"x", &kr), Err(EntryError::InsufficientRole));
-        assert_eq!(verify_entry(VERSION, &signed(Kind::Proposal, "e1", &k, b"x"), b"x", &kr), Ok(()));
+        assert_eq!(
+            verify_entry(VERSION, &signed(Kind::Delta, "e1", &k, b"x"), b"x", &kr),
+            Err(EntryError::InsufficientRole)
+        );
+        assert_eq!(
+            verify_entry(VERSION, &signed(Kind::Proposal, "e1", &k, b"x"), b"x", &kr),
+            Ok(())
+        );
     }
 
     #[test]
@@ -177,7 +203,10 @@ mod tests {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "m1", &k, b"original");
-        assert_eq!(verify_entry(VERSION, &h, b"tampered", &kr), Err(EntryError::BadSignature));
+        assert_eq!(
+            verify_entry(VERSION, &h, b"tampered", &kr),
+            Err(EntryError::BadSignature)
+        );
     }
 
     #[test]
@@ -187,7 +216,10 @@ mod tests {
         // Keyring says m1's key is `real`, but the entry was signed by `mallory` claiming to be m1.
         let kr = governing(vec![member("m1", MemberRole::Admin, &real)]);
         let h = signed(Kind::Delta, "m1", &mallory, b"x");
-        assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::BadSignature));
+        assert_eq!(
+            verify_entry(VERSION, &h, b"x", &kr),
+            Err(EntryError::BadSignature)
+        );
     }
 
     #[test]
@@ -195,7 +227,10 @@ mod tests {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "ghost", &k, b"x");
-        assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::UnknownAuthor));
+        assert_eq!(
+            verify_entry(VERSION, &h, b"x", &kr),
+            Err(EntryError::UnknownAuthor)
+        );
     }
 
     #[test]
@@ -206,15 +241,32 @@ mod tests {
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let mut h = signed(Kind::Delta, "m1", &k, b"x");
         h.key_id = b"a-newer-epoch-key".to_vec();
-        h.author_signature = k.sign(&author_signing_bytes(VERSION, &h, Sha256::digest(b"x").as_slice())).to_bytes().to_vec();
-        assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::EpochMismatch));
+        h.author_signature = k
+            .sign(&author_signing_bytes(
+                VERSION,
+                &h,
+                Sha256::digest(b"x").as_slice(),
+            ))
+            .to_bytes()
+            .to_vec();
+        assert_eq!(
+            verify_entry(VERSION, &h, b"x", &kr),
+            Err(EntryError::EpochMismatch)
+        );
     }
 
     #[test]
     fn rejects_unattributed() {
         let kr = governing(vec![]);
-        let h = Header { kind: Kind::Delta as i32, key_id: KID.to_vec(), ..Default::default() };
-        assert_eq!(verify_entry(VERSION, &h, b"x", &kr), Err(EntryError::Unattributed));
+        let h = Header {
+            kind: Kind::Delta as i32,
+            key_id: KID.to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(
+            verify_entry(VERSION, &h, b"x", &kr),
+            Err(EntryError::Unattributed)
+        );
     }
 
     #[test]
@@ -222,7 +274,9 @@ mod tests {
         // The cross-crate round-trip: openom-crypto seals + signs the entry, this crate verifies it.
         // (Lives here, not in openom-crypto, because verify_entry moved out and openom-keyring is the only
         // crate that can depend on both directions.)
-        use openom_crypto::{generate_dek, open_envelope, seal_envelope, AuthorContext, SealParams};
+        use openom_crypto::{
+            generate_dek, open_envelope, seal_envelope, AuthorContext, SealParams,
+        };
         use openom_protocol::v1::{Aead, Compression, Format};
 
         let dek = generate_dek().unwrap();
@@ -240,7 +294,11 @@ mod tests {
             prev_ciphertext_hash: b"",
             covers_through_seq: 0,
             blob_id: b"",
-            author: Some(AuthorContext { signing_key: &author, member_id: "m1", keyring_revision: 3 }),
+            author: Some(AuthorContext {
+                signing_key: &author,
+                member_id: "m1",
+                keyring_revision: 3,
+            }),
         };
         let env = seal_envelope(&dek, &params, b"a change").unwrap();
         let header = env.header.as_ref().unwrap();
@@ -251,9 +309,16 @@ mod tests {
         // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
         let kr = governing(vec![member("m1", MemberRole::Admin, &author)]);
         let plaintext = open_envelope(&dek, &env).unwrap();
-        assert_eq!(verify_entry(VERSION, header, &plaintext, &kr), Ok(()), "the sealed entry verifies");
+        assert_eq!(
+            verify_entry(VERSION, header, &plaintext, &kr),
+            Ok(()),
+            "the sealed entry verifies"
+        );
         // A different plaintext against the same signature → rejected (content binding).
-        assert_eq!(verify_entry(VERSION, header, b"tampered", &kr), Err(EntryError::BadSignature));
+        assert_eq!(
+            verify_entry(VERSION, header, b"tampered", &kr),
+            Err(EntryError::BadSignature)
+        );
     }
 
     #[test]
@@ -267,7 +332,11 @@ mod tests {
             kdf_params: None,
             ephemeral_public_key: vec![],
         };
-        let founder = AuthorizedSigner { public_key: vec![0; 32], member_id: "owner".into(), role: SignerRole::Founder as i32 };
+        let founder = AuthorizedSigner {
+            public_key: vec![0; 32],
+            member_id: "owner".into(),
+            role: SignerRole::Founder as i32,
+        };
         let mk = |wraps: Vec<KeyWrap>| Keyring {
             tree_id: vec![],
             revision: 1,
@@ -277,13 +346,23 @@ mod tests {
             members: vec![],
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: KID.to_vec(), epoch: 0, wraps }],
+            epochs: vec![KeyEpoch {
+                key_id: KID.to_vec(),
+                epoch: 0,
+                wraps,
+            }],
         };
         // Solo owner: the epoch's DEK is wrapped only to the founder → unattributed (V1 history stays valid).
         assert!(!epoch_is_attributed(&mk(vec![wrap("owner")]), KID));
         // Shared: a wrap to any non-founder member → attributed (entries must be signed).
-        assert!(epoch_is_attributed(&mk(vec![wrap("owner"), wrap("editor-1")]), KID));
+        assert!(epoch_is_attributed(
+            &mk(vec![wrap("owner"), wrap("editor-1")]),
+            KID
+        ));
         // An unknown key_id has no matching epoch → not attributed.
-        assert!(!epoch_is_attributed(&mk(vec![wrap("owner"), wrap("editor-1")]), b"no-such-key"));
+        assert!(!epoch_is_attributed(
+            &mk(vec![wrap("owner"), wrap("editor-1")]),
+            b"no-such-key"
+        ));
     }
 }

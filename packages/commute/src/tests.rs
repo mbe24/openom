@@ -26,8 +26,14 @@ fn register_is_last_writer_by_stamp_across_replicas() {
     // whichever order each replica hears them in.
     let mut a = Doc::new(rid(1));
     let mut b = Doc::new(rid(2));
-    let oa = a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1901) });
-    let ob = b.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1903) });
+    let oa = a.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::I64(1901),
+    });
+    let ob = b.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::I64(1903),
+    });
     // Both are lamport 1; replica 2 > replica 1 breaks the tie → 1903 wins on both.
     a.merge_op(&ob);
     b.merge_op(&oa);
@@ -39,8 +45,14 @@ fn register_is_last_writer_by_stamp_across_replicas() {
 fn disjoint_registers_both_survive() {
     let mut a = Doc::new(rid(1));
     let mut b = Doc::new(rid(2));
-    let oa = a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::Text("place".into()) });
-    let ob = b.apply_local(OpIntent::SetRegister { cell: cell(1), value: Value::Text("date".into()) });
+    let oa = a.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::Text("place".into()),
+    });
+    let ob = b.apply_local(OpIntent::SetRegister {
+        cell: cell(1),
+        value: Value::Text("date".into()),
+    });
     a.merge_op(&ob);
     b.merge_op(&oa);
     assert_eq!(a.register(&cell(0)), Some(&Value::Text("place".into())));
@@ -55,14 +67,32 @@ fn set_cell_ids_with_prefix_scopes_to_matching_live_cells() {
     let a1 = vec![2, 0, 0, 0, 1, 0xAA, b'x'];
     let a2 = vec![2, 0, 0, 0, 1, 0xAA, b'y'];
     let b1 = vec![2, 0, 0, 0, 1, 0xBB, b'x'];
-    d.apply_local(OpIntent::AddElement { cell: a1.clone(), elem: elem(0), value: Value::Null });
-    d.apply_local(OpIntent::AddElement { cell: a2.clone(), elem: elem(1), value: Value::Null });
-    d.apply_local(OpIntent::AddElement { cell: b1.clone(), elem: elem(2), value: Value::Null });
+    d.apply_local(OpIntent::AddElement {
+        cell: a1.clone(),
+        elem: elem(0),
+        value: Value::Null,
+    });
+    d.apply_local(OpIntent::AddElement {
+        cell: a2.clone(),
+        elem: elem(1),
+        value: Value::Null,
+    });
+    d.apply_local(OpIntent::AddElement {
+        cell: b1.clone(),
+        elem: elem(2),
+        value: Value::Null,
+    });
 
     let pa = vec![2, 0, 0, 0, 1, 0xAA];
-    assert_eq!(d.set_cell_ids_with_prefix(&pa), vec![a1.clone(), a2.clone()]);
+    assert_eq!(
+        d.set_cell_ids_with_prefix(&pa),
+        vec![a1.clone(), a2.clone()]
+    );
     // A cell with no live elements drops out; a different prefix stays isolated.
-    d.apply_local(OpIntent::RemoveElement { cell: a2.clone(), elem: elem(1) });
+    d.apply_local(OpIntent::RemoveElement {
+        cell: a2.clone(),
+        elem: elem(1),
+    });
     assert_eq!(d.set_cell_ids_with_prefix(&pa), vec![a1]);
     assert_eq!(d.set_cell_ids_with_prefix(&[2, 0, 0, 0, 1, 0xBB]), vec![b1]);
 }
@@ -71,17 +101,31 @@ fn set_cell_ids_with_prefix_scopes_to_matching_live_cells() {
 fn set_add_and_remove_resolve_by_stamp_no_resurrection() {
     // Add, then a later remove tombstones it; a re-delivered add (older stamp) never resurrects it.
     let mut d = Doc::new(rid(1));
-    let add = d.apply_local(OpIntent::AddElement { cell: cell(0), elem: elem(0), value: Value::Null });
-    let _rm = d.apply_local(OpIntent::RemoveElement { cell: cell(0), elem: elem(0) });
+    let add = d.apply_local(OpIntent::AddElement {
+        cell: cell(0),
+        elem: elem(0),
+        value: Value::Null,
+    });
+    let _rm = d.apply_local(OpIntent::RemoveElement {
+        cell: cell(0),
+        elem: elem(0),
+    });
     assert!(d.set_elements(&cell(0)).is_empty());
     d.merge_op(&add); // stale re-delivery
-    assert!(d.set_elements(&cell(0)).is_empty(), "an out-stamped add must not resurrect a tombstone");
+    assert!(
+        d.set_elements(&cell(0)).is_empty(),
+        "an out-stamped add must not resurrect a tombstone"
+    );
 }
 
 #[test]
 fn merge_is_idempotent() {
     let mut author = Doc::new(rid(1));
-    let op = author.apply_local(OpIntent::AddElement { cell: cell(0), elem: elem(0), value: Value::I64(7) });
+    let op = author.apply_local(OpIntent::AddElement {
+        cell: cell(0),
+        elem: elem(0),
+        value: Value::I64(7),
+    });
     let mut d = Doc::new(rid(2));
     d.merge_op(&op);
     let once = d.checkpoint();
@@ -110,9 +154,19 @@ fn intent_strat() -> impl Strategy<Value = OpIntent> {
     // A small fixed pool of cells/elements so concurrent ops COLLIDE on the same target — otherwise
     // the interesting merge paths are almost never exercised.
     prop_oneof![
-        (0u8..3, value_strat()).prop_map(|(c, v)| OpIntent::SetRegister { cell: cell(c), value: v }),
-        (0u8..3, 0u8..3, value_strat()).prop_map(|(c, e, v)| OpIntent::AddElement { cell: cell(c), elem: elem(e), value: v }),
-        (0u8..3, 0u8..3).prop_map(|(c, e)| OpIntent::RemoveElement { cell: cell(c), elem: elem(e) }),
+        (0u8..3, value_strat()).prop_map(|(c, v)| OpIntent::SetRegister {
+            cell: cell(c),
+            value: v
+        }),
+        (0u8..3, 0u8..3, value_strat()).prop_map(|(c, e, v)| OpIntent::AddElement {
+            cell: cell(c),
+            elem: elem(e),
+            value: v
+        }),
+        (0u8..3, 0u8..3).prop_map(|(c, e)| OpIntent::RemoveElement {
+            cell: cell(c),
+            elem: elem(e)
+        }),
     ]
 }
 
@@ -184,9 +238,19 @@ proptest! {
 #[test]
 fn snapshot_round_trips() {
     let mut a = Doc::new(rid(1));
-    a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::Text("hi".into()) });
-    a.apply_local(OpIntent::AddElement { cell: cell(1), elem: elem(0), value: Value::I64(5) });
-    a.apply_local(OpIntent::RemoveElement { cell: cell(1), elem: elem(0) });
+    a.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::Text("hi".into()),
+    });
+    a.apply_local(OpIntent::AddElement {
+        cell: cell(1),
+        elem: elem(0),
+        value: Value::I64(5),
+    });
+    a.apply_local(OpIntent::RemoveElement {
+        cell: cell(1),
+        elem: elem(0),
+    });
     let snap = a.snapshot();
     let b = Doc::from_snapshot(rid(2), &snap).unwrap();
     assert_eq!(a.checkpoint(), b.checkpoint());
@@ -198,9 +262,15 @@ fn delta_since_ships_only_the_missing_ops() {
     let mut a = Doc::new(rid(1));
     let mut b = Doc::new(rid(2));
     // b catches up to a's first edit, then a makes a second — the delta carries only the second.
-    let first = a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1) });
+    let first = a.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::I64(1),
+    });
     b.merge_op(&first);
-    a.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(2) });
+    a.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::I64(2),
+    });
     let delta_ops = codec::decode_ops(&a.delta_since(&b.version())).unwrap();
     assert_eq!(delta_ops.len(), 1, "only the op b hasn't seen");
     b.merge_bytes(&a.delta_since(&b.version())).unwrap();
@@ -219,10 +289,19 @@ fn merge_bytes_on_junk_is_a_clean_error_not_a_panic() {
 fn merge_bytes_error_leaves_the_document_unchanged() {
     // Transactional decode: a corrupt buffer applies nothing (decode fails before any integrate).
     let mut d = Doc::new(rid(1));
-    d.apply_local(OpIntent::SetRegister { cell: cell(0), value: Value::I64(1) });
+    d.apply_local(OpIntent::SetRegister {
+        cell: cell(0),
+        value: Value::I64(1),
+    });
     let before = d.checkpoint();
-    assert!(d.merge_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 5 /* count=5, but no ops follow */]).is_err());
-    assert_eq!(d.checkpoint(), before, "a failed merge must not partially apply");
+    assert!(d
+        .merge_bytes(&[1, 0, 0, 0, 0, 0, 0, 0, 5 /* count=5, but no ops follow */])
+        .is_err());
+    assert_eq!(
+        d.checkpoint(),
+        before,
+        "a failed merge must not partially apply"
+    );
 }
 
 fn hex(b: &[u8]) -> String {
@@ -235,13 +314,23 @@ fn snapshot_bytes_are_a_stable_golden_vector() {
     // deliberately. Fixed replica + fixed ops ⇒ fixed bytes, forever (until a layout-version bump).
     let r = rid(7);
     let mut d = Doc::new(r);
-    d.apply_local(OpIntent::SetRegister { cell: vec![1], value: Value::Text("Jon".into()) });
-    d.apply_local(OpIntent::AddElement { cell: vec![2], elem: vec![9], value: Value::I64(-5) });
+    d.apply_local(OpIntent::SetRegister {
+        cell: vec![1],
+        value: Value::Text("Jon".into()),
+    });
+    d.apply_local(OpIntent::AddElement {
+        cell: vec![2],
+        elem: vec![9],
+        value: Value::I64(-5),
+    });
     let got = hex(&d.snapshot());
     let expected = "01000000000000000200000000000000010700000000000000000000000000000000\
 0000000000000001010500000000000000034a6f6e00000000000000020700000000000000000000000000000001\
 00000000000000010200000000000000010902fffffffffffffffb";
-    assert_eq!(got, expected, "canonical snapshot encoding changed — bump LAYOUT_VERSION + migrate");
+    assert_eq!(
+        got, expected,
+        "canonical snapshot encoding changed — bump LAYOUT_VERSION + migrate"
+    );
 }
 
 proptest! {

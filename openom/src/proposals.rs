@@ -47,27 +47,43 @@ fn internal(e: sqlx::Error) -> ApiError {
 /// Validate a proposal envelope: decodable, supported version, `KIND_PROPOSAL`, bound to this tree,
 /// non-dev key (prod), recomputable `ciphertext_hash`. (No replica dot — each POST is a fresh proposal
 /// with a server-minted id, not an idempotent append.)
-fn validate_proposal(body: &[u8], tree_id: Uuid, reject_dev_key: bool) -> Result<Vec<u8>, ApiError> {
-    let env = Envelope::decode(body).map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
+fn validate_proposal(
+    body: &[u8],
+    tree_id: Uuid,
+    reject_dev_key: bool,
+) -> Result<Vec<u8>, ApiError> {
+    let env = Envelope::decode(body)
+        .map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
     if env.version != ENVELOPE_VERSION {
         return Err(ApiError::BadRequest(format!(
             "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",
             env.version
         )));
     }
-    let header = env.header.as_ref().ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
+    let header = env
+        .header
+        .as_ref()
+        .ok_or_else(|| ApiError::BadRequest("envelope has no header".into()))?;
     if header.kind() != Kind::Proposal {
-        return Err(ApiError::BadRequest("the proposals path accepts only KIND_PROPOSAL".into()));
+        return Err(ApiError::BadRequest(
+            "the proposals path accepts only KIND_PROPOSAL".into(),
+        ));
     }
     if header.tree_id.as_slice() != tree_id.as_bytes() {
-        return Err(ApiError::BadRequest("header tree_id does not match the url".into()));
+        return Err(ApiError::BadRequest(
+            "header tree_id does not match the url".into(),
+        ));
     }
     if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
-        return Err(ApiError::BadRequest("dev key_id refused under RUN_MODE=production (§16)".into()));
+        return Err(ApiError::BadRequest(
+            "dev key_id refused under RUN_MODE=production (§16)".into(),
+        ));
     }
     let computed = Sha256::digest(&env.ciphertext);
     if header.ciphertext_hash.as_slice() != computed.as_slice() {
-        return Err(ApiError::BadRequest("ciphertext_hash does not match the ciphertext".into()));
+        return Err(ApiError::BadRequest(
+            "ciphertext_hash does not match the ciphertext".into(),
+        ));
     }
     Ok(header.ciphertext_hash.clone())
 }
@@ -87,7 +103,9 @@ pub async fn create_proposal(
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("proposal.create");
     if body.len() > MAX_PROPOSAL_BYTES {
-        return Err(ApiError::BadRequest("proposal exceeds the per-item size limit".into()));
+        return Err(ApiError::BadRequest(
+            "proposal exceeds the per-item size limit".into(),
+        ));
     }
     let size = body.len() as i64;
     let ciphertext_hash = validate_proposal(&body, tree_id, !state.config.is_local())?;
@@ -99,7 +117,14 @@ pub async fn create_proposal(
         .map_err(internal)?;
     let owner = owner.ok_or(ApiError::NotFound)?;
     // Editor+ may propose (the whole point of the role); metered to the owner (owner-pays).
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Propose).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner,
+        identity.member_id,
+        Access::Propose,
+    )
+    .await?;
 
     // Owner's proposal entitlements (owner-pays).
     let (max_bytes, max_open, max_day, ttl): (i64, i32, i32, i32) = sqlx::query_as(
@@ -114,7 +139,9 @@ pub async fn create_proposal(
         return Err(ApiError::Forbidden); // proposals not enabled on this plan
     }
     if size > max_bytes {
-        return Err(ApiError::BadRequest("proposal exceeds the plan's per-proposal size limit".into()));
+        return Err(ApiError::BadRequest(
+            "proposal exceeds the plan's per-proposal size limit".into(),
+        ));
     }
 
     let mut tx = state.db.begin().await.map_err(internal)?;
@@ -174,7 +201,14 @@ pub async fn create_proposal(
 
     tx.commit().await.map_err(internal)?;
     tracing::info!(event = "proposal_created", %tree_id, %id, member = %identity.member_id);
-    Ok((StatusCode::OK, Json(CreateResult { id: id.simple().to_string(), expires_at: expires })).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(CreateResult {
+            id: id.simple().to_string(),
+            expires_at: expires,
+        }),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -270,16 +304,24 @@ pub async fn delete_proposal(
     // OWN. Neither is a plain capability gate, so fetch the proposer and branch. A missing proposal is an
     // idempotent success (the client accepts then deletes, and may retry) — but only for someone who
     // could have deleted it, so an unauthorized caller is refused before we reveal existence.
-    let proposer: Option<Uuid> =
-        sqlx::query_scalar("SELECT proposer_member_id FROM proposals WHERE tree_id = $1 AND id = $2")
-            .bind(tree_id)
-            .bind(proposal_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(internal)?;
+    let proposer: Option<Uuid> = sqlx::query_scalar(
+        "SELECT proposer_member_id FROM proposals WHERE tree_id = $1 AND id = $2",
+    )
+    .bind(tree_id)
+    .bind(proposal_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?;
     if proposer != Some(identity.member_id) {
         // Not the proposer (or the proposal is gone) → require Maintainer+.
-        crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+        crate::authz::authorize(
+            &state.db,
+            tree_id,
+            owner,
+            identity.member_id,
+            Access::Administer,
+        )
+        .await?;
     }
 
     sqlx::query("DELETE FROM proposals WHERE tree_id = $1 AND id = $2")

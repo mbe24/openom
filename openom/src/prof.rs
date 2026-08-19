@@ -20,7 +20,10 @@ pub struct Span {
 impl Span {
     #[inline]
     fn new(label: &'static str) -> Self {
-        Span { label, start: std::time::Instant::now() }
+        Span {
+            label,
+            start: std::time::Instant::now(),
+        }
     }
 }
 

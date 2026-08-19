@@ -92,7 +92,9 @@ impl Config {
             local_member_id: env::var("OPENOM_LOCAL_MEMBER_ID")
                 .ok()
                 .and_then(|s| Uuid::parse_str(&s).ok())
-                .unwrap_or_else(|| Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()),
+                .unwrap_or_else(|| {
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+                }),
             otel_enabled: matches!(env::var("OPENOM_OTEL").as_deref(), Ok("1") | Ok("true")),
             otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4318".into()),

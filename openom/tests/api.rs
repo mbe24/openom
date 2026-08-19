@@ -25,12 +25,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
+use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use openom_protocol::v1::{
     Aead, AuthorizedSigner, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole,
     SignerRole, WrapMethod,
 };
 use openom_protocol::Message;
-use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -44,10 +44,17 @@ async fn router() -> Router {
 
 /// One in-process request; returns status, headers, and the collected body.
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
-    let resp = app.clone().oneshot(req).await.expect("router is infallible");
+    let resp = app
+        .clone()
+        .oneshot(req)
+        .await
+        .expect("router is infallible");
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+    let body = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
     (status, headers, body)
 }
 
@@ -68,7 +75,12 @@ fn snapshot_envelope(tree: Uuid, ciphertext: &[u8], hash_of: Option<&[u8]>) -> V
         ciphertext_hash: Sha256::digest(hash_of.unwrap_or(ciphertext)).to_vec(),
         ..Default::default()
     };
-    Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
+    Envelope {
+        version: 1,
+        header: Some(header),
+        ciphertext: ciphertext.to_vec(),
+    }
+    .encode_to_vec()
 }
 
 /// A real KIND_PROPOSAL envelope (no replica dot — each proposal is a fresh submission).
@@ -80,7 +92,12 @@ fn proposal_envelope(tree: Uuid, ciphertext: &[u8]) -> Vec<u8> {
         ciphertext_hash: Sha256::digest(ciphertext).to_vec(),
         ..Default::default()
     };
-    Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
+    Envelope {
+        version: 1,
+        header: Some(header),
+        ciphertext: ciphertext.to_vec(),
+    }
+    .encode_to_vec()
 }
 
 /// A real delta envelope with a replica dot (replica_id + replica_counter).
@@ -94,7 +111,12 @@ fn delta_envelope(tree: Uuid, ciphertext: &[u8], replica: &[u8], counter: u64) -
         replica_counter: counter,
         ..Default::default()
     };
-    Envelope { version: 1, header: Some(header), ciphertext: ciphertext.to_vec() }.encode_to_vec()
+    Envelope {
+        version: 1,
+        header: Some(header),
+        ciphertext: ciphertext.to_vec(),
+    }
+    .encode_to_vec()
 }
 
 fn post_bytes(uri: String, body: &[u8]) -> Request<Body> {
@@ -142,7 +164,13 @@ async fn db() -> sqlx::PgPool {
 
 /// Insert (or reset) a fresh account with explicit metering caps, isolated from the
 /// shared generous dev account. The bucket starts full (`log_tokens = log_burst`).
-async fn seed_account(db: &sqlx::PgPool, id: Uuid, max_tree_bytes: i64, log_rate: f64, log_burst: i32) {
+async fn seed_account(
+    db: &sqlx::PgPool,
+    id: Uuid,
+    max_tree_bytes: i64,
+    log_rate: f64,
+    log_burst: i32,
+) {
     sqlx::query(
         "INSERT INTO accounts (id, max_trees, max_tree_bytes, log_rate, log_burst, log_tokens, log_refilled_at)
          VALUES ($1, 1000, $2, $3, $4, $4::float8, now())
@@ -164,7 +192,13 @@ async fn seed_account(db: &sqlx::PgPool, id: Uuid, max_tree_bytes: i64, log_rate
 }
 
 /// Enable/limit proposals for an account (default seed leaves them disabled = free tier).
-async fn set_proposal_meters(db: &sqlx::PgPool, id: Uuid, max_bytes: i64, max_open: i32, max_day: i32) {
+async fn set_proposal_meters(
+    db: &sqlx::PgPool,
+    id: Uuid,
+    max_bytes: i64,
+    max_open: i32,
+    max_day: i32,
+) {
     sqlx::query(
         "UPDATE accounts
             SET max_proposal_bytes = $2, max_open_proposals_per_tree = $3, max_proposals_per_member_day = $4
@@ -254,8 +288,20 @@ fn build_keyring(
     }];
     for (id, role) in extra {
         let s = id.to_string();
-        members.push(Member { member_id: s.clone(), role: *role, author_public_key: vec![7; 32], hpke_public_key: vec![9; 32] });
-        wraps.push(KeyWrap { member_id: s, wrap_method: WrapMethod::X25519Hpke as i32, nonce: vec![], wrapped_dek: vec![1], kdf_params: None, ephemeral_public_key: vec![] });
+        members.push(Member {
+            member_id: s.clone(),
+            role: *role,
+            author_public_key: vec![7; 32],
+            hpke_public_key: vec![9; 32],
+        });
+        wraps.push(KeyWrap {
+            member_id: s,
+            wrap_method: WrapMethod::X25519Hpke as i32,
+            nonce: vec![],
+            wrapped_dek: vec![1],
+            kdf_params: None,
+            ephemeral_public_key: vec![],
+        });
     }
     let mut k = Keyring {
         tree_id: tree.as_bytes().to_vec(),
@@ -270,7 +316,11 @@ fn build_keyring(
         members,
         signatures: vec![],
         recovery_keys: vec![],
-        epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+        epochs: vec![KeyEpoch {
+            key_id: vec![0],
+            epoch: 0,
+            wraps,
+        }],
     };
     sign_keyring(&mut k, founder);
     k
@@ -326,7 +376,11 @@ fn get_as(uri: String, member: Uuid) -> Request<Body> {
         .unwrap()
 }
 fn post(uri: String) -> Request<Body> {
-    Request::builder().method("POST").uri(uri).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
 }
 fn post_json(uri: String, json: Value) -> Request<Body> {
     Request::builder()
@@ -379,7 +433,11 @@ async fn delta_log_lifecycle() {
     let app = router().await;
     let tree = Uuid::new_v4();
     // The tree must exist (created by an initial snapshot) before deltas append to it.
-    send(&app, put_tree(tree, &snapshot_envelope(tree, b"ct", None), None)).await;
+    send(
+        &app,
+        put_tree(tree, &snapshot_envelope(tree, b"ct", None), None),
+    )
+    .await;
 
     let ra = b"replica-aaaaaaaa".to_vec();
     let d0 = delta_envelope(tree, b"delta-zero", &ra, 0);
@@ -387,27 +445,52 @@ async fn delta_log_lifecycle() {
 
     let (s, _, b0) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
     assert_eq!(s, StatusCode::OK, "append d0");
-    assert_eq!(serde_json::from_slice::<Value>(&b0).unwrap()["seq"].as_i64().unwrap(), 0);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b0).unwrap()["seq"]
+            .as_i64()
+            .unwrap(),
+        0
+    );
 
     let (s, _, b1) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d1)).await;
     assert_eq!(s, StatusCode::OK, "append d1");
-    assert_eq!(serde_json::from_slice::<Value>(&b1).unwrap()["seq"].as_i64().unwrap(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b1).unwrap()["seq"]
+            .as_i64()
+            .unwrap(),
+        1
+    );
 
     // Re-delivering d0 (same replica dot) is idempotent — same seq, no new entry.
     let (s, _, br) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
     assert_eq!(s, StatusCode::OK, "re-append idempotent");
-    assert_eq!(serde_json::from_slice::<Value>(&br).unwrap()["seq"].as_i64().unwrap(), 0);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&br).unwrap()["seq"]
+            .as_i64()
+            .unwrap(),
+        0
+    );
 
     // Whole tail: both deltas, in order, payloads round-tripping the exact sealed bytes.
     let (s, _, tb) = send(&app, get(format!("/trees/{tree}/log?since=-1"))).await;
     assert_eq!(s, StatusCode::OK, "read tail");
     let tail: Value = serde_json::from_slice(&tb).unwrap();
     let entries = tail["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2, "two deltas, not three (re-delivery didn't duplicate)");
+    assert_eq!(
+        entries.len(),
+        2,
+        "two deltas, not three (re-delivery didn't duplicate)"
+    );
     assert_eq!(tail["head_seq"].as_i64().unwrap(), 1);
     assert_eq!(tail["next_cursor"].as_i64().unwrap(), 1);
-    assert!(!entries[0]["time"].as_str().unwrap().is_empty(), "entries carry a timestamp for the activity feed");
-    assert!(!entries[0]["member"].as_str().unwrap().is_empty(), "and an author");
+    assert!(
+        !entries[0]["time"].as_str().unwrap().is_empty(),
+        "entries carry a timestamp for the activity feed"
+    );
+    assert!(
+        !entries[0]["member"].as_str().unwrap().is_empty(),
+        "and an author"
+    );
     let p0 = base64::engine::general_purpose::STANDARD
         .decode(entries[0]["payload"].as_str().unwrap())
         .unwrap();
@@ -417,14 +500,21 @@ async fn delta_log_lifecycle() {
     let (s, _, tb2) = send(&app, get(format!("/trees/{tree}/log?since=0"))).await;
     assert_eq!(s, StatusCode::OK, "read tail since 0");
     let tail2: Value = serde_json::from_slice(&tb2).unwrap();
-    assert_eq!(tail2["entries"].as_array().unwrap().len(), 1, "one delta after seq 0");
+    assert_eq!(
+        tail2["entries"].as_array().unwrap().len(),
+        1,
+        "one delta after seq 0"
+    );
     assert_eq!(tail2["entries"][0]["seq"].as_i64().unwrap(), 1);
 
     // Appending to a tree that doesn't exist → 404 (header tree_id matches the url so validation passes).
     let unknown = Uuid::new_v4();
     let (s, _, _) = send(
         &app,
-        post_bytes(format!("/trees/{unknown}/log"), &delta_envelope(unknown, b"x", &ra, 0)),
+        post_bytes(
+            format!("/trees/{unknown}/log"),
+            &delta_envelope(unknown, b"x", &ra, 0),
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "append to unknown tree");
@@ -436,17 +526,26 @@ async fn oversized_delta_spills_to_r2_and_reads_back() {
     let app = router().await;
     let db = db().await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree(tree, &snapshot_envelope(tree, b"ct", None), None)).await;
+    send(
+        &app,
+        put_tree(tree, &snapshot_envelope(tree, b"ct", None), None),
+    )
+    .await;
 
     // A ciphertext well over the 32 KiB inline cap forces the spill path.
     let big = vec![0x5au8; 40 * 1024];
     let ra = b"replica-spill000".to_vec();
     let d = delta_envelope(tree, &big, &ra, 0);
-    assert!(d.len() > 32 * 1024, "the envelope must exceed the inline cap to exercise spill");
+    assert!(
+        d.len() > 32 * 1024,
+        "the envelope must exceed the inline cap to exercise spill"
+    );
 
     let (s, _, b) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d)).await;
     assert_eq!(s, StatusCode::OK, "append oversized delta");
-    let seq = serde_json::from_slice::<Value>(&b).unwrap()["seq"].as_i64().unwrap();
+    let seq = serde_json::from_slice::<Value>(&b).unwrap()["seq"]
+        .as_i64()
+        .unwrap();
 
     // It really spilled: the row keeps no inline payload, only the R2 key.
     let (payload, r2_key): (Option<Vec<u8>>, Option<String>) =
@@ -467,7 +566,10 @@ async fn oversized_delta_spills_to_r2_and_reads_back() {
     let got = base64::engine::general_purpose::STANDARD
         .decode(tail["entries"][0]["payload"].as_str().unwrap())
         .unwrap();
-    assert_eq!(got, d, "the spilled payload round-trips the exact sealed delta bytes");
+    assert_eq!(
+        got, d,
+        "the spilled payload round-trips the exact sealed delta bytes"
+    );
 }
 
 #[tokio::test]
@@ -483,17 +585,33 @@ async fn cross_owner_access_forbidden() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
 
     let tree = Uuid::new_v4();
-    let (s, h, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    let (s, h, _) = send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "owner creates the tree");
     let version = etag(&h);
     // Owner seeds one delta so the log read path has something to guard.
     let ra = b"replica-owner000".to_vec();
-    send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), owner)).await;
+    send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d0", &ra, 0),
+            owner,
+        ),
+    )
+    .await;
 
     // A non-owner is refused on read snapshot, read log, append, and a CAS snapshot update (the
     // seam now guards the PUT/commit path too — it used to inline owner_id in the SQL predicate).
     let (s, _, _) = send(&app, get_as(format!("/trees/{tree}"), other)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the snapshot");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "non-owner cannot read the snapshot"
+    );
     let cas = Request::builder()
         .method("PUT")
         .uri(format!("/trees/{tree}"))
@@ -503,12 +621,20 @@ async fn cross_owner_access_forbidden() {
         .body(Body::from(snapshot_envelope(tree, b"hostile-rev", None)))
         .unwrap();
     let (s, _, _) = send(&app, cas).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot commit a snapshot update");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "non-owner cannot commit a snapshot update"
+    );
     let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/log?since=-1"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the log");
     let (s, _, _) = send(
         &app,
-        post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"x", b"replica-other000", 0), other),
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"x", b"replica-other000", 0),
+            other,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot append");
@@ -524,7 +650,11 @@ async fn roles_read_propose_commit() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let viewer = Uuid::new_v4();
     let editor = Uuid::new_v4();
@@ -535,22 +665,100 @@ async fn roles_read_propose_commit() {
 
     // Read — every member role can read snapshot, log, and proposals.
     for m in [viewer, editor, maint] {
-        assert_eq!(send(&app, get_as(format!("/trees/{tree}"), m)).await.0, StatusCode::OK, "read snapshot");
-        assert_eq!(send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m)).await.0, StatusCode::OK, "read log");
-        assert_eq!(send(&app, get_as(format!("/trees/{tree}/proposals"), m)).await.0, StatusCode::OK, "read proposals");
+        assert_eq!(
+            send(&app, get_as(format!("/trees/{tree}"), m)).await.0,
+            StatusCode::OK,
+            "read snapshot"
+        );
+        assert_eq!(
+            send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m))
+                .await
+                .0,
+            StatusCode::OK,
+            "read log"
+        );
+        assert_eq!(
+            send(&app, get_as(format!("/trees/{tree}/proposals"), m))
+                .await
+                .0,
+            StatusCode::OK,
+            "read proposals"
+        );
     }
 
     // Propose — Editor+ yes, Viewer no.
     let prop = proposal_envelope(tree, b"suggestion");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't propose");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)).await.0, StatusCode::OK, "editor proposes");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, maint)).await.0, StatusCode::OK, "maintainer proposes");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "viewer can't propose"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "editor proposes"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, maint)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "maintainer proposes"
+    );
 
     // Commit (append a delta) — Maintainer+ yes, Editor + Viewer no.
     let d = |r: &'static [u8]| delta_envelope(tree, b"x", r, 0);
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-viewer00"), viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't commit");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-editor00"), editor)).await.0, StatusCode::FORBIDDEN, "editor can't commit (V1 propose/approve)");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-maint000"), maint)).await.0, StatusCode::OK, "maintainer commits");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &d(b"replica-viewer00"),
+                viewer
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "viewer can't commit"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &d(b"replica-editor00"),
+                editor
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "editor can't commit (V1 propose/approve)"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-maint000"), maint)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "maintainer commits"
+    );
 }
 
 #[tokio::test]
@@ -563,7 +771,11 @@ async fn roles_media() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     enable_media(&db, owner).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let viewer = Uuid::new_v4();
     let editor = Uuid::new_v4();
@@ -573,16 +785,52 @@ async fn roles_media() {
     grant_role(&db, tree, maint, 3).await;
 
     // Upload (intent) — Editor+ passes authz (media enabled, so a pass isn't masked); Viewer 403.
-    assert_eq!(send(&app, post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't upload");
-    assert_eq!(send(&app, post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), editor)).await.0, StatusCode::OK, "editor uploads");
+    assert_eq!(
+        send(
+            &app,
+            post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), viewer)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "viewer can't upload"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), editor)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "editor uploads"
+    );
 
     // Attach = Commit. Insert a live blob directly (no MinIO round-trip needed to test the gate).
     let blob = Uuid::new_v4();
     sqlx::query("INSERT INTO tree_blobs (tree_id, blob_id, r2_key, size_bytes, state, ref_count) VALUES ($1,$2,$3,10,1,0)")
         .bind(tree).bind(blob.as_bytes().as_slice()).bind(format!("k/{blob}"))
         .execute(&db).await.unwrap();
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], editor)).await.0, StatusCode::FORBIDDEN, "editor can't attach (commit-adjacent)");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], maint)).await.0, StatusCode::OK, "maintainer attaches");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], editor)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "editor can't attach (commit-adjacent)"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], maint)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "maintainer attaches"
+    );
 }
 
 #[tokio::test]
@@ -594,15 +842,58 @@ async fn per_member_rate_isolation() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 0.001, 1).await; // burst 1, negligible refill
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
     let maint = Uuid::new_v4();
     grant_role(&db, tree, maint, 3).await;
 
     // The maintainer spends their single token, then is throttled.
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"m0", b"replica-maint000", 0), maint)).await.0, StatusCode::OK, "maintainer's first append");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"m1", b"replica-maint000", 1), maint)).await.0, StatusCode::TOO_MANY_REQUESTS, "maintainer throttled");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &delta_envelope(tree, b"m0", b"replica-maint000", 0),
+                maint
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "maintainer's first append"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &delta_envelope(tree, b"m1", b"replica-maint000", 1),
+                maint
+            )
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "maintainer throttled"
+    );
     // The owner has their OWN bucket — unaffected by the maintainer draining theirs.
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"o0", b"replica-owner000", 0), owner)).await.0, StatusCode::OK, "owner not throttled by the maintainer");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &delta_envelope(tree, b"o0", b"replica-owner000", 0),
+                owner
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "owner not throttled by the maintainer"
+    );
 }
 
 #[tokio::test]
@@ -616,16 +907,32 @@ async fn keyring_genesis_derives_acl() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let editor = Uuid::new_v4();
     let viewer = Uuid::new_v4();
-    let genesis = build_keyring(tree, 1, vec![], &founder, owner, &[(editor, 4), (viewer, 5)]);
+    let genesis = build_keyring(
+        tree,
+        1,
+        vec![],
+        &founder,
+        owner,
+        &[(editor, 4), (viewer, 5)],
+    );
 
     let (s, _, body) = send(&app, put_keyring_as(tree, &genesis, owner)).await;
     assert_eq!(s, StatusCode::OK, "owner PUTs the genesis keyring");
-    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["revision"].as_i64().unwrap(), 1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["revision"]
+            .as_i64()
+            .unwrap(),
+        1
+    );
 
     // ACL derived from the members list.
     assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner");
@@ -634,9 +941,40 @@ async fn keyring_genesis_derives_acl() {
 
     // And the derived roles actually gate: the editor may propose but not commit; the viewer neither.
     let prop = proposal_envelope(tree, b"p");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)).await.0, StatusCode::OK, "derived editor proposes");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"x", b"replica-editor00", 0), editor)).await.0, StatusCode::FORBIDDEN, "derived editor can't commit");
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)).await.0, StatusCode::FORBIDDEN, "derived viewer can't propose");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "derived editor proposes"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &delta_envelope(tree, b"x", b"replica-editor00", 0),
+                editor
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "derived editor can't commit"
+    );
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "derived viewer can't propose"
+    );
 }
 
 #[tokio::test]
@@ -648,26 +986,76 @@ async fn keyring_transition_updates_and_removes() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let m = Uuid::new_v4();
     let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[(m, 4)]); // editor
-    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev1, owner)).await.0,
+        StatusCode::OK,
+        "genesis"
+    );
     assert_eq!(role_of(&db, tree, m).await, Some(4));
 
     // rev2: promote m to maintainer (ordinary change, founder-signed), chaining onto rev1.
-    let rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[(m, 3)]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::OK, "promote");
-    assert_eq!(role_of(&db, tree, m).await, Some(3), "promoted to maintainer");
+    let rev2 = build_keyring(
+        tree,
+        2,
+        keyring_hash(&rev1).to_vec(),
+        &founder,
+        owner,
+        &[(m, 3)],
+    );
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev2, owner)).await.0,
+        StatusCode::OK,
+        "promote"
+    );
+    assert_eq!(
+        role_of(&db, tree, m).await,
+        Some(3),
+        "promoted to maintainer"
+    );
     // Now m can commit.
-    assert_eq!(send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"c", b"replica-m0000000", 0), m)).await.0, StatusCode::OK, "maintainer commits");
+    assert_eq!(
+        send(
+            &app,
+            post_bytes_as(
+                format!("/trees/{tree}/log"),
+                &delta_envelope(tree, b"c", b"replica-m0000000", 0),
+                m
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "maintainer commits"
+    );
 
     // rev3: remove m entirely → their ACL row is deleted → they're refused.
     let rev3 = build_keyring(tree, 3, keyring_hash(&rev2).to_vec(), &founder, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev3, owner)).await.0, StatusCode::OK, "remove");
-    assert_eq!(role_of(&db, tree, m).await, None, "ACL row gone after removal");
-    assert_eq!(send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m)).await.0, StatusCode::FORBIDDEN, "removed member refused");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev3, owner)).await.0,
+        StatusCode::OK,
+        "remove"
+    );
+    assert_eq!(
+        role_of(&db, tree, m).await,
+        None,
+        "ACL row gone after removal"
+    );
+    assert_eq!(
+        send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m))
+            .await
+            .0,
+        StatusCode::FORBIDDEN,
+        "removed member refused"
+    );
 }
 
 #[tokio::test]
@@ -678,25 +1066,45 @@ async fn keyring_rejects_rollback_fork_unsigned() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev1, owner)).await.0,
+        StatusCode::OK,
+        "genesis"
+    );
 
     // Rollback: re-PUT revision 1 while head is 1 → not a sequential successor → 409.
-    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::CONFLICT, "rollback refused");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev1, owner)).await.0,
+        StatusCode::CONFLICT,
+        "rollback refused"
+    );
 
     // Fork: a revision-2 with a wrong prev_keyring_hash → 409.
     let forked = build_keyring(tree, 2, vec![0u8; 32], &founder, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &forked, owner)).await.0, StatusCode::CONFLICT, "fork refused");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &forked, owner)).await.0,
+        StatusCode::CONFLICT,
+        "fork refused"
+    );
 
     // Unsigned/unauthorized: a valid-shaped rev2 signed by a stranger, not a prior signer → 400.
     let stranger = generate_identity().unwrap();
     let mut rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[]);
     rev2.signatures.clear();
     sign_keyring(&mut rev2, &stranger);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::BAD_REQUEST, "unendorsed change refused");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev2, owner)).await.0,
+        StatusCode::BAD_REQUEST,
+        "unendorsed change refused"
+    );
 }
 
 #[tokio::test]
@@ -707,7 +1115,11 @@ async fn keyring_history() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let rev1 = build_keyring(tree, 1, vec![], &founder, owner, &[]);
@@ -719,12 +1131,25 @@ async fn keyring_history() {
     assert_eq!(s, StatusCode::OK);
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
-    assert_eq!(h["revisions"].as_array().unwrap().len(), 2, "whole chain from 1");
-    let p1 = base64::engine::general_purpose::STANDARD.decode(h["revisions"][0]["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        h["revisions"].as_array().unwrap().len(),
+        2,
+        "whole chain from 1"
+    );
+    let p1 = base64::engine::general_purpose::STANDARD
+        .decode(h["revisions"][0]["payload"].as_str().unwrap())
+        .unwrap();
     assert_eq!(p1, rev1.encode_to_vec(), "revision payload round-trips");
 
     let (_, _, b2) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&b2).unwrap()["revisions"].as_array().unwrap().len(), 1, "tail from 2");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b2).unwrap()["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "tail from 2"
+    );
 }
 
 #[tokio::test]
@@ -736,7 +1161,11 @@ async fn keyring_put_requires_privilege() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let viewer = Uuid::new_v4();
@@ -744,12 +1173,30 @@ async fn keyring_put_requires_privilege() {
     let genesis = build_keyring(tree, 1, vec![], &founder, owner, &[(viewer, 5)]);
 
     // A non-owner non-member can't establish the keyring.
-    assert_eq!(send(&app, put_keyring_as(tree, &genesis, stranger)).await.0, StatusCode::FORBIDDEN, "stranger can't PUT genesis");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &genesis, stranger)).await.0,
+        StatusCode::FORBIDDEN,
+        "stranger can't PUT genesis"
+    );
     // Owner establishes it.
-    assert_eq!(send(&app, put_keyring_as(tree, &genesis, owner)).await.0, StatusCode::OK);
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &genesis, owner)).await.0,
+        StatusCode::OK
+    );
     // The derived viewer lacks Administer → can't PUT a successor (refused before any crypto).
-    let rev2 = build_keyring(tree, 2, keyring_hash(&genesis).to_vec(), &founder, owner, &[(viewer, 5)]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev2, viewer)).await.0, StatusCode::FORBIDDEN, "viewer can't PUT a keyring");
+    let rev2 = build_keyring(
+        tree,
+        2,
+        keyring_hash(&genesis).to_vec(),
+        &founder,
+        owner,
+        &[(viewer, 5)],
+    );
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev2, viewer)).await.0,
+        StatusCode::FORBIDDEN,
+        "viewer can't PUT a keyring"
+    );
 }
 
 #[tokio::test]
@@ -763,27 +1210,58 @@ async fn keyring_accepts_a_recovery_reset() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder_a = generate_identity().unwrap();
     let rev1 = build_keyring(tree, 1, vec![], &founder_a, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev1, owner)).await.0, StatusCode::OK, "genesis");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev1, owner)).await.0,
+        StatusCode::OK,
+        "genesis"
+    );
 
     // Recovery: a fresh founder identity, chaining onto rev1 by hash at revision 2.
     let founder_b = generate_identity().unwrap();
-    let reset = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder_b, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &reset, owner)).await.0, StatusCode::OK, "recovery reset accepted");
-    assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner ACL preserved across the reset");
+    let reset = build_keyring(
+        tree,
+        2,
+        keyring_hash(&rev1).to_vec(),
+        &founder_b,
+        owner,
+        &[],
+    );
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &reset, owner)).await.0,
+        StatusCode::OK,
+        "recovery reset accepted"
+    );
+    assert_eq!(
+        role_of(&db, tree, owner).await,
+        Some(1),
+        "owner ACL preserved across the reset"
+    );
 
     // GET flags the reset revision (a UX hint for the OOB re-verify prompt).
     let (_, _, b) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
-    assert_eq!(h["revisions"][0]["is_reset"].as_bool().unwrap(), true, "revision 2 is flagged a reset");
+    assert_eq!(
+        h["revisions"][0]["is_reset"].as_bool().unwrap(),
+        true,
+        "revision 2 is flagged a reset"
+    );
 
     // A plain fork (wrong prev_hash) is NOT a reset — still refused.
     let forked = build_keyring(tree, 3, vec![0u8; 32], &founder_b, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &forked, owner)).await.0, StatusCode::CONFLICT, "a fork is not a reset");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &forked, owner)).await.0,
+        StatusCode::CONFLICT,
+        "a fork is not a reset"
+    );
 }
 
 #[tokio::test]
@@ -795,7 +1273,11 @@ async fn keyring_reset_rate_capped() {
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let fa = generate_identity().unwrap();
     let rev1 = build_keyring(tree, 1, vec![], &fa, owner, &[]);
@@ -803,12 +1285,20 @@ async fn keyring_reset_rate_capped() {
 
     let fb = generate_identity().unwrap();
     let reset2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &fb, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &reset2, owner)).await.0, StatusCode::OK, "first reset");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &reset2, owner)).await.0,
+        StatusCode::OK,
+        "first reset"
+    );
 
     // A second reset immediately after → within the cooldown → 429.
     let fc = generate_identity().unwrap();
     let reset3 = build_keyring(tree, 3, keyring_hash(&reset2).to_vec(), &fc, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &reset3, owner)).await.0, StatusCode::TOO_MANY_REQUESTS, "reset cooldown");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &reset3, owner)).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "reset cooldown"
+    );
 }
 
 #[tokio::test]
@@ -822,7 +1312,11 @@ async fn keyring_removal_purges_and_access_list() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     let founder = generate_identity().unwrap();
     let m = Uuid::new_v4();
@@ -830,26 +1324,96 @@ async fn keyring_removal_purges_and_access_list() {
     send(&app, put_keyring_as(tree, &rev1, owner)).await;
 
     // m leaves a footprint: a proposal + a delta (which creates their rate bucket).
-    send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &proposal_envelope(tree, b"p"), m)).await;
-    send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"c", b"replica-m0000000", 0), m)).await;
-    let props: i64 = sqlx::query_scalar("SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
-    let rate: i64 = sqlx::query_scalar("SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
-    assert_eq!((props, rate), (1, 1), "m has a proposal + a rate bucket before removal");
+    send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/proposals"),
+            &proposal_envelope(tree, b"p"),
+            m,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"c", b"replica-m0000000", 0),
+            m,
+        ),
+    )
+    .await;
+    let props: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2",
+    )
+    .bind(tree)
+    .bind(m)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let rate: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2",
+    )
+    .bind(tree)
+    .bind(m)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        (props, rate),
+        (1, 1),
+        "m has a proposal + a rate bucket before removal"
+    );
 
     // The access list shows both members.
     let (_, _, ab) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&ab).unwrap()["members"].as_array().unwrap().len(), 2, "owner + m");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&ab).unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "owner + m"
+    );
 
     // rev2 removes m.
     let rev2 = build_keyring(tree, 2, keyring_hash(&rev1).to_vec(), &founder, owner, &[]);
-    assert_eq!(send(&app, put_keyring_as(tree, &rev2, owner)).await.0, StatusCode::OK, "remove m");
+    assert_eq!(
+        send(&app, put_keyring_as(tree, &rev2, owner)).await.0,
+        StatusCode::OK,
+        "remove m"
+    );
 
     assert_eq!(role_of(&db, tree, m).await, None, "ACL row gone");
-    let props: i64 = sqlx::query_scalar("SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
-    let rate: i64 = sqlx::query_scalar("SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2").bind(tree).bind(m).fetch_one(&db).await.unwrap();
-    assert_eq!((props, rate), (0, 0), "m's proposal + rate bucket reclaimed on removal");
+    let props: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM proposals WHERE tree_id = $1 AND proposer_member_id = $2",
+    )
+    .bind(tree)
+    .bind(m)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let rate: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM member_rate WHERE tree_id = $1 AND member_id = $2",
+    )
+    .bind(tree)
+    .bind(m)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        (props, rate),
+        (0, 0),
+        "m's proposal + rate bucket reclaimed on removal"
+    );
     let (_, _, ab2) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&ab2).unwrap()["members"].as_array().unwrap().len(), 1, "only owner remains");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&ab2).unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "only owner remains"
+    );
 }
 
 #[tokio::test]
@@ -863,13 +1427,24 @@ async fn proposals_lifecycle() {
     set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
 
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
     // Submit a proposal.
     let prop = proposal_envelope(tree, b"suggested-edit-bundle");
-    let (s, _, body) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, owner)).await;
+    let (s, _, body) = send(
+        &app,
+        post_bytes_as(format!("/trees/{tree}/proposals"), &prop, owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "submit proposal");
-    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // List it back — payload round-trips the exact sealed bytes, attributed to the proposer.
     let (s, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
@@ -881,31 +1456,57 @@ async fn proposals_lifecycle() {
         .decode(items[0]["payload"].as_str().unwrap())
         .unwrap();
     assert_eq!(payload, prop, "proposal payload round-trips");
-    assert!(!items[0]["proposer"].as_str().unwrap().is_empty(), "attributed to a member");
+    assert!(
+        !items[0]["proposer"].as_str().unwrap().is_empty(),
+        "attributed to a member"
+    );
 
     // A non-owner can neither list nor submit (the authz seam) — V1 owner-only.
     let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/proposals"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot list proposals");
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &prop, other)).await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(format!("/trees/{tree}/proposals"), &prop, other),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot propose");
 
     // Resolve (delete) it → gone from the open list; deleting again is idempotent.
-    let (s, _, _) = send(&app, delete_as(format!("/trees/{tree}/proposals/{id}"), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        delete_as(format!("/trees/{tree}/proposals/{id}"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "delete proposal");
     let (s, _, lb2) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
-        serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"].as_array().unwrap().len(),
+        serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"]
+            .as_array()
+            .unwrap()
+            .len(),
         0,
         "no open proposals after resolve"
     );
-    let (s, _, _) = send(&app, delete_as(format!("/trees/{tree}/proposals/{id}"), owner)).await;
+    let (s, _, _) = send(
+        &app,
+        delete_as(format!("/trees/{tree}/proposals/{id}"), owner),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "delete is idempotent");
 
     // The security property: a proposal must be refused on the delta-log path, so a hostile server
     // can never replay an editor's proposal into the authoritative tree history.
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &prop, owner)).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "KIND_PROPOSAL refused on the log path");
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(format!("/trees/{tree}/log"), &prop, owner),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "KIND_PROPOSAL refused on the log path"
+    );
 }
 
 #[tokio::test]
@@ -918,27 +1519,78 @@ async fn proposals_caps() {
     let free = Uuid::new_v4();
     seed_account(&db, free, 1 << 30, 1000.0, 1000).await; // proposal meters left at 0
     let t_free = Uuid::new_v4();
-    send(&app, put_tree_as(t_free, &snapshot_envelope(t_free, b"ct", None), free)).await;
-    let (s, _, _) = send(
+    send(
         &app,
-        post_bytes_as(format!("/trees/{t_free}/proposals"), &proposal_envelope(t_free, b"x"), free),
+        put_tree_as(t_free, &snapshot_envelope(t_free, b"ct", None), free),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "proposals disabled on the free tier");
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_free}/proposals"),
+            &proposal_envelope(t_free, b"x"),
+            free,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "proposals disabled on the free tier"
+    );
 
     // (2) Open-per-tree cap of 1: second concurrent proposal → 403; frees up after a delete.
     let cap = Uuid::new_v4();
     seed_account(&db, cap, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, cap, 1 << 20, 1, 50).await;
     let t_cap = Uuid::new_v4();
-    send(&app, put_tree_as(t_cap, &snapshot_envelope(t_cap, b"ct", None), cap)).await;
-    let (s, _, b1) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p1"), cap)).await;
+    send(
+        &app,
+        put_tree_as(t_cap, &snapshot_envelope(t_cap, b"ct", None), cap),
+    )
+    .await;
+    let (s, _, b1) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_cap}/proposals"),
+            &proposal_envelope(t_cap, b"p1"),
+            cap,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "first proposal fits");
-    let id1 = serde_json::from_slice::<Value>(&b1).unwrap()["id"].as_str().unwrap().to_string();
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p2"), cap)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "second exceeds the open-per-tree cap");
-    send(&app, delete_as(format!("/trees/{t_cap}/proposals/{id1}"), cap)).await;
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_cap}/proposals"), &proposal_envelope(t_cap, b"p3"), cap)).await;
+    let id1 = serde_json::from_slice::<Value>(&b1).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_cap}/proposals"),
+            &proposal_envelope(t_cap, b"p2"),
+            cap,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "second exceeds the open-per-tree cap"
+    );
+    send(
+        &app,
+        delete_as(format!("/trees/{t_cap}/proposals/{id1}"), cap),
+    )
+    .await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_cap}/proposals"),
+            &proposal_envelope(t_cap, b"p3"),
+            cap,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "a slot freed up after resolving one");
 
     // (3) Per-member/day cap of 1 backed by the ledger: survives delete-then-resubmit.
@@ -946,13 +1598,44 @@ async fn proposals_caps() {
     seed_account(&db, day, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, day, 1 << 20, 50, 1).await;
     let t_day = Uuid::new_v4();
-    send(&app, put_tree_as(t_day, &snapshot_envelope(t_day, b"ct", None), day)).await;
-    let (s, _, bd) = send(&app, post_bytes_as(format!("/trees/{t_day}/proposals"), &proposal_envelope(t_day, b"d1"), day)).await;
+    send(
+        &app,
+        put_tree_as(t_day, &snapshot_envelope(t_day, b"ct", None), day),
+    )
+    .await;
+    let (s, _, bd) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_day}/proposals"),
+            &proposal_envelope(t_day, b"d1"),
+            day,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "first submission of the day");
-    let idd = serde_json::from_slice::<Value>(&bd).unwrap()["id"].as_str().unwrap().to_string();
-    send(&app, delete_as(format!("/trees/{t_day}/proposals/{idd}"), day)).await; // resolve it
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{t_day}/proposals"), &proposal_envelope(t_day, b"d2"), day)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "daily cap counts submissions, not open rows");
+    let idd = serde_json::from_slice::<Value>(&bd).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    send(
+        &app,
+        delete_as(format!("/trees/{t_day}/proposals/{idd}"), day),
+    )
+    .await; // resolve it
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{t_day}/proposals"),
+            &proposal_envelope(t_day, b"d2"),
+            day,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "daily cap counts submissions, not open rows"
+    );
 }
 
 #[tokio::test]
@@ -964,10 +1647,25 @@ async fn proposals_ttl_swept() {
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     set_proposal_meters(&db, owner, 1 << 20, 50, 50).await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
 
-    let (_, _, body) = send(&app, post_bytes_as(format!("/trees/{tree}/proposals"), &proposal_envelope(tree, b"stale"), owner)).await;
-    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"].as_str().unwrap().to_string();
+    let (_, _, body) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/proposals"),
+            &proposal_envelope(tree, b"stale"),
+            owner,
+        ),
+    )
+    .await;
+    let id = serde_json::from_slice::<Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // Backdate its TTL so it's expired, then run the sweep.
     sqlx::query("UPDATE proposals SET expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
         .bind(&id)
@@ -976,14 +1674,41 @@ async fn proposals_ttl_swept() {
         .unwrap();
     // Already invisible to reads before the physical sweep.
     let (_, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&lb).unwrap()["proposals"].as_array().unwrap().len(), 0, "expired hidden from reads");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&lb).unwrap()["proposals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "expired hidden from reads"
+    );
     // The sweep physically reclaims it.
     let (s, _, gb) = send(&app, post("/dev/gc".to_string())).await;
     assert_eq!(s, StatusCode::OK, "run dev gc");
-    assert!(serde_json::from_slice::<Value>(&gb).unwrap()["proposals_expired"].as_u64().unwrap() >= 1, "swept ≥1 expired proposal");
+    assert!(
+        serde_json::from_slice::<Value>(&gb).unwrap()["proposals_expired"]
+            .as_u64()
+            .unwrap()
+            >= 1,
+        "swept ≥1 expired proposal"
+    );
     // Gone even when explicitly asking for expired ones.
-    let (_, _, lb2) = send(&app, get_as(format!("/trees/{tree}/proposals?include_expired=true"), owner)).await;
-    assert_eq!(serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"].as_array().unwrap().len(), 0, "physically gone");
+    let (_, _, lb2) = send(
+        &app,
+        get_as(
+            format!("/trees/{tree}/proposals?include_expired=true"),
+            owner,
+        ),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0,
+        "physically gone"
+    );
 }
 
 #[tokio::test]
@@ -997,21 +1722,49 @@ async fn log_rate_limit_429() {
     seed_account(&db, member, 1 << 30, 0.001, 1).await;
 
     let tree = Uuid::new_v4();
-    let (s, _, _) = send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member)).await;
+    let (s, _, _) = send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "create tree as the throttled member");
 
     let ra = b"replica-rate0000".to_vec();
     // First new append spends the single token.
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d0", &ra, 0),
+            member,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "first append within rate");
 
     // Second new append: bucket empty → 429 with a Retry-After hint.
-    let (s, h, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d1", &ra, 1), member)).await;
+    let (s, h, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d1", &ra, 1),
+            member,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "second append over rate");
     assert!(h.get("retry-after").is_some(), "429 carries Retry-After");
 
     // A re-delivery of the already-appended d0 is NOT metered — idempotent success even while throttled.
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d0", &ra, 0),
+            member,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "re-delivery bypasses the rate gate");
 
     // Only d0 actually landed — the throttled append never persisted.
@@ -1023,7 +1776,11 @@ async fn log_rate_limit_429() {
     let (s, _, tb) = send(&app, read).await;
     assert_eq!(s, StatusCode::OK);
     let tail: Value = serde_json::from_slice(&tb).unwrap();
-    assert_eq!(tail["entries"].as_array().unwrap().len(), 1, "throttled append never persisted");
+    assert_eq!(
+        tail["entries"].as_array().unwrap().len(),
+        1,
+        "throttled append never persisted"
+    );
 }
 
 #[tokio::test]
@@ -1036,10 +1793,22 @@ async fn log_capacity_403() {
     seed_account(&db, member, 1 << 30, 1000.0, 1000).await;
 
     let tree = Uuid::new_v4();
-    send(&app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member)).await;
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), member),
+    )
+    .await;
 
     let ra = b"replica-cap00000".to_vec();
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d0", &ra, 0), member)).await;
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d0", &ra, 0),
+            member,
+        ),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "first append within capacity");
 
     // Pin max_tree_bytes to exactly what's now used → the reserve is full.
@@ -1057,8 +1826,20 @@ async fn log_capacity_403() {
         .unwrap();
 
     // Next new append would overflow the reserve → 403 (a plan limit, not a transient throttle).
-    let (s, _, _) = send(&app, post_bytes_as(format!("/trees/{tree}/log"), &delta_envelope(tree, b"d1", &ra, 1), member)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "append over the tree-byte reserve");
+    let (s, _, _) = send(
+        &app,
+        post_bytes_as(
+            format!("/trees/{tree}/log"),
+            &delta_envelope(tree, b"d1", &ra, 1),
+            member,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "append over the tree-byte reserve"
+    );
 
     // The rejected append charged nothing (rolled back).
     let after: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
@@ -1074,7 +1855,11 @@ async fn log_capacity_403() {
 async fn media_lifecycle_and_gc() {
     let app = router().await;
     let tree = Uuid::new_v4();
-    send(&app, put_tree(tree, &snapshot_envelope(tree, b"ct", None), None)).await;
+    send(
+        &app,
+        put_tree(tree, &snapshot_envelope(tree, b"ct", None), None),
+    )
+    .await;
 
     // Intent → presigned staging PUT → confirm.
     let media = b"openom fake encrypted media blob".to_vec();
@@ -1088,12 +1873,17 @@ async fn media_lifecycle_and_gc() {
     let blob = j["blob_id"].as_str().unwrap().to_string();
 
     let client = reqwest::Client::new();
-    let mut put = client.put(j["upload_url"].as_str().unwrap()).body(media.clone());
+    let mut put = client
+        .put(j["upload_url"].as_str().unwrap())
+        .body(media.clone());
     for pair in j["required_headers"].as_array().unwrap() {
         let kv = pair.as_array().unwrap();
         put = put.header(kv[0].as_str().unwrap(), kv[1].as_str().unwrap().to_string());
     }
-    assert!(put.send().await.unwrap().status().is_success(), "presigned PUT");
+    assert!(
+        put.send().await.unwrap().status().is_success(),
+        "presigned PUT"
+    );
 
     let (s, _, cbody) = send(&app, post(format!("/trees/{tree}/media/{blob}/confirm"))).await;
     assert_eq!(s, StatusCode::OK, "confirm");
@@ -1104,14 +1894,24 @@ async fn media_lifecycle_and_gc() {
     let (s, _, gbody) = send(&app, get(format!("/trees/{tree}/media/{blob}"))).await;
     assert_eq!(s, StatusCode::OK, "get media");
     let gj: Value = serde_json::from_slice(&gbody).unwrap();
-    let dl = reqwest::get(gj["download_url"].as_str().unwrap()).await.unwrap();
-    assert_eq!(dl.bytes().await.unwrap().as_ref(), media.as_slice(), "download round-trip");
+    let dl = reqwest::get(gj["download_url"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        dl.bytes().await.unwrap().as_ref(),
+        media.as_slice(),
+        "download round-trip"
+    );
 
     // attach → detach-to-zero → tombstone → sweep physically deletes → 404.
     send(&app, post(format!("/trees/{tree}/media/{blob}/attach"))).await;
     let (_, _, dbody) = send(&app, post(format!("/trees/{tree}/media/{blob}/detach"))).await;
     let dj: Value = serde_json::from_slice(&dbody).unwrap();
-    assert_eq!(dj["state"].as_str().unwrap(), "tombstoned", "detach-to-zero tombstones");
+    assert_eq!(
+        dj["state"].as_str().unwrap(),
+        "tombstoned",
+        "detach-to-zero tombstones"
+    );
 
     let (s, _, sbody) = send(
         &app,
@@ -1120,7 +1920,10 @@ async fn media_lifecycle_and_gc() {
     .await;
     assert_eq!(s, StatusCode::OK, "sweep");
     let sj: Value = serde_json::from_slice(&sbody).unwrap();
-    assert!(sj["physically_deleted"].as_u64().unwrap() >= 1, "swept the tombstone");
+    assert!(
+        sj["physically_deleted"].as_u64().unwrap() >= 1,
+        "swept the tombstone"
+    );
 
     let (s, _, _) = send(&app, get(format!("/trees/{tree}/media/{blob}"))).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "gone after sweep");

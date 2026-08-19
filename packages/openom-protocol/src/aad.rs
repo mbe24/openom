@@ -255,7 +255,13 @@ mod tests {
     #[test]
     fn matches_documented_layout() {
         let mut want = Vec::new();
-        for v in [1u32 /*version*/, 1 /*kind*/, 1 /*format*/, 2 /*aead*/, 1 /*compression*/] {
+        for v in [
+            1u32, /*version*/
+            1,    /*kind*/
+            1,    /*format*/
+            2,    /*aead*/
+            1,    /*compression*/
+        ] {
             want.extend_from_slice(&v.to_be_bytes());
         }
         let framed = |want: &mut Vec<u8>, b: &[u8]| {
@@ -267,7 +273,7 @@ mod tests {
         framed(&mut want, &[0x11; 16]); // tree_id
         framed(&mut want, &[0x22; 4]); // replica_id
         want.extend_from_slice(&5u64.to_be_bytes()); // replica_counter
-        // ciphertext_hash is excluded from the AAD (circular + redundant).
+                                                     // ciphertext_hash is excluded from the AAD (circular + redundant).
         framed(&mut want, &[]); // prev_ciphertext_hash
         want.extend_from_slice(&0u64.to_be_bytes()); // covers_through_seq
         framed(&mut want, &[]); // replaces_ciphertext_hash
@@ -337,20 +343,26 @@ mod tests {
             w.extend_from_slice(b);
         };
         framed(&mut want, b"openom:author:v1");
-        for v in [1u32 /*version*/, Kind::Delta as u32, 1 /*format*/, 2 /*aead*/, Compression::None as u32] {
+        for v in [
+            1u32, /*version*/
+            Kind::Delta as u32,
+            1, /*format*/
+            2, /*aead*/
+            Compression::None as u32,
+        ] {
             want.extend_from_slice(&v.to_be_bytes());
         }
         framed(&mut want, &[0xAA, 0xBB]); // key_id
-        // nonce EXCLUDED (minted at seal)
+                                          // nonce EXCLUDED (minted at seal)
         framed(&mut want, &[0x11; 16]); // tree_id
         framed(&mut want, &[0x22; 4]); // replica_id
         want.extend_from_slice(&5u64.to_be_bytes()); // replica_counter
-        // ciphertext_hash EXCLUDED (circular)
+                                                     // ciphertext_hash EXCLUDED (circular)
         framed(&mut want, &[]); // prev_ciphertext_hash
         want.extend_from_slice(&0u64.to_be_bytes()); // covers_through_seq
         framed(&mut want, &[]); // replaces_ciphertext_hash
         framed(&mut want, &[]); // blob_id
-        // author_signature EXCLUDED (self)
+                                // author_signature EXCLUDED (self)
         framed(&mut want, b"member-1"); // author_member_id
         want.extend_from_slice(&3u32.to_be_bytes()); // keyring_revision
         framed(&mut want, &hash); // SHA-256(plaintext)
@@ -371,7 +383,11 @@ mod tests {
         ] {
             let mut m = h.clone();
             mutate(&mut m);
-            assert_eq!(author_signing_bytes(1, &m, &hash), base, "seal-derived field must not affect signing bytes");
+            assert_eq!(
+                author_signing_bytes(1, &m, &hash),
+                base,
+                "seal-derived field must not affect signing bytes"
+            );
         }
     }
 
@@ -382,16 +398,32 @@ mod tests {
         let h = attributed();
         let hash = [0x44u8; 32];
         let base = author_signing_bytes(1, &h, &hash);
-        assert_ne!(author_signing_bytes(1, &h, &[0x55; 32]), base, "plaintext hash bound");
+        assert_ne!(
+            author_signing_bytes(1, &h, &[0x55; 32]),
+            base,
+            "plaintext hash bound"
+        );
         let mut a = h.clone();
         a.author_member_id = "member-2".into();
-        assert_ne!(author_signing_bytes(1, &a, &hash), base, "author_member_id bound");
+        assert_ne!(
+            author_signing_bytes(1, &a, &hash),
+            base,
+            "author_member_id bound"
+        );
         let mut r = h.clone();
         r.keyring_revision = 4;
-        assert_ne!(author_signing_bytes(1, &r, &hash), base, "keyring_revision bound");
+        assert_ne!(
+            author_signing_bytes(1, &r, &hash),
+            base,
+            "keyring_revision bound"
+        );
         let mut k = h.clone();
         k.kind = Kind::Proposal as i32;
-        assert_ne!(author_signing_bytes(1, &k, &hash), base, "kind bound (no re-seal a proposal as a delta)");
+        assert_ne!(
+            author_signing_bytes(1, &k, &hash),
+            base,
+            "kind bound (no re-seal a proposal as a delta)"
+        );
     }
 
     /// Domain-separated from every other signed/authenticated byte string, so a signature can't be
@@ -420,7 +452,10 @@ mod tests {
     #[test]
     fn wrap_aad_is_disjoint_from_header_aad() {
         // The domain tag prevents a header AAD from ever colliding with a wrap AAD.
-        assert_ne!(wrap_aad(b"", b"", "", 0, 0), header_aad(0, &Header::default()));
+        assert_ne!(
+            wrap_aad(b"", b"", "", 0, 0),
+            header_aad(0, &Header::default())
+        );
     }
 
     #[test]
@@ -443,7 +478,10 @@ mod tests {
                 hpke_public_key: vec![],
             }],
             // must NOT affect the signed bytes
-            signatures: vec![KeyringSignature { signer_public_key: vec![0xAB; 32], signature: vec![0xFF; 64] }],
+            signatures: vec![KeyringSignature {
+                signer_public_key: vec![0xAB; 32],
+                signature: vec![0xFF; 64],
+            }],
             recovery_keys: vec![],
             epochs: vec![KeyEpoch {
                 key_id: vec![1, 2, 3],
@@ -465,31 +503,63 @@ mod tests {
         };
         let a = keyring_signing_bytes(&kr);
         kr.signatures[0].signature = vec![0x00; 64];
-        kr.signatures.push(KeyringSignature { signer_public_key: vec![1; 32], signature: vec![2; 64] });
-        assert_eq!(a, keyring_signing_bytes(&kr), "signatures are excluded from signed bytes");
+        kr.signatures.push(KeyringSignature {
+            signer_public_key: vec![1; 32],
+            signature: vec![2; 64],
+        });
+        assert_eq!(
+            a,
+            keyring_signing_bytes(&kr),
+            "signatures are excluded from signed bytes"
+        );
         kr.revision = 2;
-        assert_ne!(a, keyring_signing_bytes(&kr), "revision is covered (anti-rollback)");
+        assert_ne!(
+            a,
+            keyring_signing_bytes(&kr),
+            "revision is covered (anti-rollback)"
+        );
 
         // The signer set, the member/role manifest, and the history-chain link are covered.
         let mut set_change = kr.clone();
         set_change.revision = 1;
         set_change.authorized_signers[0].role = 2; // FOUNDER -> CO_OWNER
-        assert_ne!(a, keyring_signing_bytes(&set_change), "authorized_signers are covered");
+        assert_ne!(
+            a,
+            keyring_signing_bytes(&set_change),
+            "authorized_signers are covered"
+        );
         let mut role_change = kr.clone();
         role_change.revision = 1;
         role_change.members[0].role = 4; // OWNER -> EDITOR
-        assert_ne!(a, keyring_signing_bytes(&role_change), "members are covered");
+        assert_ne!(
+            a,
+            keyring_signing_bytes(&role_change),
+            "members are covered"
+        );
         let mut chained = kr.clone();
         chained.revision = 1;
         chained.prev_keyring_hash = vec![0x77; 32];
-        assert_ne!(a, keyring_signing_bytes(&chained), "prev_keyring_hash is covered");
+        assert_ne!(
+            a,
+            keyring_signing_bytes(&chained),
+            "prev_keyring_hash is covered"
+        );
     }
 
     #[test]
     fn keyring_signing_bytes_layout_version_disjoint() {
-        let mut kr = Keyring { tree_id: vec![1; 16], revision: 1, layout_version: 1, ..Default::default() };
+        let mut kr = Keyring {
+            tree_id: vec![1; 16],
+            revision: 1,
+            layout_version: 1,
+            ..Default::default()
+        };
         let v1 = keyring_signing_bytes(&kr);
         kr.layout_version = 2;
-        assert_ne!(v1, keyring_signing_bytes(&kr), "layout_version must make signing bytes disjoint");
+        assert_ne!(
+            v1,
+            keyring_signing_bytes(&kr),
+            "layout_version must make signing bytes disjoint"
+        );
     }
 }

@@ -43,16 +43,28 @@ pub struct AppendArgs {
 }
 
 #[tauri::command]
-fn store_read(state: State<'_, AppStore>, doc: String, since: Option<u64>) -> Result<ReadResult, String> {
+fn store_read(
+    state: State<'_, AppStore>,
+    doc: String,
+    since: Option<u64>,
+) -> Result<ReadResult, String> {
     let s = &state.0;
     let snapshot = s.read_snapshot(&doc).map_err(|e| e.to_string())?;
     let (updates, cursor) = s.read_updates(&doc, since).map_err(|e| e.to_string())?;
-    Ok(ReadResult { snapshot, updates, cursor, caps: s.caps() })
+    Ok(ReadResult {
+        snapshot,
+        updates,
+        cursor,
+        caps: s.caps(),
+    })
 }
 
 #[tauri::command]
 fn store_append(state: State<'_, AppStore>, args: AppendArgs) -> Result<u64, String> {
-    state.0.append(&args.doc, &args.updates).map_err(|e| e.to_string())
+    state
+        .0
+        .append(&args.doc, &args.updates)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -62,7 +74,10 @@ fn store_put_snapshot(
     bytes: Vec<u8>,
     expected: Option<String>,
 ) -> Result<String, String> {
-    state.0.put_snapshot(&doc, &bytes, expected.as_deref()).map_err(|e| e.to_string())
+    state
+        .0
+        .put_snapshot(&doc, &bytes, expected.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -95,9 +110,11 @@ async fn vault_provision(
     member_id: String,
 ) -> Result<Provisioned, VaultError> {
     let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || host.provision(&tree_key, &tree_id, passphrase, &member_id))
-        .await
-        .map_err(join_err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        host.provision(&tree_key, &tree_id, passphrase, &member_id)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 #[tauri::command]
@@ -109,9 +126,11 @@ async fn vault_unlock(
     member_id: String,
 ) -> Result<Unlocked, VaultError> {
     let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || host.unlock(&tree_key, &tree_id, passphrase, &member_id))
-        .await
-        .map_err(join_err)?
+    tauri::async_runtime::spawn_blocking(move || {
+        host.unlock(&tree_key, &tree_id, passphrase, &member_id)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 #[tauri::command]
@@ -125,7 +144,13 @@ async fn vault_recover(
 ) -> Result<Recovered, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.recover(&tree_key, &tree_id, recovery_code, new_passphrase, &member_id)
+        host.recover(
+            &tree_key,
+            &tree_id,
+            recovery_code,
+            new_passphrase,
+            &member_id,
+        )
     })
     .await
     .map_err(join_err)?
@@ -142,7 +167,13 @@ async fn vault_change_passphrase(
 ) -> Result<Rekeyed, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.change_passphrase(&tree_key, &tree_id, old_passphrase, new_passphrase, &member_id)
+        host.change_passphrase(
+            &tree_key,
+            &tree_id,
+            old_passphrase,
+            new_passphrase,
+            &member_id,
+        )
     })
     .await
     .map_err(join_err)?
@@ -203,7 +234,14 @@ async fn vault_unlock_as_member(
 ) -> Result<Unlocked, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.unlock_as_member(&tree_key, &tree_id, passphrase, &member_kdf_params, &member_id, trusted_signers)
+        host.unlock_as_member(
+            &tree_key,
+            &tree_id,
+            passphrase,
+            &member_kdf_params,
+            &member_id,
+            trusted_signers,
+        )
     })
     .await
     .map_err(join_err)?
@@ -220,7 +258,13 @@ async fn vault_remove_member(
 ) -> Result<MemberRemoved, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member(&tree_key, &tree_id, owner_passphrase, &owner_member_id, &remove_member_id)
+        host.remove_member(
+            &tree_key,
+            &tree_id,
+            owner_passphrase,
+            &owner_member_id,
+            &remove_member_id,
+        )
     })
     .await
     .map_err(join_err)?
@@ -273,7 +317,15 @@ async fn vault_remove_member_as_co_owner(
 ) -> Result<MemberRemoved, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member_as_co_owner(&tree_key, &tree_id, passphrase, &co_owner_kdf_params, &co_owner_member_id, trusted_signers, &remove_member_id)
+        host.remove_member_as_co_owner(
+            &tree_key,
+            &tree_id,
+            passphrase,
+            &co_owner_kdf_params,
+            &co_owner_member_id,
+            trusted_signers,
+            &remove_member_id,
+        )
     })
     .await
     .map_err(join_err)?
@@ -290,7 +342,13 @@ async fn vault_add_co_owner(
 ) -> Result<CoOwnerChanged, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.add_co_owner(&tree_key, &tree_id, founder_passphrase, &founder_member_id, &target_member_id)
+        host.add_co_owner(
+            &tree_key,
+            &tree_id,
+            founder_passphrase,
+            &founder_member_id,
+            &target_member_id,
+        )
     })
     .await
     .map_err(join_err)?
@@ -308,7 +366,14 @@ async fn vault_remove_co_owner(
 ) -> Result<CoOwnerChanged, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.remove_co_owner(&tree_key, &tree_id, founder_passphrase, &founder_member_id, &target_member_id, &new_role)
+        host.remove_co_owner(
+            &tree_key,
+            &tree_id,
+            founder_passphrase,
+            &founder_member_id,
+            &target_member_id,
+            &new_role,
+        )
     })
     .await
     .map_err(join_err)?
@@ -361,7 +426,12 @@ fn sealer_seal_entry(
 }
 
 #[tauri::command]
-fn sealer_open_entry(state: State<'_, Vault>, sealer_id: String, kind: String, envelope: Vec<u8>) -> Result<Vec<u8>, VaultError> {
+fn sealer_open_entry(
+    state: State<'_, Vault>,
+    sealer_id: String,
+    kind: String,
+    envelope: Vec<u8>,
+) -> Result<Vec<u8>, VaultError> {
     state.open_entry(&sealer_id, &kind, &envelope)
 }
 

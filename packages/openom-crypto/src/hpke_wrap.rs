@@ -54,7 +54,9 @@ impl rand_core::RngCore for OsCsprng {
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
         getrandom::fill(dest).map_err(|_| {
             // rand_core 0.6 wants a NonZeroU32 error code; CUSTOM_START is non-zero.
-            rand_core::Error::from(core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap())
+            rand_core::Error::from(
+                core::num::NonZeroU32::new(rand_core::Error::CUSTOM_START).unwrap(),
+            )
         })
     }
 }
@@ -81,7 +83,8 @@ pub fn derive_hpke_keypair(ikm: &[u8; 32]) -> ([u8; HPKE_SECRET_LEN], [u8; HPKE_
 
 /// Generate a fresh random X25519 HPKE keypair — for a per-tree escrow key (the recovery
 /// root key) that is NOT derived from any passphrase. Returns `(secret, public)`.
-pub fn generate_hpke_keypair() -> Result<([u8; HPKE_SECRET_LEN], [u8; HPKE_PUBLIC_LEN]), CryptoError> {
+pub fn generate_hpke_keypair() -> Result<([u8; HPKE_SECRET_LEN], [u8; HPKE_PUBLIC_LEN]), CryptoError>
+{
     let mut ikm = [0u8; 32];
     getrandom::fill(&mut ikm).map_err(|e| CryptoError::Rng(e.to_string()))?;
     let out = derive_hpke_keypair(&ikm);
@@ -91,14 +94,27 @@ pub fn generate_hpke_keypair() -> Result<([u8; HPKE_SECRET_LEN], [u8; HPKE_PUBLI
 
 /// Seal `dek` to a member's X25519 public key, binding `info` (the wrap context tuple) so
 /// the wrap can't be replayed for another member/epoch/tree.
-pub fn hpke_wrap_dek(recipient_public: &[u8], dek: &[u8], info: &[u8]) -> Result<HpkeWrap, CryptoError> {
+pub fn hpke_wrap_dek(
+    recipient_public: &[u8],
+    dek: &[u8],
+    info: &[u8],
+) -> Result<HpkeWrap, CryptoError> {
     let pk = <KemImpl as KemTrait>::PublicKey::from_bytes(recipient_public)
         .map_err(|_| CryptoError::Hpke)?;
     let mut rng = OsCsprng;
-    let (encapped, ciphertext) =
-        single_shot_seal::<AeadImpl, KdfImpl, KemImpl, _>(&OpModeS::Base, &pk, info, dek, &[], &mut rng)
-            .map_err(|_| CryptoError::Hpke)?;
-    Ok(HpkeWrap { encapped_key: encapped.to_bytes().as_slice().to_vec(), ciphertext })
+    let (encapped, ciphertext) = single_shot_seal::<AeadImpl, KdfImpl, KemImpl, _>(
+        &OpModeS::Base,
+        &pk,
+        info,
+        dek,
+        &[],
+        &mut rng,
+    )
+    .map_err(|_| CryptoError::Hpke)?;
+    Ok(HpkeWrap {
+        encapped_key: encapped.to_bytes().as_slice().to_vec(),
+        ciphertext,
+    })
 }
 
 /// Open an HPKE-wrapped DEK with the member's X25519 secret key. `info` must be the exact
@@ -177,7 +193,12 @@ mod tests {
         let (secret, public) = derive_hpke_keypair(&[7u8; 32]);
         let w = hpke_wrap_dek(&public, &dek(), INFO).unwrap();
         assert!(matches!(
-            hpke_unwrap_dek(&secret, &w.encapped_key, &w.ciphertext, b"openom:wrap:v1\x00other"),
+            hpke_unwrap_dek(
+                &secret,
+                &w.encapped_key,
+                &w.ciphertext,
+                b"openom:wrap:v1\x00other"
+            ),
             Err(CryptoError::Hpke)
         ));
     }
@@ -195,6 +216,9 @@ mod tests {
 
     #[test]
     fn a_malformed_public_key_is_rejected() {
-        assert!(matches!(hpke_wrap_dek(&[0u8; 10], &dek(), INFO), Err(CryptoError::Hpke)));
+        assert!(matches!(
+            hpke_wrap_dek(&[0u8; 10], &dek(), INFO),
+            Err(CryptoError::Hpke)
+        ));
     }
 }

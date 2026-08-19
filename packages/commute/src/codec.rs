@@ -162,7 +162,10 @@ impl<'a> Reader<'a> {
     }
 
     fn stamp(&mut self) -> Result<Stamp, DecodeError> {
-        Ok(Stamp { lamport: self.u64()?, replica: self.replica()? })
+        Ok(Stamp {
+            lamport: self.u64()?,
+            replica: self.replica()?,
+        })
     }
 
     fn value(&mut self) -> Result<Value, DecodeError> {
@@ -172,16 +175,28 @@ impl<'a> Reader<'a> {
             2 => Value::I64(self.i64()?),
             3 => Value::U64(self.u64()?),
             4 => Value::Bytes(self.len_bytes()?),
-            5 => Value::Text(String::from_utf8(self.len_bytes()?).map_err(|_| DecodeError::BadUtf8)?),
+            5 => {
+                Value::Text(String::from_utf8(self.len_bytes()?).map_err(|_| DecodeError::BadUtf8)?)
+            }
             _ => return Err(DecodeError::BadTag),
         })
     }
 
     fn intent(&mut self) -> Result<OpIntent, DecodeError> {
         Ok(match self.u8()? {
-            0 => OpIntent::SetRegister { cell: self.len_bytes()?, value: self.value()? },
-            1 => OpIntent::AddElement { cell: self.len_bytes()?, elem: self.len_bytes()?, value: self.value()? },
-            2 => OpIntent::RemoveElement { cell: self.len_bytes()?, elem: self.len_bytes()? },
+            0 => OpIntent::SetRegister {
+                cell: self.len_bytes()?,
+                value: self.value()?,
+            },
+            1 => OpIntent::AddElement {
+                cell: self.len_bytes()?,
+                elem: self.len_bytes()?,
+                value: self.value()?,
+            },
+            2 => OpIntent::RemoveElement {
+                cell: self.len_bytes()?,
+                elem: self.len_bytes()?,
+            },
             _ => return Err(DecodeError::BadTag),
         })
     }

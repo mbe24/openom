@@ -79,7 +79,11 @@ pub fn seal_envelope(
         replaces_ciphertext_hash: Vec::new(),
         author_signature: Vec::new(),
         blob_id: params.blob_id.to_vec(),
-        author_member_id: params.author.as_ref().map(|a| a.member_id.to_string()).unwrap_or_default(),
+        author_member_id: params
+            .author
+            .as_ref()
+            .map(|a| a.member_id.to_string())
+            .unwrap_or_default(),
         keyring_revision: params.author.as_ref().map_or(0, |a| a.keyring_revision),
     };
 
@@ -88,14 +92,22 @@ pub fn seal_envelope(
     // binds SHA-256(plaintext) + the attribution fields and excludes nonce/ciphertext_hash/itself, so
     // it's computable here (pre-seal).
     if let Some(author) = &params.author {
-        let msg = author_signing_bytes(params.version, &header, Sha256::digest(plaintext).as_slice());
+        let msg = author_signing_bytes(
+            params.version,
+            &header,
+            Sha256::digest(plaintext).as_slice(),
+        );
         header.author_signature = author.signing_key.sign(&msg).to_bytes().to_vec();
     }
 
     let ciphertext = seal(params.version, &header, dek, plaintext)?;
     header.ciphertext_hash = Sha256::digest(&ciphertext).to_vec();
 
-    Ok(Envelope { version: params.version, header: Some(header), ciphertext })
+    Ok(Envelope {
+        version: params.version,
+        header: Some(header),
+        ciphertext,
+    })
 }
 
 /// Open an [`Envelope`] under `dek`: check `ciphertext_hash` (the reader-side integrity
@@ -134,7 +146,8 @@ mod tests {
     #[test]
     fn round_trip_xchacha() {
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"the family tree").unwrap();
+        let env =
+            seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"the family tree").unwrap();
         let h = env.header.as_ref().unwrap();
         assert_eq!(h.nonce.len(), 24);
         assert_eq!(h.ciphertext_hash, Sha256::digest(&env.ciphertext).to_vec());
@@ -166,7 +179,11 @@ mod tests {
         let dek = generate_dek().unwrap();
         let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
         let h = env.header.unwrap();
-        assert!(h.author_signature.is_empty() && h.author_member_id.is_empty() && h.keyring_revision == 0);
+        assert!(
+            h.author_signature.is_empty()
+                && h.author_member_id.is_empty()
+                && h.keyring_revision == 0
+        );
     }
 
     #[test]
@@ -182,7 +199,10 @@ mod tests {
         let dek = generate_dek().unwrap();
         let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"payload").unwrap();
         let other = generate_dek().unwrap();
-        assert!(matches!(open_envelope(&other, &env), Err(CryptoError::Open)));
+        assert!(matches!(
+            open_envelope(&other, &env),
+            Err(CryptoError::Open)
+        ));
     }
 
     #[test]

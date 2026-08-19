@@ -115,9 +115,30 @@ pub async fn put_tree(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let outcome = match &expected {
-        None => cas_create(&state, tree_id, identity.member_id, &r2_key, &version, size, &valid).await,
+        None => {
+            cas_create(
+                &state,
+                tree_id,
+                identity.member_id,
+                &r2_key,
+                &version,
+                size,
+                &valid,
+            )
+            .await
+        }
         Some(exp) => {
-            cas_update(&state, tree_id, identity.member_id, &r2_key, &version, size, &valid, exp).await
+            cas_update(
+                &state,
+                tree_id,
+                identity.member_id,
+                &r2_key,
+                &version,
+                size,
+                &valid,
+                exp,
+            )
+            .await
         }
     };
 
@@ -148,7 +169,14 @@ pub async fn get_tree(
             .map_err(internal)?;
 
     let (owner_id, r2_key, version) = row.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner_id, identity.member_id, Access::Read).await?;
+    crate::authz::authorize(
+        &state.db,
+        tree_id,
+        owner_id,
+        identity.member_id,
+        Access::Read,
+    )
+    .await?;
     let version = version.ok_or(ApiError::NotFound)?; // row exists but no snapshot yet
 
     let bytes = state
@@ -160,7 +188,10 @@ pub async fn get_tree(
 
     Ok((
         StatusCode::OK,
-        [(ETAG, etag(&version)), (CONTENT_TYPE, "application/octet-stream".to_string())],
+        [
+            (ETAG, etag(&version)),
+            (CONTENT_TYPE, "application/octet-stream".to_string()),
+        ],
         bytes,
     )
         .into_response())
@@ -212,7 +243,10 @@ async fn cas_create(
     match existing {
         // Exists and is ours → the client should have sent If-Match.
         Some(o) if o == owner => {
-            tracing::info!(event = "snapshot_cas_conflict", reason = "exists_no_if_match");
+            tracing::info!(
+                event = "snapshot_cas_conflict",
+                reason = "exists_no_if_match"
+            );
             Err(ApiError::Conflict)
         }
         Some(_) => Err(ApiError::Forbidden),
@@ -335,9 +369,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Rate limiting carries a header, so build its response directly.
         if let ApiError::TooManyRequests(secs) = self {
-            let mut resp =
-                (StatusCode::TOO_MANY_REQUESTS, "append rate exceeded — retry after the indicated delay".to_string())
-                    .into_response();
+            let mut resp = (
+                StatusCode::TOO_MANY_REQUESTS,
+                "append rate exceeded — retry after the indicated delay".to_string(),
+            )
+                .into_response();
             if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
                 resp.headers_mut().insert(RETRY_AFTER, v);
             }
@@ -353,15 +389,21 @@ impl IntoResponse for ApiError {
             // 403 (not 402): entitlement is an authorization decision, not a payment
             // handshake. A distinct variant so it's a countable signal, not a generic
             // Forbidden (§9.9).
-            ApiError::QuotaExceeded => {
-                (StatusCode::FORBIDDEN, "account resource limit reached".to_string())
+            ApiError::QuotaExceeded => (
+                StatusCode::FORBIDDEN,
+                "account resource limit reached".to_string(),
+            ),
+            ApiError::TooManyRequests(_) => {
+                unreachable!("handled before the match (carries a header)")
             }
-            ApiError::TooManyRequests(_) => unreachable!("handled before the match (carries a header)"),
             ApiError::Gone(m) => (StatusCode::GONE, m),
             ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             ApiError::Internal(m) => {
                 tracing::error!(error = %m, "tree handler internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_string(),
+                )
             }
         };
         (status, msg).into_response()
@@ -383,7 +425,12 @@ mod tests {
             ciphertext_hash: Sha256::digest(&ciphertext).to_vec(),
             ..Default::default()
         };
-        Envelope { version: ENVELOPE_VERSION, header: Some(header), ciphertext }.encode_to_vec()
+        Envelope {
+            version: ENVELOPE_VERSION,
+            header: Some(header),
+            ciphertext,
+        }
+        .encode_to_vec()
     }
 
     #[test]

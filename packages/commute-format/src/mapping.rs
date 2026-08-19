@@ -25,7 +25,10 @@ pub enum FieldPolicy {
     Keyed { key_field: String },
     /// Like `Keyed`, but each element also carries an `order_field` used to sort the collection
     /// deterministically on export (identity from `key_field`, display order from `order_field`).
-    KeyedOrdered { key_field: String, order_field: String },
+    KeyedOrdered {
+        key_field: String,
+        order_field: String,
+    },
     /// An array of scalars → an OR-set keyed by the scalar value itself (tags, aliases). Concurrent
     /// adds/removes of distinct values converge; a repeated value in one document collapses (it's a
     /// set). The alternative for a scalar collection would be the lossy whole-list Atomic.
@@ -97,7 +100,11 @@ fn cell(field: &str) -> CellId {
 /// become arrays of their decoded elements — in element-id order, except a `KeyedOrdered` field is
 /// sorted by its declared `order_field`. `export ∘ import` round-trips modulo key ordering. The spec
 /// is consulted only for that ordering; the cell's stored shape says how to reverse everything else.
-pub fn export(doc: &commute::Doc, spec: &MappingSpec, codec: &dyn Codec) -> Result<ValueTree, MapError> {
+pub fn export(
+    doc: &commute::Doc,
+    spec: &MappingSpec,
+    codec: &dyn Codec,
+) -> Result<ValueTree, MapError> {
     let mut fields: Vec<(String, ValueTree)> = Vec::new();
     for (cell, value) in doc.register_cells() {
         let field = String::from_utf8(cell).map_err(|_| MapError::NotAnObject)?;
@@ -176,7 +183,11 @@ fn key_string(v: &ValueTree) -> Option<String> {
 
 /// Map a parsed document into unstamped op intents (Merge mode — additive only). `codec` re-encodes
 /// opaque element / atomic values as leaf bytes (round-trips against the same codec on export).
-pub fn import(doc: &ValueTree, spec: &MappingSpec, codec: &dyn Codec) -> Result<ImportPlan, MapError> {
+pub fn import(
+    doc: &ValueTree,
+    spec: &MappingSpec,
+    codec: &dyn Codec,
+) -> Result<ImportPlan, MapError> {
     import_mode(doc, spec, codec, ImportMode::Merge, None)
 }
 
@@ -200,7 +211,10 @@ pub fn import_mode(
     for (field, value) in fields {
         match spec.policy(field) {
             Some(FieldPolicy::Scalar) | None if scalar(value).is_some() => {
-                plan.intents.push(OpIntent::SetRegister { cell: cell(field), value: scalar(value).expect("checked scalar") });
+                plan.intents.push(OpIntent::SetRegister {
+                    cell: cell(field),
+                    value: scalar(value).expect("checked scalar"),
+                });
                 plan.summary.push(format!("set {field}"));
             }
             // A collection (Seq/Map) with no declared policy — refuse, never silently LWW.
@@ -208,7 +222,10 @@ pub fn import_mode(
             Some(FieldPolicy::Scalar) => return Err(MapError::ExpectedScalar(field.clone())),
             Some(FieldPolicy::Atomic) => {
                 let bytes = codec.emit(value)?;
-                plan.intents.push(OpIntent::SetRegister { cell: cell(field), value: Value::Bytes(bytes) });
+                plan.intents.push(OpIntent::SetRegister {
+                    cell: cell(field),
+                    value: Value::Bytes(bytes),
+                });
                 plan.summary.push(format!("set {field} (atomic)"));
             }
             Some(FieldPolicy::ValueIdentity) => {
@@ -217,21 +234,32 @@ pub fn import_mode(
                 };
                 let mut keys: HashSet<Vec<u8>> = HashSet::new();
                 for elem in elems {
-                    let key = key_string(elem).ok_or_else(|| MapError::BadKeyType { field: field.clone() })?;
+                    let key = key_string(elem).ok_or_else(|| MapError::BadKeyType {
+                        field: field.clone(),
+                    })?;
                     let v = scalar(elem).expect("key_string implies scalar");
                     if keys.insert(key.clone().into_bytes()) {
-                        plan.intents.push(OpIntent::AddElement { cell: cell(field), elem: key.into_bytes(), value: v });
+                        plan.intents.push(OpIntent::AddElement {
+                            cell: cell(field),
+                            elem: key.into_bytes(),
+                            value: v,
+                        });
                     }
                 }
-                plan.summary.push(format!("upsert {} value(s) in {field}", keys.len()));
+                plan.summary
+                    .push(format!("upsert {} value(s) in {field}", keys.len()));
                 present.push((field.clone(), keys));
             }
             Some(FieldPolicy::Keyed { key_field }) => {
                 let keys = keyed_elements(field, value, key_field, None, codec, &mut plan)?;
                 present.push((field.clone(), keys));
             }
-            Some(FieldPolicy::KeyedOrdered { key_field, order_field }) => {
-                let keys = keyed_elements(field, value, key_field, Some(order_field), codec, &mut plan)?;
+            Some(FieldPolicy::KeyedOrdered {
+                key_field,
+                order_field,
+            }) => {
+                let keys =
+                    keyed_elements(field, value, key_field, Some(order_field), codec, &mut plan)?;
                 present.push((field.clone(), keys));
             }
         }
@@ -243,7 +271,10 @@ pub fn import_mode(
         for (field, keys) in &present {
             for (id, _) in cur.set_elements(field.as_bytes()) {
                 if !keys.contains(id.as_slice()) {
-                    plan.intents.push(OpIntent::RemoveElement { cell: cell(field), elem: id.clone() });
+                    plan.intents.push(OpIntent::RemoveElement {
+                        cell: cell(field),
+                        elem: id.clone(),
+                    });
                     plan.summary.push(format!("retract 1 element from {field}"));
                 }
             }
@@ -272,20 +303,36 @@ fn keyed_elements(
             return Err(MapError::ElementNotAnObject(field.to_string()));
         };
         let get = |name: &str| props.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-        let key_val = get(key_field).ok_or_else(|| MapError::MissingKey { field: field.to_string(), key: key_field.to_string() })?;
-        let key = key_string(key_val).ok_or_else(|| MapError::BadKeyType { field: field.to_string() })?;
+        let key_val = get(key_field).ok_or_else(|| MapError::MissingKey {
+            field: field.to_string(),
+            key: key_field.to_string(),
+        })?;
+        let key = key_string(key_val).ok_or_else(|| MapError::BadKeyType {
+            field: field.to_string(),
+        })?;
         if let Some(of) = order_field {
             // KeyedOrdered requires the order field so the collection can be sorted on export.
             if get(of).is_none() {
-                return Err(MapError::MissingKey { field: field.to_string(), key: of.to_string() });
+                return Err(MapError::MissingKey {
+                    field: field.to_string(),
+                    key: of.to_string(),
+                });
             }
         }
         if !keys.insert(key.clone().into_bytes()) {
-            return Err(MapError::DuplicateKey { field: field.to_string(), key });
+            return Err(MapError::DuplicateKey {
+                field: field.to_string(),
+                key,
+            });
         }
         let bytes = codec.emit(elem)?;
-        plan.intents.push(OpIntent::AddElement { cell: cell(field), elem: key.into_bytes(), value: Value::Bytes(bytes) });
+        plan.intents.push(OpIntent::AddElement {
+            cell: cell(field),
+            elem: key.into_bytes(),
+            value: Value::Bytes(bytes),
+        });
     }
-    plan.summary.push(format!("upsert {} element(s) in {field}", elems.len()));
+    plan.summary
+        .push(format!("upsert {} element(s) in {field}", elems.len()));
     Ok(keys)
 }

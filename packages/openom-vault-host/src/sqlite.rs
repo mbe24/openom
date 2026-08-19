@@ -32,16 +32,22 @@ impl SqliteVaultStore {
     /// Durable, file-backed (WAL). Use the app data dir on Tauri.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch(&format!("PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"))
-            .map_err(|e| e.to_string())?;
-        Ok(Self { conn: Mutex::new(conn) })
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"
+        ))
+        .map_err(|e| e.to_string())?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Flüchtig — für Tests.
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -52,7 +58,11 @@ impl SqliteVaultStore {
 impl VaultStore for SqliteVaultStore {
     fn load_keyring(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
         self.conn()
-            .query_row("SELECT bytes FROM keyrings WHERE tree_key = ?1", params![tree_key], |r| r.get::<_, Vec<u8>>(0))
+            .query_row(
+                "SELECT bytes FROM keyrings WHERE tree_key = ?1",
+                params![tree_key],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
             .map(Some)
             .or_else(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -125,7 +135,10 @@ mod tests {
         }
         {
             let s = SqliteVaultStore::open(&path).unwrap();
-            assert_eq!(s.load_keyring("my-tree").unwrap().as_deref(), Some(&b"kr-bytes"[..]));
+            assert_eq!(
+                s.load_keyring("my-tree").unwrap().as_deref(),
+                Some(&b"kr-bytes"[..])
+            );
             assert_eq!(s.keyring_watermark("my-tree").unwrap(), 3);
             assert_eq!(s.load_keyring("absent").unwrap(), None);
             assert_eq!(s.keyring_watermark("absent").unwrap(), 0);
@@ -140,17 +153,37 @@ mod tests {
         // The whole host, over real SQLite: provision persists a keyring; a fresh unlock (as if a
         // relaunch) re-derives the same DEK and opens data sealed before.
         let host = VaultHost::new(SqliteVaultStore::in_memory().unwrap());
-        let p = host.provision("my-tree", TREE, "correct horse".into(), "owner").unwrap();
+        let p = host
+            .provision("my-tree", TREE, "correct horse".into(), "owner")
+            .unwrap();
         let envelope = host
-            .seal_entry(&p.sealer_id, "snapshot", "openom-json", "none", 0, Vec::new(), 0, Vec::new(), b"data")
+            .seal_entry(
+                &p.sealer_id,
+                "snapshot",
+                "openom-json",
+                "none",
+                0,
+                Vec::new(),
+                0,
+                Vec::new(),
+                b"data",
+            )
             .unwrap()
             .envelope;
         host.lock(&p.sealer_id);
 
-        let u = host.unlock("my-tree", TREE, "correct horse".into(), "owner").unwrap();
-        assert_eq!(host.open_entry(&u.sealer_id, "snapshot", &envelope).unwrap(), b"data");
+        let u = host
+            .unlock("my-tree", TREE, "correct horse".into(), "owner")
+            .unwrap();
         assert_eq!(
-            host.unlock("my-tree", TREE, "wrong".into(), "owner").unwrap_err().code,
+            host.open_entry(&u.sealer_id, "snapshot", &envelope)
+                .unwrap(),
+            b"data"
+        );
+        assert_eq!(
+            host.unlock("my-tree", TREE, "wrong".into(), "owner")
+                .unwrap_err()
+                .code,
             VaultErrorCode::CryptoOpen
         );
     }
