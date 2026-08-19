@@ -35,6 +35,18 @@ pub struct Attestation {
     pub signature: Vec<u8>,
 }
 
+/// The result of checking an attestation against the fact's CURRENT canonical content hash.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Signature valid and the fact's current hash matches what was signed.
+    Valid,
+    /// Signature valid, but the fact's current hash differs — it was edited since, so the
+    /// attestation vouches for an earlier value.
+    AttestedEarlierValue,
+    /// The signature does not verify.
+    BadSignature,
+}
+
 impl Attestation {
     /// Sign a vouch for `fact_hash` with `key`.
     pub fn create(key: &SigningKey, fact_hash: FactHash) -> Self {
@@ -52,6 +64,22 @@ impl Attestation {
             return false;
         };
         vk.verify(&Self::message(&self.fact_hash), &Signature::from_bytes(&sig_bytes)).is_ok()
+    }
+
+    /// Check this attestation against the fact's CURRENT canonical content hash (recomputed by the
+    /// caller from materialized state via `openom-model::content_hash`) — the binding check. A valid
+    /// signature over the current hash is [`Verdict::Valid`]; over a now-superseded hash it is
+    /// [`Verdict::AttestedEarlierValue`] (the fact was edited — unrelated tree changes never reach
+    /// here, because the hash binds to the fact, not the tree root); a bad signature is
+    /// [`Verdict::BadSignature`].
+    pub fn verify_against(&self, current_fact_hash: &FactHash) -> Verdict {
+        if !self.verify() {
+            Verdict::BadSignature
+        } else if &self.fact_hash == current_fact_hash {
+            Verdict::Valid
+        } else {
+            Verdict::AttestedEarlierValue
+        }
     }
 
     fn message(fact_hash: &FactHash) -> Vec<u8> {
@@ -244,5 +272,16 @@ mod tests {
 
         let bytes = AttestationDoc::encode_op(&op);
         assert_eq!(AttestationDoc::decode_op(&bytes).unwrap(), op);
+    }
+
+    #[test]
+    fn verify_against_current_edited_and_bad() {
+        let a = Attestation::create(&key(1), hash(9));
+        assert_eq!(a.verify_against(&hash(9)), Verdict::Valid);
+        // The fact was edited since — its current hash differs → attested an earlier value.
+        assert_eq!(a.verify_against(&hash(10)), Verdict::AttestedEarlierValue);
+        let mut bad = a.clone();
+        bad.signature[0] ^= 0xFF;
+        assert_eq!(bad.verify_against(&hash(9)), Verdict::BadSignature);
     }
 }
