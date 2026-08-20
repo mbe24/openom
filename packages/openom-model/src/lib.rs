@@ -14,7 +14,7 @@ mod id;
 pub use id::*;
 
 pub mod name;
-pub use name::{Name, NameError, Part, Position};
+pub use name::{Name, NameError, Part, Position, Provenance};
 
 #[cfg(feature = "validation")]
 pub mod schema;
@@ -530,7 +530,9 @@ mod tests {
             Name {
                 id: NameId::generate(&mut src),
                 role: Some("birth".into()),
-                form_of: None,
+                borrows_from: None,
+                equivalent_to: Vec::new(),
+                provenance: None,
                 primary: true,
                 script: Some("Latn".into()),
                 culture: Some("en-GB".into()),
@@ -551,7 +553,9 @@ mod tests {
             Name {
                 id: NameId::generate(&mut src),
                 role: Some("nickname".into()),
-                form_of: None,
+                borrows_from: None,
+                equivalent_to: Vec::new(),
+                provenance: None,
                 primary: false,
                 script: None,
                 culture: None,

@@ -49,9 +49,19 @@
           "maxLength": 64,
           "$comment": "OPEN soft label (role: birth/married/nickname/public/…); non-structural"
         },
-        "ref": {
+        "borrows_from": {
           "allOf": [{ "$ref": "#/$defs/uuid" }],
-          "$comment": "this name is a form of that one (its id) — borrow unstated parts (the family)"
+          "$comment": "COMPOSITION: this partial name borrows its unstated parts (the family) from that name's id — directional, acyclic"
+        },
+        "equivalent_to": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/uuid" },
+          "$comment": "EQUIVALENCE: the same name as each listed id, differently rendered — symmetric, class-forming; orthogonal to borrows_from (a name may set both)"
+        },
+        "provenance": {
+          "enum": ["original", "derived"],
+          "$comment": "qualifier of the equivalence relation: a co-equal `original` vs a `derived` rendering; only meaningful with equivalent_to"
         },
         "primary": {
           "type": "boolean",

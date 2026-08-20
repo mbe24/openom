@@ -65,7 +65,9 @@ mod tests {
             Name {
                 id: NameId::generate(&mut src),
                 role: Some("birth".into()),
-                form_of: None,
+                borrows_from: None,
+                equivalent_to: Vec::new(),
+                provenance: None,
                 primary: true,
                 script: None,
                 culture: None,
