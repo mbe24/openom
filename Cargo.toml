@@ -14,6 +14,7 @@ members = [
     "packages/openom-jcs",
     "packages/openom-did",
     "packages/openom-edtf",
+    "packages/openom-claim",
     "packages/openom-attestations",
     "packages/openom-sealer",
     "packages/openom-vault-host",
@@ -44,6 +45,7 @@ openom-keyring = { path = "packages/openom-keyring" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }
 openom-edtf = { path = "packages/openom-edtf" }
+openom-claim = { path = "packages/openom-claim" }
 journal = { path = "packages/journal" }
 commute = { path = "packages/commute" }
 

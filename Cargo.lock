@@ -3442,6 +3442,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-claim"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "openom-did",
+ "openom-jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [

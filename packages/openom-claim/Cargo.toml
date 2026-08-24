@@ -1,0 +1,19 @@
+# The claim-envelope hashing + signing seam (design.data-model-claims.v1.md §4): the content-hash
+# `id`, the dedup `fingerprint`, and the Ed25519 sign/verify discipline (domain-separated, authored by
+# the key behind the `createdBy` did:key). Operates on the envelope as a JSON value — the typed
+# envelope struct + JSON Schema are frozen separately (OPE-170); this is the primitive both rest on.
+[package]
+name = "openom-claim"
+description = "Claim-envelope hashing + signing seam: content-hash id (sha256 of JCS with id/signature excluded), dedup fingerprint (sha256 of JCS(targetId,predicate,value)), and domain-separated Ed25519 sign/verify keyed by the createdBy did:key."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openom-jcs.workspace = true
+openom-did.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
