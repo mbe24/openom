@@ -25,3 +25,6 @@ jsonschema = { workspace = true, optional = true }
 [features]
 # Validate a record against record.schema.json. Off by default; enabled in tests + native imports.
 validation = ["dep:jsonschema"]
+
+[dev-dependencies]
+proptest.workspace = true

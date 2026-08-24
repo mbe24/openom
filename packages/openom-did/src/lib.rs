@@ -165,6 +165,34 @@ fn b58_decode(input: &str) -> Result<Vec<u8>, DidError> {
 }
 
 #[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // Every 32-byte key round-trips through the full did:key path, always z6Mk-prefixed.
+        #[test]
+        fn did_key_roundtrips_for_any_pubkey(pk in any::<[u8; 32]>()) {
+            let did = encode_ed25519(&pk);
+            prop_assert!(did.starts_with("did:key:z6Mk"));
+            prop_assert_eq!(decode_ed25519(&did).unwrap(), pk);
+        }
+
+        // base58btc encode/decode is a bijection on arbitrary bytes (incl. leading zeros).
+        #[test]
+        fn base58_roundtrips_any_bytes(bytes in prop::collection::vec(any::<u8>(), 0..200)) {
+            prop_assert_eq!(b58_decode(&b58_encode(&bytes)).unwrap(), bytes);
+        }
+
+        // decode never panics or hangs on arbitrary input — Ok or Err, always fast.
+        #[test]
+        fn decode_never_panics(s in ".*") {
+            let _ = decode_ed25519(&s);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

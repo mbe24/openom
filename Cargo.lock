@@ -3449,6 +3449,7 @@ dependencies = [
  "jsonschema",
  "openom-did",
  "openom-jcs",
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3481,6 +3482,7 @@ dependencies = [
 name = "openom-did"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror 2.0.20",
 ]
 
@@ -3488,6 +3490,7 @@ dependencies = [
 name = "openom-edtf"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror 2.0.20",
 ]
 
@@ -3495,6 +3498,7 @@ dependencies = [
 name = "openom-jcs"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

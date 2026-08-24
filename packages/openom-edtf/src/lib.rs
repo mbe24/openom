@@ -85,6 +85,14 @@ pub fn parse(input: &str) -> Result<Edtf, EdtfError> {
         }
         let (s, su, sa) = parse_side(start)?;
         let (e, eu, ea) = parse_side(end)?;
+        // A closed interval must not run backwards; reject `2001/2000` rather than emit min > max.
+        if let (Some(sb), Some(eb)) = (s, e) {
+            if tuple(sb.min) > tuple(eb.max) {
+                return Err(EdtfError::Malformed(
+                    "interval start is after its end".into(),
+                ));
+            }
+        }
         let precision = s
             .map(|b| b.precision)
             .or(e.map(|b| b.precision))
@@ -313,6 +321,54 @@ fn days_in_month(year: i32, month: u8) -> u8 {
     }
 }
 
+/// `(year, month, day)` for chronological comparison.
+fn tuple(d: Date) -> (i32, u8, u8) {
+    (d.year, d.month, d.day)
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Plausibly-valid EDTF strings (many valid, some deliberately out-of-range) to exercise the Ok path.
+    fn edtf_like() -> impl Strategy<Value = String> {
+        (0u32..10000, 0u32..15, 0u32..35, 0u8..7).prop_map(|(y, m, d, form)| match form {
+            0 => format!("{y:04}"),
+            1 => format!("{y:04}-{m:02}"),
+            2 => format!("{y:04}-{m:02}-{d:02}"),
+            3 => format!("{y:04}?"),
+            4 => format!("{:04}-{:02}/{:04}-{:02}", y, m, y + 1, m),
+            5 => format!("{y:04}-XX"),
+            _ => format!("{y:04}-{m:02}-XX"),
+        })
+    }
+
+    proptest! {
+        // No input — however malformed — panics; parse always returns Ok or Err.
+        #[test]
+        fn parse_never_panics(s in ".*") {
+            let _ = parse(&s);
+        }
+
+        // Whenever both bounds are present, the earliest never exceeds the latest.
+        #[test]
+        fn min_le_max(s in edtf_like()) {
+            if let Ok(e) = parse(&s) {
+                if let (Some(min), Some(max)) = (e.min, e.max) {
+                    prop_assert!(tuple(min) <= tuple(max), "min {:?} > max {:?} from {:?}", min, max, s);
+                }
+            }
+        }
+
+        // Parsing is a pure function.
+        #[test]
+        fn deterministic(s in edtf_like()) {
+            prop_assert_eq!(parse(&s), parse(&s));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +510,6 @@ mod tests {
             Err(EdtfError::Malformed(_))
         )); // two slashes
         assert!(matches!(parse("2001-21-05"), Err(EdtfError::Malformed(_)))); // season + day
+        assert!(matches!(parse("2001/2000"), Err(EdtfError::Malformed(_)))); // reversed interval
     }
 }

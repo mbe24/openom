@@ -203,6 +203,52 @@ fn hex_lower(nibble: u8) -> u8 {
 }
 
 #[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Arbitrary float-free JSON values, bounded depth.
+    fn arb_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            ".*".prop_map(Value::String),
+        ];
+        leaf.prop_recursive(4, 48, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
+                prop::collection::hash_map("[a-zA-Z0-9]{0,6}", inner, 0..6)
+                    .prop_map(|m| Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        // Float-free values always canonicalize, deterministically, without panicking.
+        #[test]
+        fn deterministic(v in arb_value()) {
+            prop_assert_eq!(to_canonical_value(&v).unwrap(), to_canonical_value(&v).unwrap());
+        }
+
+        // Canonicalizing the reparse of a canonical form yields the identical bytes.
+        #[test]
+        fn idempotent(v in arb_value()) {
+            let once = to_canonical_value(&v).unwrap();
+            let reparsed: Value = serde_json::from_slice(&once).unwrap();
+            prop_assert_eq!(&once, &to_canonical_value(&reparsed).unwrap());
+        }
+
+        // Any finite float is rejected, never silently accepted.
+        #[test]
+        fn floats_rejected(x in proptest::num::f64::NORMAL) {
+            let v = serde_json::json!({ "k": x });
+            prop_assert!(matches!(to_canonical_value(&v), Err(JcsError::Float)));
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

@@ -116,6 +116,51 @@ fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
 }
 
 #[cfg(test)]
+mod proptests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use proptest::prelude::*;
+
+    /// Arbitrary float-free JSON objects for a claim's `value`.
+    fn arb_obj() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            ".*".prop_map(Value::String),
+        ];
+        prop::collection::hash_map("[a-z]{1,6}", leaf, 0..6)
+            .prop_map(|m| Value::Object(m.into_iter().collect()))
+    }
+
+    proptest! {
+        // A claim signed by its createdBy key verifies; any content change flips it to Bad.
+        #[test]
+        fn sign_verify_and_tamper(seed in any::<[u8; 32]>(), value in arb_obj()) {
+            let key = SigningKey::from_bytes(&seed);
+            let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
+            let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, 1);
+            c.compute_id().unwrap();
+            let v = c.to_value();
+            let sig = sign(&v, &key).unwrap();
+            prop_assert_eq!(verify(&v, &sig).unwrap(), SigCheck::Valid);
+
+            let mut tampered = c.clone();
+            tampered.created_at = c.created_at.wrapping_add(1);
+            prop_assert_eq!(verify(&tampered.to_value(), &sig).unwrap(), SigCheck::Bad);
+        }
+
+        // id and fingerprint are pure functions of the envelope.
+        #[test]
+        fn id_and_fingerprint_deterministic(value in arb_obj()) {
+            let v = envelope::Claim::new("t", "openom.org/core/name/v1", value, "did:key:z6MkX", 1).to_value();
+            prop_assert_eq!(claim_id(&v).unwrap(), claim_id(&v).unwrap());
+            prop_assert_eq!(fingerprint(&v).unwrap(), fingerprint(&v).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
