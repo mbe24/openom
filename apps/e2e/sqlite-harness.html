@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>sqlite opfs-sahpool harness</title>
+<!--
+  Real browser: a module Worker running WASM SQLite over the OPFS-SAHPool VFS, loaded from
+  app/src/vendor/sqlite exactly as the app will. run() does one open → count → insert-5 → count
+  cycle and resolves the counts; the spec calls it, reloads, calls again — proving OPFS persistence
+  across a reload with no COOP/COEP headers. One worker at a time (SAHPool is single-connection).
+-->
+<body>
+  <div id="status">loading…</div>
+  <script type="module">
+    window.__sqlite = {
+      run() {
+        return new Promise((resolve) => {
+          const w = new Worker(new URL('./sqlite-harness.worker.js', import.meta.url), { type: 'module' });
+          w.onmessage = (e) => { if (e.data?.type === 'done') { w.terminate(); resolve(e.data); } };
+          w.onerror = (e) => { w.terminate(); resolve({ ok: false, error: String(e.message || e) }); };
+        });
+      },
+    };
+    window.__ready = true;
+    document.getElementById('status').textContent = 'ready';
+  </script>
+</body>
