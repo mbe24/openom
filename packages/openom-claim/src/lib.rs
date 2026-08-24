@@ -23,6 +23,10 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub mod envelope;
+#[cfg(feature = "validation")]
+pub mod schema;
+
 /// Envelope field names — the frozen set the schema freeze (OPE-170) will type.
 pub const F_ID: &str = "id";
 pub const F_SIGNATURE: &str = "signature";

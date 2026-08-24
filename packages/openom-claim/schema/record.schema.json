@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openom.dev/schema/record.schema.json",
+  "title": "openom claim-model record",
+  "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). Attestations and tombstones ARE Claims, discriminated by `predicate` (there is no targetType). Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the two core meta-predicates (attest, tombstone) additionally constrain `value`. camelCase field names match openom-claim's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-claim), not here. Bump x-openom-bounds-version when a bound widens.",
+  "x-openom-bounds-version": 1,
+  "oneOf": [
+    { "$ref": "#/$defs/anchor" },
+    { "$ref": "#/$defs/claim" }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid", "maxLength": 36 },
+    "sha256Id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "$comment": "content-hash id: 'sha256:' + lowercase hex of the 32-byte content hash"
+    },
+    "didKey": {
+      "type": "string",
+      "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$",
+      "maxLength": 128,
+      "$comment": "createdBy: the author's Ed25519 keyring identity as a did:key (base58btc, always z6Mk...)"
+    },
+    "epochMs": {
+      "type": "integer",
+      "minimum": 0,
+      "$comment": "createdAt in epoch milliseconds; PROVENANCE only, never a tiebreak (design principle 2)"
+    },
+    "predicate": {
+      "type": "string",
+      "pattern": "^openom\\.org/(core|ext)/[A-Za-z0-9._/-]+/v[0-9]+$",
+      "maxLength": 256
+    },
+    "anchorType": {
+      "enum": [
+        "openom.org/core/person/v1",
+        "openom.org/core/event/v1",
+        "openom.org/core/place/v1",
+        "openom.org/core/tree/v1"
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceId"],
+      "properties": {
+        "sourceId": { "type": "string", "maxLength": 256, "$comment": "the id of a Source claim (§10.2)" },
+        "locator": { "type": "object", "$comment": "page/entry/etc.; resolves into the source's media" },
+        "extract": { "type": "string", "maxLength": 8192 }
+      }
+    },
+    "citations": {
+      "$comment": "inline evidence: one citation, or an array when one assertion is backed by several sources",
+      "oneOf": [
+        { "$ref": "#/$defs/citation" },
+        { "type": "array", "items": { "$ref": "#/$defs/citation" }, "minItems": 1, "maxItems": 64 }
+      ]
+    },
+    "attestValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict"],
+      "properties": {
+        "verdict": { "enum": ["support", "reject"] },
+        "reason": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "tombstoneValue": {
+      "type": "object",
+      "maxProperties": 0,
+      "$comment": "empty: a tombstone carries no value, only its targetId"
+    },
+    "signature": {
+      "type": "string",
+      "maxLength": 128,
+      "$comment": "optional (tree-level signed_claims): Ed25519 over the domain-separated content hash by the createdBy key"
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "createdAt", "createdBy"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "type": { "$ref": "#/$defs/anchorType" },
+        "createdAt": { "$ref": "#/$defs/epochMs" },
+        "createdBy": { "$ref": "#/$defs/didKey" }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "targetId", "predicate", "value", "createdAt", "createdBy"],
+      "properties": {
+        "id": { "$ref": "#/$defs/sha256Id" },
+        "type": { "const": "openom.org/core/claim/v1" },
+        "targetId": {
+          "type": "string",
+          "maxLength": 256,
+          "$comment": "the anchor/claim this asserts about — a uuid, a claim id, or a fingerprint"
+        },
+        "predicate": { "$ref": "#/$defs/predicate" },
+        "value": { "type": "object" },
+        "citation": { "$ref": "#/$defs/citations" },
+        "createdAt": { "$ref": "#/$defs/epochMs" },
+        "createdBy": { "$ref": "#/$defs/didKey" },
+        "signature": { "$ref": "#/$defs/signature" }
+      },
+      "allOf": [
+        {
+          "$comment": "attestation = a claim whose value is a verdict",
+          "if": { "required": ["predicate"], "properties": { "predicate": { "const": "openom.org/core/attest/v1" } } },
+          "then": { "properties": { "value": { "$ref": "#/$defs/attestValue" } } }
+        },
+        {
+          "$comment": "tombstone = a claim with an empty value",
+          "if": { "required": ["predicate"], "properties": { "predicate": { "const": "openom.org/core/tombstone/v1" } } },
+          "then": { "properties": { "value": { "$ref": "#/$defs/tombstoneValue" } } }
+        }
+      ]
+    }
+  }
+}

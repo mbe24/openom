@@ -14,6 +14,14 @@ rust-version.workspace = true
 openom-jcs.workspace = true
 openom-did.workspace = true
 ed25519-dalek.workspace = true
-sha2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+# JSON Schema (Draft 2020-12) validation of the frozen record shape — optional, off the default/wasm
+# build so jsonschema never bloats the browser bundle (mirrors openom-model).
+jsonschema = { workspace = true, optional = true }
+
+[features]
+# Validate a record against record.schema.json. Off by default; enabled in tests + native imports.
+validation = ["dep:jsonschema"]
