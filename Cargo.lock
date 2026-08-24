@@ -3464,6 +3464,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-did"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-edtf"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-jcs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-keyring"
 version = "0.1.0"
 dependencies = [

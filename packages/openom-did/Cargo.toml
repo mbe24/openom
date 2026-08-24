@@ -1,0 +1,15 @@
+# The DID layer: `did:key` encode/decode for Ed25519 identities, plus a member-resolution seam
+# (member_id ⇄ did:key). Built on the raw Ed25519 public keys the keyring already holds
+# (Member.author_public_key). This is the byte-format `createdBy` will use in the claim envelope, so
+# it must be pinned before content-hash ids are persisted cross-client (design.substrate-adaptation
+# §3 fix #11). Pure and dependency-free (base58btc implemented in-crate) so it is wasm-trivial.
+[package]
+name = "openom-did"
+description = "did:key encode/decode for Ed25519 (multicodec 0xed01 + multibase base58btc) and a member_id ⇄ did:key resolution seam."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

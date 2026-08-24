@@ -1,0 +1,16 @@
+# EDTF (ISO 8601-2 / Extended Date-Time Format) parser + normalizer for the family-tree-relevant
+# subset: dates (year / year-month / year-month-day), uncertain `?` / approximate `~` / both `%`,
+# unspecified digits `X` (`19XX`, `1984-XX`), seasons (`2001-21`), and intervals incl. open (`..`)
+# and unknown (empty) ends. Normalizes every expression to sortable [min, max] day bounds + a
+# precision + qualifier flags — the shape the projection's date views and timeline sort need.
+# Pure and dependency-free (no chrono) so it is wasm-trivial and deterministic across targets.
+[package]
+name = "openom-edtf"
+description = "EDTF (ISO 8601-2) parser/normalizer for the genealogy subset: dates, uncertainty/approximation, unspecified digits, seasons, and open/unknown intervals → sortable [min,max] bounds."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true

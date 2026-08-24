@@ -11,6 +11,9 @@ members = [
     "packages/openom-roles",
     "packages/openom-keyring",
     "packages/openom-model",
+    "packages/openom-jcs",
+    "packages/openom-did",
+    "packages/openom-edtf",
     "packages/openom-attestations",
     "packages/openom-sealer",
     "packages/openom-vault-host",
@@ -38,6 +41,9 @@ openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
+openom-jcs = { path = "packages/openom-jcs" }
+openom-did = { path = "packages/openom-did" }
+openom-edtf = { path = "packages/openom-edtf" }
 journal = { path = "packages/journal" }
 commute = { path = "packages/commute" }
 
