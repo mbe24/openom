@@ -19,7 +19,7 @@
 //! This operates on the envelope as a [`serde_json::Value`]; the typed envelope struct + JSON Schema
 //! are frozen separately (OPE-170) and reuse these primitives.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -61,7 +61,10 @@ pub fn content_hash(envelope: &Value) -> Result<[u8; 32], ClaimError> {
 
 /// The claim `id`: `"sha256:" + lowercase-hex(content_hash)`.
 pub fn claim_id(envelope: &Value) -> Result<String, ClaimError> {
-    Ok(format!("sha256:{}", hex(&content_hash(envelope)?)))
+    Ok(format!(
+        "sha256:{}",
+        openom_jcs::hex(&content_hash(envelope)?)
+    ))
 }
 
 /// The dedup/refutation **fingerprint**: `sha256(JCS(targetId, predicate, value))`.
@@ -98,8 +101,10 @@ pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> 
         return Ok(SigCheck::Bad);
     };
     let ch = content_hash(envelope)?;
+    // verify_strict additionally rejects small-order keys / torsion components (defence in depth for
+    // a load-bearing signature) — standard verify already rejects the non-canonical-S malleability.
     Ok(
-        match vk.verify(&signing_message(&ch), &Signature::from_bytes(sig)) {
+        match vk.verify_strict(&signing_message(&ch), &Signature::from_bytes(sig)) {
             Ok(()) => SigCheck::Valid,
             Err(_) => SigCheck::Bad,
         },
@@ -108,15 +113,6 @@ pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> 
 
 fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
     [SIGN_DOMAIN, content_hash.as_slice()].concat()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
-    }
-    s
 }
 
 #[cfg(test)]
@@ -230,10 +226,48 @@ mod tests {
         let before = claim_id(&c).unwrap();
         let sig = sign(&c, &key).unwrap();
         let mut signed = c.clone();
-        signed["signature"] = json!(hex(&sig));
+        signed["signature"] = json!(openom_jcs::hex(&sig));
         assert_eq!(claim_id(&signed).unwrap(), before);
         // …and the signature still verifies with the field present.
         assert_eq!(verify(&signed, &sig).unwrap(), SigCheck::Valid);
+    }
+
+    #[test]
+    fn id_covers_every_content_field() {
+        let (_, did) = signer(1);
+        let base = claim_id(&claim(&did)).unwrap();
+        let moved = |mutate: &dyn Fn(&mut Value)| {
+            let mut m = claim(&did);
+            mutate(&mut m);
+            claim_id(&m).unwrap() != base
+        };
+        assert!(moved(&|m| m["predicate"] = json!("openom.org/core/sex/v1")));
+        assert!(moved(&|m| m["targetId"] = json!("per_other")));
+        assert!(moved(&|m| m["createdAt"] = json!(1771765800001_i64)));
+        assert!(moved(&|m| m["createdBy"] = json!(signer(2).1)));
+        assert!(moved(&|m| m["citation"] = json!({ "sourceId": "other" })));
+    }
+
+    #[test]
+    fn fingerprint_covers_target_and_predicate() {
+        let (_, did) = signer(1);
+        let base = fingerprint(&claim(&did)).unwrap();
+        let mut t = claim(&did);
+        t["targetId"] = json!("per_other");
+        assert_ne!(fingerprint(&t).unwrap(), base);
+        let mut p = claim(&did);
+        p["predicate"] = json!("openom.org/core/sex/v1");
+        assert_ne!(fingerprint(&p).unwrap(), base);
+    }
+
+    #[test]
+    fn a_did_encoding_a_non_curve_point_is_bad_not_error() {
+        // A syntactically valid did:key (right multicodec + 32 bytes) whose bytes are not a valid
+        // Ed25519 point must make verify() return Bad, never Err.
+        let did = openom_did::encode_ed25519(&[0xff; 32]);
+        let mut c = claim(&did);
+        c["createdBy"] = json!(did);
+        assert_eq!(verify(&c, &[0u8; 64]).unwrap(), SigCheck::Bad);
     }
 
     #[test]

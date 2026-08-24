@@ -129,5 +129,15 @@ mod tests {
         let mut bad_author = c.to_value();
         bad_author["createdBy"] = json!("alice");
         assert!(!s.is_valid(&bad_author));
+
+        // An anchor with a malformed uuid id fails (pattern enforced, not just the `format` annotation).
+        assert!(!s.is_valid(&json!({
+            "id": "not-a-uuid", "type": TYPE_PERSON, "createdAt": 1, "createdBy": d
+        })));
+
+        // A claim with a non-hex signature fails the signature pattern.
+        let mut bad_sig = c.to_value();
+        bad_sig["signature"] = json!("nothex");
+        assert!(!s.is_valid(&bad_sig));
     }
 }

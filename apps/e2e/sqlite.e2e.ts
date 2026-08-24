@@ -26,6 +26,8 @@ test('sqlite-wasm OPFS-SAHPool persists across reload, header-free', async ({ pa
   expect(second.ok, second.error).toBe(true);
   expect(second.before).toBe(5); // survived the reload — OPFS persistence
   expect(second.after).toBe(10);
+  // Content, not just the count, survived: claim-0 was written on the first load.
+  expect(second.sample).toBe('{"parts":{"given":"Test0"}}');
 
   expect(errors, 'no uncaught page errors').toEqual([]);
 });

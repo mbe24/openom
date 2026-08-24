@@ -16,6 +16,10 @@ pub const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 const DID_KEY_PREFIX: &str = "did:key:";
 /// Bitcoin/base58btc alphabet (multibase code `z`).
 const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+/// Upper bound on the base58 body length. An Ed25519 `did:key` body is ~48 chars; this cap is far
+/// above that and exists so an adversarial `createdBy` can't drive the O(n²) big-integer decode for
+/// minutes (base58 decode is quadratic in the input length).
+const MAX_B58_LEN: usize = 128;
 
 /// A `did:key` parse/decode failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -54,6 +58,9 @@ pub fn decode_ed25519(did: &str) -> Result<[u8; 32], DidError> {
         .strip_prefix(DID_KEY_PREFIX)
         .ok_or(DidError::NotDidKey)?;
     let b58 = method.strip_prefix('z').ok_or(DidError::BadMultibase)?;
+    if b58.len() > MAX_B58_LEN {
+        return Err(DidError::BadLength);
+    }
     let bytes = b58_decode(b58)?;
     let rest = bytes
         .strip_prefix(&ED25519_MULTICODEC[..])
@@ -226,6 +233,13 @@ mod tests {
             s
         };
         assert_eq!(decode_ed25519(&did), Err(DidError::UnsupportedMulticodec));
+    }
+
+    #[test]
+    fn rejects_overlong_base58_without_hanging() {
+        // A pathological createdBy must fail fast, not drive the O(n²) decode for minutes.
+        let did = format!("did:key:z{}", "1".repeat(10_000));
+        assert_eq!(decode_ed25519(&did), Err(DidError::BadLength));
     }
 
     #[test]

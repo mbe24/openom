@@ -9,7 +9,13 @@
     { "$ref": "#/$defs/claim" }
   ],
   "$defs": {
-    "uuid": { "type": "string", "format": "uuid", "maxLength": 36 },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+      "maxLength": 36,
+      "$comment": "pattern (always enforced) not just format (which jsonschema treats as an annotation)"
+    },
     "sha256Id": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
@@ -72,8 +78,8 @@
     },
     "signature": {
       "type": "string",
-      "maxLength": 128,
-      "$comment": "optional (tree-level signed_claims): Ed25519 over the domain-separated content hash by the createdBy key"
+      "pattern": "^[0-9a-f]{128}$",
+      "$comment": "optional (tree-level signed_claims): 64-byte Ed25519 signature as 128 lowercase hex chars, over the domain-separated content hash by the createdBy key"
     },
     "anchor": {
       "type": "object",

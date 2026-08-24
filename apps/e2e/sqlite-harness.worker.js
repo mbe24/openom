@@ -24,8 +24,11 @@ async function cycle() {
   }
   stmt.finalize();
   const after = Number(db.selectValue('SELECT count(*) FROM claim'));
+  // Read back a specific row's content — proves the VFS persisted the actual bytes, not just the
+  // row-count bookkeeping (a reload must see the value inserted on the first load).
+  const sample = db.selectValue("SELECT value FROM claim WHERE id = 'claim-0'");
   db.close();
-  return { before, after, coi: globalThis.crossOriginIsolated, lib: sqlite3.version.libVersion };
+  return { before, after, sample, coi: globalThis.crossOriginIsolated, lib: sqlite3.version.libVersion };
 }
 
 cycle()

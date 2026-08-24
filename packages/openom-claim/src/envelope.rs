@@ -168,18 +168,43 @@ impl Claim {
     /// unchanged.
     pub fn sign_with(&mut self, key: &SigningKey) -> Result<(), ClaimError> {
         let sig = crate::sign(&self.to_value(), key)?;
-        self.signature = Some(hex(&sig));
+        self.signature = Some(openom_jcs::hex(&sig));
         Ok(())
+    }
+
+    /// Verify the embedded `signature` against this claim's content and `createdBy` key. `Ok(None)`
+    /// when unsigned; a malformed signature string is `Ok(Some(SigCheck::Bad))`.
+    pub fn verify(&self) -> Result<Option<crate::SigCheck>, ClaimError> {
+        let Some(sig_hex) = &self.signature else {
+            return Ok(None);
+        };
+        match hex_decode_64(sig_hex) {
+            Some(sig) => Ok(Some(crate::verify(&self.to_value(), &sig)?)),
+            None => Ok(Some(crate::SigCheck::Bad)),
+        }
+    }
+
+    /// Does `id` still match a fresh hash of the current fields? Returns `false` if the claim was
+    /// mutated after [`compute_id`](Claim::compute_id) — a cheap guard against a stale id. (An empty
+    /// `id`, before `compute_id`, is never current.)
+    pub fn id_is_current(&self) -> Result<bool, ClaimError> {
+        Ok(self.id == crate::claim_id(&self.to_value())?)
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
+/// Decode a 128-char lowercase/uppercase hex string into 64 bytes; `None` if not exactly 128 hex chars.
+fn hex_decode_64(s: &str) -> Option<[u8; 64]> {
+    let b = s.as_bytes();
+    if b.len() != 128 {
+        return None;
     }
-    s
+    let mut out = [0u8; 64];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = (b[2 * i] as char).to_digit(16)?;
+        let lo = (b[2 * i + 1] as char).to_digit(16)?;
+        *byte = (hi * 16 + lo) as u8;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -251,6 +276,34 @@ mod tests {
         assert_eq!(c.id, id_before, "signing must not move the id");
         // And the stored id still equals a fresh computation over the now-signed value.
         assert_eq!(c.id, crate::claim_id(&c.to_value()).unwrap());
+    }
+
+    #[test]
+    fn typed_verify_and_id_drift_detection() {
+        let (key, did) = author();
+        let mut c = Claim::new(
+            "per_uuid",
+            "openom.org/core/name/v1",
+            json!({ "x": 1 }),
+            &did,
+            1,
+        );
+        c.compute_id().unwrap();
+        assert!(c.verify().unwrap().is_none(), "unsigned → None");
+        assert!(c.id_is_current().unwrap());
+
+        c.sign_with(&key).unwrap();
+        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Valid));
+        assert!(c.id_is_current().unwrap(), "signing must not move the id");
+
+        // Mutating content after computing the id/signature invalidates both — detectably.
+        c.value = json!({ "x": 2 });
+        assert!(!c.id_is_current().unwrap());
+        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Bad));
+
+        // A malformed signature string is Bad, not an error.
+        c.signature = Some("zz".into());
+        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Bad));
     }
 
     #[test]

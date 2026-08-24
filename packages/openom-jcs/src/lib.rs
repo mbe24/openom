@@ -33,10 +33,18 @@ pub enum JcsError {
     /// A field-selective helper was handed a value that isn't a JSON object.
     #[error("expected a JSON object")]
     NotObject,
+    /// Nesting exceeded [`MAX_DEPTH`] — a guard against stack overflow on adversarial input.
+    #[error("value nesting exceeds the maximum depth of {MAX_DEPTH}")]
+    TooDeep,
     /// The value could not be serialized to `serde_json::Value`.
     #[error("serialization failed: {0}")]
     Serialize(#[from] serde_json::Error),
 }
+
+/// Maximum array/object nesting depth. Claim values are shallow; this is far above any legitimate
+/// structure and exists only so a maliciously deep synced record fails with [`JcsError::TooDeep`]
+/// instead of aborting the process with a stack overflow.
+pub const MAX_DEPTH: usize = 128;
 
 /// Canonicalize any [`Serialize`] value to RFC 8785 bytes.
 pub fn to_canonical<T: Serialize>(value: &T) -> Result<Vec<u8>, JcsError> {
@@ -46,7 +54,7 @@ pub fn to_canonical<T: Serialize>(value: &T) -> Result<Vec<u8>, JcsError> {
 /// Canonicalize an already-parsed [`Value`] to RFC 8785 bytes.
 pub fn to_canonical_value(value: &Value) -> Result<Vec<u8>, JcsError> {
     let mut out = Vec::new();
-    write_value(&mut out, value)?;
+    write_value(&mut out, value, 0)?;
     Ok(out)
 }
 
@@ -84,16 +92,24 @@ pub fn canonical_hash<T: Serialize>(value: &T) -> Result<[u8; 32], JcsError> {
 
 /// Lowercase-hex SHA-256 of arbitrary bytes — the encoding used in `"sha256:"` content references.
 pub fn hex256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut s = String::with_capacity(64);
-    for b in digest {
+    hex(Sha256::digest(bytes).as_slice())
+}
+
+/// Lowercase-hex encoding of arbitrary bytes. Shared so every crate in the content-addressing path
+/// encodes hashes and signatures identically.
+pub fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
         s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
         s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
     }
     s
 }
 
-fn write_value(out: &mut Vec<u8>, v: &Value) -> Result<(), JcsError> {
+fn write_value(out: &mut Vec<u8>, v: &Value, depth: usize) -> Result<(), JcsError> {
+    if depth > MAX_DEPTH {
+        return Err(JcsError::TooDeep);
+    }
     match v {
         Value::Null => out.extend_from_slice(b"null"),
         Value::Bool(true) => out.extend_from_slice(b"true"),
@@ -113,7 +129,7 @@ fn write_value(out: &mut Vec<u8>, v: &Value) -> Result<(), JcsError> {
                 if i > 0 {
                     out.push(b',');
                 }
-                write_value(out, e)?;
+                write_value(out, e, depth + 1)?;
             }
             out.push(b']');
         }
@@ -127,7 +143,7 @@ fn write_value(out: &mut Vec<u8>, v: &Value) -> Result<(), JcsError> {
                 }
                 write_string(out, k);
                 out.push(b':');
-                write_value(out, &map[*k])?;
+                write_value(out, &map[*k], depth + 1)?;
             }
             out.push(b'}');
         }
@@ -276,6 +292,16 @@ mod tests {
         let reparsed: Value = serde_json::from_slice(&once).unwrap();
         let twice = to_canonical_value(&reparsed).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn rejects_pathologically_deep_nesting() {
+        // Deeper than MAX_DEPTH must fail with TooDeep, not abort the process with a stack overflow.
+        let mut v = json!(0);
+        for _ in 0..(MAX_DEPTH + 5) {
+            v = Value::Array(vec![v]);
+        }
+        assert!(matches!(to_canonical_value(&v), Err(JcsError::TooDeep)));
     }
 
     #[test]

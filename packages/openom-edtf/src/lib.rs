@@ -173,7 +173,10 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
         });
     }
 
-    // Month (or season).
+    // Month (or season) — exactly two digits/X per ISO 8601-2 (also bounds the arithmetic below).
+    if parts[1].len() != 2 {
+        return Err(malformed());
+    }
     let (mlo, mhi) = parse_digits_range(parts[1]).ok_or_else(malformed)?;
     let exact_month = mlo == mhi;
     if exact_month && (21..=24).contains(&mlo) {
@@ -204,7 +207,10 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
         });
     }
 
-    // Day.
+    // Day — exactly two digits/X (also bounds the arithmetic).
+    if parts[2].len() != 2 {
+        return Err(malformed());
+    }
     let (dlo, dhi) = parse_digits_range(parts[2]).ok_or_else(malformed)?;
     let (day_min, day_max) = if dlo == dhi {
         if !(1..=31).contains(&dlo) {
@@ -219,6 +225,17 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
         }
         (lo as u8, hi as u8)
     };
+
+    // A fully-specified date must be a real calendar day — reject e.g. 1985-02-30 or 1985-02-29
+    // (non-leap) rather than silently clamping it to a different, plausible-looking day. Only enforce
+    // when year, month, and day are all exact; a wildcard component stays permissive.
+    if year_min == year_max
+        && month_min == month_max
+        && day_min == day_max
+        && day_min > days_in_month(year_min, month_min)
+    {
+        return Err(malformed());
+    }
 
     // Clamp the day bounds to the real month lengths (e.g. `1984-02-XX` → max Feb 29).
     let min = Date::new(
@@ -402,6 +419,26 @@ mod tests {
         // "-004X" → years -49..-40; min is the more-negative bound.
         let range = parse("-004X").unwrap();
         assert_eq!((range.min, range.max), (d(-49, 1, 1), d(-40, 12, 31)));
+    }
+
+    #[test]
+    fn rejects_impossible_and_nonconformant_days() {
+        // Impossible literal days are rejected, not silently clamped to a plausible-looking day.
+        assert!(matches!(parse("1985-02-30"), Err(EdtfError::Malformed(_))));
+        assert!(matches!(parse("1985-02-29"), Err(EdtfError::Malformed(_)))); // 1985 is not a leap year
+        assert!(matches!(parse("1984-04-31"), Err(EdtfError::Malformed(_))));
+        // …but a real leap day is accepted.
+        assert_eq!(parse("1984-02-29").unwrap().min, d(1984, 2, 29));
+
+        // Month/day must be exactly two digits (ISO 8601-2).
+        assert!(matches!(parse("1984-1-1"), Err(EdtfError::Malformed(_))));
+        assert!(matches!(parse("1984-006"), Err(EdtfError::Malformed(_))));
+
+        // A pathologically long digit run is rejected, not an arithmetic-overflow panic.
+        assert!(matches!(
+            parse("1984-99999999999999999999"),
+            Err(EdtfError::Malformed(_))
+        ));
     }
 
     #[test]
