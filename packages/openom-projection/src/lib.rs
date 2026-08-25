@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use openom_claim::envelope::Record;
+use openom_claim::envelope::{Citations, Claim};
 use serde_json::Value;
 
 const TYPE_PERSON: &str = "openom.org/core/person/v1";
@@ -243,16 +245,13 @@ pub struct Projection {
 
 /// Project a record set into the read model. Pure: the result depends only on the set of records and
 /// the policy, never on their order.
-pub fn project(records: &[Value], policy: &Policy) -> Projection {
+pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // The store guarantees unique content-hash ids, but be robust to a duplicated slice: keep the
     // first record per id, so projecting `recs` and `recs ++ recs` give the same result (set input).
     let mut seen_ids: BTreeSet<String> = BTreeSet::new();
-    let deduped: Vec<&Value> = records
+    let deduped: Vec<&Record> = records
         .iter()
-        .filter(|r| match str_field(r, "id") {
-            Some(id) => seen_ids.insert(id.to_string()),
-            None => true,
-        })
+        .filter(|r| seen_ids.insert(r.id().to_string()))
         .collect();
 
     // --- classify -------------------------------------------------------------------------------
@@ -288,44 +287,44 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut media_links: Vec<(String, String, String, Option<Value>)> = Vec::new(); // (target, claimId, mediaHash, coverage)
 
     for &r in &deduped {
-        if type_of(r) == Some(TYPE_PERSON) {
-            if let Some(id) = str_field(r, "id") {
-                anchors.insert(id.to_string());
+        let c: &Claim = match r {
+            Record::Anchor(a) => {
+                match a.type_uri.as_str() {
+                    TYPE_PERSON => {
+                        anchors.insert(a.id.clone());
+                    }
+                    TYPE_EVENT => {
+                        event_anchors.insert(a.id.clone());
+                    }
+                    _ => {}
+                }
+                continue;
             }
-            continue;
-        }
-        if type_of(r) == Some(TYPE_EVENT) {
-            if let Some(id) = str_field(r, "id") {
-                event_anchors.insert(id.to_string());
-            }
-            continue;
-        }
-        let Some(pred) = predicate(r) else { continue };
-        let Some(id) = str_field(r, "id") else {
-            continue;
+            Record::Claim(c) => c,
         };
+        let pred = c.predicate.as_str();
+        let id = c.id.as_str();
         // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
-        if let (Some(target), Some(cit)) = (str_field(r, "targetId"), r.get("citation")) {
-            if cit.get("sourceId").and_then(Value::as_str).is_some() {
+        // Today only a single-object citation is captured; an array citation is a documented seam.
+        if let Some(Citations::One(cit)) = &c.citation {
+            if let Ok(cit_val) = serde_json::to_value(cit) {
                 citations.push((
-                    target.to_string(),
+                    c.target_id.clone(),
                     id.to_string(),
                     pred.to_string(),
-                    cit.clone(),
+                    cit_val,
                 ));
             }
         }
         match pred {
             P_SOURCE => {
-                if let Some(v) = r.get("value") {
-                    sources.insert(id.to_string(), v.clone());
-                }
+                sources.insert(id.to_string(), c.value.clone());
             }
             P_PLACE_POINT => {
                 if let (Some(t), Some(v), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value"),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    Some(&c.value),
+                    Some(c.created_by.as_str()),
                 ) {
                     place_point
                         .entry(t.to_string())
@@ -338,15 +337,13 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_PLACE_NAME => {
                 if let (Some(t), Some(name), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("name"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("name").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
-                    let range = r
-                        .get("value")
-                        .and_then(|v| v.get("validRange"))
+                    let range = c
+                        .value
+                        .get("validRange")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     place_name
@@ -357,27 +354,23 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                         .insert(a.to_string());
                 }
             }
-            P_PART_OF => tally(&mut part_of, r, "parentPlaceId"),
+            P_PART_OF => tally(&mut part_of, c, "parentPlaceId"),
             P_MEDIA_LINK => {
                 if let (Some(t), Some(hash)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("mediaHash"))
-                        .and_then(Value::as_str),
+                    Some(c.target_id.as_str()),
+                    c.value.get("mediaHash").and_then(Value::as_str),
                 ) {
-                    let coverage = r.get("value").and_then(|v| v.get("coverage")).cloned();
+                    let coverage = c.value.get("coverage").cloned();
                     media_links.push((t.to_string(), id.to_string(), hash.to_string(), coverage));
                 }
             }
-            P_SAME_AS => collect_pair(&mut same_as, r, id),
-            P_DIFFERENT_FROM => collect_pair(&mut different_from, r, id),
+            P_SAME_AS => collect_pair(&mut same_as, c, id),
+            P_DIFFERENT_FROM => collect_pair(&mut different_from, c, id),
             P_ATTEST => {
                 if let (Some(t), Some(verdict), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("verdict"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("verdict").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
                     let v = attests.entry(t.to_string()).or_default();
                     match verdict {
@@ -393,14 +386,10 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_PREFERRED => {
                 if let (Some(person), Some(for_pred), Some(claim_ref), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("for"))
-                        .and_then(Value::as_str),
-                    r.get("value")
-                        .and_then(|v| v.get("claimId"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("for").and_then(Value::as_str),
+                    c.value.get("claimId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
                     let info = preferred
                         .entry((
@@ -412,21 +401,19 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     info.authors.insert(a.to_string());
                     info.claim_ids.insert(id.to_string());
                     if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(r);
+                        info.fingerprint = fingerprint_str(c);
                     }
                 }
             }
             P_PARENT => {
                 if let (Some(child), Some(parent), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("parentPersonId"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("parentPersonId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
-                    let kind = r
-                        .get("value")
-                        .and_then(|v| v.get("kind"))
+                    let kind = c
+                        .value
+                        .get("kind")
                         .and_then(Value::as_str)
                         .unwrap_or(DEFAULT_KIND);
                     let info = parent_child
@@ -435,37 +422,33 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     info.authors.insert(a.to_string());
                     info.claim_ids.insert(id.to_string());
                     if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(r);
+                        info.fingerprint = fingerprint_str(c);
                     }
                 }
             }
             P_PARTNERSHIP => {
-                if let (Some(p), Some(a)) = (pair(r), str_field(r, "createdBy")) {
-                    let role = r
-                        .get("value")
-                        .and_then(|v| v.get("role"))
+                if let (Some(p), Some(a)) = (pair(c), Some(c.created_by.as_str())) {
+                    let role = c
+                        .value
+                        .get("role")
                         .and_then(Value::as_str)
                         .unwrap_or(DEFAULT_ROLE);
                     let info = partnership.entry((p, role.to_string())).or_default();
                     info.authors.insert(a.to_string());
                     info.claim_ids.insert(id.to_string());
                     if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(r);
+                        info.fingerprint = fingerprint_str(c);
                     }
                 }
             }
-            P_EVENT_TYPE => tally(&mut event_type, r, "type"),
-            P_DATE => tally(&mut event_date, r, "edtf"),
-            P_EVENT_PLACE => tally(&mut event_place, r, "placeId"),
+            P_EVENT_TYPE => tally(&mut event_type, c, "type"),
+            P_DATE => tally(&mut event_date, c, "edtf"),
+            P_EVENT_PLACE => tally(&mut event_place, c, "placeId"),
             P_PARTICIPANT => {
                 if let (Some(evt), Some(person), Some(role)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("personId"))
-                        .and_then(Value::as_str),
-                    r.get("value")
-                        .and_then(|v| v.get("role"))
-                        .and_then(Value::as_str),
+                    Some(c.target_id.as_str()),
+                    c.value.get("personId").and_then(Value::as_str),
+                    c.value.get("role").and_then(Value::as_str),
                 ) {
                     participants
                         .entry(evt.to_string())
@@ -474,17 +457,15 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                 }
             }
             P_NAME => {
-                if let (Some(t), Some(v)) = (str_field(r, "targetId"), r.get("value")) {
+                if let (Some(t), Some(v)) = (Some(c.target_id.as_str()), Some(&c.value)) {
                     name_claims.push((t.to_string(), id.to_string(), v.clone()));
                 }
             }
             P_SEX => {
                 if let (Some(t), Some(sex), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("sex"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("sex").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
                     sex_claims.push((
                         t.to_string(),
@@ -496,11 +477,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_BIOGRAPHY => {
                 if let (Some(t), Some(text), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("text"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("text").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
                     biography_claims.push((
                         t.to_string(),
@@ -512,13 +491,11 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_CUSTOM_FIELD => {
                 if let (Some(fid), Some(a)) = (
-                    r.get("value")
-                        .and_then(|v| v.get("fieldId"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    c.value.get("fieldId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
-                    let val = r.get("value");
-                    if let Some(label) = val.and_then(|v| v.get("label")).and_then(Value::as_str) {
+                    let val = &c.value;
+                    if let Some(label) = val.get("label").and_then(Value::as_str) {
                         field_label
                             .entry(fid.to_string())
                             .or_default()
@@ -526,7 +503,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                             .or_default()
                             .insert(a.to_string());
                     }
-                    if let Some(ty) = val.and_then(|v| v.get("type")).and_then(Value::as_str) {
+                    if let Some(ty) = val.get("type").and_then(Value::as_str) {
                         field_type
                             .entry(fid.to_string())
                             .or_default()
@@ -538,12 +515,10 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_CUSTOM_VALUE => {
                 if let (Some(t), Some(fid), Some(val), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("fieldId"))
-                        .and_then(Value::as_str),
-                    r.get("value").and_then(|v| v.get("value")),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("fieldId").and_then(Value::as_str),
+                    c.value.get("value"),
+                    Some(c.created_by.as_str()),
                 ) {
                     custom_values.push((
                         t.to_string(),
@@ -556,11 +531,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
             P_REATTRIBUTE => {
                 if let (Some(target), Some(person), Some(a)) = (
-                    str_field(r, "targetId"),
-                    r.get("value")
-                        .and_then(|v| v.get("personId"))
-                        .and_then(Value::as_str),
-                    str_field(r, "createdBy"),
+                    Some(c.target_id.as_str()),
+                    c.value.get("personId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
                 ) {
                     let info = reattribute
                         .entry(target.to_string())
@@ -570,7 +543,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     info.authors.insert(a.to_string());
                     info.claim_ids.insert(id.to_string());
                     if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(r);
+                        info.fingerprint = fingerprint_str(c);
                     }
                 }
             }
@@ -1203,20 +1176,27 @@ struct Votes {
     reject: BTreeSet<String>,
 }
 
-fn collect_pair(map: &mut BTreeMap<[String; 2], PairInfo>, r: &Value, id: &str) {
-    if let (Some(p), Some(author)) = (pair(r), str_field(r, "createdBy")) {
+fn collect_pair(map: &mut BTreeMap<[String; 2], PairInfo>, c: &Claim, id: &str) {
+    if let (Some(p), Some(author)) = (pair(c), Some(c.created_by.as_str())) {
         let info = map.entry(p).or_default();
         info.authors.insert(author.to_string());
         info.claim_ids.insert(id.to_string());
         if info.fingerprint.is_none() {
-            info.fingerprint = fingerprint_str(r);
+            info.fingerprint = fingerprint_str(c);
         }
     }
 }
 
 /// The `"sha256:<hex>"` fingerprint of a claim — the target an attestation uses to vote on the fact.
-fn fingerprint_str(r: &Value) -> Option<String> {
-    openom_claim::fingerprint(r)
+/// Built from just the 3 fields the fingerprint covers (`targetId`, `predicate`, `value`), never the
+/// whole claim, so this stays cheap even though the claim itself carries citation/signature baggage.
+fn fingerprint_str(c: &Claim) -> Option<String> {
+    let subset = serde_json::json!({
+        "targetId": c.target_id,
+        "predicate": c.predicate,
+        "value": c.value,
+    });
+    openom_claim::fingerprint(&subset)
         .ok()
         .map(|h| format!("sha256:{}", openom_jcs::hex(&h)))
 }
@@ -1297,13 +1277,11 @@ fn equiv_classes(names: &[NameView]) -> BTreeMap<String, String> {
 }
 
 /// Tally a string field of a claim's `value` by author into `map[targetId][value]`.
-fn tally(map: &mut BTreeMap<String, BTreeMap<String, BTreeSet<String>>>, r: &Value, field: &str) {
+fn tally(map: &mut BTreeMap<String, BTreeMap<String, BTreeSet<String>>>, c: &Claim, field: &str) {
     if let (Some(target), Some(val), Some(a)) = (
-        str_field(r, "targetId"),
-        r.get("value")
-            .and_then(|v| v.get(field))
-            .and_then(Value::as_str),
-        str_field(r, "createdBy"),
+        Some(c.target_id.as_str()),
+        c.value.get(field).and_then(Value::as_str),
+        Some(c.created_by.as_str()),
     ) {
         map.entry(target.to_string())
             .or_default()
@@ -1352,21 +1330,9 @@ fn pick_place_name(
 
 // --- record field helpers -----------------------------------------------------------------------
 
-fn type_of(r: &Value) -> Option<&str> {
-    str_field(r, "type")
-}
-
-fn predicate(r: &Value) -> Option<&str> {
-    str_field(r, "predicate")
-}
-
-fn str_field<'a>(r: &'a Value, key: &str) -> Option<&'a str> {
-    r.get(key).and_then(Value::as_str)
-}
-
 /// The canonical sorted pair from a `same_as` / `different_from` claim's `value.pair`.
-fn pair(r: &Value) -> Option<[String; 2]> {
-    let arr = r.get("value")?.get("pair")?.as_array()?;
+fn pair(c: &Claim) -> Option<[String; 2]> {
+    let arr = c.value.get("pair")?.as_array()?;
     if arr.len() != 2 {
         return None;
     }

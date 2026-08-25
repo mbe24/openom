@@ -45,17 +45,33 @@ WSL2/Docker).
 ## Usage
 
 ```rust
+use openom_claim::envelope::{Claim, Record};
 use openom_projection::{project, Policy};
 use serde_json::json;
 
-let records = vec![
-    json!({ "id": "pA", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" }),
-    json!({ "id": "pB", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" }),
-    // one author asserts the two anchors are the same person:
-    json!({ "id": "s1", "type": "openom.org/core/claim/v1", "targetId": "pA",
-            "predicate": "openom.org/core/same_as/v1", "value": { "pair": ["pA", "pB"] },
-            "createdAt": 1, "createdBy": "did:key:z6MkA" }),
-];
+// Anchor ids are opaque (a Person/Event/Place UUID) — `Record::try_from` doesn't hash-verify them, only
+// a Claim's content-hash id.
+let pa = Record::try_from(json!({
+    "id": "pA", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA"
+}))
+.unwrap();
+let pb = Record::try_from(json!({
+    "id": "pB", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA"
+}))
+.unwrap();
+
+// One author asserts the two anchors are the same person; a Claim's id is content-derived, so it's
+// computed rather than made up.
+let mut same_as = Claim::new(
+    "pA",
+    "openom.org/core/same_as/v1",
+    json!({ "pair": ["pA", "pB"] }),
+    "did:key:z6MkA",
+    1,
+);
+same_as.compute_id().unwrap();
+
+let records = vec![pa, pb, Record::Claim(same_as)];
 
 let view = project(&records, &Policy::default());
 assert_eq!(view.people.len(), 1);       // pA + pB resolved to one person
@@ -63,9 +79,10 @@ assert_eq!(view.people[0].id, "pA");    // canonical = the minimum anchor id
 assert!(view.conflicts.is_empty());
 ```
 
-Entry point: `project(records: &[Value], policy: &Policy) -> Projection`. `Policy` carries the
-per-relation score thresholds; `Projection` exposes `people`, `parent_child`, `partnerships`, `unions`,
-`events`, and `conflicts`.
+Entry point: `project(records: &[Record], policy: &Policy) -> Projection`, where `Record` (from
+`openom-claim`) is either a pure-identity `Anchor` or a `Claim`. `Policy` carries the per-relation score
+thresholds; `Projection` exposes `people`, `parent_child`, `partnerships`, `unions`, `events`, and
+`conflicts`.
 
 ## Position
 

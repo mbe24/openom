@@ -1,23 +1,35 @@
 use super::*;
+use openom_claim::envelope::TYPE_CLAIM;
 use proptest::prelude::*;
 use serde_json::json;
 
-fn person(id: &str) -> Value {
-    json!({ "id": id, "type": TYPE_PERSON, "createdAt": 1, "createdBy": "did:key:z6MkA" })
+// These helpers build fake-id test records directly as `Record::Claim`/`Record::Anchor` — never via
+// `Record::try_from`, which verifies a claim's content-hash id, and these ids ("s1", "pA", …) are not
+// content hashes.
+fn person(id: &str) -> Record {
+    Record::Anchor(
+        serde_json::from_value(
+            json!({ "id": id, "type": TYPE_PERSON, "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+        )
+        .unwrap(),
+    )
 }
-fn claim(id: &str, pred: &str, target: &str, value: Value, author: &str) -> Value {
-    json!({ "id": id, "type": "openom.org/core/claim/v1", "targetId": target,
-            "predicate": pred, "value": value, "createdAt": 1, "createdBy": author })
+fn claim(id: &str, pred: &str, target: &str, value: Value, author: &str) -> Record {
+    Record::Claim(
+        serde_json::from_value(json!({ "id": id, "type": TYPE_CLAIM, "targetId": target,
+                "predicate": pred, "value": value, "createdAt": 1, "createdBy": author }))
+        .unwrap(),
+    )
 }
-fn same_as(id: &str, a: &str, b: &str, author: &str) -> Value {
+fn same_as(id: &str, a: &str, b: &str, author: &str) -> Record {
     let [x, y] = sorted_pair(a, b);
     claim(id, P_SAME_AS, &x, json!({ "pair": [x, y] }), author)
 }
-fn different_from(id: &str, a: &str, b: &str, author: &str) -> Value {
+fn different_from(id: &str, a: &str, b: &str, author: &str) -> Record {
     let [x, y] = sorted_pair(a, b);
     claim(id, P_DIFFERENT_FROM, &x, json!({ "pair": [x, y] }), author)
 }
-fn name(id: &str, target: &str, given: &str) -> Value {
+fn name(id: &str, target: &str, given: &str) -> Record {
     claim(
         id,
         P_NAME,
@@ -26,10 +38,10 @@ fn name(id: &str, target: &str, given: &str) -> Value {
         "did:key:z6MkA",
     )
 }
-fn sex(id: &str, target: &str, s: &str, author: &str) -> Value {
+fn sex(id: &str, target: &str, s: &str, author: &str) -> Record {
     claim(id, P_SEX, target, json!({ "sex": s }), author)
 }
-fn biography(id: &str, target: &str, text: &str, author: &str) -> Value {
+fn biography(id: &str, target: &str, text: &str, author: &str) -> Record {
     claim(
         id,
         P_BIOGRAPHY,
@@ -45,7 +57,7 @@ fn custom_field(
     label: &str,
     ty: &str,
     author: &str,
-) -> Value {
+) -> Record {
     claim(
         id,
         P_CUSTOM_FIELD,
@@ -54,7 +66,7 @@ fn custom_field(
         author,
     )
 }
-fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &str) -> Value {
+fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &str) -> Record {
     claim(
         id,
         P_CUSTOM_VALUE,
@@ -63,20 +75,32 @@ fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &s
         author,
     )
 }
-fn source(id: &str, title: &str, repository: &str, author: &str) -> Value {
-    json!({ "id": id, "type": "openom.org/core/claim/v1", "predicate": P_SOURCE,
-            "value": { "title": title, "repository": repository, "quality": "original" },
-            "createdAt": 1, "createdBy": author })
+fn source(id: &str, title: &str, repository: &str, author: &str) -> Record {
+    Record::Claim(
+        serde_json::from_value(json!({ "id": id, "type": TYPE_CLAIM, "targetId": id,
+                "predicate": P_SOURCE,
+                "value": { "title": title, "repository": repository, "quality": "original" },
+                "createdAt": 1, "createdBy": author }))
+        .unwrap(),
+    )
 }
 // Attach an inline citation to an existing claim (as its top-level `citation` envelope field).
-fn with_citation(mut c: Value, source_id: &str, locator: Value, extract: &str) -> Value {
-    c["citation"] = json!({ "sourceId": source_id, "locator": locator, "extract": extract });
+fn with_citation(mut c: Record, source_id: &str, locator: Value, extract: &str) -> Record {
+    let Record::Claim(claim) = &mut c else {
+        panic!("with_citation expects a Claim record");
+    };
+    claim.citation = Some(Citations::One(
+        serde_json::from_value(
+            json!({ "sourceId": source_id, "locator": locator, "extract": extract }),
+        )
+        .unwrap(),
+    ));
     c
 }
-fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Value {
+fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Record {
     claim(id, P_ATTEST, target, json!({ "verdict": verdict }), author)
 }
-fn reattribute(id: &str, claim_target: &str, person: &str, author: &str) -> Value {
+fn reattribute(id: &str, claim_target: &str, person: &str, author: &str) -> Record {
     claim(
         id,
         P_REATTRIBUTE,
@@ -85,7 +109,7 @@ fn reattribute(id: &str, claim_target: &str, person: &str, author: &str) -> Valu
         author,
     )
 }
-fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &str) -> Value {
+fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &str) -> Record {
     claim(
         id,
         P_PREFERRED,
@@ -98,7 +122,7 @@ fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &s
 fn given_ref(given: &str) -> String {
     openom_claim::content_ref(&json!({ "parts": { "given": given } })).unwrap()
 }
-fn parent(id: &str, child: &str, parent_person: &str, kind: &str, author: &str) -> Value {
+fn parent(id: &str, child: &str, parent_person: &str, kind: &str, author: &str) -> Record {
     claim(
         id,
         P_PARENT,
@@ -107,7 +131,7 @@ fn parent(id: &str, child: &str, parent_person: &str, kind: &str, author: &str) 
         author,
     )
 }
-fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Value {
+fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Record {
     let [x, y] = sorted_pair(a, b);
     claim(
         id,
@@ -117,16 +141,21 @@ fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Value {
         author,
     )
 }
-fn event(id: &str) -> Value {
-    json!({ "id": id, "type": TYPE_EVENT, "createdAt": 1, "createdBy": "did:key:z6MkA" })
+fn event(id: &str) -> Record {
+    Record::Anchor(
+        serde_json::from_value(
+            json!({ "id": id, "type": TYPE_EVENT, "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+        )
+        .unwrap(),
+    )
 }
-fn event_type(id: &str, evt: &str, ty: &str, author: &str) -> Value {
+fn event_type(id: &str, evt: &str, ty: &str, author: &str) -> Record {
     claim(id, P_EVENT_TYPE, evt, json!({ "type": ty }), author)
 }
-fn date(id: &str, evt: &str, edtf: &str, author: &str) -> Value {
+fn date(id: &str, evt: &str, edtf: &str, author: &str) -> Record {
     claim(id, P_DATE, evt, json!({ "edtf": edtf }), author)
 }
-fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> Value {
+fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> Record {
     claim(
         id,
         P_PARTICIPANT,
@@ -135,10 +164,15 @@ fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> V
         author,
     )
 }
-fn place(id: &str) -> Value {
-    json!({ "id": id, "type": "openom.org/core/place/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" })
+fn place(id: &str) -> Record {
+    Record::Anchor(
+        serde_json::from_value(
+            json!({ "id": id, "type": "openom.org/core/place/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+        )
+        .unwrap(),
+    )
 }
-fn event_place(id: &str, evt: &str, place_id: &str, author: &str) -> Value {
+fn event_place(id: &str, evt: &str, place_id: &str, author: &str) -> Record {
     claim(
         id,
         P_EVENT_PLACE,
@@ -147,7 +181,7 @@ fn event_place(id: &str, evt: &str, place_id: &str, author: &str) -> Value {
         author,
     )
 }
-fn place_name(id: &str, place_id: &str, name: &str, valid_range: &str, author: &str) -> Value {
+fn place_name(id: &str, place_id: &str, name: &str, valid_range: &str, author: &str) -> Record {
     claim(
         id,
         P_PLACE_NAME,
@@ -156,7 +190,7 @@ fn place_name(id: &str, place_id: &str, name: &str, valid_range: &str, author: &
         author,
     )
 }
-fn place_point(id: &str, place_id: &str, lat: f64, lon: f64, author: &str) -> Value {
+fn place_point(id: &str, place_id: &str, lat: f64, lon: f64, author: &str) -> Record {
     claim(
         id,
         P_PLACE_POINT,
@@ -165,7 +199,7 @@ fn place_point(id: &str, place_id: &str, lat: f64, lon: f64, author: &str) -> Va
         author,
     )
 }
-fn media_link(id: &str, target: &str, media_hash: &str, author: &str) -> Value {
+fn media_link(id: &str, target: &str, media_hash: &str, author: &str) -> Record {
     claim(
         id,
         P_MEDIA_LINK,
@@ -486,7 +520,7 @@ fn attestation_by_fingerprint_counts() {
     let sa = same_as("s1", "pA", "pB", "did:key:z6MkA");
     let fp = format!(
         "sha256:{}",
-        openom_jcs::hex(&openom_claim::fingerprint(&sa).unwrap())
+        openom_jcs::hex(&openom_claim::fingerprint(&sa.to_value()).unwrap())
     );
     let recs = vec![
         person("pA"),
@@ -870,7 +904,7 @@ fn spec() -> impl Strategy<Value = Spec> {
     ]
 }
 // Stable id per record from its ORIGINAL index, so ids don't shift when the records are reordered.
-fn into_record(spec: &Spec, i: usize) -> Value {
+fn into_record(spec: &Spec, i: usize) -> Record {
     let cid = format!("c{i}");
     match spec {
         Spec::Person(id) => person(id),
@@ -885,14 +919,14 @@ proptest! {
     // Delivery order does not change the projection — the convergence guarantee.
     #[test]
     fn order_independent(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
-        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let records: Vec<Record> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
         let a = project(&records, &Policy::default());
 
         // Reorder by the generated keys; the baked-in ids stay put.
-        let mut indexed: Vec<(u64, Value)> =
+        let mut indexed: Vec<(u64, Record)> =
             specs.iter().map(|(_, k)| *k).zip(records.iter().cloned()).collect();
         indexed.sort_by_key(|(k, _)| *k);
-        let shuffled: Vec<Value> = indexed.into_iter().map(|(_, v)| v).collect();
+        let shuffled: Vec<Record> = indexed.into_iter().map(|(_, v)| v).collect();
 
         prop_assert_eq!(a, project(&shuffled, &Policy::default()));
     }
@@ -900,7 +934,7 @@ proptest! {
     // The record slice is a SET: duplicating every record changes nothing.
     #[test]
     fn duplication_invariant(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
-        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let records: Vec<Record> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
         let once = project(&records, &Policy::default());
         let mut doubled = records.clone();
         doubled.extend(records.iter().cloned());
@@ -911,7 +945,7 @@ proptest! {
     // disjoint across people, and each name claim belongs to exactly one person.
     #[test]
     fn people_are_wellformed(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
-        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let records: Vec<Record> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
         let anchors: std::collections::BTreeSet<String> = specs.iter()
             .filter_map(|(s, _)| if let Spec::Person(id) = s { Some(id.clone()) } else { None })
             .collect();
@@ -936,7 +970,7 @@ proptest! {
     // No asserted different_from ever ends with both anchors in one person.
     #[test]
     fn different_from_never_violated(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
-        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let records: Vec<Record> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
         let proj = project(&records, &Policy::default());
 
         let mut person_of: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
