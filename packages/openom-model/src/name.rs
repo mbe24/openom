@@ -276,12 +276,16 @@ pub fn validate(names: &[Name]) -> Result<(), NameError> {
 fn check_borrow_chain(names: &[Name], start: NameId) -> Result<(), NameError> {
     let mut visited = HashSet::new();
     visited.insert(start);
-    let mut cursor = find(names, start).ok_or(NameError::UnknownName(start))?.borrows_from;
+    let mut cursor = find(names, start)
+        .ok_or(NameError::UnknownName(start))?
+        .borrows_from;
     while let Some(rid) = cursor {
         if !visited.insert(rid) {
             return Err(NameError::CyclicBorrow(rid));
         }
-        cursor = find(names, rid).ok_or(NameError::UnknownName(rid))?.borrows_from;
+        cursor = find(names, rid)
+            .ok_or(NameError::UnknownName(rid))?
+            .borrows_from;
     }
     Ok(())
 }
@@ -346,7 +350,11 @@ mod tests {
             nick(n3, n1, vec![given("Bill"), given("Jefferson")], false),
             nick(n4, n1, vec![given("William"), given("Jeff")], false),
             // A standalone epithet — borrows nothing, is a rendering of nothing.
-            bare(n5, "nickname", vec![Part::new(TAG_BYNAME, "The Comeback Kid")]),
+            bare(
+                n5,
+                "nickname",
+                vec![Part::new(TAG_BYNAME, "The Comeback Kid")],
+            ),
         ];
         assert_eq!(render(&names, n2).unwrap(), "Bill Clinton");
         assert_eq!(render(&names, n3).unwrap(), "Bill Jefferson Clinton");
@@ -476,7 +484,12 @@ mod tests {
         );
         let names = vec![
             birth(lat_birth, vec![given("Earvin"), family("Johnson")], false),
-            nick(lat_magic, lat_birth, vec![Part::new(TAG_BYNAME, "Magic")], true),
+            nick(
+                lat_magic,
+                lat_birth,
+                vec![Part::new(TAG_BYNAME, "Magic")],
+                true,
+            ),
             Name {
                 equivalent_to: vec![lat_birth],
                 provenance: Some(Provenance::Derived),
@@ -494,8 +507,14 @@ mod tests {
         // Composition resolves via its OWN rendering's chain (borrows Джонсон, not Johnson).
         assert_eq!(render(&names, cyr_magic).unwrap(), "Мэджик Джонсон");
         // Equivalence pairs the two bynames, independent of the birth-name class.
-        assert_eq!(equivalence_class(&names, lat_magic).unwrap(), vec![lat_magic, cyr_magic]);
-        assert_eq!(equivalence_class(&names, lat_birth).unwrap(), vec![lat_birth, cyr_birth]);
+        assert_eq!(
+            equivalence_class(&names, lat_magic).unwrap(),
+            vec![lat_magic, cyr_magic]
+        );
+        assert_eq!(
+            equivalence_class(&names, lat_birth).unwrap(),
+            vec![lat_birth, cyr_birth]
+        );
         assert!(validate(&names).is_ok());
     }
 
@@ -577,7 +596,10 @@ mod tests {
         // provenance without an equivalence edge.
         let mut n = bare(a, "birth", vec![given("A")]);
         n.provenance = Some(Provenance::Original);
-        assert_eq!(validate(&[n]), Err(NameError::ProvenanceWithoutEquivalence(a)));
+        assert_eq!(
+            validate(&[n]),
+            Err(NameError::ProvenanceWithoutEquivalence(a))
+        );
 
         // equivalent_to pointing outside the list.
         let mut n = bare(a, "birth", vec![given("A")]);
@@ -608,7 +630,10 @@ mod tests {
         let json = serde_json::to_string(&n).unwrap();
         assert!(json.contains("\"borrows_from\":"), "composition edge key");
         assert!(json.contains("\"equivalent_to\":"), "equivalence edge key");
-        assert!(json.contains("\"provenance\":\"derived\""), "provenance value");
+        assert!(
+            json.contains("\"provenance\":\"derived\""),
+            "provenance value"
+        );
         assert!(json.contains("\"type\":"), "role serializes as `type`");
         let back: Name = serde_json::from_str(&json).unwrap();
         assert_eq!(n, back);
