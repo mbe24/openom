@@ -42,7 +42,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **commute** — a small op-based CRDT: Lamport-ordered ops → convergent cells (LWW / OR-set / tombstones).
 - **commute-format** — bridge: JSON documents ⇄ mergeable commute cells.
 - **openom-treelog** — the family-tree domain over `commute` — *the current engine, being replaced by the claim model.*
-- **openom-oplog** — the claim model's operations channel: the operation type + the set-union fold that materializes the live record set (add / retract / supersede / revoke, same-author observed-remove). Domain-agnostic, clock-free. *(claim model — the successor to the op-log half of `openom-treelog`)*
+- **openom-oplog** — the claim model's operations channel: the operation type + the set-union fold that materializes the live record set (add / remove / supersede / revoke, same-author observed-remove). Domain-agnostic, clock-free. *(claim model — the successor to the op-log half of `openom-treelog`)*
 
 **Storage / sync** (transport; opaque bytes)
 - **journal** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.

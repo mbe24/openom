@@ -35,9 +35,9 @@ have no record to be:
 
 | kind | operand | meaning |
 |------|---------|---------|
-| `Retract`   | a **record** id | delete your own record (same-author) |
-| `Supersede` | a **record** id + a replacement `Record` | edit: atomically retract `prior` and assert `replacement`, carrying an edit-lineage edge |
-| `Revoke`    | an **operation** id (of a `Retract`) | undo your own delete, restoring the *original* record id |
+| `Remove`    | a **record** id | remove your own record (same-author, observed-remove) |
+| `Supersede` | a **record** id + a replacement `Record` | edit: atomically remove `prior` and assert `replacement`, carrying an edit-lineage edge |
+| `Revoke`    | an **operation** id (of a `Remove`) | undo your own remove, restoring the *original* record id |
 
 Folding `Assert` as the bare record avoids a second author/timestamp on ~99% of the stream and closes
 the attribution-forgery gap a duplicate envelope would open.
@@ -47,9 +47,9 @@ the attribution-forgery gap a duplicate envelope would open.
 | id | guarantee | why it matters | verified by |
 |----|-----------|----------------|-------------|
 | **OPLOG-1** | Convergent: the fold depends only on the *set* of items — not delivery order, not duplication. | Replicas agree without a shared clock — the whole point of set-union. | `tests::materialize_is_order_independent`, `tests::duplicate_items_are_idempotent` |
-| **OPLOG-2** | Same-author observed-remove: a `Retract` / `Supersede` / `Revoke` is honored only when its author matches the target record's (or op's) author; an op naming an unknown or other-author target is a deterministic no-op everywhere. | Censorship resistance — you can delete only your own record — as a pure fold, defense-in-depth below the transport authorization. | `tests::same_author_retract_removes_the_record`, `tests::other_author_retract_is_a_noop`, `tests::retract_of_an_unknown_target_is_a_noop`, `tests::other_author_supersede_neither_removes_nor_injects`, `tests::other_author_revoke_does_not_restore` |
-| **OPLOG-3** | Supersede: atomically retracts `prior` and asserts `replacement`; a chain keeps only the last; two concurrent same-author supersedes of one prior fork into two live records (documented, not LWW); a replacement attributed to another author is dropped, not injected. | Edits converge deterministically; a forged replacement can't manufacture a corroborating author. | `tests::same_author_supersede_replaces_the_record`, `tests::supersede_chain_keeps_only_the_last`, `tests::concurrent_supersede_of_one_prior_forks_into_two_live`, `tests::other_author_supersede_neither_removes_nor_injects` |
-| **OPLOG-4** | Revoke: a same-author `Revoke` of a `Retract` restores the *original* record id (non-monotone liveness, still order-independent), so attestations/citations bound to it survive the undo; revoking an unknown or non-retract op is ignored. | Undo-of-delete without minting a new id (which a re-assert would, orphaning bound facts). | `tests::same_author_revoke_restores_a_retracted_record`, `tests::revoke_of_an_unknown_or_non_retract_op_is_ignored` |
+| **OPLOG-2** | Same-author observed-remove: a `Remove` / `Supersede` / `Revoke` is honored only when its author matches the target record's (or op's) author; an op naming an unknown or other-author target is a deterministic no-op everywhere. | Censorship resistance — you can remove only your own record — as a pure fold, defense-in-depth below the transport authorization. | `tests::same_author_remove_drops_the_record`, `tests::other_author_remove_is_a_noop`, `tests::remove_of_an_unknown_target_is_a_noop`, `tests::other_author_supersede_neither_removes_nor_injects`, `tests::other_author_revoke_does_not_restore` |
+| **OPLOG-3** | Supersede: atomically removes `prior` and asserts `replacement`; a chain keeps only the last; two concurrent same-author supersedes of one prior fork into two live records (documented, not LWW); a replacement attributed to another author is dropped, not injected. | Edits converge deterministically; a forged replacement can't manufacture a corroborating author. | `tests::same_author_supersede_replaces_the_record`, `tests::supersede_chain_keeps_only_the_last`, `tests::concurrent_supersede_of_one_prior_forks_into_two_live`, `tests::other_author_supersede_neither_removes_nor_injects` |
+| **OPLOG-4** | Revoke: a same-author `Revoke` of a `Remove` restores the *original* record id (non-monotone liveness, still order-independent), so attestations/citations bound to it survive the undo; revoking an unknown or non-remove op is ignored. | Undo-of-remove without minting a new id (which a re-assert would, orphaning bound facts). | `tests::same_author_revoke_restores_a_removed_record`, `tests::revoke_of_an_unknown_or_non_remove_op_is_ignored` |
 | **OPLOG-5** | Content-addressed & id-verified: an `Op`'s id is `sha256(JCS(envelope − id − signature − embedded-record-signature))`; ingest (`TryFrom` / deserialize) rejects a stated id that doesn't match and a forged embedded replacement id; signing the replacement never shifts the op id. | One hashing path (shared `ContentAddressed` seam), and there is no id-skipping ingest door. | `tests::op_id_is_stable_when_the_embedded_replacement_is_signed`, `tests::a_tampered_op_id_fails_ingest`, `tests::an_op_with_a_forged_embedded_replacement_id_fails_ingest`, `tests::op_roundtrips_through_serde_and_verifies_its_id`, `tests::channel_item_dispatches_on_type` |
 
 Run: `node scripts/cargo.mjs test -p openom-oplog` (from the repo root; on Windows cargo runs under
@@ -68,7 +68,7 @@ let mut name = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "
 name.compute_id().unwrap();
 let name = Record::Claim(name);
 
-// Later, the same author edits it (supersede: retract prior + assert replacement, atomically).
+// Later, the same author edits it (supersede: remove prior + assert replacement, atomically).
 let mut better = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada Lovelace" }), author, 2);
 better.compute_id().unwrap();
 let better_id = better.id.clone();
@@ -91,9 +91,11 @@ snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types); `ContentAddres
 - **Op signing.** `Op::signature` and `SIGN_DOMAIN` (`openom-op-v1`, distinct from the claim domain)
   are reserved; signing/verifying ops (only relevant to `signed_claims` trees — unsigned trees
   authenticate at the transport layer) is a follow-on. The fold trusts transport-validated `createdBy`.
-- **Anchor-retraction policy** — a same-author retract of a Person anchor leaves other authors' claims
-  dangling vs. cascade; a departed member's records become undeletable (the never-delete ↔
-  tree-byte-metering collision). A materializer-spec decision, **OPE-192**.
+- **Orphan byte-sweep at compaction** — the projection already hides claims whose anchor was removed
+  (the read-time cascade); reclaiming their *bytes* (the never-delete ↔ tree-byte-metering question)
+  is a compaction mark-sweep, deferred to **OPE-176 / OPE-179**. The deletion *policy* itself is settled
+  (OPE-192): same-author-or-approval, no privileged cross-author redaction, no operator GDPR — the
+  server is zero-knowledge, and export + set-union re-import make deletion advisory, not enforced.
 - **Proposal disposition** — an Editor's write is a *pending* proposal; a content-addressed op can't be
   mutated to "approved", so accept/reject lives in a separate record referencing the op id (as an
   attestation references a claim), **OPE-163**.

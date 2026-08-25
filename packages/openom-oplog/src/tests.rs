@@ -32,11 +32,11 @@ fn name_claim(target: &str, given: &str, author: &str, at: i64) -> Record {
     Record::Claim(c)
 }
 
-fn retract(target: &Record, author: &str) -> Op {
+fn remove(target: &Record, author: &str) -> Op {
     Op::new(
         2,
         author,
-        OpKind::Retract {
+        OpKind::Remove {
             target: target.id().to_owned(),
         },
     )
@@ -55,12 +55,12 @@ fn supersede(prior: &Record, replacement: Record, author: &str) -> Op {
     .unwrap()
 }
 
-fn revoke(retract_op: &Op, author: &str) -> Op {
+fn revoke(remove_op: &Op, author: &str) -> Op {
     Op::new(
         3,
         author,
         OpKind::Revoke {
-            retract: retract_op.id.clone(),
+            removal: remove_op.id.clone(),
         },
     )
     .unwrap()
@@ -89,33 +89,33 @@ fn asserts_materialize_as_live_records() {
 }
 
 #[test]
-fn same_author_retract_removes_the_record() {
+fn same_author_remove_drops_the_record() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let items = vec![
         ChannelItem::Assert(n.clone()),
-        ChannelItem::Op(retract(&n, &did(1))),
+        ChannelItem::Op(remove(&n, &did(1))),
     ];
     assert!(materialize(&items).is_empty());
 }
 
 #[test]
-fn other_author_retract_is_a_noop() {
+fn other_author_remove_is_a_noop() {
     // Censorship resistance: you cannot delete a record you did not author.
     let n = name_claim("pA", "Ada", &did(1), 1);
     let items = vec![
         ChannelItem::Assert(n.clone()),
-        ChannelItem::Op(retract(&n, &did(2))),
+        ChannelItem::Op(remove(&n, &did(2))),
     ];
     assert_eq!(live(&items), ids([&n]));
 }
 
 #[test]
-fn retract_of_an_unknown_target_is_a_noop() {
+fn remove_of_an_unknown_target_is_a_noop() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let orphan = Op::new(
         2,
         did(1),
-        OpKind::Retract {
+        OpKind::Remove {
             target: "sha256:does-not-exist".to_owned(),
         },
     )
@@ -177,9 +177,9 @@ fn concurrent_supersede_of_one_prior_forks_into_two_live() {
 }
 
 #[test]
-fn same_author_revoke_restores_a_retracted_record() {
+fn same_author_revoke_restores_a_removed_record() {
     let n = name_claim("pA", "Ada", &did(1), 1);
-    let r = retract(&n, &did(1));
+    let r = remove(&n, &did(1));
     let items = vec![
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(r.clone()),
@@ -193,23 +193,23 @@ fn same_author_revoke_restores_a_retracted_record() {
 #[test]
 fn other_author_revoke_does_not_restore() {
     let n = name_claim("pA", "Ada", &did(1), 1);
-    let r = retract(&n, &did(1));
+    let r = remove(&n, &did(1));
     let items = vec![
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(r.clone()),
-        ChannelItem::Op(revoke(&r, &did(2))), // not the retract's author
+        ChannelItem::Op(revoke(&r, &did(2))), // not the remove's author
     ];
     assert!(materialize(&items).is_empty());
 }
 
 #[test]
-fn revoke_of_an_unknown_or_non_retract_op_is_ignored() {
+fn revoke_of_an_unknown_or_non_remove_op_is_ignored() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let stray = Op::new(
         3,
         did(1),
         OpKind::Revoke {
-            retract: "sha256:not-a-real-op".to_owned(),
+            removal: "sha256:not-a-real-op".to_owned(),
         },
     )
     .unwrap();
@@ -260,9 +260,9 @@ fn op_roundtrips_through_serde_and_verifies_its_id() {
     let old = name_claim("pA", "Ada", &did(1), 1);
     let new = name_claim("pA", "Ada Lovelace", &did(1), 2);
     for op in [
-        retract(&old, &did(1)),
+        remove(&old, &did(1)),
         supersede(&old, new.clone(), &did(1)),
-        revoke(&retract(&old, &did(1)), &did(1)),
+        revoke(&remove(&old, &did(1)), &did(1)),
     ] {
         let item = ChannelItem::Op(op.clone());
         let back: ChannelItem =
@@ -274,7 +274,7 @@ fn op_roundtrips_through_serde_and_verifies_its_id() {
 #[test]
 fn a_tampered_op_id_fails_ingest() {
     let old = name_claim("pA", "Ada", &did(1), 1);
-    let mut v = serde_json::to_value(retract(&old, &did(1))).unwrap();
+    let mut v = serde_json::to_value(remove(&old, &did(1))).unwrap();
     v["createdBy"] = json!(did(2)); // content changed, stated id now stale
     assert!(matches!(Op::try_from(v), Err(OplogError::IdMismatch)));
 }
@@ -292,7 +292,7 @@ fn an_op_with_a_forged_embedded_replacement_id_fails_ingest() {
 #[test]
 fn channel_item_dispatches_on_type() {
     let claim = name_claim("pA", "Ada", &did(1), 1);
-    let op = retract(&claim, &did(1));
+    let op = remove(&claim, &did(1));
 
     let as_assert: ChannelItem =
         serde_json::from_value(serde_json::to_value(&claim).unwrap()).unwrap();
@@ -304,15 +304,15 @@ fn channel_item_dispatches_on_type() {
 
 // --- convergence -----------------------------------------------------------------------------
 
-/// A representative channel: asserts, a retract, a superseded chain, a fork, and a revoke.
+/// A representative channel: asserts, a remove, a superseded chain, a fork, and a revoke.
 fn scenario() -> Vec<ChannelItem> {
     let keep = name_claim("pA", "keep", &did(1), 1);
     let deleted = name_claim("pA", "deleted", &did(1), 1);
-    let del = retract(&deleted, &did(1));
+    let del = remove(&deleted, &did(1));
     let base = name_claim("pB", "base", &did(2), 1);
     let edit = name_claim("pB", "edited", &did(2), 2);
     let undeleted = name_claim("pB", "undeleted", &did(2), 1);
-    let undel = retract(&undeleted, &did(2));
+    let undel = remove(&undeleted, &did(2));
     vec![
         ChannelItem::Assert(keep),
         ChannelItem::Assert(deleted),

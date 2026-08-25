@@ -19,14 +19,14 @@ pub const SIGN_DOMAIN: &[u8] = b"openom-op-v1";
 /// One element of the operations channel: an **add** (the bare [`Record`]) or an [`Op`].
 ///
 /// "Every change is an operation" is modeled at the *channel*, not the envelope: an add is the record
-/// itself (its own id/author/timestamp is the whole story), while retract/supersede/revoke — which
+/// itself (its own id/author/timestamp is the whole story), while remove/supersede/revoke — which
 /// have no record to be — carry an [`Op`] envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ChannelItem {
     /// Add a record. The op id *is* the record id; the author *is* the record's author.
     Assert(Record),
-    /// A retract / supersede / revoke operation.
+    /// A remove / supersede / revoke operation.
     Op(Op),
 }
 
@@ -73,7 +73,7 @@ impl ChannelItem {
     }
 }
 
-/// The envelope for a retract / supersede / revoke operation. `id` is the content hash of the
+/// The envelope for a remove / supersede / revoke operation. `id` is the content hash of the
 /// envelope (excluding `id`, `signature`, and — for a supersede — the embedded record's `signature`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,7 +85,7 @@ pub struct Op {
     pub type_uri: String,
     /// Advisory timestamp (epoch ms). Provenance only — never a convergence tiebreak. Per-device
     /// monotonic, so a byte-identical resend of the same logical op collapses by id (see the
-    /// revoke/re-delete note on [`OpKind::Revoke`]).
+    /// revoke/re-remove note on [`OpKind::Revoke`]).
     pub created_at: i64,
     /// The operation's author. Must equal the transport-authenticated entry author, and — for a
     /// [`Supersede`](OpKind::Supersede) — the replacement record's author.
@@ -99,34 +99,35 @@ pub struct Op {
     pub kind: OpKind,
 }
 
-/// The operation kinds. `op` is the JSON discriminator (`"retract"` / `"supersede"` / `"revoke"`).
+/// The operation kinds. `op` is the JSON discriminator (`"remove"` / `"supersede"` / `"revoke"`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum OpKind {
-    /// Delete a record by id (same-author). Undoable by [`Revoke`](OpKind::Revoke) up to the GC
-    /// horizon.
-    Retract {
-        /// The **record** id being deleted.
+    /// Remove a record by id (same-author, observed-remove). Not an un-send — an appended delete-op
+    /// that honest replicas fold out of the live set; undoable by [`Revoke`](OpKind::Revoke) up to the
+    /// GC horizon.
+    Remove {
+        /// The **record** id being removed.
         target: String,
     },
-    /// Edit: atomically retract `prior` and assert `replacement`, carrying an edit-lineage edge
-    /// (same-author on both). Atomic so a retract and an assert never arrive in separate deltas and
+    /// Edit: atomically remove `prior` and assert `replacement`, carrying an edit-lineage edge
+    /// (same-author on both). Atomic so a remove and an assert never arrive in separate deltas and
     /// transiently show a deletion where the user made an edit. Kept distinct from a plain
-    /// retract+assert for exactly that atomicity and the lineage.
+    /// remove+assert for exactly that atomicity and the lineage.
     Supersede {
         /// The **record** id being replaced.
         prior: String,
-        /// The new record (its id is content-verified on ingest). Boxed so a retract/revoke op does
+        /// The new record (its id is content-verified on ingest). Boxed so a remove/revoke op does
         /// not carry the record-sized variant as slack; serde treats `Box<Record>` as the record.
         replacement: Box<Record>,
     },
-    /// Undo a [`Retract`](OpKind::Retract) (same-author as that retract), restoring the *original*
+    /// Undo a [`Remove`](OpKind::Remove) (same-author as that remove), restoring the *original*
     /// record id — so attestations and citations bound to it survive the undo, which a fresh
-    /// re-assert (new id) could not. One level: a revoke is not itself revocable; a re-delete is a
-    /// new retract of the same record.
+    /// re-assert (new id) could not. One level: a revoke is not itself revocable; a re-remove is a
+    /// new remove of the same record.
     Revoke {
-        /// The **operation** id of the retract being undone.
-        retract: String,
+        /// The **operation** id of the remove being undone.
+        removal: String,
     },
 }
 
@@ -237,7 +238,7 @@ pub enum OplogError {
 /// Materialize the live record set from an operations-channel item set — the fold that produces the
 /// snapshot `openom-projection` reads.
 ///
-/// `live = (asserted ∪ superseded-replacements) − { ids named by a valid, un-revoked Retract or
+/// `live = (asserted ∪ superseded-replacements) − { ids named by a valid, un-revoked Remove or
 /// Supersede }`, where "valid" means same-author as the target. Every step is set membership over the
 /// *set* of items, so the result is independent of order and duplication — the convergence guarantee.
 ///
@@ -245,10 +246,10 @@ pub enum OplogError {
 /// path; the projection then borrows the snapshot). Output is ordered by id.
 pub fn materialize(items: &[ChannelItem]) -> Vec<Record> {
     // 1. Every asserted record by id (bare Asserts + Supersede replacements); first writer of an id
-    //    wins — a collision is a byte-identical duplicate, so idempotent. Also index each Retract op's
-    //    author, since only Retracts can be revoked.
+    //    wins — a collision is a byte-identical duplicate, so idempotent. Also index each Remove op's
+    //    author, since only Removes can be revoked.
     let mut records: BTreeMap<&str, &Record> = BTreeMap::new();
-    let mut retract_author: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut remove_author: BTreeMap<&str, &str> = BTreeMap::new();
     for item in items {
         match item {
             ChannelItem::Assert(r) => {
@@ -267,35 +268,35 @@ pub fn materialize(items: &[ChannelItem]) -> Vec<Record> {
                         .or_insert(replacement.as_ref());
                 }
                 OpKind::Supersede { .. } => {}
-                OpKind::Retract { .. } => {
-                    retract_author.insert(op.id.as_str(), op.created_by.as_str());
+                OpKind::Remove { .. } => {
+                    remove_author.insert(op.id.as_str(), op.created_by.as_str());
                 }
                 OpKind::Revoke { .. } => {}
             },
         }
     }
 
-    // 2. Retract ops suppressed by a same-author Revoke.
+    // 2. Remove ops suppressed by a same-author Revoke.
     let mut revoked: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         if let ChannelItem::Op(op) = item {
-            if let OpKind::Revoke { retract } = &op.kind {
-                if retract_author.get(retract.as_str()).copied() == Some(op.created_by.as_str()) {
-                    revoked.insert(retract.as_str());
+            if let OpKind::Revoke { removal } = &op.kind {
+                if remove_author.get(removal.as_str()).copied() == Some(op.created_by.as_str()) {
+                    revoked.insert(removal.as_str());
                 }
             }
         }
     }
 
-    // 3. Dead record ids: a same-author Retract (not revoked) or Supersede naming a record kills it.
+    // 3. Dead record ids: a same-author Remove (not revoked) or Supersede naming a record kills it.
     //    An op naming an unknown or other-author record is a deterministic no-op on every replica.
     let mut dead: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         let ChannelItem::Op(op) = item else { continue };
         let target = match &op.kind {
-            OpKind::Retract { target } if !revoked.contains(op.id.as_str()) => target.as_str(),
+            OpKind::Remove { target } if !revoked.contains(op.id.as_str()) => target.as_str(),
             OpKind::Supersede { prior, .. } => prior.as_str(),
-            OpKind::Retract { .. } | OpKind::Revoke { .. } => continue,
+            OpKind::Remove { .. } | OpKind::Revoke { .. } => continue,
         };
         if records
             .get(target)
