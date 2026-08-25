@@ -3535,6 +3535,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-projection"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde_json",
+]
+
+[[package]]
 name = "openom-protocol"
 version = "0.1.0"
 dependencies = [
