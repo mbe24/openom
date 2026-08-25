@@ -3589,10 +3589,13 @@ version = "0.1.0"
 dependencies = [
  "commute",
  "journal",
+ "openom-claim",
  "openom-crypto",
+ "openom-oplog",
  "openom-protocol",
  "openom-sealer",
  "openom-treelog",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 

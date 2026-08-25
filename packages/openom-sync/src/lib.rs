@@ -21,6 +21,9 @@ pub enum SyncError {
     /// A pulled proposal's decrypted bytes didn't decode as a proposal bundle.
     #[error("proposal decode failed: {0:?}")]
     ProposalDecode(ProposalError),
+    /// A pulled claim entry's decrypted bytes didn't decode as a `ChannelItem` batch.
+    #[error("claim decode failed: {0}")]
+    ClaimDecode(#[from] serde_json::Error),
 }
 
 impl From<commute::DecodeError> for SyncError {
@@ -238,6 +241,9 @@ impl<S: DocStore> SyncClient<S> {
         self.push(&ops)
     }
 }
+
+mod claim;
+pub use claim::ClaimSyncClient;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 [package]
 name = "openom-sync"
-description = "openom — the client sync loop: seal treelog deltas to the store and merge peers' deltas back (E2EE, multi-device)"
+description = "openom — the client sync loop: seal deltas to the store and merge peers' deltas back (E2EE, multi-device). Hosts the treelog SyncClient and the claim-model ClaimSyncClient (op-based, materialize fold)."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -12,6 +12,11 @@ openom-treelog = { path = "../openom-treelog" }
 openom-sealer = { path = "../openom-sealer" }
 journal = { path = "../journal" }
 openom-protocol = { path = "../openom-protocol" }
+# The claim-model sync path (ClaimSyncClient) — independent of treelog/commute, so those can be
+# dropped later (OPE-210) without touching it. openom-claim supplies the Record the fold returns.
+openom-oplog = { path = "../openom-oplog" }
+openom-claim = { path = "../openom-claim" }
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
