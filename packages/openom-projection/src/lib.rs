@@ -37,8 +37,12 @@ const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
 const P_REATTRIBUTE: &str = "openom.org/core/reattribute_to/v1";
 const P_PREFERRED: &str = "openom.org/core/preferred/v1";
+const P_PARENT: &str = "openom.org/core/parent/v1";
+const P_PARTNERSHIP: &str = "openom.org/core/partnership/v1";
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
+const DEFAULT_KIND: &str = "biological";
+const DEFAULT_ROLE: &str = "partner";
 
 /// Read-time policy knobs.
 pub struct Policy {
@@ -51,6 +55,8 @@ pub struct Policy {
     pub reattribute_threshold: i64,
     /// Minimum score for a `preferred` selection to take effect.
     pub preferred_threshold: i64,
+    /// Minimum score for a parent-child or partnership edge to be admitted.
+    pub relationship_threshold: i64,
 }
 
 impl Default for Policy {
@@ -60,6 +66,7 @@ impl Default for Policy {
             different_from_threshold: 1,
             reattribute_threshold: 1,
             preferred_threshold: 1,
+            relationship_threshold: 1,
         }
     }
 }
@@ -96,10 +103,29 @@ pub struct Conflict {
     pub cut_pair: [String; 2],
 }
 
-/// The materialized read model (increment 1: people + identity conflicts).
+/// A directional parent→child edge (stored once, read from either end) between canonical persons.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ParentChild {
+    pub parent: String,
+    pub child: String,
+    /// A `core/relations/v1` term: `biological` | `adoptive` | `step` | `foster` | `guardian`.
+    pub kind: String,
+}
+
+/// A symmetric partnership between two canonical persons.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Partnership {
+    pub pair: [String; 2],
+    /// A `core/roles/v1` term: `spouse` | `partner`.
+    pub role: String,
+}
+
+/// The materialized read model: people, their relationships, and identity conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     pub people: Vec<Person>,
+    pub parent_child: Vec<ParentChild>,
+    pub partnerships: Vec<Partnership>,
     pub conflicts: Vec<Conflict>,
 }
 
@@ -136,6 +162,8 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
     let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
     let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
+    let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
+    let mut partnership: BTreeMap<([String; 2], String), PairInfo> = BTreeMap::new(); // (canonical pair, role) -> info
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -192,6 +220,44 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                             claim_ref.to_string(),
                         ))
                         .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(r);
+                    }
+                }
+            }
+            P_PARENT => {
+                if let (Some(child), Some(parent), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("parentPersonId"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let kind = r
+                        .get("value")
+                        .and_then(|v| v.get("kind"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(DEFAULT_KIND);
+                    let info = parent_child
+                        .entry((child.to_string(), parent.to_string(), kind.to_string()))
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(r);
+                    }
+                }
+            }
+            P_PARTNERSHIP => {
+                if let (Some(p), Some(a)) = (pair(r), str_field(r, "createdBy")) {
+                    let role = r
+                        .get("value")
+                        .and_then(|v| v.get("role"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(DEFAULT_ROLE);
+                    let info = partnership.entry((p, role.to_string())).or_default();
                     info.authors.insert(a.to_string());
                     info.claim_ids.insert(id.to_string());
                     if info.fingerprint.is_none() {
@@ -260,6 +326,14 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         for person in options.keys() {
             nodes.insert(person.clone());
         }
+    }
+    for (child, parent, _) in parent_child.keys() {
+        nodes.insert(child.clone());
+        nodes.insert(parent.clone());
+    }
+    for (pair, _) in partnership.keys() {
+        nodes.insert(pair[0].clone());
+        nodes.insert(pair[1].clone());
     }
 
     // --- edges + cuts, each gated by its attestation-weighted score -----------------------------
@@ -429,11 +503,48 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));
 
+    // Relationships between canonical persons (attestation-weighted; endpoints canonicalized through
+    // the same_as clusters; an edge with a dangling endpoint or that collapses to a self-loop is
+    // dropped; duplicates that coincide after canonicalization are merged).
+    let mut parent_child_edges: Vec<ParentChild> = parent_child
+        .iter()
+        .filter(|(_, info)| score(info, &attests) >= policy.relationship_threshold)
+        .filter_map(|((child, parent, kind), _)| {
+            let (c, p) = (canon_of(child)?, canon_of(parent)?);
+            (c != p).then(|| ParentChild {
+                parent: p,
+                child: c,
+                kind: kind.clone(),
+            })
+        })
+        .collect();
+    parent_child_edges.sort();
+    parent_child_edges.dedup();
+
+    let mut partnership_edges: Vec<Partnership> = partnership
+        .iter()
+        .filter(|(_, info)| score(info, &attests) >= policy.relationship_threshold)
+        .filter_map(|((pair, role), _)| {
+            let (a, b) = (canon_of(&pair[0])?, canon_of(&pair[1])?);
+            (a != b).then(|| Partnership {
+                pair: sorted_pair(&a, &b),
+                role: role.clone(),
+            })
+        })
+        .collect();
+    partnership_edges.sort();
+    partnership_edges.dedup();
+
     let conflicts = skipped
         .into_iter()
         .map(|cut_pair| Conflict { cut_pair })
         .collect();
-    Projection { people, conflicts }
+    Projection {
+        people,
+        parent_child: parent_child_edges,
+        partnerships: partnership_edges,
+        conflicts,
+    }
 }
 
 // --- the constraint-repair union-find (§11) -----------------------------------------------------

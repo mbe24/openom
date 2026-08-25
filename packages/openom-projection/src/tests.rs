@@ -57,6 +57,25 @@ fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &s
 fn given_ref(given: &str) -> String {
     openom_claim::content_ref(&json!({ "parts": { "given": given } })).unwrap()
 }
+fn parent(id: &str, child: &str, parent_person: &str, kind: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_PARENT,
+        child,
+        json!({ "parentPersonId": parent_person, "kind": kind }),
+        author,
+    )
+}
+fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Value {
+    let [x, y] = sorted_pair(a, b);
+    claim(
+        id,
+        P_PARTNERSHIP,
+        &x,
+        json!({ "pair": [x, y], "role": role }),
+        author,
+    )
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -366,6 +385,70 @@ fn equivalent_names_share_a_class() {
     assert_eq!(cls("n1"), cls("n2")); // equivalent → one class
     assert_ne!(cls("n1"), cls("n3")); // unrelated → separate class
     assert_eq!(cls("n1"), "n1"); // class label = min claim_id in the component
+}
+
+#[test]
+fn parent_child_edge() {
+    let recs = vec![
+        person("pChild"),
+        person("pParent"),
+        parent("r1", "pChild", "pParent", "biological", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.parent_child,
+        vec![ParentChild {
+            parent: "pParent".into(),
+            child: "pChild".into(),
+            kind: "biological".into()
+        }]
+    );
+}
+
+#[test]
+fn partnership_edge() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        partnership("r1", "pB", "pA", "spouse", "did:key:z6MkA"), // endpoints in any order
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.partnerships,
+        vec![Partnership {
+            pair: ["pA".into(), "pB".into()],
+            role: "spouse".into()
+        }]
+    );
+}
+
+#[test]
+fn relationships_canonicalize_across_a_merge() {
+    // The parent edge names pB; a same_as merges pB into pA → the edge points at pA.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pChild"),
+        parent("r1", "pChild", "pB", "biological", "did:key:z6MkA"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.parent_child.len(), 1);
+    assert_eq!(p.parent_child[0].parent, "pA");
+    assert_eq!(p.parent_child[0].child, "pChild");
+}
+
+#[test]
+fn refuted_relationship_is_dropped() {
+    let recs = vec![
+        person("pChild"),
+        person("pParent"),
+        parent("r1", "pChild", "pParent", "biological", "did:key:z6MkA"),
+        attest("z1", "r1", "reject", "did:key:z6MkB"),
+        attest("z2", "r1", "reject", "did:key:z6MkC"),
+    ];
+    // score = 1 - 2 = -1 < threshold → dropped.
+    assert!(project(&recs, &Policy::default()).parent_child.is_empty());
 }
 
 // ---- properties --------------------------------------------------------------------------------
