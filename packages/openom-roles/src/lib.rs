@@ -1,13 +1,4 @@
-//! openom's authorization role model + the capability→role policy.
-//!
-//! ONE source of truth for a rule enforced in two places that must agree: the server's advisory ACL gate
-//! (`openom` `authz`) and the client's landed-entry verification (`openom-keyring` `verify_entry`). The
-//! server is defense-in-depth; the client is the real boundary — but both apply the same matrix, so it
-//! lives here rather than being duplicated (and silently drifting).
-//!
-//! Roles are numeric, power descending (owner strongest), mirroring the keyring `MemberRole`; a gate is
-//! `member_role <= required`. Values are `i16` — the server's `tree_access.role` column type — with the
-//! proto `MemberRole` (i32) as the authoritative vocabulary.
+#![doc = include_str!("../README.md")]
 
 use openom_protocol::v1::{Kind, MemberRole};
 

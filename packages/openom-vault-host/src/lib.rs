@@ -1,19 +1,4 @@
-//! The native key-custody host. On Tauri the DEK must never enter the webview, so the
-//! passphrase lifecycle (provision/unlock/recover/change) and the live [`Sealer`] sessions
-//! live here in Rust; the `#[tauri::command]`s are thin wrappers that (de)serialize and
-//! delegate. Keeping the substance in a plain crate — no `tauri`, no webview — is what makes
-//! it `cargo test`-able without a device.
-//!
-//! This is the Rust twin of the web app's `vault.js` + the worker's sealer registry, cut ONE
-//! level higher than the worker: keyring bytes, the anti-rollback watermark, and the replica
-//! id never cross the boundary. The host owns keyring + watermark storage (injected as a
-//! [`VaultStore`]) so a keyring-save and its watermark advance can be one durable transaction,
-//! and so key custody shares the ciphertext's durability domain rather than the evictable
-//! webview one.
-//!
-//! Errors cross as a `{ code, message }` [`VaultError`] with a stable [`VaultErrorCode`] enum,
-//! never a matchable string — the web app already has one string-matched error path that broke
-//! when a Rust message read "rolled back" instead of "rollback".
+#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

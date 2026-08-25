@@ -1,19 +1,4 @@
-//! EDTF (ISO 8601-2, Extended Date/Time Format) — the genealogy-relevant subset, normalized to
-//! sortable `[min, max]` day bounds.
-//!
-//! A date in a family tree is rarely a precise instant: "1984", "spring 1901", "about 1850",
-//! "before 1912", "sometime in the 1870s". EDTF is the ISO grammar for exactly that. This crate
-//! parses the subset genealogy needs and normalizes every expression to the same shape — the
-//! earliest (`min`) and latest (`max`) calendar day it could denote, a [`Precision`], and the
-//! uncertainty/approximation flags — so the projection can sort a timeline and test range overlap
-//! without re-parsing. `min`/`max` are `None` on an open or unknown interval end.
-//!
-//! Supported: dates `YYYY`, `YYYY-MM`, `YYYY-MM-DD` (with a leading `-` for BCE years); the level-1
-//! qualifiers `?` (uncertain), `~` (approximate), `%` (both) as a trailing marker; unspecified
-//! digits `X` (`19XX`, `1984-XX`, `1984-06-XX`); the four seasons (`YYYY-21`..`24`); and intervals
-//! `start/end`, where either end may be a date, `..` (open), or empty (unknown). Not supported
-//! (out of genealogy scope): times of day, time zones, level-2 per-component qualifiers, sets
-//! `[..]`/`{..}`, and `Y`-prefixed large years.
+#![doc = include_str!("../README.md")]
 
 /// A concrete calendar day (proleptic Gregorian; `year` may be negative for BCE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

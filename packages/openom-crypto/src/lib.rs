@@ -1,13 +1,4 @@
-//! Shared crypto — the symmetric primitives, used identically on client and
-//! server.
-//!
-//! V1 is client-side zero-knowledge: the client seals the tree before upload and
-//! the server never holds a key. Sharing this crate is what keeps V2 sharing and
-//! any cross-side validation on the *exact* same algorithms and parameters, so
-//! the two ends can never disagree on how a blob was sealed.
-//!
-//! The seal/open surface lands next; for now the type aliases below fix the
-//! algorithm choices and wire the underlying crates.
+#![doc = include_str!("../README.md")]
 
 /// Default AEAD cipher — **XChaCha20-Poly1305** (frozen §6). Its 192-bit nonce makes
 /// random nonces collision-free in practice, so a long delta log under one DEK never

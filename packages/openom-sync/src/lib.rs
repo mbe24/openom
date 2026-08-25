@@ -1,17 +1,4 @@
-//! The client sync loop — the piece that makes a [`Tree`](openom_treelog::Tree) multi-device.
-//!
-//! It ties three layers that each deliberately know nothing of the others: `openom-treelog` produces
-//! and consumes `commute` op bytes; `openom-sealer` seals those bytes into E2EE envelopes; a
-//! `DocStore` persists opaque envelopes as an append log. A [`SyncClient`] wraps all three:
-//!
-//! - **push** — a local edit's ops are encoded, sealed as a `KIND_DELTA` / `FORMAT_OPENOM_TREELOG`
-//!   entry, and appended to the store's log;
-//! - **pull** — new log entries are opened and `merge_bytes`-d into the tree.
-//!
-//! Because `commute` ops are self-contained, commutative, and idempotent, delivery order and
-//! at-least-once redelivery don't matter — re-pulling one's own pushes is a no-op, and any interleave
-//! of two clients' pushes converges. The log carries deltas only; full snapshots are a separate
-//! compaction concern (the store's snapshot slot), so the receive path always opens a delta.
+#![doc = include_str!("../README.md")]
 
 use commute::codec::encode_ops;
 use commute::Op;

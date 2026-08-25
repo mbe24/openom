@@ -1,17 +1,4 @@
-//! Signed attestations — an independent **sidecar**, never tree ops (see `plan/design.attestations.md`).
-//!
-//! A member vouches for a fact by Ed25519-signing that fact's canonical content hash
-//! (`openom-model::content_hash`). Signed, not zero-knowledge: a signature attributes the claim and
-//! is tamper-evident. The sidecar is its own document that **rides the generic `journal` substrate**
-//! (a snapshot + an op-log): [`AttestationDoc`] is the snapshot, [`AttestOp`] is an update — see
-//! [`AttestationDoc::to_snapshot`] / [`AttestationDoc::encode_op`].
-//!
-//! Scope of THIS crate = the **mechanism**: the record, signature verification, and the document's
-//! merge semantics (concurrent attests union; revoke tombstones then hard-purges on compaction).
-//! It deliberately does NOT decide **who** may attest/revoke (role authority = OPE-104) or **whose
-//! key this is** (the attester registry = OPE-105) — resolution and authorization are layered on top.
-//! The write surface gets its own server-side abuse meter (a new metered endpoint, like the
-//! delta-log meter) — that lives in the server track, not here.
+#![doc = include_str!("../README.md")]
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};

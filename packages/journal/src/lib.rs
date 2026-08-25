@@ -1,16 +1,5 @@
-//! `journal` — a local-first sync backend.
-//!
-//! Persistence of OPAQUE bytes, deliberately ignorant of the data model: a document is a
-//! `Snapshot` (a checkpoint) plus an append-only log of `Update`s addressed by a growing
-//! `seq`. That opacity is the point — the same [`DocStore`] contract serves an in-memory
-//! store, SQLite, S3, or a zero-knowledge server, because every metadata field lives INSIDE
-//! the ciphertext the caller hands in. This crate has no `openom-*` dependency and knows
-//! nothing about the tree, the crypto, or the wire format.
-//!
-//! The openom server-backed *implementation* of this contract (endpoints, auth, protocol
-//! framing, media upload) sits ABOVE this crate — today as the JS RemoteStore, and if a
-//! native one is ever needed, as a future `openom-store`. Orchestration (seal → append,
-//! read → open → merge, retry, bootstrap) is a third layer again, in `openom-sync`.
+#![doc = include_str!("../README.md")]
+
 pub mod memory;
 pub mod sqlite;
 #[cfg(test)]

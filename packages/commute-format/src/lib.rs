@@ -1,16 +1,4 @@
-//! The **commute format bridge** — import/export structured documents as mergeable [`commute`] cells.
-//!
-//! It is a REUSABILITY layer (openom's own editing goes through typed ops, not this). Two seams:
-//!
-//! - a [`Codec`] turns a serialized format ⇄ a neutral [`ValueTree`] (mechanical; one impl per
-//!   format — JSON now, XML/YAML later behind the same trait);
-//! - a `Mapping` (next slice) turns a [`ValueTree`] ⇄ commute cells, carrying **identity** and a
-//!   per-field **merge policy** — the substance, and where "no silent last-writer-wins" is enforced.
-//!
-//! This slice lands the IR + the JSON codec. The JSON codec is hand-rolled (no serde) so it
-//! **rejects duplicate object keys and floating-point numbers** — a document CRDT that silently
-//! last-writer-wins a duplicate key, or archives a non-canonical float, is exactly what we avoid.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 /// A neutral, format-agnostic value — the pivot every [`Codec`] and mapping shares. `#[non_exhaustive]`

@@ -1,12 +1,4 @@
-//! `did:key` for Ed25519 identities, plus a `member_id ⇄ did:key` resolution seam.
-//!
-//! A `did:key` is a self-certifying identifier: the key *is* the identifier, no registry needed.
-//! For Ed25519 it is `did:key:z` + base58btc( multicodec(0xed01) ++ 32-byte-public-key ), which
-//! always renders with the `z6Mk…` prefix. This is the byte-format the claim envelope's `createdBy`
-//! will carry, so it is pinned here (phase 0) before any content-hash id is persisted cross-client.
-//!
-//! The crate is deliberately dependency-free — base58btc is ~40 lines below — so it compiles to wasm
-//! with no surface, and the encoding can be audited in one file.
+#![doc = include_str!("../README.md")]
 
 use std::collections::HashMap;
 

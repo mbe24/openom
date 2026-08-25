@@ -1,29 +1,4 @@
-//! `commute` — a small, self-contained **operation-based CRDT**.
-//!
-//! `commute` is deliberately NOT a JSON/document CRDT. It merges a keyed collection of **typed
-//! cells** — each with its own convergent merge rule — via **self-contained operations**: every op
-//! names its own target and carries everything needed to apply it, referencing no other op. That is
-//! the defining property, and it buys three things at once:
-//!
-//! - **order-independence** — ops commute, so replicas that have seen the same set of ops agree,
-//!   regardless of delivery order (proven by the convergence property test);
-//! - **idempotence** — re-delivering an op is a no-op, so at-least-once sync is safe;
-//! - **discardable proposals** — because nothing depends on a given op, a rejected op leaves no
-//!   dangling references (the property that makes an approval/reject gate clean; see `openom-treelog`).
-//!
-//! Ordering is a **Lamport clock** `(lamport, replica)`, never wall-clock time — so merge decisions
-//! are deterministic and immune to device clock skew. The **engine owns the clock**: a caller hands
-//! in an unstamped [`OpIntent`] and [`Doc::apply_local`] stamps it. Leaf [`Value`]s are opaque and
-//! contain **no floats** (values become a canonical archive encoding downstream; floats have no
-//! canonical form).
-//!
-//! This first slice provides two cell kinds — an **LWW register** and a **tombstoned OR-set** — plus
-//! the Lamport kernel and merge. Richer cells land in later slices behind the same op model:
-//! sourced-claim sets, keyed-ordered collections, and a **RESERVED `text`/`sequence` cell** for
-//! free-text fields (e.g. a biography) that must merge character/span-level rather than whole-value
-//! LWW — its CRDT algorithm is deferred (see `plan/design.schema-evolution.md`, OPE-150/OPE-151). The
-//! canonical byte codec and snapshot/compaction also land later.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;

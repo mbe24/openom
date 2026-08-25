@@ -1,14 +1,4 @@
-//! openom canonical data model — the flat, tabular, id-keyed representation of a family tree.
-//!
-//! Design: `plan/design.data-model.md`. Flat tables (no deep nesting), each entity carrying an
-//! **opaque, random, stable id** (see [`id`]). A family tree is a **DAG, not a tree** (a person has
-//! two parents), so relationships are `edges`, not nesting. Ids are intrinsic stored fields, so
-//! **editing a fact never changes an id and never breaks an edge**, and folding deltas into a
-//! snapshot (compaction) preserves them.
-//!
-//! Out of scope here (tracked separately): RFC-8785 canonicalization + per-entity hashing
-//! (OPE-96/OPE-97), generous JSON-Schema bounds (OPE-96), and embedding the name model
-//! (`design.data-name-mode.md`, OPE-98) — `names` is referenced by [`NameId`] but not yet a table.
+#![doc = include_str!("../README.md")]
 
 mod id;
 pub use id::*;

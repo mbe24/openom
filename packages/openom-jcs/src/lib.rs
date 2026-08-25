@@ -1,22 +1,4 @@
-//! RFC 8785 — the JSON Canonicalization Scheme (JCS).
-//!
-//! One serialization, byte-for-byte, for any JSON value — the substrate every content hash rests
-//! on: a claim `id` is `sha256(JCS(envelope-minus-signature-minus-id))`, a dedup `fingerprint` is
-//! `sha256(JCS(targetId, predicate, value))`, and a content reference is `"sha256:" + hex(JCS(intrinsic))`.
-//! If two clients canonicalize the same value to different bytes, their ids fork silently, and dedup
-//! and refutation memory corrupt with no error anywhere — so this crate is deliberately small, pure,
-//! and exhaustively tested, and native and wasm builds MUST agree (property enforced by the
-//! projection's byte-identity harness downstream).
-//!
-//! Scope choices (both are policy, enforced here):
-//! - **Integers only — floats are rejected.** RFC 8785's number rule is the ES6 `Number` formatting
-//!   of an IEEE-754 double; that lossy round-trip only matters for non-integers, and the claim model
-//!   is float-free by construction. Rather than implement (and depend on the correctness of) ES6
-//!   number formatting we'd never exercise, a float is a hard [`JcsError::Float`].
-//! - **Keys are ordered by UTF-16 code units**, per RFC 8785 §3.2.3 — *not* by UTF-8/code-point
-//!   order. The two agree for the Basic Multilingual Plane but diverge for supplementary characters
-//!   (surrogates `D800..DFFF` sort below `E000..FFFF`). Our keys are ASCII today, but the guarantee
-//!   is structural so a future non-ASCII key can never silently fork a hash.
+#![doc = include_str!("../README.md")]
 
 use std::cmp::Ordering;
 

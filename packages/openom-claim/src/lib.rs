@@ -1,23 +1,4 @@
-//! The claim-envelope hashing + signing seam (design.data-model-claims.v1.md §4).
-//!
-//! Every disputable fact is a **Claim** carried in a uniform envelope
-//! `{ id, type, targetId, predicate, value, citation?, createdAt, createdBy, signature? }`. Three
-//! derived quantities hang off that envelope, and getting their byte-inputs exactly right is
-//! load-bearing — a divergence forks ids and corrupts dedup/refutation memory with no error anywhere:
-//!
-//! - **`id`** = `"sha256:" + hex( sha256( JCS(envelope, id & signature excluded) ) )`. Covers
-//!   type/targetId/predicate/value/citation/createdAt/createdBy. Excluding `id` avoids self-reference;
-//!   excluding `signature` makes the id identical whether or not the record is signed.
-//! - **`fingerprint`** = `sha256( JCS(targetId, predicate, value) )`. Excludes `createdBy` and
-//!   `citation`, so the same fact by different authors or with different sources shares one
-//!   fingerprint — that is what makes corroboration count distinct authors and lets a re-import inherit
-//!   a refuted fact's `reject`s (§4.2).
-//! - **signature** (optional, tree-level `signed_claims`) = Ed25519 over `DOMAIN‖content_hash` by the
-//!   key behind `createdBy` (a `did:key`). Domain-separated so it can't be replayed elsewhere;
-//!   excluded from both the id and the fingerprint.
-//!
-//! This operates on the envelope as a [`serde_json::Value`]; the typed envelope struct + JSON Schema
-//! are frozen separately (OPE-170) and reuse these primitives.
+#![doc = include_str!("../README.md")]
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::Value;

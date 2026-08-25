@@ -1,22 +1,4 @@
-//! `openom-treelog` — the family-tree domain layer, composed over the [`commute`] op-based CRDT.
-//!
-//! `commute` provides typed convergent *cells* (LWW registers, tombstoned OR-sets) and self-contained
-//! ops; this crate maps the genealogy model onto them. The design choice that matters most here is how
-//! a **fact** is represented. A birth date is NOT an overwritable scalar — two relatives who record
-//! different dates must both be *kept*, as competing **sourced claims** for a human to adjudicate;
-//! silent last-writer-wins is genealogically wrong. So a fact is:
-//!
-//! - an OR-set of [`Claim`]s (each `AddClaim` names a caller-minted [`ClaimId`], so a crash-retry is
-//!   idempotent and never mints a duplicate), plus
-//! - an LWW register holding the *preferred* claim pointer.
-//!
-//! Person/family existence and relationships (child, spouse) are OR-sets of ids. Everything inherits
-//! `commute`'s convergence: any concurrent edits, in any order, converge — and competing facts are
-//! retained, not clobbered.
-//!
-//! This first slice covers persons and their sourced facts. Relationships, media, `MoveChild`,
-//! batched actions, and the proposal/approval flow build on the same op model in later slices.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 use commute::{CellId, Doc, Op, OpIntent, ReplicaId, Value};

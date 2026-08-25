@@ -1,33 +1,4 @@
-//! openom **sealer** — the client-side session that holds the *unlocked* DEK and turns
-//! plaintext into wire-ready [`Envelope`] bytes (and back). It is the one stateful,
-//! key-holding component in the system; the server stays keyless (§16). The same core
-//! runs natively inside Tauri and, compiled to wasm32 with the `wasm` feature, inside
-//! the browser through the [`wasm`] veneer — one implementation, two bindings, so a web
-//! and a native client can never disagree on how a blob was sealed.
-//!
-//! ## What lives here vs. in the caller
-//! The sealer is deliberately *not* the source of truth for the log chain. Per the §3
-//! crash-retry model, the caller (JS `SealedStore` / the Tauri command) owns the chain
-//! state — `replica_counter`, `prev_ciphertext_hash`, `covers_through_seq` — and passes
-//! it in as a [`SealContext`]. [`Sealer::seal_entry`] returns the freshly-minted
-//! `ciphertext_hash`, which the caller persists as the next entry's `prev`.
-//!
-//! ## Retry means re-UPLOAD, never re-SEAL
-//! Each `seal_entry` mints a **fresh random nonce**, so re-sealing the *same* logical
-//! entry yields a *different* `ciphertext_hash` under the *same* `(replica_id, counter)`
-//! slot — and if the first upload had actually landed (a lost ack), that is a self-
-//! inflicted chain fork. So a transient upload failure must retry the **already-sealed
-//! bytes verbatim** (the caller persists them locally before upload; that local commit is
-//! the write-ahead point). `seal_entry` is called exactly once per logical entry, and a
-//! fresh seal (new nonce) is reserved for genuinely new content, which always takes a new
-//! counter. The purity here is what makes that discipline possible, not a license to
-//! re-seal on retry.
-//!
-//! ## Scope binding
-//! A sealer is bound to exactly one `(tree_id, key_id, replica_id)`. On open it verifies
-//! the envelope's header matches that scope and the expected [`EntryKind`] before
-//! decrypting — a blob for another tree, or sealed under a superseded key epoch, is
-//! rejected structurally rather than handed to the AEAD and failing opaquely.
+#![doc = include_str!("../README.md")]
 
 use openom_crypto::{open_envelope, seal_envelope, CryptoError, Key32};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};

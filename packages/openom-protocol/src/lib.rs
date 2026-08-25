@@ -1,12 +1,4 @@
-//! Shared protocol — the wire format used identically by the server and the
-//! client (through the sealer / sync layer).
-//!
-//! The Rust types in [`v1`] are generated from `proto/openom/v1/openom.proto` with
-//! `buf generate` (the neoeinstein-prost plugin) and checked into `src/generated/`.
-//! There is **no build script and no `protoc`**, so nothing executes during
-//! `cargo build` — which is what lets the crate build on a host whose policy blocks
-//! build-script execution. Regenerate with `cd proto && buf generate` after editing
-//! the `.proto`.
+#![doc = include_str!("../README.md")]
 
 /// Generated types for `package openom.v1` — `Envelope`, `Header`, `Keyring`,
 /// `KeyEpoch`, `KeyWrap`, `KdfParams`, and the `Kind` / `Format` / `Aead` /
