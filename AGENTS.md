@@ -36,3 +36,19 @@ mood, lowercase start, no trailing period.
 ## Validation before committing
 
 Run quick type checks, format checks, and unit tests after a series of commits.
+
+## Package & app documentation
+
+Every crate in `packages/` and every unit in `apps/` has a `README.md`, wired as the module doc
+(`#![doc = include_str!("../README.md")]` for crates). The format, the layer map, and the exemplar
+(`packages/openom-jcs/README.md`) live in `packages/README.md`.
+
+When you add or materially change a unit:
+- Create/update its `README.md` — especially **What it is — and is not** (the scope boundary) and
+  **Invariants** (the contract).
+- Invariants are namespaced (`JCS-1`), stable, never renumbered, and each `verified by` names a
+  **real** test. Never invent invariants to fill the table; a unit with no real contract has no
+  Invariants section. A README may omit any section that would be padding — never pad one.
+- Tag non-Rust code fences (` ```sh `, ` ```json `, …) so rustdoc doesn't run them as doctests.
+- Keep the `packages/README.md` map and each `Position` line honest when the graph or a status changes.
+- Verify before done: `node scripts/cargo.mjs test -p <crate>` (repo root; cargo runs under WSL2/Docker on Windows).
