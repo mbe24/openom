@@ -1,4 +1,4 @@
-//! The read-time **projection** — increment 1.
+//! The read-time **projection**.
 //!
 //! The claim store is a grow-only set of records that different authors append concurrently and that
 //! sync in any order. It carries no resolved truth: two authors may say person A and person B are the
@@ -7,16 +7,22 @@
 //! without a shared clock — write-time invariants that can't hold in a concurrent append-only store
 //! become read-time guarantees (the same move keyeo's StrongRemove resolver makes).
 //!
-//! This increment builds the identity core: group `same_as` / `different_from` edges, cluster the
-//! anchors with **constraint-repair union-find** (§11) — admit positive edges in a fixed order,
-//! skipping any that would merge two anchors cut, directly or transitively, by a `different_from` —
-//! canonicalize each cluster to its minimum anchor id, and assemble a [`Person`] view (names + sex)
-//! with tombstoned records suppressed.
+//! Built so far:
+//! - **Identity clustering** — group `same_as` / `different_from` edges, cluster the anchors with
+//!   **constraint-repair union-find** (§11: admit positive edges in a fixed order, skip any that would
+//!   merge two anchors cut directly or transitively by a `different_from`), and canonicalize each
+//!   cluster to its minimum *anchor* id. Skipped merges surface as conflicts.
+//! - **Attestation-weighted confidence** — each `same_as` / `different_from` / `reattribute_to` is
+//!   gated by `distinct authors + independent support − rejects`, so `reject`s un-merge and a refuted
+//!   `different_from` stops cutting.
+//! - **`reattribute_to`** — a net-positive re-home moves a claim's subject to a new anchor before its
+//!   facts are grouped.
+//! - **Assembly** — a [`Person`] view (names + sex) per cluster, with tombstoned records suppressed.
 //!
-//! Not yet here (documented seams): attestation-weighted confidence (edge scores are distinct-author
-//! corroboration for now), `preferred`, `reattribute_to`, events/EDTF views, the *role-gated*
-//! tombstone (this increment suppresses tombstoned records but does not yet check the tombstoner's
-//! authority — that needs the role/membership feed), and SQLite materialization.
+//! Not yet here (documented seams): `preferred` selection and name `equivalent_to` grouping (both
+//! need the reference-by-content primitive), events/EDTF views, referential-integrity degrade, the
+//! *role-gated* tombstone (records are suppressed but the tombstoner's authority is not yet checked —
+//! that needs the role/membership feed), and SQLite materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +33,7 @@ const P_NAME: &str = "openom.org/core/name/v1";
 const P_SEX: &str = "openom.org/core/sex/v1";
 const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
+const P_REATTRIBUTE: &str = "openom.org/core/reattribute_to/v1";
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 
@@ -37,6 +44,8 @@ pub struct Policy {
     /// Minimum score for a `different_from` to act as a hard cut; a weaker or refuted one does not
     /// block a merge.
     pub different_from_threshold: i64,
+    /// Minimum score for a `reattribute_to` to re-home a claim's subject to a new anchor.
+    pub reattribute_threshold: i64,
 }
 
 impl Default for Policy {
@@ -44,6 +53,7 @@ impl Default for Policy {
         Policy {
             same_as_threshold: 1,
             different_from_threshold: 1,
+            reattribute_threshold: 1,
         }
     }
 }
@@ -111,7 +121,8 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
     let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
-    let mut sex_claims: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // target -> value -> authors
+    let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
+    let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -163,12 +174,32 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                         .and_then(Value::as_str),
                     str_field(r, "createdBy"),
                 ) {
-                    sex_claims
-                        .entry(t.to_string())
+                    sex_claims.push((
+                        t.to_string(),
+                        id.to_string(),
+                        sex.to_string(),
+                        a.to_string(),
+                    ));
+                }
+            }
+            P_REATTRIBUTE => {
+                if let (Some(target), Some(person), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("personId"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let info = reattribute
+                        .entry(target.to_string())
                         .or_default()
-                        .entry(sex.to_string())
-                        .or_default()
-                        .insert(a.to_string());
+                        .entry(person.to_string())
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(r);
+                    }
                 }
             }
             _ => {}
@@ -184,8 +215,13 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     for (t, _, _) in &name_claims {
         nodes.insert(t.clone());
     }
-    for t in sex_claims.keys() {
+    for (t, _, _, _) in &sex_claims {
         nodes.insert(t.clone());
+    }
+    for options in reattribute.values() {
+        for person in options.keys() {
+            nodes.insert(person.clone());
+        }
     }
 
     // --- edges + cuts, each gated by its attestation-weighted score -----------------------------
@@ -225,6 +261,55 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let canon_of =
         |id: &str| -> Option<String> { rep.get(id).and_then(|key| canonical.get(key)).cloned() };
 
+    // Resolve reattribute_to: per re-homed claim, the winning net-positive personId (highest score,
+    // ties by personId). eff_target then re-homes a claim's subject *before* it is grouped.
+    let rehome: BTreeMap<String, String> = reattribute
+        .iter()
+        .filter_map(|(claim, options)| {
+            options
+                .iter()
+                .filter(|(_, info)| score(info, &attests) >= policy.reattribute_threshold)
+                .max_by(|a, b| {
+                    score(a.1, &attests)
+                        .cmp(&score(b.1, &attests))
+                        .then(b.0.cmp(a.0))
+                })
+                .map(|(person, _)| (claim.clone(), person.clone()))
+        })
+        .collect();
+    let eff_target = |claim_id: &str, orig: &str| -> String {
+        rehome
+            .get(claim_id)
+            .cloned()
+            .unwrap_or_else(|| orig.to_string())
+    };
+
+    // Pre-group names + sex by canonical person (applying reattribute_to via eff_target).
+    let mut names_by_person: BTreeMap<String, Vec<NameView>> = BTreeMap::new();
+    for (target, cid, parts) in &name_claims {
+        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            names_by_person.entry(canon).or_default().push(NameView {
+                claim_id: cid.clone(),
+                parts: parts.clone(),
+            });
+        }
+    }
+    for v in names_by_person.values_mut() {
+        v.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
+    }
+
+    let mut sex_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    for (target, cid, val, author) in &sex_claims {
+        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            sex_by_person
+                .entry(canon)
+                .or_default()
+                .entry(val.clone())
+                .or_default()
+                .insert(author.clone());
+        }
+    }
+
     let mut people = Vec::new();
     for (key, members) in &by_key {
         let Some(canon) = canonical.get(key) else {
@@ -238,32 +323,13 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             }
         }
 
-        let mut names: Vec<NameView> = name_claims
-            .iter()
-            .filter(|(t, _, _)| canon_of(t).as_deref() == Some(canon.as_str()))
-            .map(|(_, cid, parts)| NameView {
-                claim_id: cid.clone(),
-                parts: parts.clone(),
-            })
-            .collect();
-        names.sort_by(|x, y| x.claim_id.cmp(&y.claim_id));
-
-        // Resolve sex: the value with the most distinct authors across all member anchors.
-        let mut tally: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for m in members {
-            if let Some(by_value) = sex_claims.get(m) {
-                for (val, authors) in by_value {
-                    tally
-                        .entry(val.clone())
-                        .or_default()
-                        .extend(authors.iter().cloned());
-                }
-            }
-        }
-        let sex = tally
-            .iter()
-            .max_by(|x, y| x.1.len().cmp(&y.1.len()).then(y.0.cmp(x.0)))
-            .map(|(val, _)| val.clone());
+        let names = names_by_person.remove(canon).unwrap_or_default();
+        let sex = sex_by_person.get(canon).and_then(|tally| {
+            tally
+                .iter()
+                .max_by(|x, y| x.1.len().cmp(&y.1.len()).then(y.0.cmp(x.0)))
+                .map(|(val, _)| val.clone())
+        });
 
         people.push(Person {
             id: canon.clone(),

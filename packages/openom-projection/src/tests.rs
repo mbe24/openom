@@ -35,6 +35,15 @@ fn tombstone(id: &str, target: &str) -> Value {
 fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Value {
     claim(id, P_ATTEST, target, json!({ "verdict": verdict }), author)
 }
+fn reattribute(id: &str, claim_target: &str, person: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_REATTRIBUTE,
+        claim_target,
+        json!({ "personId": person }),
+        author,
+    )
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -137,7 +146,7 @@ fn support_attestations_boost_confidence() {
     ];
     let strict = Policy {
         same_as_threshold: 3,
-        different_from_threshold: 1,
+        ..Policy::default()
     };
     // 1 author + 2 independent support = 3 → merges even under a strict threshold…
     assert_eq!(project(&sa, &strict).people.len(), 1);
@@ -161,7 +170,7 @@ fn self_support_is_inadmissible() {
     // score = 1 author + 0 independent support = 1; threshold 2 → not merged.
     let strict = Policy {
         same_as_threshold: 2,
-        different_from_threshold: 1,
+        ..Policy::default()
     };
     assert_eq!(project(&recs, &strict).people.len(), 2);
 }
@@ -198,6 +207,67 @@ fn attestation_by_fingerprint_counts() {
     ];
     // Rejects targeting the fact fingerprint (not the claim id) still count → score -1 → not merged.
     assert_eq!(project(&recs, &Policy::default()).people.len(), 2);
+}
+
+#[test]
+fn reattribute_rehomes_a_name_and_sex() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        name("n1", "pA", "Ada"),
+        sex("x1", "pA", "female", "did:key:z6MkA"),
+        reattribute("re1", "n1", "pB", "did:key:z6MkB"),
+        reattribute("re2", "x1", "pB", "did:key:z6MkB"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let pa = p.people.iter().find(|x| x.id == "pA").unwrap();
+    let pb = p.people.iter().find(|x| x.id == "pB").unwrap();
+    assert!(pa.names.is_empty() && pa.sex.is_none()); // re-homed away
+    assert_eq!(pb.names.len(), 1);
+    assert_eq!(pb.sex.as_deref(), Some("female"));
+}
+
+#[test]
+fn refuted_reattribute_does_not_apply() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        name("n1", "pA", "Ada"),
+        reattribute("re1", "n1", "pB", "did:key:z6MkB"),
+        attest("y1", "re1", "reject", "did:key:z6MkC"),
+        attest("y2", "re1", "reject", "did:key:z6MkD"),
+    ];
+    // reattribute score = 1 - 2 = -1 < threshold → the name stays on pA.
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.people.iter().find(|x| x.id == "pA").unwrap().names.len(),
+        1
+    );
+}
+
+#[test]
+fn competing_reattribute_resolves_by_score() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC"),
+        name("n1", "pA", "Ada"),
+        reattribute("re1", "n1", "pB", "did:key:z6MkB"),
+        reattribute("re2", "n1", "pC", "did:key:z6MkC"),
+        reattribute("re3", "n1", "pC", "did:key:z6MkD"), // pC: 2 authors → higher score
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.people.iter().find(|x| x.id == "pC").unwrap().names.len(),
+        1
+    );
+    assert!(p
+        .people
+        .iter()
+        .find(|x| x.id == "pB")
+        .unwrap()
+        .names
+        .is_empty());
 }
 
 // ---- properties --------------------------------------------------------------------------------
