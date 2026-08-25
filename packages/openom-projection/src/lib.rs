@@ -17,12 +17,14 @@
 //!   `different_from` stops cutting.
 //! - **`reattribute_to`** — a net-positive re-home moves a claim's subject to a new anchor before its
 //!   facts are grouped.
-//! - **Assembly** — a [`Person`] view (names + sex) per cluster, with tombstoned records suppressed.
+//! - **`preferred`** — the highest-scored net-positive `preferred` whose referent (a content
+//!   reference, §4.1) resolves marks the canonical name.
+//! - **Assembly** — a [`Person`] view (names + preferred name + sex) per cluster, tombstones suppressed.
 //!
-//! Not yet here (documented seams): `preferred` selection and name `equivalent_to` grouping (both
-//! need the reference-by-content primitive), events/EDTF views, referential-integrity degrade, the
-//! *role-gated* tombstone (records are suppressed but the tombstoner's authority is not yet checked —
-//! that needs the role/membership feed), and SQLite materialization.
+//! Not yet here (documented seams): name `equivalent_to` grouping (the shared clustering routine
+//! parameterized by kind), events/EDTF views, referential-integrity degrade, the *role-gated*
+//! tombstone (records are suppressed but the tombstoner's authority is not yet checked — that needs
+//! the role/membership feed), and SQLite materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,6 +36,7 @@ const P_SEX: &str = "openom.org/core/sex/v1";
 const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
 const P_REATTRIBUTE: &str = "openom.org/core/reattribute_to/v1";
+const P_PREFERRED: &str = "openom.org/core/preferred/v1";
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 
@@ -46,6 +49,8 @@ pub struct Policy {
     pub different_from_threshold: i64,
     /// Minimum score for a `reattribute_to` to re-home a claim's subject to a new anchor.
     pub reattribute_threshold: i64,
+    /// Minimum score for a `preferred` selection to take effect.
+    pub preferred_threshold: i64,
 }
 
 impl Default for Policy {
@@ -54,6 +59,7 @@ impl Default for Policy {
             same_as_threshold: 1,
             different_from_threshold: 1,
             reattribute_threshold: 1,
+            preferred_threshold: 1,
         }
     }
 }
@@ -74,6 +80,8 @@ pub struct Person {
     pub also: Vec<String>,
     /// Name claims about this person (sorted by claim id).
     pub names: Vec<NameView>,
+    /// The claim id of the preferred name, if a `preferred` selection resolved to one of `names`.
+    pub preferred_name: Option<String>,
     /// Resolved sex, if asserted (the value with the most distinct authors; ties broken lexically).
     pub sex: Option<String>,
 }
@@ -123,6 +131,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
     let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
     let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
+    let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -158,6 +167,31 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                             v.reject.insert(a.to_string());
                         }
                         _ => {}
+                    }
+                }
+            }
+            P_PREFERRED => {
+                if let (Some(person), Some(for_pred), Some(claim_ref), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("for"))
+                        .and_then(Value::as_str),
+                    r.get("value")
+                        .and_then(|v| v.get("claimId"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let info = preferred
+                        .entry((
+                            person.to_string(),
+                            for_pred.to_string(),
+                            claim_ref.to_string(),
+                        ))
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(r);
                     }
                 }
             }
@@ -310,6 +344,47 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         }
     }
 
+    // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
+    // whose referent resolves to one of the person's names wins (ties by content-ref).
+    let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
+    for (person, views) in &names_by_person {
+        let map = views
+            .iter()
+            .filter_map(|v| name_ref(&v.parts).map(|r| (r, v.claim_id.clone())))
+            .collect();
+        name_ref_to_id.insert(person.clone(), map);
+    }
+    let mut by_slot: BTreeMap<(String, String), Vec<(&String, &PairInfo)>> = BTreeMap::new();
+    for ((person, for_pred, claim_ref), info) in &preferred {
+        if let Some(canon) = canon_of(person) {
+            by_slot
+                .entry((canon, for_pred.clone()))
+                .or_default()
+                .push((claim_ref, info));
+        }
+    }
+    let mut preferred_name_of: BTreeMap<String, String> = BTreeMap::new();
+    for ((person, for_pred), options) in &by_slot {
+        if for_pred != P_NAME {
+            continue; // other slots (birthdate, portrait…) use the same mechanism — a later increment
+        }
+        let refs = name_ref_to_id.get(person);
+        let winner = options
+            .iter()
+            .filter(|(claim_ref, info)| {
+                score(info, &attests) >= policy.preferred_threshold
+                    && refs.is_some_and(|m| m.contains_key(*claim_ref))
+            })
+            .max_by(|a, b| {
+                score(a.1, &attests)
+                    .cmp(&score(b.1, &attests))
+                    .then(b.0.cmp(a.0))
+            });
+        if let Some(name_id) = winner.and_then(|(r, _)| refs.and_then(|m| m.get(*r))) {
+            preferred_name_of.insert(person.clone(), name_id.clone());
+        }
+    }
+
     let mut people = Vec::new();
     for (key, members) in &by_key {
         let Some(canon) = canonical.get(key) else {
@@ -331,10 +406,12 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                 .map(|(val, _)| val.clone())
         });
 
+        let preferred_name = preferred_name_of.get(canon).cloned();
         people.push(Person {
             id: canon.clone(),
             also,
             names,
+            preferred_name,
             sex,
         });
     }
@@ -527,6 +604,18 @@ fn score(info: &PairInfo, attests: &BTreeMap<String, Votes>) -> i64 {
         .filter(|a| !info.authors.contains(*a))
         .count() as i64;
     info.authors.len() as i64 + indep_support - reject.len() as i64
+}
+
+/// The content reference of a name's intrinsic form — parts + script + culture (§4.1) — the target a
+/// `preferred` selection points at. Stable across a name's `type`/`derived_from` changing.
+fn name_ref(name_value: &Value) -> Option<String> {
+    let mut intrinsic = serde_json::Map::new();
+    for k in ["parts", "script", "culture"] {
+        if let Some(v) = name_value.get(k) {
+            intrinsic.insert(k.to_string(), v.clone());
+        }
+    }
+    openom_claim::content_ref(&Value::Object(intrinsic)).ok()
 }
 
 // --- record field helpers -----------------------------------------------------------------------

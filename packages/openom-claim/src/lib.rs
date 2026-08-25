@@ -73,6 +73,18 @@ pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
     Ok(Sha256::digest(bytes).into())
 }
 
+/// A **content reference** to an intrinsic value: `"sha256:" + hex(sha256(JCS(intrinsic)))`. This is
+/// how `equivalent_to` / `derived_from` / `preferred.claimId` point at *what a claim says* (§4.1)
+/// rather than at a minted id — a reference stable across authors and unaffected by unrelated fields.
+/// The caller supplies the intrinsic (for a name that is its parts+script+culture; otherwise the
+/// whole `value`).
+pub fn content_ref(intrinsic: &Value) -> Result<String, ClaimError> {
+    Ok(format!(
+        "sha256:{}",
+        openom_jcs::hex256(&openom_jcs::to_canonical_value(intrinsic)?)
+    ))
+}
+
 /// Sign an envelope with the author's Ed25519 key (must be the key behind `createdBy`). The signature
 /// is over `DOMAIN‖content_hash` and is excluded from the id + fingerprint.
 pub fn sign(envelope: &Value, key: &SigningKey) -> Result<[u8; 64], ClaimError> {
@@ -303,6 +315,21 @@ mod tests {
         let mut p = claim(&did);
         p["predicate"] = json!("openom.org/core/sex/v1");
         assert_ne!(fingerprint(&p).unwrap(), base);
+    }
+
+    #[test]
+    fn content_ref_is_stable_and_field_selective() {
+        let a = json!({ "parts": { "given": "Ada" }, "script": "Latn" });
+        let r1 = content_ref(&a).unwrap();
+        assert!(r1.starts_with("sha256:") && r1.len() == 7 + 64);
+        // JCS canonicalizes, so key order doesn't move the reference…
+        let b = json!({ "script": "Latn", "parts": { "given": "Ada" } });
+        assert_eq!(content_ref(&b).unwrap(), r1);
+        // …but different intrinsic content does.
+        assert_ne!(
+            content_ref(&json!({ "parts": { "given": "Augusta" } })).unwrap(),
+            r1
+        );
     }
 
     #[test]

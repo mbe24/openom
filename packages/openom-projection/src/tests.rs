@@ -44,6 +44,19 @@ fn reattribute(id: &str, claim_target: &str, person: &str, author: &str) -> Valu
         author,
     )
 }
+fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_PREFERRED,
+        person,
+        json!({ "for": for_pred, "claimId": claim_ref }),
+        author,
+    )
+}
+// The content-ref of a name whose only intrinsic is its given part — matches the projection's name_ref.
+fn given_ref(given: &str) -> String {
+    openom_claim::content_ref(&json!({ "parts": { "given": given } })).unwrap()
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -268,6 +281,60 @@ fn competing_reattribute_resolves_by_score() {
         .unwrap()
         .names
         .is_empty());
+}
+
+#[test]
+fn preferred_selects_a_name() {
+    let recs = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        name("n2", "pA", "Augusta"),
+        preferred("pf1", "pA", P_NAME, &given_ref("Augusta"), "did:key:z6MkB"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people[0].preferred_name.as_deref(), Some("n2"));
+}
+
+#[test]
+fn preferred_resolves_to_the_canonical_person_after_a_merge() {
+    // The name is on pB; the preferred is asserted against pA; a same_as merges them.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        name("n1", "pB", "Augusta"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        preferred("pf1", "pA", P_NAME, &given_ref("Augusta"), "did:key:z6MkB"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people[0].id, "pA");
+    assert_eq!(p.people[0].preferred_name.as_deref(), Some("n1"));
+}
+
+#[test]
+fn preferred_ignored_when_absent_or_refuted() {
+    // Points at a name the person doesn't have → no selection.
+    let recs = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        preferred("pf1", "pA", P_NAME, &given_ref("Nobody"), "did:key:z6MkB"),
+    ];
+    assert_eq!(
+        project(&recs, &Policy::default()).people[0].preferred_name,
+        None
+    );
+
+    // Refuted below threshold → no selection.
+    let recs2 = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        preferred("pf1", "pA", P_NAME, &given_ref("Ada"), "did:key:z6MkB"),
+        attest("z1", "pf1", "reject", "did:key:z6MkC"),
+        attest("z2", "pf1", "reject", "did:key:z6MkD"),
+    ];
+    assert_eq!(
+        project(&recs2, &Policy::default()).people[0].preferred_name,
+        None
+    );
 }
 
 // ---- properties --------------------------------------------------------------------------------
