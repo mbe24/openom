@@ -21,12 +21,8 @@ unions / places / sources / media over the canonical persons.
 It is **not** the operations or transport layer. Deleting a record and editing (superseding) a value
 are **operations in a separate channel — not claims and not the projection's job** (design
 §8.2 / principle 6); the projection consumes the **live claim set** and resolves *disagreement between
-authors*, never the *lifecycle* of a record. (In-flight caveat: the code today still suppresses an
-in-tree `tombstone` claim — the `tombstone_suppresses_a_name` test — a documented seam from before the
-two-channel split; under the current design that deletion handling moves to the operations→snapshot
-layer and this crate will consume the already-materialized live set. A task tracks the removal.) It is
-also **not** the write path, and it is **not yet wasm-bound** (the in-wasm claim engine is a separate
-task); it depends on no operations/CRDT crate.
+authors*, never the *lifecycle* of a record. It is also **not** the write path, and it is **not yet
+wasm-bound** (the in-wasm claim engine is a separate task); it depends on no operations/CRDT crate.
 
 ## Invariants
 

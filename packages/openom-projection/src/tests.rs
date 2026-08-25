@@ -63,9 +63,6 @@ fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &s
         author,
     )
 }
-fn tombstone(id: &str, target: &str) -> Value {
-    claim(id, P_TOMBSTONE, target, json!({}), "did:key:z6MkA")
-}
 fn source(id: &str, title: &str, repository: &str, author: &str) -> Value {
     json!({ "id": id, "type": "openom.org/core/claim/v1", "predicate": P_SOURCE,
             "value": { "title": title, "repository": repository, "quality": "original" },
@@ -228,19 +225,6 @@ fn different_from_cuts_transitively() {
     let ids: Vec<_> = p.people.iter().map(|x| x.id.clone()).collect();
     assert_eq!(ids, vec!["pA".to_string(), "pC".to_string()]);
     assert_eq!(p.people[0].also, vec!["pB".to_string()]);
-}
-
-#[test]
-fn tombstone_suppresses_a_name() {
-    let recs = vec![
-        person("pA"),
-        name("n1", "pA", "Ada"),
-        name("n2", "pA", "Typo"),
-        tombstone("t1", "n2"),
-    ];
-    let p = project(&recs, &Policy::default());
-    assert_eq!(p.people[0].names.len(), 1);
-    assert_eq!(p.people[0].names[0].claim_id, "n1");
 }
 
 #[test]

@@ -22,7 +22,6 @@ const P_PARTNERSHIP: &str = "openom.org/core/partnership/v1";
 const P_CUSTOM_FIELD: &str = "openom.org/core/custom/field/v1"; // definition (on the tree)
 const P_CUSTOM_VALUE: &str = "openom.org/core/custom/value/v1"; // a value (on a person)
 const P_ATTEST: &str = "openom.org/core/attest/v1";
-const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 const P_SOURCE: &str = "openom.org/core/source/v1"; // a self-subject source (cite-sink), §10.2
 const P_PLACE_POINT: &str = "openom.org/core/place_point/v1"; // {latitude, longitude, precision?}
 const P_PLACE_NAME: &str = "openom.org/core/place_name/v1"; // {name, validRange} — time-bounded, §10.3
@@ -257,16 +256,8 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         .collect();
 
     // --- classify -------------------------------------------------------------------------------
-    let mut tombstoned: BTreeSet<String> = BTreeSet::new();
-    for &r in &deduped {
-        if predicate(r) == Some(P_TOMBSTONE) {
-            if let Some(t) = str_field(r, "targetId") {
-                tombstoned.insert(t.to_string());
-            }
-        }
-    }
-
-    // Anchors, and person-scoped claims (skipping any tombstoned record).
+    // Anchors, and person-scoped claims. Deletion and edit-supersession are operations applied
+    // upstream (the ops→snapshot layer, §8.2); the projection consumes the already-live claim set.
     let mut anchors: BTreeSet<String> = BTreeSet::new();
     let mut same_as: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
     let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
@@ -313,9 +304,6 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         let Some(id) = str_field(r, "id") else {
             continue;
         };
-        if tombstoned.contains(id) {
-            continue;
-        }
         // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
         if let (Some(target), Some(cit)) = (str_field(r, "targetId"), r.get("citation")) {
             if cit.get("sourceId").and_then(Value::as_str).is_some() {
