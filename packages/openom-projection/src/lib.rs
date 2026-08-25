@@ -36,11 +36,15 @@
 //!   `part_of` (most-corroborated) and the `place_name` whose EDTF `validRange` covers the event date
 //!   (so an 1845 birth renders "Königsberg", today's map "Kaliningrad"), falling back to the
 //!   most-corroborated name when none covers.
+//! - **Media** (§10.2) — `media_link/v1` claims targeting a person become [`MediaLink`]s on it
+//!   (portraits and other blobs), so the GUI can render a portrait; the blob is fetched out-of-band by
+//!   its content hash.
 //!
 //! Not yet here (documented seams): the *role-gated* tombstone (records are suppressed but the
 //! tombstoner's authority is not yet checked — that needs the role/membership feed); place anchor
-//! `same_as` dedup + the reverse-geocode aggregation view; derived kinship (sibling/cousin) and
-//! gendered labels (father/mother from `sex` + edge direction); and SQLite materialization.
+//! `same_as` dedup + the reverse-geocode aggregation view; a `preferred` portrait slot and media on
+//! events/sources; derived kinship (sibling/cousin) and gendered labels (father/mother from `sex` +
+//! edge direction); and SQLite materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -69,6 +73,7 @@ const P_SOURCE: &str = "openom.org/core/source/v1"; // a self-subject source (ci
 const P_PLACE_POINT: &str = "openom.org/core/place_point/v1"; // {latitude, longitude, precision?}
 const P_PLACE_NAME: &str = "openom.org/core/place_name/v1"; // {name, validRange} — time-bounded, §10.3
 const P_PART_OF: &str = "openom.org/core/part_of/v1"; // {parentPlaceId} — modern nesting
+const P_MEDIA_LINK: &str = "openom.org/core/media_link/v1"; // {mediaHash, coverage?} — blob ↔ anchor
 const DEFAULT_KIND: &str = "biological";
 const DEFAULT_ROLE: &str = "partner";
 
@@ -133,6 +138,20 @@ pub struct Person {
     /// referenced `core/source/v1` claim (§10.2). Sorted by (source id, citing claim id). Citations
     /// borne by an event a person merely participates in are not yet folded in (a documented seam).
     pub sources: Vec<Citation>,
+    /// Media linked to this person (§10.2) — portraits and other blobs, via `media_link/v1` claims
+    /// targeting the person. Sorted by claim id; the GUI picks one as the portrait (a `preferred`
+    /// portrait slot is a later increment).
+    pub media: Vec<MediaLink>,
+}
+
+/// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaLink {
+    pub claim_id: String,
+    /// The content hash of the blob (out-of-band, fetched from object storage).
+    pub media_hash: String,
+    /// A coverage/locator within the blob (e.g. `{page, entry}`) for partial media, if given.
+    pub coverage: Option<Value>,
 }
 
 /// A source referenced by a citation, resolved from its `core/source/v1` claim. Every field is
@@ -321,6 +340,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut place_name: BTreeMap<String, BTreeMap<(String, String), BTreeSet<String>>> =
         BTreeMap::new(); // placeId -> (validRange, name) -> authors
     let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
+    let mut media_links: Vec<(String, String, String, Option<Value>)> = Vec::new(); // (target, claimId, mediaHash, coverage)
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -396,6 +416,17 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                 }
             }
             P_PART_OF => tally(&mut part_of, r, "parentPlaceId"),
+            P_MEDIA_LINK => {
+                if let (Some(t), Some(hash)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("mediaHash"))
+                        .and_then(Value::as_str),
+                ) {
+                    let coverage = r.get("value").and_then(|v| v.get("coverage")).cloned();
+                    media_links.push((t.to_string(), id.to_string(), hash.to_string(), coverage));
+                }
+            }
             P_SAME_AS => collect_pair(&mut same_as, r, id),
             P_DIFFERENT_FROM => collect_pair(&mut different_from, r, id),
             P_ATTEST => {
@@ -623,6 +654,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     for (t, _, _, _, _) in &custom_values {
         nodes.insert(t.clone());
     }
+    for (t, _, _, _) in &media_links {
+        nodes.insert(t.clone());
+    }
     for options in reattribute.values() {
         for person in options.keys() {
             nodes.insert(person.clone());
@@ -833,6 +867,23 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         cits.dedup();
     }
 
+    // Media: attach each `media_link` to the canonical person its (effective) target resolves to.
+    // Links targeting events or sources don't resolve to a person and are dropped here (a seam).
+    let mut media_by_person: BTreeMap<String, Vec<MediaLink>> = BTreeMap::new();
+    for (target, cid, hash, coverage) in &media_links {
+        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            media_by_person.entry(canon).or_default().push(MediaLink {
+                claim_id: cid.clone(),
+                media_hash: hash.clone(),
+                coverage: coverage.clone(),
+            });
+        }
+    }
+    for links in media_by_person.values_mut() {
+        links.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
+        links.dedup();
+    }
+
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
@@ -899,6 +950,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         let biography = biography_by_person.get(canon).and_then(most_corroborated);
         let custom_fields = customs_of.remove(canon).unwrap_or_default();
         let sources = sources_by_person.remove(canon).unwrap_or_default();
+        let media = media_by_person.remove(canon).unwrap_or_default();
         people.push(Person {
             id: canon.clone(),
             also,
@@ -908,6 +960,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             biography,
             custom_fields,
             sources,
+            media,
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));

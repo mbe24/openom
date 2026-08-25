@@ -168,6 +168,15 @@ fn place_point(id: &str, place_id: &str, lat: f64, lon: f64, author: &str) -> Va
         author,
     )
 }
+fn media_link(id: &str, target: &str, media_hash: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_MEDIA_LINK,
+        target,
+        json!({ "mediaHash": media_hash }),
+        author,
+    )
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -262,6 +271,26 @@ fn biography_resolves() {
         p.people[0].biography.as_deref(),
         Some("Born in Krakow, emigrated 1923.")
     );
+}
+
+#[test]
+fn media_links_attach_to_person() {
+    // A portrait links to the anchor pB; after merge it hangs off the canonical person pA.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        media_link("m1", "pB", "sha256:9f2b", "did:key:z6MkA"),
+        media_link("m2", "pA", "sha256:aaaa", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people.len(), 1);
+    let hashes: Vec<_> = p.people[0]
+        .media
+        .iter()
+        .map(|m| m.media_hash.as_str())
+        .collect();
+    assert_eq!(hashes, vec!["sha256:9f2b", "sha256:aaaa"]); // sorted by claim id: m1 then m2
 }
 
 #[test]
