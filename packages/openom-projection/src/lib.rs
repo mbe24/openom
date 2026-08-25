@@ -47,6 +47,7 @@ const P_DATE: &str = "openom.org/core/date/v1";
 const P_EVENT_PLACE: &str = "openom.org/core/event_place/v1";
 const P_PARTICIPANT: &str = "openom.org/core/participant/v1";
 const P_SEX: &str = "openom.org/core/sex/v1";
+const P_BIOGRAPHY: &str = "openom.org/core/biography/v1";
 const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
 const P_REATTRIBUTE: &str = "openom.org/core/reattribute_to/v1";
@@ -109,6 +110,8 @@ pub struct Person {
     pub preferred_name: Option<String>,
     /// Resolved sex, if asserted (the value with the most distinct authors; ties broken lexically).
     pub sex: Option<String>,
+    /// Resolved biography text, if asserted (most-corroborated `core/biography/v1` plain text).
+    pub biography: Option<String>,
 }
 
 /// A `same_as` edge that was not applied because a `different_from` cut it — surfaced, never merged.
@@ -220,6 +223,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
     let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
+    let mut biography_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, text, author)
     let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
     let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
     let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
@@ -376,6 +380,22 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     ));
                 }
             }
+            P_BIOGRAPHY => {
+                if let (Some(t), Some(text), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("text"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    biography_claims.push((
+                        t.to_string(),
+                        id.to_string(),
+                        text.to_string(),
+                        a.to_string(),
+                    ));
+                }
+            }
             P_REATTRIBUTE => {
                 if let (Some(target), Some(person), Some(a)) = (
                     str_field(r, "targetId"),
@@ -410,6 +430,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         nodes.insert(t.clone());
     }
     for (t, _, _, _) in &sex_claims {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _, _) in &biography_claims {
         nodes.insert(t.clone());
     }
     for options in reattribute.values() {
@@ -520,6 +543,19 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         }
     }
 
+    let mut biography_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> =
+        BTreeMap::new();
+    for (target, cid, text, author) in &biography_claims {
+        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            biography_by_person
+                .entry(canon)
+                .or_default()
+                .entry(text.clone())
+                .or_default()
+                .insert(author.clone());
+        }
+    }
+
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
@@ -583,12 +619,14 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         });
 
         let preferred_name = preferred_name_of.get(canon).cloned();
+        let biography = biography_by_person.get(canon).and_then(most_corroborated);
         people.push(Person {
             id: canon.clone(),
             also,
             names,
             preferred_name,
             sex,
+            biography,
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));

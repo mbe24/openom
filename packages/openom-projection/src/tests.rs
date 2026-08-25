@@ -29,6 +29,15 @@ fn name(id: &str, target: &str, given: &str) -> Value {
 fn sex(id: &str, target: &str, s: &str, author: &str) -> Value {
     claim(id, P_SEX, target, json!({ "sex": s }), author)
 }
+fn biography(id: &str, target: &str, text: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_BIOGRAPHY,
+        target,
+        json!({ "format": "plain", "text": text }),
+        author,
+    )
+}
 fn tombstone(id: &str, target: &str) -> Value {
     claim(id, P_TOMBSTONE, target, json!({}), "did:key:z6MkA")
 }
@@ -170,6 +179,24 @@ fn sex_resolves_by_author_majority() {
     ];
     let p = project(&recs, &Policy::default());
     assert_eq!(p.people[0].sex.as_deref(), Some("male")); // 2 distinct authors vs 1
+}
+
+#[test]
+fn biography_resolves() {
+    let recs = vec![
+        person("pA"),
+        biography(
+            "b1",
+            "pA",
+            "Born in Krakow, emigrated 1923.",
+            "did:key:z6MkA",
+        ),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.people[0].biography.as_deref(),
+        Some("Born in Krakow, emigrated 1923.")
+    );
 }
 
 #[test]
