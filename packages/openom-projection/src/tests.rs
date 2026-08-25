@@ -76,6 +76,24 @@ fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Value {
         author,
     )
 }
+fn event(id: &str) -> Value {
+    json!({ "id": id, "type": TYPE_EVENT, "createdAt": 1, "createdBy": "did:key:z6MkA" })
+}
+fn event_type(id: &str, evt: &str, ty: &str, author: &str) -> Value {
+    claim(id, P_EVENT_TYPE, evt, json!({ "type": ty }), author)
+}
+fn date(id: &str, evt: &str, edtf: &str, author: &str) -> Value {
+    claim(id, P_DATE, evt, json!({ "edtf": edtf }), author)
+}
+fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_PARTICIPANT,
+        evt,
+        json!({ "personId": person, "role": role }),
+        author,
+    )
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -449,6 +467,61 @@ fn refuted_relationship_is_dropped() {
     ];
     // score = 1 - 2 = -1 < threshold → dropped.
     assert!(project(&recs, &Policy::default()).parent_child.is_empty());
+}
+
+#[test]
+fn birth_event_assembles() {
+    let recs = vec![
+        person("pA"),
+        event("e1"),
+        event_type("t1", "e1", "birth", "did:key:z6MkA"),
+        date("d1", "e1", "1842~", "did:key:z6MkA"),
+        participant("pt1", "e1", "pA", "child", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.events.len(), 1);
+    let e = &p.events[0];
+    assert_eq!(e.event_type.as_deref(), Some("birth"));
+    assert_eq!(e.date_edtf.as_deref(), Some("1842~"));
+    assert_eq!(e.date_min_year, Some(1842));
+    assert_eq!(
+        e.participants,
+        vec![Participant {
+            person: "pA".into(),
+            role: "child".into()
+        }]
+    );
+}
+
+#[test]
+fn event_participants_canonicalize() {
+    // A marriage; participant pB merges into pA via a same_as → the event names pA.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC"),
+        event("e1"),
+        event_type("t1", "e1", "marriage", "did:key:z6MkA"),
+        participant("pt1", "e1", "pB", "spouse", "did:key:z6MkA"),
+        participant("pt2", "e1", "pC", "spouse", "did:key:z6MkA"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let e = &p.events[0];
+    assert_eq!(e.event_type.as_deref(), Some("marriage"));
+    assert_eq!(
+        e.participants,
+        vec![
+            Participant {
+                person: "pA".into(),
+                role: "spouse".into()
+            },
+            Participant {
+                person: "pC".into(),
+                role: "spouse".into()
+            },
+        ]
+    );
 }
 
 // ---- properties --------------------------------------------------------------------------------

@@ -19,19 +19,30 @@
 //!   facts are grouped.
 //! - **`preferred`** — the highest-scored net-positive `preferred` whose referent (a content
 //!   reference, §4.1) resolves marks the canonical name.
-//! - **Assembly** — a [`Person`] view (names + preferred name + sex) per cluster, tombstones suppressed.
+//! - **Names** — a [`Person`] view per cluster with names grouped into `equivalent_to` classes (§6,
+//!   the same clustering routine parameterized by name content-refs), a preferred name, and sex.
+//! - **Relationships** (§9) — parent-child (with `kind`) and partnership edges between canonical
+//!   persons, attestation-weighted, dangling/self-loop edges dropped.
+//! - **Events** (§10) — each Event anchor's `event_type` / `date` (EDTF → sortable year bounds via
+//!   `openom-edtf`) / `event_place` / `participant` claims assembled into an [`EventView`] hyper-edge,
+//!   participants canonicalized to persons.
 //!
-//! Not yet here (documented seams): name `equivalent_to` grouping (the shared clustering routine
-//! parameterized by kind), events/EDTF views, referential-integrity degrade, the *role-gated*
-//! tombstone (records are suppressed but the tombstoner's authority is not yet checked — that needs
-//! the role/membership feed), and SQLite materialization.
+//! Not yet here (documented seams): the *role-gated* tombstone (records are suppressed but the
+//! tombstoner's authority is not yet checked — that needs the role/membership feed); place
+//! canonicalization + time-bounded `place_name` rendering; derived kinship (sibling/cousin) and
+//! gendered labels (father/mother from `sex` + edge direction); and SQLite materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
 const TYPE_PERSON: &str = "openom.org/core/person/v1";
+const TYPE_EVENT: &str = "openom.org/core/event/v1";
 const P_NAME: &str = "openom.org/core/name/v1";
+const P_EVENT_TYPE: &str = "openom.org/core/event_type/v1";
+const P_DATE: &str = "openom.org/core/date/v1";
+const P_EVENT_PLACE: &str = "openom.org/core/event_place/v1";
+const P_PARTICIPANT: &str = "openom.org/core/participant/v1";
 const P_SEX: &str = "openom.org/core/sex/v1";
 const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
@@ -120,12 +131,39 @@ pub struct Partnership {
     pub role: String,
 }
 
-/// The materialized read model: people, their relationships, and identity conflicts.
+/// One participant in an event: the canonical person and the role they played.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Participant {
+    pub person: String,
+    /// A `core/roles/v1` term: `child` | `parent` | `spouse` | `witness` | `officiant` | …
+    pub role: String,
+}
+
+/// A projected event (birth, death, marriage, …) — a hyper-edge assembled from the claims targeting
+/// one Event anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventView {
+    pub id: String,
+    /// The event type, if asserted (most-corroborated value).
+    pub event_type: Option<String>,
+    /// The raw EDTF date, if asserted (most-corroborated).
+    pub date_edtf: Option<String>,
+    /// Sortable year bounds parsed from the EDTF (`None` if it doesn't parse or an end is open).
+    pub date_min_year: Option<i32>,
+    pub date_max_year: Option<i32>,
+    /// The place anchor id, if asserted (most-corroborated).
+    pub place_id: Option<String>,
+    /// Participants (persons canonicalized), sorted.
+    pub participants: Vec<Participant>,
+}
+
+/// The materialized read model: people, relationships, events, and identity conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     pub people: Vec<Person>,
     pub parent_child: Vec<ParentChild>,
     pub partnerships: Vec<Partnership>,
+    pub events: Vec<EventView>,
     pub conflicts: Vec<Conflict>,
 }
 
@@ -164,11 +202,22 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
     let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
     let mut partnership: BTreeMap<([String; 2], String), PairInfo> = BTreeMap::new(); // (canonical pair, role) -> info
+    let mut event_anchors: BTreeSet<String> = BTreeSet::new();
+    let mut event_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> type -> authors
+    let mut event_date: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> edtf -> authors
+    let mut event_place: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> placeId -> authors
+    let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
             if let Some(id) = str_field(r, "id") {
                 anchors.insert(id.to_string());
+            }
+            continue;
+        }
+        if type_of(r) == Some(TYPE_EVENT) {
+            if let Some(id) = str_field(r, "id") {
+                event_anchors.insert(id.to_string());
             }
             continue;
         }
@@ -263,6 +312,25 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     if info.fingerprint.is_none() {
                         info.fingerprint = fingerprint_str(r);
                     }
+                }
+            }
+            P_EVENT_TYPE => tally(&mut event_type, r, "type"),
+            P_DATE => tally(&mut event_date, r, "edtf"),
+            P_EVENT_PLACE => tally(&mut event_place, r, "placeId"),
+            P_PARTICIPANT => {
+                if let (Some(evt), Some(person), Some(role)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("personId"))
+                        .and_then(Value::as_str),
+                    r.get("value")
+                        .and_then(|v| v.get("role"))
+                        .and_then(Value::as_str),
+                ) {
+                    participants
+                        .entry(evt.to_string())
+                        .or_default()
+                        .insert((person.to_string(), role.to_string()));
                 }
             }
             P_NAME => {
@@ -535,6 +603,44 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     partnership_edges.sort();
     partnership_edges.dedup();
 
+    // Events — assemble each Event anchor's targeting claims into a hyper-edge (type / date / place
+    // most-corroborated; participants canonicalized to persons). Sorted by event id (BTreeSet order).
+    let events: Vec<EventView> = event_anchors
+        .iter()
+        .map(|eid| {
+            let event_type = event_type.get(eid).and_then(most_corroborated);
+            let date_edtf = event_date.get(eid).and_then(most_corroborated);
+            let (date_min_year, date_max_year) = date_edtf
+                .as_deref()
+                .and_then(|s| openom_edtf::parse(s).ok())
+                .map(|e| (e.min.map(|d| d.year), e.max.map(|d| d.year)))
+                .unwrap_or((None, None));
+            let place_id = event_place.get(eid).and_then(most_corroborated);
+            let mut parts: Vec<Participant> = participants
+                .get(eid)
+                .into_iter()
+                .flatten()
+                .filter_map(|(person, role)| {
+                    canon_of(person).map(|p| Participant {
+                        person: p,
+                        role: role.clone(),
+                    })
+                })
+                .collect();
+            parts.sort();
+            parts.dedup();
+            EventView {
+                id: eid.clone(),
+                event_type,
+                date_edtf,
+                date_min_year,
+                date_max_year,
+                place_id,
+                participants: parts,
+            }
+        })
+        .collect();
+
     let conflicts = skipped
         .into_iter()
         .map(|cut_pair| Conflict { cut_pair })
@@ -543,6 +649,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         people,
         parent_child: parent_child_edges,
         partnerships: partnership_edges,
+        events,
         conflicts,
     }
 }
@@ -777,6 +884,31 @@ fn equiv_classes(names: &[NameView]) -> BTreeMap<String, String> {
         .iter()
         .map(|(r, cid)| (cid.clone(), min_id[&uf.find(r)].clone()))
         .collect()
+}
+
+/// Tally a string field of a claim's `value` by author into `map[targetId][value]`.
+fn tally(map: &mut BTreeMap<String, BTreeMap<String, BTreeSet<String>>>, r: &Value, field: &str) {
+    if let (Some(target), Some(val), Some(a)) = (
+        str_field(r, "targetId"),
+        r.get("value")
+            .and_then(|v| v.get(field))
+            .and_then(Value::as_str),
+        str_field(r, "createdBy"),
+    ) {
+        map.entry(target.to_string())
+            .or_default()
+            .entry(val.to_string())
+            .or_default()
+            .insert(a.to_string());
+    }
+}
+
+/// The value with the most distinct authors (ties broken by the smaller value).
+fn most_corroborated(votes: &BTreeMap<String, BTreeSet<String>>) -> Option<String> {
+    votes
+        .iter()
+        .max_by(|x, y| x.1.len().cmp(&y.1.len()).then(y.0.cmp(x.0)))
+        .map(|(v, _)| v.clone())
 }
 
 // --- record field helpers -----------------------------------------------------------------------

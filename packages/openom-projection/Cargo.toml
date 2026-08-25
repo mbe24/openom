@@ -22,6 +22,8 @@ serde_json.workspace = true
 # (sha256(JCS(targetId,predicate,value))), so the projection recomputes it to match votes to edges.
 openom-claim.workspace = true
 openom-jcs.workspace = true
+# Event dates are EDTF strings, normalized to sortable year bounds for the timeline view.
+openom-edtf.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
