@@ -138,6 +138,36 @@ fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> V
         author,
     )
 }
+fn place(id: &str) -> Value {
+    json!({ "id": id, "type": "openom.org/core/place/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" })
+}
+fn event_place(id: &str, evt: &str, place_id: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_EVENT_PLACE,
+        evt,
+        json!({ "placeId": place_id }),
+        author,
+    )
+}
+fn place_name(id: &str, place_id: &str, name: &str, valid_range: &str, author: &str) -> Value {
+    claim(
+        id,
+        P_PLACE_NAME,
+        place_id,
+        json!({ "name": name, "validRange": valid_range }),
+        author,
+    )
+}
+fn place_point(id: &str, place_id: &str, lat: f64, lon: f64, author: &str) -> Value {
+    claim(
+        id,
+        P_PLACE_POINT,
+        place_id,
+        json!({ "latitude": lat, "longitude": lon }),
+        author,
+    )
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -232,6 +262,57 @@ fn biography_resolves() {
         p.people[0].biography.as_deref(),
         Some("Born in Krakow, emigrated 1923.")
     );
+}
+
+#[test]
+fn event_place_renders_time_bounded_name() {
+    // Königsberg → Kaliningrad; an 1845 birth renders the name whose validRange covers 1845.
+    let recs = vec![
+        event("e1"),
+        event_type("et1", "e1", "birth", "did:key:z6MkA"),
+        date("dt1", "e1", "1845", "did:key:z6MkA"),
+        event_place("ep1", "e1", "plc_kb", "did:key:z6MkA"),
+        place("plc_kb"),
+        place_name(
+            "pn1",
+            "plc_kb",
+            "Königsberg, Provinz Preußen",
+            "1824/1878",
+            "did:key:z6MkA",
+        ),
+        place_name(
+            "pn2",
+            "plc_kb",
+            "Kaliningrad, Russia",
+            "1946/..",
+            "did:key:z6MkA",
+        ),
+        place_point("pp1", "plc_kb", 54.7104, 20.4522, "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let place = p.events[0].place.as_ref().unwrap();
+    assert_eq!(place.id, "plc_kb");
+    assert_eq!(place.name.as_deref(), Some("Königsberg, Provinz Preußen"));
+    assert_eq!(
+        place.point,
+        Some(json!({ "latitude": 54.7104, "longitude": 20.4522 }))
+    );
+}
+
+#[test]
+fn event_place_falls_back_when_no_range_covers() {
+    // No date on the event → fall back to the most-corroborated name.
+    let recs = vec![
+        event("e1"),
+        event_place("ep1", "e1", "plc_kb", "did:key:z6MkA"),
+        place("plc_kb"),
+        place_name("pn1", "plc_kb", "Old Name", "1600/1700", "did:key:z6MkA"),
+        place_name("pn2", "plc_kb", "New Name", "1900/..", "did:key:z6MkB"),
+        place_name("pn3", "plc_kb", "New Name", "1900/..", "did:key:z6MkC"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let place = p.events[0].place.as_ref().unwrap();
+    assert_eq!(place.name.as_deref(), Some("New Name")); // 2 authors vs 1
 }
 
 #[test]

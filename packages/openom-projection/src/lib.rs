@@ -32,10 +32,14 @@
 //! - **Sources** (§10.2) — every claim's inline `citation` is attached to the canonical person its
 //!   target resolves to, with the `sourceId` resolved to its `core/source/v1` description, so a
 //!   person's sources panel shows the citation *and* the source it points at.
+//! - **Places** (§10.3) — an event's `place_id` resolves to a [`PlaceView`]: its `place_point` and
+//!   `part_of` (most-corroborated) and the `place_name` whose EDTF `validRange` covers the event date
+//!   (so an 1845 birth renders "Königsberg", today's map "Kaliningrad"), falling back to the
+//!   most-corroborated name when none covers.
 //!
 //! Not yet here (documented seams): the *role-gated* tombstone (records are suppressed but the
-//! tombstoner's authority is not yet checked — that needs the role/membership feed); place
-//! canonicalization + time-bounded `place_name` rendering; derived kinship (sibling/cousin) and
+//! tombstoner's authority is not yet checked — that needs the role/membership feed); place anchor
+//! `same_as` dedup + the reverse-geocode aggregation view; derived kinship (sibling/cousin) and
 //! gendered labels (father/mother from `sex` + edge direction); and SQLite materialization.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,6 +66,9 @@ const P_CUSTOM_VALUE: &str = "openom.org/core/custom/value/v1"; // a value (on a
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 const P_SOURCE: &str = "openom.org/core/source/v1"; // a self-subject source (cite-sink), §10.2
+const P_PLACE_POINT: &str = "openom.org/core/place_point/v1"; // {latitude, longitude, precision?}
+const P_PLACE_NAME: &str = "openom.org/core/place_name/v1"; // {name, validRange} — time-bounded, §10.3
+const P_PART_OF: &str = "openom.org/core/part_of/v1"; // {parentPlaceId} — modern nesting
 const DEFAULT_KIND: &str = "biological";
 const DEFAULT_ROLE: &str = "partner";
 
@@ -214,6 +221,23 @@ pub struct EventView {
     pub place_id: Option<String>,
     /// Participants (persons canonicalized), sorted.
     pub participants: Vec<Participant>,
+    /// The resolved place, if a `place_id` is asserted: its name rendered for this event's date, its
+    /// point, and its parent. `None` if the event has no place.
+    pub place: Option<PlaceView>,
+}
+
+/// A resolved place for an event (§10.3): its time-appropriate name plus its point and parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceView {
+    /// The place anchor id (referenced verbatim; place `same_as` dedup is a documented seam).
+    pub id: String,
+    /// The `place_name` whose `validRange` covers the event date; falls back to the most-corroborated
+    /// name if none covers (or the event has no date). `None` if the place has no name claim.
+    pub name: Option<String>,
+    /// The most-corroborated `place_point` value `{ latitude, longitude, precision? }`, if asserted.
+    pub point: Option<Value>,
+    /// The parent place anchor id from `part_of` (most-corroborated), if any.
+    pub part_of: Option<String>,
 }
 
 /// A family/union — a parent-set (the spouses) and the children sharing exactly that parent-set,
@@ -291,6 +315,12 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
     let mut sources: BTreeMap<String, Value> = BTreeMap::new(); // source claim id -> its value
     let mut citations: Vec<(String, String, String, Value)> = Vec::new(); // (targetId, citing claimId, predicate, citation)
+    #[allow(clippy::type_complexity)]
+    let mut place_point: BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>> =
+        BTreeMap::new(); // placeId -> canonical(point) -> (authors, pointValue)
+    let mut place_name: BTreeMap<String, BTreeMap<(String, String), BTreeSet<String>>> =
+        BTreeMap::new(); // placeId -> (validRange, name) -> authors
+    let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -329,6 +359,43 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     sources.insert(id.to_string(), v.clone());
                 }
             }
+            P_PLACE_POINT => {
+                if let (Some(t), Some(v), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value"),
+                    str_field(r, "createdBy"),
+                ) {
+                    place_point
+                        .entry(t.to_string())
+                        .or_default()
+                        .entry(v.to_string())
+                        .or_insert_with(|| (BTreeSet::new(), v.clone()))
+                        .0
+                        .insert(a.to_string());
+                }
+            }
+            P_PLACE_NAME => {
+                if let (Some(t), Some(name), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("name"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let range = r
+                        .get("value")
+                        .and_then(|v| v.get("validRange"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    place_name
+                        .entry(t.to_string())
+                        .or_default()
+                        .entry((range.to_string(), name.to_string()))
+                        .or_default()
+                        .insert(a.to_string());
+                }
+            }
+            P_PART_OF => tally(&mut part_of, r, "parentPlaceId"),
             P_SAME_AS => collect_pair(&mut same_as, r, id),
             P_DIFFERENT_FROM => collect_pair(&mut different_from, r, id),
             P_ATTEST => {
@@ -877,6 +944,27 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     partnership_edges.sort();
     partnership_edges.dedup();
 
+    // Resolve a place for a given event year: most-corroborated point + parent, and the name whose
+    // `validRange` covers the year (falling back to the most-corroborated name when none covers or
+    // there is no year).
+    let resolve_place = |pid: &str, year: Option<i32>| -> PlaceView {
+        let point = place_point.get(pid).and_then(|m| {
+            m.iter()
+                .max_by(|a, b| a.1 .0.len().cmp(&b.1 .0.len()).then(b.0.cmp(a.0)))
+                .map(|(_, (_, v))| v.clone())
+        });
+        let part_of = part_of.get(pid).and_then(most_corroborated);
+        let name = place_name
+            .get(pid)
+            .and_then(|cands| pick_place_name(cands, year));
+        PlaceView {
+            id: pid.to_string(),
+            name,
+            point,
+            part_of,
+        }
+    };
+
     // Events — assemble each Event anchor's targeting claims into a hyper-edge (type / date / place
     // most-corroborated; participants canonicalized to persons). Sorted by event id (BTreeSet order).
     let events: Vec<EventView> = event_anchors
@@ -903,6 +991,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                 .collect();
             parts.sort();
             parts.dedup();
+            let place = place_id
+                .as_deref()
+                .map(|pid| resolve_place(pid, date_min_year.or(date_max_year)));
             EventView {
                 id: eid.clone(),
                 event_type,
@@ -911,6 +1002,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                 date_max_year,
                 place_id,
                 participants: parts,
+                place,
             }
         })
         .collect();
@@ -1232,6 +1324,35 @@ fn most_corroborated(votes: &BTreeMap<String, BTreeSet<String>>) -> Option<Strin
         .iter()
         .max_by(|x, y| x.1.len().cmp(&y.1.len()).then(y.0.cmp(x.0)))
         .map(|(v, _)| v.clone())
+}
+
+/// Does an EDTF `validRange` cover `year`? An empty range is always-valid; an open end is unbounded on
+/// that side; an unparseable range covers nothing.
+fn range_covers(valid_range: &str, year: i32) -> bool {
+    if valid_range.is_empty() {
+        return true;
+    }
+    match openom_edtf::parse(valid_range) {
+        Ok(e) => e.min.is_none_or(|d| d.year <= year) && e.max.is_none_or(|d| d.year >= year),
+        Err(_) => false,
+    }
+}
+
+/// Pick a place name for an event year: among `(validRange, name) -> authors` candidates, the
+/// most-corroborated name whose range covers the year (ties by smallest name); falling back to the
+/// most-corroborated name overall when no range covers or the event has no year.
+fn pick_place_name(
+    cands: &BTreeMap<(String, String), BTreeSet<String>>,
+    year: Option<i32>,
+) -> Option<String> {
+    let best = |covering: bool| {
+        cands
+            .iter()
+            .filter(|((vr, _), _)| !covering || year.is_some_and(|y| range_covers(vr, y)))
+            .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0 .1.cmp(&a.0 .1)))
+            .map(|((_, name), _)| name.clone())
+    };
+    year.and_then(|_| best(true)).or_else(|| best(false))
 }
 
 // --- record field helpers -----------------------------------------------------------------------
