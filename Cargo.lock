@@ -3538,6 +3538,8 @@ dependencies = [
 name = "openom-projection"
 version = "0.1.0"
 dependencies = [
+ "openom-claim",
+ "openom-jcs",
  "proptest",
  "serde_json",
 ]

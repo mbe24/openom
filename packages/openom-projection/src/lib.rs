@@ -27,19 +27,23 @@ const P_NAME: &str = "openom.org/core/name/v1";
 const P_SEX: &str = "openom.org/core/sex/v1";
 const P_SAME_AS: &str = "openom.org/core/same_as/v1";
 const P_DIFFERENT_FROM: &str = "openom.org/core/different_from/v1";
+const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 
-/// Read-time policy knobs. Kept minimal for increment 1.
+/// Read-time policy knobs.
 pub struct Policy {
-    /// Minimum edge score to merge a `same_as` pair. Score is distinct-author corroboration here;
-    /// attestation weighting lands in a later increment.
+    /// Minimum score to merge a `same_as` pair.
     pub same_as_threshold: i64,
+    /// Minimum score for a `different_from` to act as a hard cut; a weaker or refuted one does not
+    /// block a merge.
+    pub different_from_threshold: i64,
 }
 
 impl Default for Policy {
     fn default() -> Self {
         Policy {
             same_as_threshold: 1,
+            different_from_threshold: 1,
         }
     }
 }
@@ -103,8 +107,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
 
     // Anchors, and person-scoped claims (skipping any tombstoned record).
     let mut anchors: BTreeSet<String> = BTreeSet::new();
-    let mut same_as_authors: BTreeMap<[String; 2], BTreeSet<String>> = BTreeMap::new();
-    let mut different_from: BTreeSet<[String; 2]> = BTreeSet::new();
+    let mut same_as: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
+    let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
+    let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
     let mut sex_claims: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // target -> value -> authors
 
@@ -123,16 +128,26 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             continue;
         }
         match pred {
-            P_SAME_AS => {
-                if let Some(p) = pair(r) {
-                    if let Some(a) = str_field(r, "createdBy") {
-                        same_as_authors.entry(p).or_default().insert(a.to_string());
+            P_SAME_AS => collect_pair(&mut same_as, r, id),
+            P_DIFFERENT_FROM => collect_pair(&mut different_from, r, id),
+            P_ATTEST => {
+                if let (Some(t), Some(verdict), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("verdict"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let v = attests.entry(t.to_string()).or_default();
+                    match verdict {
+                        "support" => {
+                            v.support.insert(a.to_string());
+                        }
+                        "reject" => {
+                            v.reject.insert(a.to_string());
+                        }
+                        _ => {}
                     }
-                }
-            }
-            P_DIFFERENT_FROM => {
-                if let Some(p) = pair(r) {
-                    different_from.insert(p);
                 }
             }
             P_NAME => {
@@ -162,7 +177,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
 
     // --- nodes = every id that participates as a person -----------------------------------------
     let mut nodes: BTreeSet<String> = anchors.clone();
-    for p in same_as_authors.keys().chain(different_from.iter()) {
+    for p in same_as.keys().chain(different_from.keys()) {
         nodes.insert(p[0].clone());
         nodes.insert(p[1].clone());
     }
@@ -173,17 +188,23 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         nodes.insert(t.clone());
     }
 
-    // --- edges (above threshold) + cuts ---------------------------------------------------------
-    let edges: Vec<Edge> = same_as_authors
+    // --- edges + cuts, each gated by its attestation-weighted score -----------------------------
+    let edges: Vec<Edge> = same_as
         .iter()
-        .filter(|(_, authors)| authors.len() as i64 >= policy.same_as_threshold)
-        .map(|(pair, authors)| Edge {
-            a: pair[0].clone(),
-            b: pair[1].clone(),
-            score: authors.len() as i64,
+        .filter_map(|(pair, info)| {
+            let s = score(info, &attests);
+            (s >= policy.same_as_threshold).then(|| Edge {
+                a: pair[0].clone(),
+                b: pair[1].clone(),
+                score: s,
+            })
         })
         .collect();
-    let cuts: Vec<[String; 2]> = different_from.iter().cloned().collect();
+    let cuts: Vec<[String; 2]> = different_from
+        .iter()
+        .filter(|(_, info)| score(info, &attests) >= policy.different_from_threshold)
+        .map(|(pair, _)| pair.clone())
+        .collect();
 
     let Clustering { rep, skipped } = cluster(&nodes, edges, &cuts);
 
@@ -379,6 +400,67 @@ fn sorted_pair(a: &str, b: &str) -> [String; 2] {
     } else {
         [b.to_string(), a.to_string()]
     }
+}
+
+// --- attestation-weighted scoring ---------------------------------------------------------------
+
+/// Everything known about one identity pair: who asserted it, the asserting claim ids, and the fact
+/// fingerprint (shared by every assertion of the pair) so attestations can be matched to it.
+#[derive(Default)]
+struct PairInfo {
+    authors: BTreeSet<String>,
+    claim_ids: BTreeSet<String>,
+    fingerprint: Option<String>,
+}
+
+/// Support/reject attestation authors for one target (a claim id or a fingerprint).
+#[derive(Default)]
+struct Votes {
+    support: BTreeSet<String>,
+    reject: BTreeSet<String>,
+}
+
+fn collect_pair(map: &mut BTreeMap<[String; 2], PairInfo>, r: &Value, id: &str) {
+    if let (Some(p), Some(author)) = (pair(r), str_field(r, "createdBy")) {
+        let info = map.entry(p).or_default();
+        info.authors.insert(author.to_string());
+        info.claim_ids.insert(id.to_string());
+        if info.fingerprint.is_none() {
+            info.fingerprint = fingerprint_str(r);
+        }
+    }
+}
+
+/// The `"sha256:<hex>"` fingerprint of a claim — the target an attestation uses to vote on the fact.
+fn fingerprint_str(r: &Value) -> Option<String> {
+    openom_claim::fingerprint(r)
+        .ok()
+        .map(|h| format!("sha256:{}", openom_jcs::hex(&h)))
+}
+
+/// Attestation-weighted confidence for an identity pair: distinct-author corroboration, plus
+/// independent support (a `support` by one of the pair's own asserters is self-grading and excluded,
+/// §5.3), minus distinct rejects. Attestations may target the fact fingerprint or any asserting
+/// claim id.
+fn score(info: &PairInfo, attests: &BTreeMap<String, Votes>) -> i64 {
+    let mut support: BTreeSet<&str> = BTreeSet::new();
+    let mut reject: BTreeSet<&str> = BTreeSet::new();
+    let targets = info
+        .claim_ids
+        .iter()
+        .map(String::as_str)
+        .chain(info.fingerprint.as_deref());
+    for t in targets {
+        if let Some(v) = attests.get(t) {
+            support.extend(v.support.iter().map(String::as_str));
+            reject.extend(v.reject.iter().map(String::as_str));
+        }
+    }
+    let indep_support = support
+        .into_iter()
+        .filter(|a| !info.authors.contains(*a))
+        .count() as i64;
+    info.authors.len() as i64 + indep_support - reject.len() as i64
 }
 
 // --- record field helpers -----------------------------------------------------------------------

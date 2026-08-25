@@ -32,6 +32,9 @@ fn sex(id: &str, target: &str, s: &str, author: &str) -> Value {
 fn tombstone(id: &str, target: &str) -> Value {
     claim(id, P_TOMBSTONE, target, json!({}), "did:key:z6MkA")
 }
+fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Value {
+    claim(id, P_ATTEST, target, json!({ "verdict": verdict }), author)
+}
 
 #[test]
 fn merges_two_anchors_by_same_as() {
@@ -108,6 +111,93 @@ fn sex_resolves_by_author_majority() {
     ];
     let p = project(&recs, &Policy::default());
     assert_eq!(p.people[0].sex.as_deref(), Some("male")); // 2 distinct authors vs 1
+}
+
+#[test]
+fn reject_attestations_unmerge() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        attest("a1", "s1", "reject", "did:key:z6MkB"),
+        attest("a2", "s1", "reject", "did:key:z6MkC"),
+    ];
+    // score = 1 author + 0 support - 2 rejects = -1 < threshold 1 → not merged.
+    assert_eq!(project(&recs, &Policy::default()).people.len(), 2);
+}
+
+#[test]
+fn support_attestations_boost_confidence() {
+    let sa = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        attest("a1", "s1", "support", "did:key:z6MkB"),
+        attest("a2", "s1", "support", "did:key:z6MkC"),
+    ];
+    let strict = Policy {
+        same_as_threshold: 3,
+        different_from_threshold: 1,
+    };
+    // 1 author + 2 independent support = 3 → merges even under a strict threshold…
+    assert_eq!(project(&sa, &strict).people.len(), 1);
+    // …whereas the bare same_as (score 1) would not.
+    let bare = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+    ];
+    assert_eq!(project(&bare, &strict).people.len(), 2);
+}
+
+#[test]
+fn self_support_is_inadmissible() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        attest("a1", "s1", "support", "did:key:z6MkA"), // same author as the claim → self-grading
+    ];
+    // score = 1 author + 0 independent support = 1; threshold 2 → not merged.
+    let strict = Policy {
+        same_as_threshold: 2,
+        different_from_threshold: 1,
+    };
+    assert_eq!(project(&recs, &strict).people.len(), 2);
+}
+
+#[test]
+fn refuted_different_from_does_not_cut() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        same_as("s1", "pA", "pB", "did:key:z6MkA"),
+        different_from("d1", "pA", "pB", "did:key:z6MkB"),
+        attest("r1", "d1", "reject", "did:key:z6MkC"),
+        attest("r2", "d1", "reject", "did:key:z6MkD"),
+    ];
+    // different_from score = 1 - 2 = -1 < threshold 1 → not a cut → the same_as merges.
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people.len(), 1);
+    assert!(p.conflicts.is_empty());
+}
+
+#[test]
+fn attestation_by_fingerprint_counts() {
+    let sa = same_as("s1", "pA", "pB", "did:key:z6MkA");
+    let fp = format!(
+        "sha256:{}",
+        openom_jcs::hex(&openom_claim::fingerprint(&sa).unwrap())
+    );
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        sa.clone(),
+        attest("r1", &fp, "reject", "did:key:z6MkB"),
+        attest("r2", &fp, "reject", "did:key:z6MkC"),
+    ];
+    // Rejects targeting the fact fingerprint (not the claim id) still count → score -1 → not merged.
+    assert_eq!(project(&recs, &Policy::default()).people.len(), 2);
 }
 
 // ---- properties --------------------------------------------------------------------------------
