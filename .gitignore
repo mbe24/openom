@@ -25,3 +25,6 @@ plan/
 apps/test-results/
 apps/playwright-report/
 apps/.last-run.json
+
+# proptest failure-seed regressions (not tracked, matching repo convention)
+proptest-regressions/
