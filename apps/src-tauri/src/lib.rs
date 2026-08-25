@@ -1,16 +1,4 @@
-//! The Tauri command surface. Two managed states:
-//!   - `AppStore`: opaque ciphertext persistence (the doc store), unchanged in spirit.
-//!   - `Vault` = `Arc<VaultHost<..>>`: the key-custody host. The DEK lives in Rust and never
-//!     crosses to the webview; JS gets an opaque `sealerId` handle back.
-//!
-//! The commands are THIN wrappers — all the substance (and its tests) live in
-//! `openom-vault-host` / `journal`, which build without `tauri`. This file therefore can't
-//! be `cargo test`-ed in the headless container (the `tauri` crate needs system webview libs);
-//! it is verified by `tauri dev` / `cargo check` on a machine with the Tauri toolchain.
-//!
-//! The passphrase-bearing flows (provision/unlock/recover/change) run Argon2id, so they are
-//! `async` + `spawn_blocking`: a Tauri v2 sync command runs on the main thread and would freeze
-//! the UI and all IPC for the ~1s KDF. The cheap AEAD seal/open and the map ops stay sync.
+#![doc = include_str!("../README.md")]
 
 use std::sync::Arc;
 
