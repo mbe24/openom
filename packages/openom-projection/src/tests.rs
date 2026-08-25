@@ -38,6 +38,31 @@ fn biography(id: &str, target: &str, text: &str, author: &str) -> Value {
         author,
     )
 }
+fn custom_field(
+    id: &str,
+    tree: &str,
+    field_id: &str,
+    label: &str,
+    ty: &str,
+    author: &str,
+) -> Value {
+    claim(
+        id,
+        P_CUSTOM_FIELD,
+        tree,
+        json!({ "fieldId": field_id, "label": label, "type": ty }),
+        author,
+    )
+}
+fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &str) -> Value {
+    claim(
+        id,
+        P_CUSTOM_VALUE,
+        person,
+        json!({ "fieldId": field_id, "value": value }),
+        author,
+    )
+}
 fn tombstone(id: &str, target: &str) -> Value {
     claim(id, P_TOMBSTONE, target, json!({}), "did:key:z6MkA")
 }
@@ -197,6 +222,45 @@ fn biography_resolves() {
         p.people[0].biography.as_deref(),
         Some("Born in Krakow, emigrated 1923.")
     );
+}
+
+#[test]
+fn custom_fields_resolve_via_definition() {
+    let recs = vec![
+        person("pA"),
+        custom_field(
+            "cf1",
+            "tree",
+            "fld_job",
+            "Occupation",
+            "text",
+            "did:key:z6MkA",
+        ),
+        custom_value("cv1", "pA", "fld_job", json!("Carpenter"), "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.people[0].custom_fields,
+        vec![CustomField {
+            field_id: "fld_job".into(),
+            label: "Occupation".into(),
+            field_type: "text".into(),
+            value: json!("Carpenter"),
+        }]
+    );
+}
+
+#[test]
+fn custom_value_without_definition_degrades() {
+    let recs = vec![
+        person("pA"),
+        custom_value("cv1", "pA", "fld_x", json!(42), "did:key:z6MkA"),
+    ];
+    let cf = &project(&recs, &Policy::default()).people[0].custom_fields[0];
+    assert_eq!(cf.field_id, "fld_x");
+    assert_eq!(cf.label, "fld_x"); // degrade: label = fieldId
+    assert_eq!(cf.field_type, "text");
+    assert_eq!(cf.value, json!(42));
 }
 
 #[test]

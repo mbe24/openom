@@ -54,6 +54,8 @@ const P_REATTRIBUTE: &str = "openom.org/core/reattribute_to/v1";
 const P_PREFERRED: &str = "openom.org/core/preferred/v1";
 const P_PARENT: &str = "openom.org/core/parent/v1";
 const P_PARTNERSHIP: &str = "openom.org/core/partnership/v1";
+const P_CUSTOM_FIELD: &str = "openom.org/core/custom/field/v1"; // definition (on the tree)
+const P_CUSTOM_VALUE: &str = "openom.org/core/custom/value/v1"; // a value (on a person)
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
 const DEFAULT_KIND: &str = "biological";
@@ -112,6 +114,20 @@ pub struct Person {
     pub sex: Option<String>,
     /// Resolved biography text, if asserted (most-corroborated `core/biography/v1` plain text).
     pub biography: Option<String>,
+    /// Resolved custom fields (sorted by `field_id`): each field's canonical label/type from its
+    /// `custom/field/v1` definition + this person's most-corroborated `custom/value/v1`.
+    pub custom_fields: Vec<CustomField>,
+}
+
+/// A resolved custom field on a person. `label`/`field_type` come from the field's `custom/field/v1`
+/// definition (most-corroborated); a value whose `field_id` has no definition degrades to
+/// `label = field_id`, `field_type = "text"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomField {
+    pub field_id: String,
+    pub label: String,
+    pub field_type: String,
+    pub value: Value,
 }
 
 /// A `same_as` edge that was not applied because a `different_from` cut it — surfaced, never merged.
@@ -224,6 +240,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
     let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
     let mut biography_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, text, author)
+    let mut field_label: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> label -> authors
+    let mut field_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> type -> authors
+    let mut custom_values: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, fieldId, value, author)
     let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
     let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
     let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
@@ -396,6 +415,50 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
                     ));
                 }
             }
+            P_CUSTOM_FIELD => {
+                if let (Some(fid), Some(a)) = (
+                    r.get("value")
+                        .and_then(|v| v.get("fieldId"))
+                        .and_then(Value::as_str),
+                    str_field(r, "createdBy"),
+                ) {
+                    let val = r.get("value");
+                    if let Some(label) = val.and_then(|v| v.get("label")).and_then(Value::as_str) {
+                        field_label
+                            .entry(fid.to_string())
+                            .or_default()
+                            .entry(label.to_string())
+                            .or_default()
+                            .insert(a.to_string());
+                    }
+                    if let Some(ty) = val.and_then(|v| v.get("type")).and_then(Value::as_str) {
+                        field_type
+                            .entry(fid.to_string())
+                            .or_default()
+                            .entry(ty.to_string())
+                            .or_default()
+                            .insert(a.to_string());
+                    }
+                }
+            }
+            P_CUSTOM_VALUE => {
+                if let (Some(t), Some(fid), Some(val), Some(a)) = (
+                    str_field(r, "targetId"),
+                    r.get("value")
+                        .and_then(|v| v.get("fieldId"))
+                        .and_then(Value::as_str),
+                    r.get("value").and_then(|v| v.get("value")),
+                    str_field(r, "createdBy"),
+                ) {
+                    custom_values.push((
+                        t.to_string(),
+                        id.to_string(),
+                        fid.to_string(),
+                        val.clone(),
+                        a.to_string(),
+                    ));
+                }
+            }
             P_REATTRIBUTE => {
                 if let (Some(target), Some(person), Some(a)) = (
                     str_field(r, "targetId"),
@@ -433,6 +496,9 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         nodes.insert(t.clone());
     }
     for (t, _, _, _) in &biography_claims {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _, _, _) in &custom_values {
         nodes.insert(t.clone());
     }
     for options in reattribute.values() {
@@ -556,6 +622,52 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         }
     }
 
+    // Custom fields: per (person, fieldId) resolve the most-corroborated value; label/type from the
+    // field's most-corroborated definition (dangling fieldId → label = fieldId, type = "text").
+    #[allow(clippy::type_complexity)]
+    let mut custom_by_person: BTreeMap<
+        String,
+        BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>>,
+    > = BTreeMap::new();
+    for (target, cid, fid, val, author) in &custom_values {
+        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            custom_by_person
+                .entry(canon)
+                .or_default()
+                .entry(fid.clone())
+                .or_default()
+                .entry(val.to_string())
+                .or_insert_with(|| (BTreeSet::new(), val.clone()))
+                .0
+                .insert(author.clone());
+        }
+    }
+    let mut customs_of: BTreeMap<String, Vec<CustomField>> = BTreeMap::new();
+    for (person, by_field) in &custom_by_person {
+        let mut fields: Vec<CustomField> = by_field
+            .iter()
+            .filter_map(|(fid, by_value)| {
+                by_value
+                    .iter()
+                    .max_by(|a, b| a.1 .0.len().cmp(&b.1 .0.len()).then(b.0.cmp(a.0)))
+                    .map(|(_, (_, val))| CustomField {
+                        field_id: fid.clone(),
+                        label: field_label
+                            .get(fid)
+                            .and_then(most_corroborated)
+                            .unwrap_or_else(|| fid.clone()),
+                        field_type: field_type
+                            .get(fid)
+                            .and_then(most_corroborated)
+                            .unwrap_or_else(|| "text".to_string()),
+                        value: val.clone(),
+                    })
+            })
+            .collect();
+        fields.sort_by(|a, b| a.field_id.cmp(&b.field_id));
+        customs_of.insert(person.clone(), fields);
+    }
+
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
@@ -620,6 +732,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
 
         let preferred_name = preferred_name_of.get(canon).cloned();
         let biography = biography_by_person.get(canon).and_then(most_corroborated);
+        let custom_fields = customs_of.remove(canon).unwrap_or_default();
         people.push(Person {
             id: canon.clone(),
             also,
@@ -627,6 +740,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             preferred_name,
             sex,
             biography,
+            custom_fields,
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));
