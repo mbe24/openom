@@ -337,6 +337,37 @@ fn preferred_ignored_when_absent_or_refuted() {
     );
 }
 
+#[test]
+fn equivalent_names_share_a_class() {
+    // n2 (a different rendering) points at n1's content-ref via equivalent_to; n3 is unrelated.
+    let n2 = claim(
+        "n2",
+        P_NAME,
+        "pA",
+        json!({ "parts": { "given": "Ada-cyr" }, "equivalent_to": [given_ref("Ada")] }),
+        "did:key:z6MkA",
+    );
+    let recs = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        n2,
+        name("n3", "pA", "Zed"),
+    ];
+    let p = project(&recs, &Policy::default());
+    let names = &p.people[0].names;
+    let cls = |cid: &str| {
+        names
+            .iter()
+            .find(|v| v.claim_id == cid)
+            .unwrap()
+            .equiv_class
+            .clone()
+    };
+    assert_eq!(cls("n1"), cls("n2")); // equivalent → one class
+    assert_ne!(cls("n1"), cls("n3")); // unrelated → separate class
+    assert_eq!(cls("n1"), "n1"); // class label = min claim_id in the component
+}
+
 // ---- properties --------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]

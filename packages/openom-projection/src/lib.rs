@@ -69,6 +69,10 @@ impl Default for Policy {
 pub struct NameView {
     pub claim_id: String,
     pub parts: Value,
+    /// Equivalence-class label — the minimum `claim_id` among names joined (directly or transitively)
+    /// by `equivalent_to`. Names sharing it are the *same* name differently rendered (§6); a name with
+    /// no equivalents is its own class.
+    pub equiv_class: String,
 }
 
 /// A projected person: one real individual, possibly assembled from several merged anchors.
@@ -325,11 +329,19 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             names_by_person.entry(canon).or_default().push(NameView {
                 claim_id: cid.clone(),
                 parts: parts.clone(),
+                equiv_class: String::new(),
             });
         }
     }
-    for v in names_by_person.values_mut() {
-        v.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
+    for views in names_by_person.values_mut() {
+        views.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
+        let classes = equiv_classes(views);
+        for v in views.iter_mut() {
+            v.equiv_class = classes
+                .get(&v.claim_id)
+                .cloned()
+                .unwrap_or_else(|| v.claim_id.clone());
+        }
     }
 
     let mut sex_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
@@ -616,6 +628,44 @@ fn name_ref(name_value: &Value) -> Option<String> {
         }
     }
     openom_claim::content_ref(&Value::Object(intrinsic)).ok()
+}
+
+/// Group a person's names into equivalence classes over `equivalent_to` (§6). Each name's class label
+/// is the minimum `claim_id` in its connected component — the same union-find routine as identity
+/// clustering, parameterized here by name content-refs instead of anchors.
+fn equiv_classes(names: &[NameView]) -> BTreeMap<String, String> {
+    let mut ref_to_id: BTreeMap<String, String> = BTreeMap::new();
+    for n in names {
+        if let Some(r) = name_ref(&n.parts) {
+            ref_to_id.insert(r, n.claim_id.clone());
+        }
+    }
+    let nodes: BTreeSet<String> = ref_to_id.keys().cloned().collect();
+    let mut uf = Uf::new(&nodes);
+    for n in names {
+        let Some(own) = name_ref(&n.parts) else {
+            continue;
+        };
+        if let Some(eqs) = n.parts.get("equivalent_to").and_then(Value::as_array) {
+            for e in eqs.iter().filter_map(Value::as_str) {
+                if nodes.contains(e) {
+                    uf.union(&own, e);
+                }
+            }
+        }
+    }
+    let mut min_id: BTreeMap<String, String> = BTreeMap::new();
+    for (r, cid) in &ref_to_id {
+        let root = uf.find(r);
+        let entry = min_id.entry(root).or_insert_with(|| cid.clone());
+        if cid < entry {
+            *entry = cid.clone();
+        }
+    }
+    ref_to_id
+        .iter()
+        .map(|(r, cid)| (cid.clone(), min_id[&uf.find(r)].clone()))
+        .collect()
 }
 
 // --- record field helpers -----------------------------------------------------------------------
