@@ -26,6 +26,9 @@
 //! - **Events** (§10) — each Event anchor's `event_type` / `date` (EDTF → sortable year bounds via
 //!   `openom-edtf`) / `event_place` / `participant` claims assembled into an [`EventView`] hyper-edge,
 //!   participants canonicalized to persons.
+//! - **Family unions** — children grouped by their canonical parent-set into an addressable [`Union`]
+//!   (stable id + marriage event), so the GUI has a "family" to attach to and full-vs-half siblings
+//!   fall out of the grouping.
 //!
 //! Not yet here (documented seams): the *role-gated* tombstone (records are suppressed but the
 //! tombstoner's authority is not yet checked — that needs the role/membership feed); place
@@ -157,12 +160,31 @@ pub struct EventView {
     pub participants: Vec<Participant>,
 }
 
-/// The materialized read model: people, relationships, events, and identity conflicts.
+/// A family/union — a parent-set (the spouses) and the children sharing exactly that parent-set,
+/// with a stable id and its marriage event if one is recorded. Derived from the atomic parent-child +
+/// partnership edges so the GUI has an addressable "family": marriage facts attach here, and full vs.
+/// half siblings fall out of the parent-set grouping (a shared parent-set = full siblings; a partially
+/// shared one = a different union = half siblings). The id is stable across replicas (a function of
+/// the canonical parent-set), so it survives merges and re-projection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Union {
+    /// Stable id: `"union:" + the sorted canonical parent ids joined by '+'`.
+    pub id: String,
+    /// The parents (0 is impossible, 1 = single-parent family, 2 = a couple), sorted.
+    pub parents: Vec<String>,
+    /// The children sharing exactly this parent-set, sorted.
+    pub children: Vec<String>,
+    /// The id of a recorded marriage/divorce event whose spouses are exactly these parents, if any.
+    pub marriage_event: Option<String>,
+}
+
+/// The materialized read model: people, relationships, family unions, events, and identity conflicts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     pub people: Vec<Person>,
     pub parent_child: Vec<ParentChild>,
     pub partnerships: Vec<Partnership>,
+    pub unions: Vec<Union>,
     pub events: Vec<EventView>,
     pub conflicts: Vec<Conflict>,
 }
@@ -641,6 +663,54 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         })
         .collect();
 
+    // Family unions — group children by their canonical parent-set, add childless partnerships, and
+    // attach a marriage/divorce event whose spouses match. The stable id gives the GUI an addressable
+    // "family" and makes full-vs-half siblings fall out of the parent-set grouping.
+    let mut parents_of_child: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for pc in &parent_child_edges {
+        parents_of_child
+            .entry(pc.child.clone())
+            .or_default()
+            .insert(pc.parent.clone());
+    }
+    let mut union_children: BTreeMap<Vec<String>, BTreeSet<String>> = BTreeMap::new();
+    for (child, parents) in &parents_of_child {
+        union_children
+            .entry(parents.iter().cloned().collect())
+            .or_default()
+            .insert(child.clone());
+    }
+    for pn in &partnership_edges {
+        union_children.entry(pn.pair.to_vec()).or_default();
+    }
+    let unions: Vec<Union> = union_children
+        .iter()
+        .map(|(parents, children)| {
+            let marriage_event = (parents.len() == 2)
+                .then(|| {
+                    let want: BTreeSet<&String> = parents.iter().collect();
+                    events
+                        .iter()
+                        .find(|e| {
+                            matches!(e.event_type.as_deref(), Some("marriage") | Some("divorce"))
+                                && e.participants
+                                    .iter()
+                                    .map(|p| &p.person)
+                                    .collect::<BTreeSet<_>>()
+                                    == want
+                        })
+                        .map(|e| e.id.clone())
+                })
+                .flatten();
+            Union {
+                id: format!("union:{}", parents.join("+")),
+                parents: parents.clone(),
+                children: children.iter().cloned().collect(),
+                marriage_event,
+            }
+        })
+        .collect();
+
     let conflicts = skipped
         .into_iter()
         .map(|cut_pair| Conflict { cut_pair })
@@ -649,6 +719,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         people,
         parent_child: parent_child_edges,
         partnerships: partnership_edges,
+        unions,
         events,
         conflicts,
     }

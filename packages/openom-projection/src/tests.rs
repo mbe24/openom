@@ -524,6 +524,81 @@ fn event_participants_canonicalize() {
     );
 }
 
+#[test]
+fn union_groups_children_and_attaches_marriage() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC1"),
+        person("pC2"),
+        parent("r1", "pC1", "pA", "biological", "did:key:z6MkA"),
+        parent("r2", "pC1", "pB", "biological", "did:key:z6MkA"),
+        parent("r3", "pC2", "pA", "biological", "did:key:z6MkA"),
+        parent("r4", "pC2", "pB", "biological", "did:key:z6MkA"),
+        partnership("pn1", "pA", "pB", "spouse", "did:key:z6MkA"),
+        event("e1"),
+        event_type("t1", "e1", "marriage", "did:key:z6MkA"),
+        participant("pt1", "e1", "pA", "spouse", "did:key:z6MkA"),
+        participant("pt2", "e1", "pB", "spouse", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.unions.len(), 1);
+    let u = &p.unions[0];
+    assert_eq!(u.id, "union:pA+pB");
+    assert_eq!(u.parents, vec!["pA".to_string(), "pB".to_string()]);
+    assert_eq!(u.children, vec!["pC1".to_string(), "pC2".to_string()]);
+    assert_eq!(u.marriage_event.as_deref(), Some("e1"));
+}
+
+#[test]
+fn half_siblings_are_separate_unions() {
+    // pC1 has parents A+B; pC2 has parents A+C → two unions sharing only A.
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC"),
+        person("pC1"),
+        person("pC2"),
+        parent("r1", "pC1", "pA", "biological", "did:key:z6MkA"),
+        parent("r2", "pC1", "pB", "biological", "did:key:z6MkA"),
+        parent("r3", "pC2", "pA", "biological", "did:key:z6MkA"),
+        parent("r4", "pC2", "pC", "biological", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.unions.len(), 2);
+    let ab = p
+        .unions
+        .iter()
+        .find(|u| u.parents == vec!["pA".to_string(), "pB".to_string()])
+        .unwrap();
+    let ac = p
+        .unions
+        .iter()
+        .find(|u| u.parents == vec!["pA".to_string(), "pC".to_string()])
+        .unwrap();
+    assert_eq!(ab.children, vec!["pC1".to_string()]);
+    assert_eq!(ac.children, vec!["pC2".to_string()]);
+}
+
+#[test]
+fn childless_partnership_is_a_union() {
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        partnership("pn1", "pA", "pB", "spouse", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(
+        p.unions,
+        vec![Union {
+            id: "union:pA+pB".into(),
+            parents: vec!["pA".into(), "pB".into()],
+            children: vec![],
+            marriage_event: None,
+        }]
+    );
+}
+
 // ---- properties --------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
