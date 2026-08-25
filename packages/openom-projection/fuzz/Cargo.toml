@@ -1,0 +1,28 @@
+# cargo-fuzz target for openom-projection's ingest boundary. This is a DETACHED crate (its own empty
+# [workspace]) so it never touches the stable workspace build — the main crates build on stable in
+# the container; these run under nightly libFuzzer:
+#   cd packages/openom-projection && cargo +nightly fuzz run project
+# The stable proptests (order_independent, different_from_never_violated, duplication_invariant,
+# people_are_wellformed) cover the invariants for CI; this is for deep, corpus-driven fuzzing.
+[package]
+name = "openom-projection-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+openom-projection = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "project"
+path = "fuzz_targets/project.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

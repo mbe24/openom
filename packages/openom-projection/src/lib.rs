@@ -80,9 +80,20 @@ pub struct Projection {
 /// Project a record set into the read model. Pure: the result depends only on the set of records and
 /// the policy, never on their order.
 pub fn project(records: &[Value], policy: &Policy) -> Projection {
+    // The store guarantees unique content-hash ids, but be robust to a duplicated slice: keep the
+    // first record per id, so projecting `recs` and `recs ++ recs` give the same result (set input).
+    let mut seen_ids: BTreeSet<String> = BTreeSet::new();
+    let deduped: Vec<&Value> = records
+        .iter()
+        .filter(|r| match str_field(r, "id") {
+            Some(id) => seen_ids.insert(id.to_string()),
+            None => true,
+        })
+        .collect();
+
     // --- classify -------------------------------------------------------------------------------
     let mut tombstoned: BTreeSet<String> = BTreeSet::new();
-    for r in records {
+    for &r in &deduped {
         if predicate(r) == Some(P_TOMBSTONE) {
             if let Some(t) = str_field(r, "targetId") {
                 tombstoned.insert(t.to_string());
@@ -97,7 +108,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
     let mut sex_claims: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // target -> value -> authors
 
-    for r in records {
+    for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
             if let Some(id) = str_field(r, "id") {
                 anchors.insert(id.to_string());
@@ -177,32 +188,38 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let Clustering { rep, skipped } = cluster(&nodes, edges, &cuts);
 
     // --- assemble people ------------------------------------------------------------------------
-    // Group nodes by canonical representative.
-    let mut clusters: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (node, canon) in &rep {
-        clusters
-            .entry(canon.clone())
-            .or_default()
-            .insert(node.clone());
+    // Group nodes by cluster key (the min-node rep), then pick each cluster's canonical PERSON id =
+    // its minimum *anchor* member. A cluster with no anchor (e.g. a dangling `same_as` endpoint that
+    // sorts below the real anchors) is not a person and is dropped.
+    let mut by_key: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (node, key) in &rep {
+        by_key.entry(key.clone()).or_default().insert(node.clone());
     }
-
-    let canon_of = |id: &str| rep.get(id).cloned().unwrap_or_else(|| id.to_string());
+    let mut canonical: BTreeMap<String, String> = BTreeMap::new(); // cluster key -> min anchor
+    for (key, members) in &by_key {
+        if let Some(anchor) = members.iter().find(|m| anchors.contains(*m)) {
+            canonical.insert(key.clone(), anchor.clone());
+        }
+    }
+    let canon_of =
+        |id: &str| -> Option<String> { rep.get(id).and_then(|key| canonical.get(key)).cloned() };
 
     let mut people = Vec::new();
-    for (canon, members) in &clusters {
-        // A cluster is a person only if at least one member is a real Person anchor.
-        if !members.iter().any(|m| anchors.contains(m)) {
+    for (key, members) in &by_key {
+        let Some(canon) = canonical.get(key) else {
             continue;
+        };
+
+        let mut also: Vec<String> = Vec::new();
+        for m in members {
+            if anchors.contains(m) && m != canon {
+                also.push(m.clone());
+            }
         }
-        let also: Vec<String> = members
-            .iter()
-            .filter(|m| *m != canon && anchors.contains(*m))
-            .cloned()
-            .collect();
 
         let mut names: Vec<NameView> = name_claims
             .iter()
-            .filter(|(t, _, _)| canon_of(t) == *canon)
+            .filter(|(t, _, _)| canon_of(t).as_deref() == Some(canon.as_str()))
             .map(|(_, cid, parts)| NameView {
                 claim_id: cid.clone(),
                 parts: parts.clone(),
@@ -234,6 +251,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             sex,
         });
     }
+    people.sort_by(|a, b| a.id.cmp(&b.id));
 
     let conflicts = skipped
         .into_iter()

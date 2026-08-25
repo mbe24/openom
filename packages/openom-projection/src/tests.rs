@@ -168,6 +168,42 @@ proptest! {
         prop_assert_eq!(a, project(&shuffled, &Policy::default()));
     }
 
+    // The record slice is a SET: duplicating every record changes nothing.
+    #[test]
+    fn duplication_invariant(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
+        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let once = project(&records, &Policy::default());
+        let mut doubled = records.clone();
+        doubled.extend(records.iter().cloned());
+        prop_assert_eq!(once, project(&doubled, &Policy::default()));
+    }
+
+    // Every person is well-formed: canonical id is the minimum member anchor, member sets are
+    // disjoint across people, and each name claim belongs to exactly one person.
+    #[test]
+    fn people_are_wellformed(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
+        let records: Vec<Value> = specs.iter().enumerate().map(|(i, (s, _))| into_record(s, i)).collect();
+        let anchors: std::collections::BTreeSet<String> = specs.iter()
+            .filter_map(|(s, _)| if let Spec::Person(id) = s { Some(id.clone()) } else { None })
+            .collect();
+        let proj = project(&records, &Policy::default());
+
+        let mut seen_members = std::collections::BTreeSet::new();
+        let mut seen_names = std::collections::BTreeSet::new();
+        for p in &proj.people {
+            prop_assert!(anchors.contains(&p.id));
+            prop_assert!(seen_members.insert(p.id.clone()), "anchor {} in two people", p.id);
+            for a in &p.also {
+                prop_assert!(anchors.contains(a));
+                prop_assert!(p.id < *a, "canonical id must be the minimum: {} !< {}", p.id, a);
+                prop_assert!(seen_members.insert(a.clone()), "anchor {} in two people", a);
+            }
+            for n in &p.names {
+                prop_assert!(seen_names.insert(n.claim_id.clone()), "name {} in two people", n.claim_id);
+            }
+        }
+    }
+
     // No asserted different_from ever ends with both anchors in one person.
     #[test]
     fn different_from_never_violated(specs in prop::collection::vec((spec(), any::<u64>()), 0..24)) {
