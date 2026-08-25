@@ -44,6 +44,10 @@ Every crate in `packages/` and every unit in `apps/` has a `README.md`, wired as
 (`packages/openom-jcs/README.md`) live in `packages/README.md`.
 
 When you add or materially change a unit:
+- **The README is part of the code — keep it current.** Any change to a unit's behavior or contract
+  updates its README in the *same* change; in particular, rewrite or **drop** invariants (and their
+  prose) for behavior that no longer exists. A README that documents behavior the code no longer has
+  is worse than none.
 - Create/update its `README.md` — especially **What it is — and is not** (the scope boundary) and
   **Invariants** (the contract).
 - Invariants are namespaced (`JCS-1`), stable, never renumbered, and each `verified by` names a
