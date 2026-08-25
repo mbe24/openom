@@ -3,7 +3,7 @@
 # This crate is the mechanism (record, verify, merge semantics) — authority (OPE-104) and the
 # attester registry (OPE-105) layer on top.
 [package]
-name = "openom-attestations"
+name = "openom-attestation-zkp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

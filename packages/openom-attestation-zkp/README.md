@@ -1,8 +1,10 @@
-# openom-attestations
+# openom-attestation-zkp
 
 > A member Ed25519-signs a fact's canonical content hash — an independent sidecar, never a tree op.
 
-**Status:** built · signed-attestation mechanism, authority-agnostic · plan/design.attestations.md
+**Status:** dormant · the ZK-deferred signed-attestation sidecar — **superseded** by the claim-based
+`core/attest/v1` attestation (with citations); kept only for a possible future ZK / external-attestation
+need, and **slated for deletion** (see the release WP, OPE-109) · plan/design.attestations.md
 
 **Last updated:** 2026-08-25
 
@@ -44,14 +46,14 @@ bytes; the caller supplies the hash and threads the bytes through storage.
 | **ATTEST-5** | `Revoke` removes the vouch and tombstones `(attester, fact)` so a re-delivered attest is suppressed; `compact` hard-purges the tombstone. | The "known-liar" / bad-divorce case: a revoked vouch leaves no trace once every replica has seen the revoke. | `tests::revoke_tombstones_then_compaction_hard_purges` |
 | **ATTEST-6** | `AttestationDoc` and `AttestOp` both round-trip through their `journal`-shaped byte encoding (`to_snapshot`/`from_snapshot`, `encode_op`/`decode_op`). | The sidecar's snapshot + op-log bytes are exactly what `journal` expects, with nothing lost. | `tests::snapshot_and_op_round_trip_through_journal_bytes` |
 
-Run: `node scripts/cargo.mjs test -p openom-attestations` (from the repo root; on Windows cargo runs
+Run: `node scripts/cargo.mjs test -p openom-attestation-zkp` (from the repo root; on Windows cargo runs
 under WSL2/Docker).
 
 ## Usage
 
 ```rust
 use ed25519_dalek::SigningKey;
-use openom_attestations::{AttestOp, Attestation, AttestationDoc, Verdict};
+use openom_attestation_zkp::{AttestOp, Attestation, AttestationDoc, Verdict};
 
 let member_key = SigningKey::from_bytes(&[1; 32]);
 let fact_hash = [9; 32]; // openom-model::content_hash of the fact being vouched for
