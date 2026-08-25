@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openom.dev/schema/record.schema.json",
   "title": "openom claim-model record",
-  "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). Attestations and tombstones ARE Claims, discriminated by `predicate` (there is no targetType). Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the two core meta-predicates (attest, tombstone) additionally constrain `value`. camelCase field names match openom-claim's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-claim), not here. Bump x-openom-bounds-version when a bound widens.",
+  "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). An attestation IS a Claim, discriminated by `predicate` (there is no targetType); deletion/edit-supersession are operations, NOT claims. Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the core `attest` meta-predicate additionally constrains `value`. camelCase field names match openom-claim's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-claim), not here. Bump x-openom-bounds-version when a bound widens.",
   "x-openom-bounds-version": 1,
   "oneOf": [
     { "$ref": "#/$defs/anchor" },
@@ -71,11 +71,6 @@
         "reason": { "type": "string", "maxLength": 4096 }
       }
     },
-    "tombstoneValue": {
-      "type": "object",
-      "maxProperties": 0,
-      "$comment": "empty: a tombstone carries no value, only its targetId"
-    },
     "signature": {
       "type": "string",
       "pattern": "^[0-9a-f]{128}$",
@@ -116,11 +111,6 @@
           "$comment": "attestation = a claim whose value is a verdict",
           "if": { "required": ["predicate"], "properties": { "predicate": { "const": "openom.org/core/attest/v1" } } },
           "then": { "properties": { "value": { "$ref": "#/$defs/attestValue" } } }
-        },
-        {
-          "$comment": "tombstone = a claim with an empty value",
-          "if": { "required": ["predicate"], "properties": { "predicate": { "const": "openom.org/core/tombstone/v1" } } },
-          "then": { "properties": { "value": { "$ref": "#/$defs/tombstoneValue" } } }
         }
       ]
     }

@@ -91,23 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_must_have_empty_value() {
-        let s = RecordSchema::new();
-        let d = did();
-        let mut t = Claim::tombstone("sha256:bb", &d, 1);
-        t.compute_id().unwrap();
-        assert!(s.is_valid(&t.to_value()));
-
-        let mut nonempty = t.clone();
-        nonempty.value = json!({ "note": "why" });
-        nonempty.compute_id().unwrap();
-        assert!(
-            !s.is_valid(&nonempty.to_value()),
-            "a tombstone carries no value"
-        );
-    }
-
-    #[test]
     fn junk_and_malformed_ids_are_rejected() {
         let s = RecordSchema::new();
         let d = did();

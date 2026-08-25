@@ -32,6 +32,18 @@ pub enum ClaimError {
     /// `createdBy` is not a valid `did:key`.
     #[error("createdBy is not a valid did:key: {0}")]
     BadCreatedBy(#[from] openom_did::DidError),
+    /// A record has no string `type`.
+    #[error("record has no string type")]
+    MissingType,
+    /// A record's `type` is neither the claim type nor a known anchor type.
+    #[error("unknown record type: {0}")]
+    UnknownType(String),
+    /// A claim's stored `id` does not match a fresh hash of its content.
+    #[error("claim id does not match its content")]
+    IdMismatch,
+    /// A record's JSON did not match the `{0}` shape.
+    #[error("malformed {0} record: {1}")]
+    Malformed(&'static str, serde_json::Error),
 }
 
 /// The 32-byte content hash — the basis of both the `id` and the signed message.
