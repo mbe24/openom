@@ -1,0 +1,28 @@
+# cargo-fuzz targets for openom-claim's hashing/verify boundary. This is a DETACHED crate (its own
+# empty [workspace]) so it never touches the stable workspace build — the main crates build on
+# stable in the container; these run under nightly libFuzzer:
+#   cd packages/openom-claim && cargo +nightly fuzz run hash_and_verify
+# The stable proptests (sign_verify_and_tamper, id_and_fingerprint_deterministic) cover the same
+# surface for CI; this is for deep, corpus-driven fuzzing.
+[package]
+name = "openom-claim-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+openom-claim = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "hash_and_verify"
+path = "fuzz_targets/hash_and_verify.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

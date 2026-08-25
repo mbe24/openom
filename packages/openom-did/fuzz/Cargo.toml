@@ -1,0 +1,27 @@
+# cargo-fuzz targets for openom-did's did:key parse boundary. This is a DETACHED crate (its own
+# empty [workspace]) so it never touches the stable workspace build — the main crates build on
+# stable in the container; these run under nightly libFuzzer:
+#   cd packages/openom-did && cargo +nightly fuzz run decode
+# The stable proptests (did_key_roundtrips_for_any_pubkey, decode_never_panics) cover the same
+# surface for CI; this is for deep, corpus-driven fuzzing.
+[package]
+name = "openom-did-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+openom-did = { path = ".." }
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
