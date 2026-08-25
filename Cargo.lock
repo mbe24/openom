@@ -3432,7 +3432,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-attestations"
+name = "openom-attestation-zkp"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
@@ -3532,6 +3532,17 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "openom-oplog"
+version = "0.1.0"
+dependencies = [
+ "openom-claim",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
