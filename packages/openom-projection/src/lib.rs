@@ -29,6 +29,9 @@
 //! - **Family unions** — children grouped by their canonical parent-set into an addressable [`Union`]
 //!   (stable id + marriage event), so the GUI has a "family" to attach to and full-vs-half siblings
 //!   fall out of the grouping.
+//! - **Sources** (§10.2) — every claim's inline `citation` is attached to the canonical person its
+//!   target resolves to, with the `sourceId` resolved to its `core/source/v1` description, so a
+//!   person's sources panel shows the citation *and* the source it points at.
 //!
 //! Not yet here (documented seams): the *role-gated* tombstone (records are suppressed but the
 //! tombstoner's authority is not yet checked — that needs the role/membership feed); place
@@ -58,6 +61,7 @@ const P_CUSTOM_FIELD: &str = "openom.org/core/custom/field/v1"; // definition (o
 const P_CUSTOM_VALUE: &str = "openom.org/core/custom/value/v1"; // a value (on a person)
 const P_ATTEST: &str = "openom.org/core/attest/v1";
 const P_TOMBSTONE: &str = "openom.org/core/tombstone/v1";
+const P_SOURCE: &str = "openom.org/core/source/v1"; // a self-subject source (cite-sink), §10.2
 const DEFAULT_KIND: &str = "biological";
 const DEFAULT_ROLE: &str = "partner";
 
@@ -117,6 +121,39 @@ pub struct Person {
     /// Resolved custom fields (sorted by `field_id`): each field's canonical label/type from its
     /// `custom/field/v1` definition + this person's most-corroborated `custom/value/v1`.
     pub custom_fields: Vec<CustomField>,
+    /// Citations backing facts about this person: every claim directly targeting this person (after
+    /// `reattribute_to`) that carries an inline `citation`, with its `sourceId` resolved to the
+    /// referenced `core/source/v1` claim (§10.2). Sorted by (source id, citing claim id). Citations
+    /// borne by an event a person merely participates in are not yet folded in (a documented seam).
+    pub sources: Vec<Citation>,
+}
+
+/// A source referenced by a citation, resolved from its `core/source/v1` claim. Every field is
+/// `None` when the `source_id` does not resolve to a known source claim (dangling reference).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRef {
+    pub source_id: String,
+    pub title: Option<String>,
+    pub repository: Option<String>,
+    pub uri: Option<String>,
+    /// `primary` | `secondary` | `original` | `derivative`.
+    pub quality: Option<String>,
+}
+
+/// One citation surfaced on a person's sources panel: the fact it backs, where in the source, and the
+/// resolved source itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Citation {
+    /// The id of the claim this citation is attached to.
+    pub claim_id: String,
+    /// The predicate of that claim, so the panel can say *what* is cited.
+    pub predicate: String,
+    /// A locator within the source (e.g. `{page, entry}`), verbatim, if given.
+    pub locator: Option<Value>,
+    /// A verbatim extract from the source, if given.
+    pub extract: Option<String>,
+    /// The referenced source, resolved from `citation.sourceId`.
+    pub source: SourceRef,
 }
 
 /// A resolved custom field on a person. `label`/`field_type` come from the field's `custom/field/v1`
@@ -252,6 +289,8 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
     let mut event_date: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> edtf -> authors
     let mut event_place: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> placeId -> authors
     let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
+    let mut sources: BTreeMap<String, Value> = BTreeMap::new(); // source claim id -> its value
+    let mut citations: Vec<(String, String, String, Value)> = Vec::new(); // (targetId, citing claimId, predicate, citation)
 
     for &r in &deduped {
         if type_of(r) == Some(TYPE_PERSON) {
@@ -273,7 +312,23 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         if tombstoned.contains(id) {
             continue;
         }
+        // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
+        if let (Some(target), Some(cit)) = (str_field(r, "targetId"), r.get("citation")) {
+            if cit.get("sourceId").and_then(Value::as_str).is_some() {
+                citations.push((
+                    target.to_string(),
+                    id.to_string(),
+                    pred.to_string(),
+                    cit.clone(),
+                ));
+            }
+        }
         match pred {
+            P_SOURCE => {
+                if let Some(v) = r.get("value") {
+                    sources.insert(id.to_string(), v.clone());
+                }
+            }
             P_SAME_AS => collect_pair(&mut same_as, r, id),
             P_DIFFERENT_FROM => collect_pair(&mut different_from, r, id),
             P_ATTEST => {
@@ -668,6 +723,49 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         customs_of.insert(person.clone(), fields);
     }
 
+    // Sources: attach each citing claim to the canonical person its (effective) target resolves to,
+    // resolving the `sourceId` to the source claim's description. An unresolved source id surfaces the
+    // reference with empty source fields rather than dropping the citation.
+    let mut sources_by_person: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
+    for (target, cid, pred, cit) in &citations {
+        let Some(canon) = canon_of(&eff_target(cid, target)) else {
+            continue;
+        };
+        let source_id = cit
+            .get("sourceId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let src = sources.get(&source_id);
+        let field = |k: &str| {
+            src.and_then(|s| s.get(k))
+                .and_then(Value::as_str)
+                .map(String::from)
+        };
+        sources_by_person.entry(canon).or_default().push(Citation {
+            claim_id: cid.clone(),
+            predicate: pred.clone(),
+            locator: cit.get("locator").cloned(),
+            extract: cit.get("extract").and_then(Value::as_str).map(String::from),
+            source: SourceRef {
+                source_id: source_id.clone(),
+                title: field("title"),
+                repository: field("repository"),
+                uri: field("uri"),
+                quality: field("quality"),
+            },
+        });
+    }
+    for cits in sources_by_person.values_mut() {
+        cits.sort_by(|a, b| {
+            a.source
+                .source_id
+                .cmp(&b.source.source_id)
+                .then(a.claim_id.cmp(&b.claim_id))
+        });
+        cits.dedup();
+    }
+
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
@@ -733,6 +831,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
         let preferred_name = preferred_name_of.get(canon).cloned();
         let biography = biography_by_person.get(canon).and_then(most_corroborated);
         let custom_fields = customs_of.remove(canon).unwrap_or_default();
+        let sources = sources_by_person.remove(canon).unwrap_or_default();
         people.push(Person {
             id: canon.clone(),
             also,
@@ -741,6 +840,7 @@ pub fn project(records: &[Value], policy: &Policy) -> Projection {
             sex,
             biography,
             custom_fields,
+            sources,
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));

@@ -66,6 +66,16 @@ fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &s
 fn tombstone(id: &str, target: &str) -> Value {
     claim(id, P_TOMBSTONE, target, json!({}), "did:key:z6MkA")
 }
+fn source(id: &str, title: &str, repository: &str, author: &str) -> Value {
+    json!({ "id": id, "type": "openom.org/core/claim/v1", "predicate": P_SOURCE,
+            "value": { "title": title, "repository": repository, "quality": "original" },
+            "createdAt": 1, "createdBy": author })
+}
+// Attach an inline citation to an existing claim (as its top-level `citation` envelope field).
+fn with_citation(mut c: Value, source_id: &str, locator: Value, extract: &str) -> Value {
+    c["citation"] = json!({ "sourceId": source_id, "locator": locator, "extract": extract });
+    c
+}
 fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Value {
     claim(id, P_ATTEST, target, json!({ "verdict": verdict }), author)
 }
@@ -248,6 +258,51 @@ fn custom_fields_resolve_via_definition() {
             value: json!("Carpenter"),
         }]
     );
+}
+
+#[test]
+fn sources_resolve_from_citations() {
+    let biog = with_citation(
+        biography("b1", "pA", "Born in Krakow.", "did:key:z6MkA"),
+        "src1",
+        json!({ "page": "112", "entry": "3" }),
+        "b. Krakow 1842",
+    );
+    let recs = vec![
+        person("pA"),
+        source(
+            "src1",
+            "St. Mary Parish Register",
+            "London Metropolitan Archives",
+            "did:key:z6MkA",
+        ),
+        biog,
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people[0].sources.len(), 1);
+    let c = &p.people[0].sources[0];
+    assert_eq!(c.claim_id, "b1");
+    assert_eq!(c.predicate, P_BIOGRAPHY);
+    assert_eq!(c.extract.as_deref(), Some("b. Krakow 1842"));
+    assert_eq!(c.locator, Some(json!({ "page": "112", "entry": "3" })));
+    assert_eq!(c.source.source_id, "src1");
+    assert_eq!(c.source.title.as_deref(), Some("St. Mary Parish Register"));
+    assert_eq!(
+        c.source.repository.as_deref(),
+        Some("London Metropolitan Archives")
+    );
+    assert_eq!(c.source.quality.as_deref(), Some("original"));
+}
+
+#[test]
+fn citation_with_unresolved_source_still_surfaces() {
+    let n = with_citation(name("n1", "pA", "Ada"), "srcX", json!(null), "");
+    let recs = vec![person("pA"), n];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people[0].sources.len(), 1);
+    let c = &p.people[0].sources[0];
+    assert_eq!(c.source.source_id, "srcX");
+    assert_eq!(c.source.title, None); // source claim absent → reference surfaced, fields empty
 }
 
 #[test]
