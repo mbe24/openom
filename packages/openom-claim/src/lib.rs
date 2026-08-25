@@ -44,6 +44,9 @@ pub enum ClaimError {
     /// A record's JSON did not match the `{0}` shape.
     #[error("malformed {0} record: {1}")]
     Malformed(&'static str, serde_json::Error),
+    /// Serializing a typed record to its canonical envelope failed.
+    #[error("serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 /// The 32-byte content hash — the basis of both the `id` and the signed message.
@@ -119,6 +122,30 @@ pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> 
 fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
     [SIGN_DOMAIN, content_hash.as_slice()].concat()
 }
+
+/// A value whose `id` is the hash of its own content. Every enveloped record — [`envelope::Claim`] and
+/// the operations channel's `Op` — derives its id through the one canonicalization path here (JCS,
+/// excluding the top-level `id` and `signature`), so there is never a second hashing implementation.
+///
+/// It is **not** blanket-implemented over [`Serialize`]: the excluded fields live at a *specific* depth
+/// (the top level), so a type that *embeds* another record (an op embedding a [`envelope::Record`])
+/// overrides [`hash_envelope`](ContentAddressed::hash_envelope) to strip the nested record's
+/// `signature` before hashing — otherwise signing the inner record would shift the enclosing id. Each
+/// type implements the trait explicitly.
+pub trait ContentAddressed: serde::Serialize {
+    /// The JSON to hash, normalized so anything excluded from the hash below the top level is already
+    /// removed. Default = the plain serialization (correct for a flat envelope like [`envelope::Claim`]).
+    fn hash_envelope(&self) -> Result<Value, ClaimError> {
+        Ok(serde_json::to_value(self)?)
+    }
+
+    /// The content-hash id: `"sha256:" + hex(sha256(JCS(hash_envelope − id − signature)))`.
+    fn content_id(&self) -> Result<String, ClaimError> {
+        claim_id(&self.hash_envelope()?)
+    }
+}
+
+impl ContentAddressed for envelope::Claim {}
 
 #[cfg(test)]
 mod proptests {
@@ -333,6 +360,17 @@ mod tests {
         let mut c = claim(&did);
         c["createdBy"] = json!(did);
         assert_eq!(verify(&c, &[0u8; 64]).unwrap(), SigCheck::Bad);
+    }
+
+    #[test]
+    fn content_addressed_matches_the_claim_id_seam() {
+        use crate::ContentAddressed;
+        let (_, did) = signer(1);
+        let c: crate::envelope::Claim = serde_json::from_value(claim(&did)).unwrap();
+        assert_eq!(
+            c.content_id().unwrap(),
+            crate::claim_id(&c.to_value()).unwrap()
+        );
     }
 
     #[test]

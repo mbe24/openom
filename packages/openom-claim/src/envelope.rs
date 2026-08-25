@@ -182,10 +182,22 @@ impl Claim {
 /// Operations (delete, edit-supersession) are **not** records; they live in the operations channel as
 /// their own type, so an operation can never be passed where a `Record` is expected (the projection,
 /// the exporter). This is the coarse data-vs-operations boundary made a compile-time fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
 pub enum Record {
     Anchor(Anchor),
     Claim(Claim),
+}
+
+impl<'de> Deserialize<'de> for Record {
+    /// Deserialize routes through [`Record::try_from`], so the same parse-don't-validate ingest
+    /// boundary (dispatch on `type`; verify a claim's content-hash id) applies whether a record is read
+    /// from a JSON document or deserialized while embedded in an operation — there is no id-skipping
+    /// path. `Serialize` is a plain untagged serialization of the inner `Anchor`/`Claim`.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        Record::try_from(v).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Record {
@@ -210,6 +222,22 @@ impl Record {
         match self {
             Record::Anchor(a) => serde_json::to_value(a).expect("Anchor serializes"),
             Record::Claim(c) => c.to_value(),
+        }
+    }
+
+    /// The record's author (`createdBy`).
+    pub fn created_by(&self) -> &str {
+        match self {
+            Record::Anchor(a) => &a.created_by,
+            Record::Claim(c) => &c.created_by,
+        }
+    }
+
+    /// The record's creation timestamp (`createdAt`, epoch ms; provenance only, never a tiebreak).
+    pub fn created_at(&self) -> i64 {
+        match self {
+            Record::Anchor(a) => a.created_at,
+            Record::Claim(c) => c.created_at,
         }
     }
 }
@@ -353,6 +381,30 @@ mod tests {
             Record::try_from(json!({})),
             Err(crate::ClaimError::MissingType)
         ));
+    }
+
+    #[test]
+    fn record_serde_roundtrips_and_verifies_embedded_ids() {
+        let (_, did) = author();
+        let mut c = Claim::new(
+            "per_uuid",
+            "openom.org/core/name/v1",
+            json!({ "given": "Ada" }),
+            &did,
+            1,
+        );
+        c.compute_id().unwrap();
+        let rec = Record::Claim(c);
+
+        // Serialize → Deserialize round-trips; Deserialize goes through the verifying TryFrom.
+        let back: Record = serde_json::from_value(serde_json::to_value(&rec).unwrap()).unwrap();
+        assert_eq!(back, rec);
+
+        // A tampered id (content changed, id now stale) fails at deserialize — not only at top-level
+        // ingest, so an operation embedding a forged replacement record is rejected too.
+        let mut tampered = serde_json::to_value(&rec).unwrap();
+        tampered["value"] = json!({ "given": "Mallory" });
+        assert!(serde_json::from_value::<Record>(tampered).is_err());
     }
 
     #[test]
