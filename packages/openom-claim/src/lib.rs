@@ -76,7 +76,7 @@ pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
 }
 
 /// A **content reference** to an intrinsic value: `"sha256:" + hex(sha256(JCS(intrinsic)))`. This is
-/// how `equivalent_to` / `derived_from` / `preferred.claimId` point at *what a claim says* (§4.1)
+/// how `equivalent_to` / `derived_from` / `preferred.contentRef` point at *what a claim says* (§4.1)
 /// rather than at a minted id — a reference stable across authors and unaffected by unrelated fields.
 /// The caller supplies the intrinsic (for a name that is its parts+script+culture; otherwise the
 /// whole `value`).

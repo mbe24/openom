@@ -446,17 +446,19 @@ fn collect(deduped: &[&Record]) -> Collected {
                 }
             }
             P_PREFERRED => {
-                if let (Some(person), Some(for_pred), Some(claim_ref), Some(a)) = (
+                // The referent is a `contentRef` (a `sha256:` content-ref of the name it prefers), NOT
+                // a claim id — stable across authors/merges, which is the point of `preferred` (§4.1).
+                if let (Some(person), Some(for_pred), Some(content_ref), Some(a)) = (
                     Some(c.target_id.as_str()),
                     c.value.get("for").and_then(Value::as_str),
-                    c.value.get("claimId").and_then(Value::as_str),
+                    c.value.get("contentRef").and_then(Value::as_str),
                     Some(c.created_by.as_str()),
                 ) {
                     let info = preferred
                         .entry((
                             person.to_string(),
                             for_pred.to_string(),
-                            claim_ref.to_string(),
+                            content_ref.to_string(),
                         ))
                         .or_default();
                     info.authors.insert(a.to_string());

@@ -114,7 +114,7 @@ fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &s
         id,
         P_PREFERRED,
         person,
-        json!({ "for": for_pred, "claimId": claim_ref }),
+        json!({ "for": for_pred, "contentRef": claim_ref }),
         author,
     )
 }
