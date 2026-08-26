@@ -17,6 +17,13 @@ const COMPACT_AT = 200; // replayed-tail length past which hydrate folds the log
 
 const splitGiven = (s) => (String(s ?? '').trim() ? String(s).trim().split(/\s+/) : []);
 const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+/** A fresh opaque anchor id (person / event) — the engine does not mint anchor ids, the caller does. */
+const uuid = () => 'x_' + hex(crypto.getRandomValues(new Uint8Array(16)));
+// The author fallback must match the loader's, so a claim this replica authored reads back as "mine"
+// (createdBy === this author) and an edit supersedes it in place instead of piling up a competitor.
+const DEFAULT_AUTHOR = 'did:key:zLocalReplica';
+const NEW_PERSON = { given: '', surname: '', sex: 'U', custom: {} };
 
 // The core claim vocabulary the projection recognizes (packages/openom-projection). Kept here so the
 // read mapping and the (stage-2) write mapping name the same predicates/anchor types in one place.
@@ -80,19 +87,25 @@ export class ClaimFamilyTree {
   #store;
   #docId;
   #schema;
-  #createdBy;
+  #author;
   #engine = null;
   #ready;
   #listeners = new Set();
   #deltaListeners = new Set();
   #cursor = 0;
+  #eventOf = new Map(); // `${personId}|${type}` -> event anchor id (rebuilt each materialize)
 
   constructor(store, docId, schema = null, createdBy = null) {
     this.#store = store;
     this.#docId = docId;
     this.#schema = schema;
-    this.#createdBy = createdBy;
-    this.#ready = createClaimTree({ createdBy });
+    this.#author = createdBy ?? DEFAULT_AUTHOR;
+    this.#ready = createClaimTree({ createdBy: this.#author });
+  }
+
+  /** A millisecond timestamp stamped on each op (the claim/op `created_at`). */
+  #at() {
+    return Date.now();
   }
 
   async #ensure() {
@@ -237,11 +250,15 @@ export class ClaimFamilyTree {
       const proj = this.#engine.project();
       const eventsById = new Map(proj.events.map((e) => [e.id, e]));
       const eventsByPerson = new Map();
+      this.#eventOf = new Map();
       for (const e of proj.events) {
         for (const part of e.participants) {
           if (part.role !== ROLE_PRINCIPAL) continue;
           if (!eventsByPerson.has(part.person)) eventsByPerson.set(part.person, []);
           eventsByPerson.get(part.person).push(e);
+          // First event of a given (person, type) wins as the one an edit supersedes.
+          const key = part.person + '|' + (e.event_type ?? '');
+          if (!this.#eventOf.has(key)) this.#eventOf.set(key, e.id);
         }
       }
       this.people = new Map(proj.people.map((P) => [P.id, this.#buildPerson(P, eventsByPerson)]));
@@ -350,7 +367,7 @@ export class ClaimFamilyTree {
     if (snap) {
       const raw = toU8(snap.bytes);
       const { snapshot, cursor } = this.#unwrapSnapshot(raw);
-      this.#engine = await createClaimTree({ createdBy: this.#createdBy, snapshot });
+      this.#engine = await createClaimTree({ createdBy: this.#author, snapshot });
       this.#cursor = cursor;
     }
     const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
@@ -374,10 +391,129 @@ export class ClaimFamilyTree {
   }
 
   // ------------------------------------------------------------------ writing (stage 2, OPE-201)
+  // Each edit mints one or more ops (assert / supersede / remove) via the engine — which returns the
+  // op-batch bytes AND applies the op to the local set — then persists the bytes and re-materializes.
+  // A single-value field is one claim under (target, predicate): set = supersede this replica's prior
+  // claim in place (or assert the first), clear = remove this replica's claim(s). Only *this replica's*
+  // claims are touched, so a peer's competing claim survives (the projection resolves the contest).
+
+  /** This replica's live claims under (target, predicate). */
+  #liveMine(target, predicate) {
+    return this.#engine.liveClaimsOf(target, predicate).filter((c) => c.createdBy === this.#author);
+  }
+
+  /** Set (value = object) or clear (value = null) a single-value claim with replace semantics. */
+  #setSingle(target, predicate, value, out) {
+    const mine = this.#liveMine(target, predicate);
+    if (value == null) {
+      for (const c of mine) out.push(this.#engine.remove(c.id, this.#at()));
+      return;
+    }
+    const prior = mine[0];
+    out.push(prior
+      ? this.#engine.supersedeClaim(prior.id, target, predicate, value, this.#at())
+      : this.#engine.assertClaim(target, predicate, value, this.#at()));
+  }
+
+  /** Merge a name patch (given/surname) into this replica's name claim, preserving its other parts. */
+  #setName(pid, patch, out) {
+    const prior = this.#liveMine(pid, V.P_NAME)[0];
+    const cur = prior
+      ? structuredClone(prior.value)
+      : { parts: { given: '', family: '', prefix: '', suffix: '' }, convention: 'western', type: 'birth' };
+    cur.parts = cur.parts ?? {};
+    if ('given' in patch) cur.parts.given = String(patch.given ?? '');
+    if ('surname' in patch) cur.parts.family = String(patch.surname ?? '');
+    out.push(prior
+      ? this.#engine.supersedeClaim(prior.id, pid, V.P_NAME, cur, this.#at())
+      : this.#engine.assertClaim(pid, V.P_NAME, cur, this.#at()));
+  }
+
+  /** The person's event anchor of `type` (birth/death), minting it (+ its type + principal participant)
+   *  if absent. `cache` reuses an event minted earlier in the same commit (before re-materialize). */
+  #eventFor(pid, type, out, cache) {
+    const key = pid + '|' + type;
+    if (cache.has(key)) return cache.get(key);
+    const existing = this.#eventOf.get(key);
+    if (existing) { cache.set(key, existing); return existing; }
+    const eid = uuid();
+    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
+    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type }, this.#at()));
+    out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: pid, role: ROLE_PRINCIPAL }, this.#at()));
+    cache.set(key, eid);
+    return eid;
+  }
+
+  /** Set (or clear) an event's place: a Place is a claim-target id (deterministic per name, so equal
+   *  place strings dedup) carrying a place_name claim; the event points at it via event_place. */
+  #setEventPlace(eid, place, out) {
+    if (!place) { this.#setSingle(eid, V.P_EVENT_PLACE, null, out); return; }
+    const placeId = 'place:' + place;
+    if (!this.#liveMine(placeId, V.P_PLACE_NAME).some((c) => c.value?.name === place)) {
+      out.push(this.#engine.assertClaim(placeId, V.P_PLACE_NAME, { name: place }, this.#at()));
+    }
+    this.#setSingle(eid, V.P_EVENT_PLACE, { placeId }, out);
+  }
+
+  /** Set (or clear on empty) one custom field value. A boolean is written as an explicit 'true'/'false'
+   *  (never cleared), matching the legacy semantics; text/number/option clear on empty. */
+  #setCustom(pid, k, v, out) {
+    const mine = this.#liveMine(pid, V.P_CUSTOM_VALUE).filter((c) => c.value?.fieldId === k);
+    const isBool = typeof v === 'boolean' || this.#schema?.field?.(k)?.type === 'boolean';
+    const clearing = !isBool && (v === '' || v == null);
+    if (clearing) { for (const c of mine) out.push(this.#engine.remove(c.id, this.#at())); return; }
+    const value = { fieldId: k, value: isBool ? String(v === true || v === 'true') : String(v) };
+    const prior = mine[0];
+    out.push(prior
+      ? this.#engine.supersedeClaim(prior.id, pid, V.P_CUSTOM_VALUE, value, this.#at())
+      : this.#engine.assertClaim(pid, V.P_CUSTOM_VALUE, value, this.#at()));
+  }
+
+  /** Translate an editor patch on person `pid` into engine ops. */
+  #applyPatch(pid, patch, out, cache) {
+    if ('given' in patch || 'surname' in patch) this.#setName(pid, patch, out);
+    for (const [key, type] of [['birth', 'birth'], ['death', 'death']]) {
+      const placeKey = key + 'Place';
+      if (!(key in patch) && !(placeKey in patch)) continue;
+      const eid = this.#eventFor(pid, type, out, cache);
+      if (key in patch) this.#setSingle(eid, V.P_DATE, patch[key] ? { edtf: String(patch[key]) } : null, out);
+      if (placeKey in patch) this.#setEventPlace(eid, patch[placeKey], out);
+    }
+    if ('sex' in patch) this.#setSingle(pid, V.P_SEX, patch.sex ? { sex: patch.sex } : null, out);
+    if ('note' in patch) this.#setSingle(pid, V.P_BIOGRAPHY, patch.note ? { text: patch.note } : null, out);
+    if ('custom' in patch) for (const [k, v] of Object.entries(patch.custom)) this.#setCustom(pid, k, v, out);
+  }
+
+  /** Apply the collected op batches: persist, emit to the sync controller, re-materialize, notify. */
+  async #commit(out, { silent = false } = {}) {
+    const batches = out.filter(Boolean);
+    if (batches.length) await profile('store.append', () => this.#store.append(this.#docId, batches));
+    this.#cursor += batches.length;
+    if (this.#deltaListeners.size) for (const d of batches) for (const fn of this.#deltaListeners) fn(d);
+    this.#materialize();
+    if (!silent) this.#bump();
+  }
+
   get canUndo() { return false; }
   get canRedo() { return false; }
-  async createPerson() { return notImplemented('createPerson'); }
-  async updatePerson() { return notImplemented('updatePerson'); }
+
+  async createPerson(fields = {}) {
+    const e = await this.#ensure();
+    const pid = uuid();
+    const out = [], cache = new Map();
+    out.push(e.assertAnchor(pid, V.TYPE_PERSON, this.#at()));
+    this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, out, cache);
+    await this.#commit(out);
+    return this.person(pid);
+  }
+
+  async updatePerson(id, patch, opts = {}) {
+    await this.#ensure();
+    const out = [], cache = new Map();
+    this.#applyPatch(id, patch, out, cache);
+    await this.#commit(out, opts);
+    return this.person(id);
+  }
   async deletePerson() { return notImplemented('deletePerson'); }
   async addMarriage() { return notImplemented('addMarriage'); }
   async addChild() { return notImplemented('addChild'); }

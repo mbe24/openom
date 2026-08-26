@@ -106,6 +106,46 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
     expect(cft.person('per_byron').events).toEqual([]);
   });
 
+  it('createPerson mints a person the projection surfaces (name/sex/birth)', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace', sex: 'F', birth: '1815' });
+    expect(p.given).toBe('Ada');
+    expect(p.surname).toBe('Lovelace');
+    expect(p.sex).toBe('F');
+    expect(p.birth).toBe('1815');
+    expect(cft.allPeople().length).toBe(1);
+  });
+
+  it('updatePerson supersedes in place — no duplicate claims, other parts preserved', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w2', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace' });
+    await cft.updatePerson(p.id, { surname: 'Byron' });
+    const u = cft.person(p.id);
+    expect(u.surname).toBe('Byron');
+    expect(u.given).toBe('Ada');
+    expect(u.names.length).toBe(1);
+  });
+
+  it('supersedes an event date + sets its place', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w3', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'A', birth: '1800' });
+    await cft.updatePerson(p.id, { birth: '1815', birthPlace: 'London' });
+    const u = cft.person(p.id);
+    expect(u.birth).toBe('1815');
+    expect(u.birthPlace).toBe('London');
+    expect(u.events.filter((e) => e.type === 'birth').length).toBe(1);
+  });
+
+  it('persists ops to the store and replays them on hydrate', async () => {
+    const store = fakeStore();
+    const cft = new ClaimFamilyTree(store, 'tree-p', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
+    const restored = new ClaimFamilyTree(store, 'tree-p', null, 'did:key:zLocal');
+    await restored.hydrate();
+    expect(restored.person(p.id)?.given).toBe('Ada');
+    expect(restored.person(p.id)?.sex).toBe('F');
+  });
+
   it('round-trips through a snapshot with an identical read model', async () => {
     // mergeFamilyFields stamps a wall-clock createdAt/updatedAt on each family (part of the v2 view
     // shape, as in the legacy engine); drop those volatile fields before comparing the two projections.
