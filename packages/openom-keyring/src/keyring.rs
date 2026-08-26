@@ -16,7 +16,7 @@
 //! client watermark concern (the caller persists the highest `revision`/last hash + the
 //! trusted signer set, and rejects a regression or an unendorsed set change, §4/§10).
 
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::Signer;
 use openom_protocol::aad::keyring_signing_bytes;
 use openom_protocol::v1::{Keyring, KeyringSignature};
 use sha2::{Digest, Sha256};
@@ -66,7 +66,10 @@ pub fn verify_keyring_any(
         };
         let signature = Signature::from_bytes(&sig_bytes);
         for key in trusted {
-            if key.verify(&msg, &signature).is_ok() {
+            // verify_strict, not verify: additionally reject small-order / torsion public keys, matching
+            // the claim signing path (openom-claim). A keyring signer's key is attacker-influenced in a
+            // shared tree, so the load-bearing keyring signature gets the same defense in depth.
+            if key.verify_strict(&msg, &signature).is_ok() {
                 return Ok(*key);
             }
         }

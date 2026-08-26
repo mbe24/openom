@@ -10,7 +10,7 @@
 //! epoch-consistency closes the "seal under the current key, stamp an old revision" forge; the
 //! retained-old-key variant is the documented residual left for the full-A log-frontier slice.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
 use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
@@ -89,7 +89,10 @@ pub fn verify_entry(
     let signature = Signature::from_bytes(&sig_bytes);
     let plaintext_hash = Sha256::digest(plaintext);
     let msg = author_signing_bytes(version, header, plaintext_hash.as_slice());
-    key.verify(&msg, &signature)
+    // verify_strict, not verify: reject small-order / torsion author keys — defense in depth matching
+    // the claim signing path, since a member's author key comes from the (shared, attacker-influenced)
+    // keyring.
+    key.verify_strict(&msg, &signature)
         .map_err(|_| EntryError::BadSignature)?;
 
     // Role (numeric, lower = stronger): the author's role must be at least as strong as required.
