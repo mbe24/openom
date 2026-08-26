@@ -65,11 +65,11 @@ export function createInvokeVault(invoke) {
     },
     async provision(treeKey, treeId, passphrase, memberId) {
       const r = await invoke('vault_provision', { treeKey, treeId: arr(treeId), passphrase, memberId });
-      return { session: session(r.sealerId), recoveryCode: r.recoveryCode };
+      return { session: session(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
     async unlock(treeKey, treeId, passphrase, memberId) {
       const r = await invoke('vault_unlock', { treeKey, treeId: arr(treeId), passphrase, memberId });
-      return { session: session(r.sealerId) };
+      return { session: session(r.sealerId), didKey: r.didKey };
     },
     async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {
       const r = await invoke('vault_recover', {
@@ -79,7 +79,7 @@ export function createInvokeVault(invoke) {
         newPassphrase,
         memberId,
       });
-      return { session: session(r.sealerId), recoveryCode: r.recoveryCode };
+      return { session: session(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
     async changePassphrase(treeKey, treeId, oldPassphrase, newPassphrase, memberId) {
       const r = await invoke('vault_change_passphrase', {

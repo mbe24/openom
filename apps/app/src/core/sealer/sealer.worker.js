@@ -55,7 +55,7 @@ const api = {
     await ensureInit();
     const r = wasmProvision(passphrase, treeId, memberId, replicaId);
     const sealerId = register(r.takeSealer()); // move the sealer out INSIDE the worker
-    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, sealerId };
+    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, didKey: r.didKey, sealerId };
     r.free();
     return out;
   },
@@ -70,7 +70,7 @@ const api = {
       throw new Error('keyring revision rollback');
     }
     const sealerId = register(r.takeSealer());
-    const out = { revision: r.revision, sealerId };
+    const out = { revision: r.revision, didKey: r.didKey, sealerId };
     r.free();
     return out;
   },
@@ -79,7 +79,7 @@ const api = {
     await ensureInit();
     const r = wasmRecover(keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, minRevision);
     const sealerId = register(r.takeSealer());
-    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, sealerId };
+    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, didKey: r.didKey, sealerId };
     r.free();
     return out;
   },

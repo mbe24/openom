@@ -71,7 +71,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       const r = await worker.provision(passphrase, treeId, memberId, makeReplicaId());
       await keyringStore.save(treeKey, r.revision, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
+      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
     async unlock(treeKey, treeId, passphrase, memberId) {
@@ -79,7 +79,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       const min = watermarks.current(treeKey).keyringRevision;
       const r = await worker.unlock(keyring, passphrase, treeId, memberId, makeReplicaId(), min);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: sessionFor(r.sealerId) };
+      return { session: sessionFor(r.sealerId), didKey: r.didKey };
     },
 
     async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {
@@ -88,7 +88,7 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
       const r = await worker.recover(keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), min);
       await keyringStore.save(treeKey, r.revision, r.keyring);
       watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode };
+      return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
     async changePassphrase(treeKey, treeId, oldPassphrase, newPassphrase, memberId) {

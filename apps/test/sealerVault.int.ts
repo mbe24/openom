@@ -27,13 +27,13 @@ function fakeWorker() {
     async provision(passphrase: string) {
       const dek = ++dekSeq;
       const kr = { passphrase, revision: 1, dek, recoveryCode: 'CODE-1' };
-      return { keyring: encode(kr), recoveryCode: 'CODE-1', revision: 1, sealerId: reg(dek) };
+      return { keyring: encode(kr), recoveryCode: 'CODE-1', revision: 1, didKey: 'did:key:z6Mk' + passphrase, sealerId: reg(dek) };
     },
     async unlock(keyring: Uint8Array, passphrase: string, _t: any, _m: any, _r: any, minRev: number) {
       const kr = decode(keyring);
       if (kr.passphrase !== passphrase) throw new Error('wrong passphrase');
       if (kr.revision < minRev) throw new Error('keyring revision rollback');
-      return { revision: kr.revision, sealerId: reg(kr.dek) };
+      return { revision: kr.revision, didKey: 'did:key:z6Mk' + kr.passphrase, sealerId: reg(kr.dek) };
     },
     async recover(keyring: Uint8Array, code: string, newPass: string, _t: any, _m: any, _r: any, minRev: number) {
       const kr = decode(keyring);
@@ -41,7 +41,7 @@ function fakeWorker() {
       if (kr.revision < minRev) throw new Error('revision rollback');
       const revision = Math.max(minRev, kr.revision) + 1;
       const nk = { passphrase: newPass, revision, dek: kr.dek, recoveryCode: 'CODE-' + revision };
-      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, revision, sealerId: reg(kr.dek) };
+      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, revision, didKey: 'did:key:z6Mk' + newPass, sealerId: reg(kr.dek) };
     },
     async changePassphrase(keyring: Uint8Array, oldPass: string, newPass: string, _t: any, _m: any, minRev: number) {
       const kr = decode(keyring);
@@ -113,6 +113,19 @@ describe('createVault (worker orchestration)', () => {
     const { session: sb } = await b.vault.unlock(TREE, TID, 'pass', MEMBER);
     // b's worker registered the same dek from the keyring, so it opens a's sealed bytes.
     await expect(sb.open(sealed, TREE, { kind: 'snapshot' })).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it('surfaces a stable did:key author id across devices', async () => {
+    const store = memoryKeyringStore();
+    const a = newVault(store);
+    const { didKey: da } = await a.vault.provision(TREE, TID, 'pass', MEMBER);
+
+    const b = newVault(store); // a second "device", same keyring store
+    const { didKey: db } = await b.vault.unlock(TREE, TID, 'pass', MEMBER);
+
+    expect(da).toMatch(/^did:key:/);
+    // Same passphrase → same identity → same did:key across devices, unlike the per-context replicaId.
+    expect(db).toBe(da);
   });
 
   it('rejects a wrong passphrase', async () => {

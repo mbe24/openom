@@ -171,6 +171,9 @@ pub struct Provisioned {
     pub sealer_id: String,
     pub revision: u32,
     pub recovery_code: String,
+    /// The owner's stable author id — a `did:key` over their public identity key (the claim
+    /// `createdBy`). Distinct from the per-context sync replica id.
+    pub did_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +181,9 @@ pub struct Provisioned {
 pub struct Unlocked {
     pub sealer_id: String,
     pub revision: u32,
+    /// The member's stable author id — a `did:key` over their public identity key (the claim
+    /// `createdBy`), stable across tabs/reloads.
+    pub did_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +192,9 @@ pub struct Recovered {
     pub sealer_id: String,
     pub revision: u32,
     pub recovery_code: String,
+    /// The NEW owner's stable author id — recovery mints a fresh identity, so this differs from the
+    /// pre-recovery did:key.
+    pub did_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,6 +320,7 @@ impl<S: VaultStore> VaultHost<S> {
             sealer_id: id,
             revision,
             recovery_code: p.recovery_code,
+            did_key: p.did_key,
         })
     }
 
@@ -356,6 +366,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Unlocked {
             sealer_id: id,
             revision: u.revision,
+            did_key: u.did_key,
         })
     }
 
@@ -394,6 +405,7 @@ impl<S: VaultStore> VaultHost<S> {
             sealer_id: id,
             revision,
             recovery_code: r.recovery_code,
+            did_key: r.did_key,
         })
     }
 
@@ -520,6 +532,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Unlocked {
             sealer_id: id,
             revision: u.revision,
+            did_key: u.did_key,
         })
     }
 
@@ -766,6 +779,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Unlocked {
             sealer_id: id,
             revision: 0,
+            did_key: String::new(), // dev sealer: no vault identity
         })
     }
 
