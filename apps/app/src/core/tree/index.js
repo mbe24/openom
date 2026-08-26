@@ -34,6 +34,7 @@ function wrap(inner) {
     project: () => JSON.parse(inner.project()),
     liveClaimsOf: (target, predicate) => JSON.parse(inner.liveClaimsOf(target, predicate)),
     liveClaimsOfAny: (target) => JSON.parse(inner.liveClaimsOfAny(target)),
+    liveRecords: () => JSON.parse(inner.liveRecords()),
     resolveId: (anchor) => inner.resolveId(anchor) ?? null,
   };
 }

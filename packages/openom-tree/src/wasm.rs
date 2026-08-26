@@ -119,6 +119,12 @@ impl WasmTree {
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {
         self.inner.resolve_id(anchor)
     }
+
+    /// Every live record (anchors + claims) as a JSON array — the app's undo/redo diff reads this.
+    #[wasm_bindgen(js_name = liveRecords)]
+    pub fn live_records(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.inner.live_records().map_err(to_js)?).map_err(to_js)
+    }
 }
 
 fn to_js<E: std::fmt::Display>(e: E) -> JsError {

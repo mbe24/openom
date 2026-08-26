@@ -242,6 +242,16 @@ impl Tree {
             .collect()
     }
 
+    /// Every live record (anchors + claims), each as its JSON — the granular set the app's undo/redo
+    /// diff reads to compute what a commit added vs. removed (keyed by content-hash id).
+    pub fn live_records(&self) -> Result<Vec<Value>, TreeError> {
+        Ok(self
+            .materialized()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {

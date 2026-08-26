@@ -188,6 +188,62 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
     expect(cft.mediaOf(a.id).length).toBe(1);
   });
 
+  it('undo/redo a field edit (supersede)', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u1', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace' });
+    await cft.updatePerson(p.id, { surname: 'Byron' });
+    expect(cft.person(p.id).surname).toBe('Byron');
+    expect(cft.canUndo).toBe(true);
+    await cft.undo();
+    expect(cft.person(p.id).surname).toBe('Lovelace');
+    expect(cft.person(p.id).given).toBe('Ada');
+    expect(cft.canRedo).toBe(true);
+    await cft.redo();
+    expect(cft.person(p.id).surname).toBe('Byron');
+  });
+
+  it('undo createPerson removes the person; redo restores it', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u2', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
+    expect(cft.allPeople().length).toBe(1);
+    await cft.undo();
+    expect(cft.allPeople().length).toBe(0);
+    await cft.redo();
+    expect(cft.allPeople().length).toBe(1);
+    expect(cft.person(p.id)?.given).toBe('Ada');
+    expect(cft.person(p.id)?.sex).toBe('F');
+  });
+
+  it('undo a delete restores the person', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u3', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
+    await cft.deletePerson(p.id);
+    expect(cft.person(p.id)).toBeUndefined();
+    await cft.undo();
+    expect(cft.person(p.id)?.given).toBe('Ada');
+    expect(cft.person(p.id)?.sex).toBe('F');
+  });
+
+  it('settle overlay: silent edits show but do not mint (undo hits the create, not a keystroke)', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-s1', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'A' });
+    await cft.updatePerson(p.id, { given: 'Ad' }, { silent: true });
+    await cft.updatePerson(p.id, { given: 'Ada' }, { silent: true });
+    expect(cft.person(p.id).given).toBe('Ada'); // overlay shows the in-progress value
+    await cft.undo();
+    expect(cft.person(p.id)).toBeUndefined(); // the burst minted nothing, so undo removes the person
+  });
+
+  it('settle mints once and is a single undo step', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-s2', null, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'A' });
+    await cft.updatePerson(p.id, { given: 'Ad' }, { silent: true });
+    await cft.updatePerson(p.id, { given: 'Ada' }); // settle
+    expect(cft.person(p.id).given).toBe('Ada');
+    await cft.undo();
+    expect(cft.person(p.id).given).toBe('A');
+  });
+
   it('round-trips through a snapshot with an identical read model', async () => {
     // mergeFamilyFields stamps a wall-clock createdAt/updatedAt on each family (part of the v2 view
     // shape, as in the legacy engine); drop those volatile fields before comparing the two projections.
