@@ -146,6 +146,48 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
     expect(restored.person(p.id)?.sex).toBe('F');
   });
 
+  it('addMarriage + addChild build a family (union) with spouses, children, marriage facts', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b1', null, 'did:key:zLocal');
+    const a = await cft.createPerson({ given: 'Ada', sex: 'F' });
+    const fam = await cft.addMarriage(a.id, { given: 'George', sex: 'M' }, { marriage: '1835' });
+    expect(fam.spouses.length).toBe(2);
+    expect(fam.spouses).toContain(a.id);
+    expect(fam.facts.marriage).toBe('1835');
+    const kid = await cft.addChild(fam.id, { given: 'Byron' });
+    expect(cft.family(fam.id).children).toContain(kid.id);
+    expect(cft.childrenOf(a.id).map((p) => p.id)).toContain(kid.id);
+  });
+
+  it('addParents attaches a father and mother to a child', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b2', null, 'did:key:zLocal');
+    const child = await cft.createPerson({ given: 'Kid' });
+    const fam = await cft.addParents(child.id, { given: 'Dad' }, { given: 'Mom' });
+    expect(fam.spouses.length).toBe(2);
+    const { father, mother } = cft.parentsOf(child.id);
+    expect(father.given).toBe('Dad');
+    expect(mother.given).toBe('Mom');
+  });
+
+  it('deletePerson removes the person and drops their dangling relationships', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b3', null, 'did:key:zLocal');
+    const a = await cft.createPerson({ given: 'Ada' });
+    const fam = await cft.addMarriage(a.id, { given: 'George' });
+    const other = fam.spouses.find((s) => s !== a.id);
+    await cft.deletePerson(a.id);
+    expect(cft.person(a.id)).toBeUndefined();
+    expect(cft.allPeople().map((p) => p.id)).toEqual([other]);
+    expect(cft.familiesOf(other).length).toBe(0);
+  });
+
+  it('attachMedia sets a portrait the view surfaces', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b4', null, 'did:key:zLocal');
+    const a = await cft.createPerson({ given: 'Ada' });
+    const { linkId } = await cft.attachMedia(a.id, { hash: 'sha256:img1', mime: 'image/png', role: 'portrait' });
+    expect(linkId).toBeTruthy();
+    expect(cft.portraitOf(a.id)?.media?.hash).toBe('sha256:img1');
+    expect(cft.mediaOf(a.id).length).toBe(1);
+  });
+
   it('round-trips through a snapshot with an identical read model', async () => {
     // mergeFamilyFields stamps a wall-clock createdAt/updatedAt on each family (part of the v2 view
     // shape, as in the legacy engine); drop those volatile fields before comparing the two projections.

@@ -94,6 +94,7 @@ export class ClaimFamilyTree {
   #deltaListeners = new Set();
   #cursor = 0;
   #eventOf = new Map(); // `${personId}|${type}` -> event anchor id (rebuilt each materialize)
+  #marriageEventOf = new Map(); // union id -> its marriage event anchor id (rebuilt each materialize)
 
   constructor(store, docId, schema = null, createdBy = null) {
     this.#store = store;
@@ -263,6 +264,7 @@ export class ClaimFamilyTree {
       }
       this.people = new Map(proj.people.map((P) => [P.id, this.#buildPerson(P, eventsByPerson)]));
       this.families = new Map((proj.unions ?? []).map((U) => [U.id, this.#buildFamily(U, eventsById)]));
+      this.#marriageEventOf = new Map((proj.unions ?? []).map((U) => [U.id, U.marriage_event]));
       this.#buildMedia(proj.people);
     });
   }
@@ -514,19 +516,214 @@ export class ClaimFamilyTree {
     await this.#commit(out, opts);
     return this.person(id);
   }
-  async deletePerson() { return notImplemented('deletePerson'); }
-  async addMarriage() { return notImplemented('addMarriage'); }
-  async addChild() { return notImplemented('addChild'); }
-  async addParents() { return notImplemented('addParents'); }
-  async removeMarriage() { return notImplemented('removeMarriage'); }
-  async unlinkChild() { return notImplemented('unlinkChild'); }
-  async unlinkSpouse() { return notImplemented('unlinkSpouse'); }
-  async linkSpouse() { return notImplemented('linkSpouse'); }
-  async setFamilyFacts() { return notImplemented('setFamilyFacts'); }
-  async attachMedia() { return notImplemented('attachMedia'); }
-  async setPortrait() { return notImplemented('setPortrait'); }
-  async detachMedia() { return notImplemented('detachMedia'); }
-  async setCrop() { return notImplemented('setCrop'); }
+  /** Mint a fresh person anchor and apply an initial patch, into `out`. Returns the new id. */
+  #newPerson(fields, out, cache) {
+    const pid = uuid();
+    out.push(this.#engine.assertAnchor(pid, V.TYPE_PERSON, this.#at()));
+    this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, out, cache);
+    return pid;
+  }
+
+  /** The union's marriage event anchor (participants = its parents, type "marriage"), minting if absent. */
+  #marriageEventFor(fam, out) {
+    const existing = this.#marriageEventOf.get(fam.id);
+    if (existing) return existing;
+    const eid = uuid();
+    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
+    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
+    for (const parent of fam.spouses) {
+      out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: parent, role: 'spouse' }, this.#at()));
+    }
+    return eid;
+  }
+
+  async deletePerson(id) {
+    await this.#ensure();
+    const out = [];
+    // Remove this replica's claims about the person and the anchor itself; relationships others hold
+    // that reference this person drop out of the projection on their own (dangling endpoint).
+    for (const c of this.#engine.liveClaimsOfAny(id)) {
+      if (c.createdBy === this.#author) out.push(this.#engine.remove(c.id, this.#at()));
+    }
+    out.push(this.#engine.remove(id, this.#at()));
+    // The person's own events (birth/death) go with them.
+    for (const [key, eid] of this.#eventOf) {
+      if (!key.startsWith(id + '|')) continue;
+      for (const c of this.#engine.liveClaimsOfAny(eid)) {
+        if (c.createdBy === this.#author) out.push(this.#engine.remove(c.id, this.#at()));
+      }
+      out.push(this.#engine.remove(eid, this.#at()));
+    }
+    await this.#commit(out);
+  }
+
+  async addMarriage(aId, bFieldsOrId, facts = {}) {
+    await this.#ensure();
+    const out = [], cache = new Map();
+    const bId = typeof bFieldsOrId === 'string' ? bFieldsOrId : this.#newPerson(bFieldsOrId, out, cache);
+    const pair = [aId, bId].sort();
+    out.push(this.#engine.assertClaim(aId, V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+    if ('marriage' in facts || 'place' in facts) {
+      const eid = uuid();
+      out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
+      out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
+      for (const p of pair) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: p, role: 'spouse' }, this.#at()));
+      if ('marriage' in facts) this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null, out);
+      if ('place' in facts) this.#setEventPlace(eid, facts.place, out);
+    }
+    await this.#commit(out);
+    return this.family('union:' + pair.map((p) => this.resolveId(p) ?? p).sort().join('+'));
+  }
+
+  async addChild(familyId, fieldsOrId) {
+    await this.#ensure();
+    const fam = this.family(familyId);
+    const parents = fam ? fam.spouses : [];
+    const out = [], cache = new Map();
+    const pid = typeof fieldsOrId === 'string' ? fieldsOrId : this.#newPerson(fieldsOrId, out, cache);
+    for (const parent of parents) {
+      out.push(this.#engine.assertClaim(pid, V.P_PARENT, { parentPersonId: parent, kind: 'biological' }, this.#at()));
+    }
+    await this.#commit(out);
+    return this.person(pid);
+  }
+
+  async addParents(childId, father = null, mother = null) {
+    await this.#ensure();
+    const out = [], cache = new Map();
+    const parentIds = [];
+    for (const [role, val] of [['M', father], ['F', mother]]) {
+      if (!val) continue;
+      const pid = typeof val === 'string' ? val : this.#newPerson({ sex: role, ...val }, out, cache);
+      parentIds.push(pid);
+      out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: pid, kind: 'biological' }, this.#at()));
+    }
+    await this.#commit(out);
+    const canonical = parentIds.map((p) => this.resolveId(p) ?? p).sort();
+    return this.family('union:' + canonical.join('+'));
+  }
+
+  async removeMarriage(familyId) {
+    const fam = this.family(familyId);
+    if (!fam) return;
+    await this.#ensure();
+    const out = [];
+    const parents = fam.spouses;
+    for (const p of parents) {
+      for (const c of this.#liveMine(p, V.P_PARTNERSHIP)) {
+        const pair = c.value?.pair ?? [];
+        if (parents.length === pair.length && parents.every((x) => pair.includes(x))) out.push(this.#engine.remove(c.id, this.#at()));
+      }
+    }
+    for (const childId of fam.children) {
+      for (const c of this.#liveMine(childId, V.P_PARENT)) {
+        if (parents.includes(c.value?.parentPersonId)) out.push(this.#engine.remove(c.id, this.#at()));
+      }
+    }
+    const eid = this.#marriageEventOf.get(familyId);
+    if (eid) {
+      for (const c of this.#engine.liveClaimsOfAny(eid)) if (c.createdBy === this.#author) out.push(this.#engine.remove(c.id, this.#at()));
+      out.push(this.#engine.remove(eid, this.#at()));
+    }
+    await this.#commit(out);
+  }
+
+  async unlinkChild(familyId, personId) {
+    const fam = this.family(familyId);
+    await this.#ensure();
+    const out = [];
+    const parents = fam ? fam.spouses : [];
+    for (const c of this.#liveMine(personId, V.P_PARENT)) {
+      if (parents.includes(c.value?.parentPersonId)) out.push(this.#engine.remove(c.id, this.#at()));
+    }
+    await this.#commit(out);
+  }
+
+  async unlinkSpouse(familyId, personId) {
+    const fam = this.family(familyId);
+    await this.#ensure();
+    const out = [];
+    for (const c of this.#liveMine(personId, V.P_PARTNERSHIP)) {
+      if ((c.value?.pair ?? []).includes(personId)) out.push(this.#engine.remove(c.id, this.#at()));
+    }
+    for (const childId of fam?.children ?? []) {
+      for (const c of this.#liveMine(childId, V.P_PARENT)) {
+        if (c.value?.parentPersonId === personId) out.push(this.#engine.remove(c.id, this.#at()));
+      }
+    }
+    await this.#commit(out);
+  }
+
+  async linkSpouse(familyId, personId) {
+    const fam = this.family(familyId);
+    await this.#ensure();
+    const out = [];
+    const other = (fam?.spouses ?? [])[0];
+    if (other) {
+      const pair = [other, personId].sort();
+      out.push(this.#engine.assertClaim(other, V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+      // Keep the union addressable by the same children: link the new spouse to its children too.
+      for (const childId of fam.children) {
+        out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: personId, kind: 'biological' }, this.#at()));
+      }
+    }
+    await this.#commit(out);
+  }
+
+  async setFamilyFacts(familyId, facts) {
+    const fam = this.family(familyId);
+    if (!fam) return;
+    await this.#ensure();
+    const out = [];
+    const eid = this.#marriageEventFor(fam, out);
+    if ('marriage' in facts) this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null, out);
+    if ('place' in facts) this.#setEventPlace(eid, facts.place, out);
+    await this.#commit(out);
+  }
+
+  async attachMedia(subjectId, { hash, mime, w, h: hh, caption = '', role = 'portrait', crop = null }) {
+    await this.#ensure();
+    const out = [];
+    const value = { mediaHash: hash, mime, role };
+    if (w) value.width = Number(w);
+    if (hh) value.height = Number(hh);
+    if (caption) value.caption = caption;
+    if (crop) value.crop = crop;
+    out.push(this.#engine.assertClaim(subjectId, V.P_MEDIA_LINK, value, this.#at()));
+    await this.#commit(out);
+    const link = this.#liveMine(subjectId, V.P_MEDIA_LINK).find((c) => c.value?.mediaHash === hash);
+    return { mediaId: hash, linkId: link?.id };
+  }
+
+  async setPortrait(subjectId, linkId) {
+    await this.#ensure();
+    const out = [];
+    for (const c of this.#liveMine(subjectId, V.P_MEDIA_LINK)) {
+      const role = c.value?.role;
+      if (c.id === linkId && role !== 'portrait') {
+        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'portrait' }, this.#at()));
+      } else if (c.id !== linkId && role === 'portrait') {
+        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'document' }, this.#at()));
+      }
+    }
+    await this.#commit(out);
+  }
+
+  async detachMedia(linkId) {
+    const link = this.mediaLinks.get(linkId);
+    if (!link) return;
+    await this.#ensure();
+    const mine = this.#liveMine(link.subjectId, V.P_MEDIA_LINK).some((c) => c.id === linkId);
+    if (mine) await this.#commit([this.#engine.remove(linkId, this.#at())]);
+  }
+
+  async setCrop(linkId, crop) {
+    const link = this.mediaLinks.get(linkId);
+    if (!link) return;
+    await this.#ensure();
+    const mine = this.#liveMine(link.subjectId, V.P_MEDIA_LINK).find((c) => c.id === linkId);
+    if (mine) await this.#commit([this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop }, this.#at())]);
+  }
   async undo() { return notImplemented('undo'); }
   async redo() { return notImplemented('redo'); }
   async seed() { return notImplemented('seed'); }
