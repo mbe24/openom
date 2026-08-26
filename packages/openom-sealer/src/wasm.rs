@@ -15,8 +15,8 @@ use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring::{
-    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, KeyringAnchor,
-    VerifyingKey,
+    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, GoverningKeyring,
+    KeyringAnchor, VerifyingKey,
 };
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
@@ -708,6 +708,11 @@ pub fn accept_remote_keyring(
 /// bytes at `header.keyring_revision` (which the caller fetched + chain-verified). Throws if the entry
 /// wasn't validly authored by a member with the capability its kind requires at the governing revision —
 /// the caller then refuses to merge it. The trust decision is the Rust `verify_entry`'s; this only marshals.
+///
+/// OPE-186 residual: the governing keyring's chain verification is currently the JS caller's
+/// responsibility (it can't yet hold the chain-walk's verified Rust token across the wasm boundary), so
+/// this wraps the decoded bytes with the deliberately-named `from_unverified_wasm_boundary`. When JS-side
+/// verified handles land, this marshals a handle instead and the boundary stops trusting the caller.
 #[wasm_bindgen(js_name = verifyEntry)]
 pub fn verify_entry_wasm(
     version: u32,
@@ -723,7 +728,8 @@ pub fn verify_entry_wasm(
         .ok_or_else(|| JsError::new("envelope has no header"))?;
     let kr = Keyring::decode(governing)
         .map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
-    verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
+    let governing = GoverningKeyring::from_unverified_wasm_boundary(kr);
+    verify_entry(version, header, plaintext, &governing).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// An entry's attribution coordinates, read from its (AAD-bound) header — enough for the client to decide

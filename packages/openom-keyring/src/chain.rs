@@ -69,6 +69,88 @@ impl KeyringAnchor {
     }
 }
 
+/// A **full keyring whose legitimacy has been established by the chain-walk** — the token
+/// [`verify_entry`](crate::verify_entry) requires. Unlike [`KeyringAnchor`] (which keeps only the trust
+/// state to persist), this carries the whole verified keyring, so entry verification can read its
+/// members / epochs / signers. The inner keyring is private and there is no public unchecked
+/// constructor: the only way to mint one is a verifying constructor below (each delegates to the
+/// matching chain check), so a raw, wire-decoded `Keyring` cannot be passed as the governing keyring by
+/// mistake — the "the caller chain-verified this" guarantee is a type, not a doc comment.
+///
+/// (The single deliberate exception, [`from_unverified_wasm_boundary`](Self::from_unverified_wasm_boundary),
+/// is the documented OPE-186 residual for the wasm boundary, where JS cannot yet hold a verified token.)
+#[derive(Clone, Debug)]
+pub struct GoverningKeyring {
+    keyring: Keyring,
+}
+
+impl GoverningKeyring {
+    /// The verified keyring — read access for entry verification within the crate.
+    pub(crate) fn keyring(&self) -> &Keyring {
+        &self.keyring
+    }
+
+    /// The revision this keyring governs.
+    pub fn revision(&self) -> u32 {
+        self.keyring.revision
+    }
+
+    /// The trust anchor to persist (so the next transition can chain onto it).
+    pub fn anchor(&self) -> KeyringAnchor {
+        KeyringAnchor::from_keyring(&self.keyring)
+    }
+
+    /// Mint by validating `candidate` as the successor of `prior` — see [`verify_transition`]. A
+    /// multi-hop walk to a governing revision is this applied per hop (each against the prior anchor).
+    pub fn from_transition(prior: &KeyringAnchor, candidate: Keyring) -> Result<Self, ChainError> {
+        verify_transition(prior, &candidate)?;
+        Ok(Self { keyring: candidate })
+    }
+
+    /// Mint a first-sight genesis the founder trusts by its own key — see [`bootstrap_from_genesis`].
+    pub fn from_genesis(
+        genesis: Keyring,
+        own_founder_key: &VerifyingKey,
+    ) -> Result<Self, ChainError> {
+        bootstrap_from_genesis(&genesis, own_founder_key)?;
+        Ok(Self { keyring: genesis })
+    }
+
+    /// Mint a first-sight head pinned out-of-band — see [`bootstrap_from_oob`].
+    pub fn from_oob(
+        head: Keyring,
+        pinned_tree_id: &[u8],
+        pinned_revision: u32,
+        pinned_hash: &[u8; 32],
+    ) -> Result<Self, ChainError> {
+        bootstrap_from_oob(&head, pinned_tree_id, pinned_revision, pinned_hash)?;
+        Ok(Self { keyring: head })
+    }
+
+    /// Mint a recovery / succession reset validated on its own terms — see [`verify_reset`].
+    pub fn from_reset(keyring: Keyring) -> Result<Self, ChainError> {
+        verify_reset(&keyring)?;
+        Ok(Self { keyring })
+    }
+
+    /// **Unverified boundary shim — OPE-186 residual, do not use from native code.** Wraps a keyring the
+    /// *caller* promises it chain-verified, WITHOUT re-checking here. The sole sanctioned caller is the
+    /// wasm `verifyEntry` boundary (`openom-sealer`), where JS cannot yet hold the chain-walk's verified
+    /// token; OPE-186 replaces this with a JS-side verified handle. Named to stand out in a security
+    /// audit; native callers must use a verifying constructor instead.
+    #[doc(hidden)]
+    pub fn from_unverified_wasm_boundary(keyring: Keyring) -> Self {
+        Self { keyring }
+    }
+
+    /// Test-only wrap of a hand-built fixture keyring (the verifying constructors reject the minimal
+    /// non-genesis fixtures the entry tests use).
+    #[cfg(test)]
+    pub(crate) fn from_keyring_for_test(keyring: Keyring) -> Self {
+        Self { keyring }
+    }
+}
+
 /// Why a candidate keyring was refused as a successor. Distinct variants so the client can
 /// react differently (a fork/rollback is an attack; a gap is availability; an unendorsed
 /// change is tampering) and so each guard gets a one-to-one negative test.
@@ -941,5 +1023,38 @@ mod tests {
             3
         );
         assert_eq!(verify_walk(&a, &[c2]), Err(ChainError::NonSequential));
+    }
+
+    #[test]
+    fn governing_keyring_mints_only_from_a_verified_chain() {
+        let f = key();
+        let g = genesis(&f, &[], &[]);
+
+        // from_genesis mints for a founder-trusted genesis, and exposes the revision + persistable anchor.
+        let gk = GoverningKeyring::from_genesis(g.clone(), &f.verifying_key()).unwrap();
+        assert_eq!(gk.revision(), 1);
+        assert_eq!(gk.anchor(), KeyringAnchor::from_keyring(&g));
+        // …and rejects a genesis the caller's own founder key didn't sign.
+        assert!(GoverningKeyring::from_genesis(g.clone(), &key().verifying_key()).is_err());
+
+        // from_transition mints for a valid successor…
+        let a = anchor(&g);
+        let add_bob = |k: &mut Keyring| {
+            k.members.push(dummy_member("bob"));
+            k.epochs[0].wraps.push(wrap("bob", HPKE));
+        };
+        let ok = next(&g, add_bob, &[&f]);
+        assert_eq!(
+            GoverningKeyring::from_transition(&a, ok)
+                .unwrap()
+                .revision(),
+            2
+        );
+        // …and rejects a successor signed by a stranger (no verified token, so verify_entry can't run).
+        let bad = next(&g, add_bob, &[&key()]);
+        assert_eq!(
+            GoverningKeyring::from_transition(&a, bad).unwrap_err(),
+            ChainError::UnendorsedOrdinaryChange
+        );
     }
 }

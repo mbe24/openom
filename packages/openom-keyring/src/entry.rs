@@ -16,6 +16,8 @@ use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
 use openom_sign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+use crate::GoverningKeyring;
+
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
 /// (retry vs alarm) and each gets a negative test.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -37,10 +39,12 @@ pub enum EntryError {
 }
 
 /// Verify a landed entry's author attribution against `governing` — the keyring at
-/// `header.keyring_revision`, which the caller fetches and chain-verifies (the foundation's keyring
-/// sync). `plaintext` is the AEAD-opened payload (verification runs after open — the AEAD tag has already
-/// authenticated the header, including `author_signature`, against this exact ciphertext). `Ok(())` iff a
-/// member with sufficient role for `header.kind` validly signed the entry at the governing revision.
+/// `header.keyring_revision`. Its type ([`GoverningKeyring`]) is the guarantee that it was chain-verified:
+/// it can only be minted by the chain-walk, never by decoding raw bytes, so a caller cannot pass an
+/// unverified keyring here by mistake. `plaintext` is the AEAD-opened payload (verification runs after
+/// open — the AEAD tag has already authenticated the header, including `author_signature`, against this
+/// exact ciphertext). `Ok(())` iff a member with sufficient role for `header.kind` validly signed the
+/// entry at the governing revision.
 ///
 /// The caller decides separately whether an *unattributed* entry (empty `author_signature`) is acceptable
 /// — that's a per-epoch property of the verified keyring, not something this function can judge from the
@@ -49,8 +53,9 @@ pub fn verify_entry(
     version: u32,
     header: &Header,
     plaintext: &[u8],
-    governing: &Keyring,
+    governing: &GoverningKeyring,
 ) -> Result<(), EntryError> {
+    let governing = governing.keyring();
     if header.author_signature.is_empty() {
         return Err(EntryError::Unattributed);
     }
@@ -141,9 +146,12 @@ mod tests {
         }
     }
 
-    /// A governing keyring whose newest epoch uses KID and whose members are as given.
-    fn governing(members: Vec<Member>) -> Keyring {
-        Keyring {
+    /// A governing keyring whose newest epoch uses KID and whose members are as given. Wrapped as a
+    /// GoverningKeyring via the test-only constructor (these minimal fixtures aren't full genesis
+    /// keyrings, so the real chain-verifying constructors would reject them — that's a chain-walk
+    /// concern, exercised in chain.rs, not here).
+    fn governing(members: Vec<Member>) -> GoverningKeyring {
+        GoverningKeyring::from_keyring_for_test(Keyring {
             tree_id: vec![1; 16],
             revision: 3,
             layout_version: 1,
@@ -157,7 +165,7 @@ mod tests {
                 epoch: 0,
                 wraps: vec![],
             }],
-        }
+        })
     }
 
     /// A header authored by `author_id` under KID, stamped at the governing revision, signed by `key`.
