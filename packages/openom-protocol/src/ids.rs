@@ -17,6 +17,11 @@ pub struct TreeId(Vec<u8>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReplicaId(Vec<u8>);
 
+/// An epoch key id — the 16-byte identifier of a DEK generation (`Header.key_id`, `KeyEpoch.key_id`).
+/// Distinct from a [`TreeId`]/[`ReplicaId`] though all are opaque byte-strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyId(Vec<u8>);
+
 /// An application member id (`Member.member_id` / `AuthorizedSigner.member_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MemberId(String);
@@ -38,6 +43,21 @@ impl TreeId {
 
 impl ReplicaId {
     /// Wrap raw replica-id bytes.
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+    /// The raw bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+    /// Consume into the owned bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl KeyId {
+    /// Wrap raw key-id bytes.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
