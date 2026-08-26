@@ -99,3 +99,17 @@ fn resolve_id_returns_the_canonical_person() {
     assert_eq!(a.resolve_id("pA").as_deref(), Some("pA"));
     assert_eq!(a.resolve_id("nope"), None);
 }
+
+#[test]
+fn live_claims_of_returns_matching_records() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim("pA", "openom.org/core/sex/v1", json!({ "sex": "F" }), 1)
+        .unwrap();
+
+    let names = a.live_claims_of("pA", NAME);
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0]["value"], name_value("Ada"));
+    assert!(a.live_claims_of("pA", "openom.org/core/date/v1").is_empty());
+}

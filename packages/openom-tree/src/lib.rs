@@ -193,6 +193,22 @@ impl Tree {
         Ok(serde_json::to_string(&self.project())?)
     }
 
+    /// The live claims about `target` under `predicate` (after the fold), each as its JSON record — a
+    /// granular reader for the editor (e.g. which name claims exist on a person, to supersede one).
+    pub fn live_claims_of(&self, target: &str, predicate: &str) -> Vec<Value> {
+        self.materialized()
+            .iter()
+            .filter_map(|r| match r {
+                Record::Claim(c)
+                    if c.target_id.as_str() == target && c.predicate.as_str() == predicate =>
+                {
+                    Some(c.to_value())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {

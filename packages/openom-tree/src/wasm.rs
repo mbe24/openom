@@ -101,6 +101,12 @@ impl WasmTree {
         self.inner.project_json().map_err(to_js)
     }
 
+    /// The live claims about `target` under `predicate`, as a JSON array of records.
+    #[wasm_bindgen(js_name = liveClaimsOf)]
+    pub fn live_claims_of(&self, target: &str, predicate: &str) -> Result<String, JsError> {
+        serde_json::to_string(&self.inner.live_claims_of(target, predicate)).map_err(to_js)
+    }
+
     /// The canonical person id an anchor resolves to (or `undefined`).
     #[wasm_bindgen(js_name = resolveId)]
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {
