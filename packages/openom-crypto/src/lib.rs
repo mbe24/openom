@@ -66,7 +66,7 @@ pub use recovery::{
 };
 pub use root::{derive_root, RootKeys};
 pub use seal::{open, seal};
-pub use secret::{Dek, HpkePrivate, Kek, RrkSecret};
+pub use secret::{Dek, HpkePrivate, Kek, Passphrase, RecoveryCode, RrkSecret};
 pub use wrap::{unwrap_dek, unwrap_rrk_secret, wrap_dek, wrap_rrk_secret, WrapContext, WrappedDek};
 
 /// A crypto operation failed. `Open` deliberately does not distinguish a bad key from

@@ -85,3 +85,74 @@ secret_key!(
     /// itself (it re-derives from the passphrase). Distinct from [`RrkSecret`].
     HpkePrivate
 );
+
+// The two variable-length secret inputs — hand-written since the fixed-32-byte macro above doesn't fit.
+// Same guard shape: no `Deref`, no `Serialize`, a `Debug` that hides the value, one `.expose()`.
+
+/// A user **passphrase** — the variable-length secret fed to the KDF. Zeroized on drop; its bytes are
+/// reachable only via [`expose`](Passphrase::expose). Distinct from a keyring blob or any other `&[u8]`
+/// at a vault call site, so the two can't be swapped.
+#[derive(Clone)]
+pub struct Passphrase(Zeroizing<Vec<u8>>);
+
+impl Passphrase {
+    /// Wrap raw passphrase bytes (zeroized on drop).
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(Zeroizing::new(bytes.into()))
+    }
+    /// Borrow the raw bytes — the single explicit exposure point (grep `.expose()`).
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for Passphrase {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Passphrase(..)")
+    }
+}
+
+/// A **recovery code** — the bearer secret shown to the user once (its entropy is a second door to the
+/// DEK). No `Debug` bytes and no `Serialize`, so it can't leak via `{:?}` or a stray serialize, and it
+/// is a distinct type from a `did:key` / member id it sits next to at a boundary. Read via
+/// [`expose`](RecoveryCode::expose); hand to a display boundary via [`into_string`](RecoveryCode::into_string).
+#[derive(Clone)]
+pub struct RecoveryCode(String);
+
+impl RecoveryCode {
+    /// Wrap a recovery-code string.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    /// Borrow the code string.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+    /// Consume into the owned string — for the one boundary that must display it (a wasm getter / IPC).
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl core::fmt::Debug for RecoveryCode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RecoveryCode(..)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_inputs_hide_their_value_in_debug() {
+        let p = Passphrase::new(b"correct horse".to_vec());
+        assert_eq!(p.expose(), b"correct horse");
+        assert_eq!(format!("{p:?}"), "Passphrase(..)");
+
+        let r = RecoveryCode::new("ABCD-1234");
+        assert_eq!(r.expose(), "ABCD-1234");
+        assert_eq!(format!("{r:?}"), "RecoveryCode(..)");
+        assert_eq!(r.into_string(), "ABCD-1234");
+    }
+}
