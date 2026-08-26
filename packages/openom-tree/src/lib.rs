@@ -188,6 +188,11 @@ impl Tree {
         project(&self.materialized(), &Policy::default())
     }
 
+    /// The read model as a JSON string — for the wasm boundary and any JSON consumer.
+    pub fn project_json(&self) -> Result<String, TreeError> {
+        Ok(serde_json::to_string(&self.project())?)
+    }
+
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {
@@ -203,6 +208,9 @@ impl Tree {
         materialize(&items)
     }
 }
+
+#[cfg(feature = "wasm")]
+mod wasm;
 
 #[cfg(test)]
 mod tests;

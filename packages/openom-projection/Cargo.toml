@@ -17,6 +17,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 # For the attestation-weighted identity confidence: an attestation targets a fact's fingerprint
 # (sha256(JCS(targetId,predicate,value))), so the projection recomputes it to match votes to edges.

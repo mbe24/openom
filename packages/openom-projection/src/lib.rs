@@ -60,7 +60,7 @@ impl Default for Policy {
 }
 
 /// One rendering of a person's name, retargeted to the canonical person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct NameView {
     pub claim_id: String,
     pub parts: Value,
@@ -71,7 +71,7 @@ pub struct NameView {
 }
 
 /// A projected person: one real individual, possibly assembled from several merged anchors.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Person {
     /// Canonical id — the minimum anchor id in the cluster.
     pub id: String,
@@ -106,7 +106,7 @@ pub struct Person {
 /// and varies by kind (an image has `width`/`height`, a document has a `coverage` locator, a future
 /// kind whatever it needs), as an open value map rather than a fixed set of typed fields.
 /// `role == "portrait"` is the portrait selection (a disputable `preferred` portrait slot is later).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MediaLink {
     /// The media_link claim's id — the stable UI handle for this link.
     pub claim_id: String,
@@ -119,7 +119,7 @@ pub struct MediaLink {
 
 /// A source referenced by a citation, resolved from its `core/source/v1` claim. Every field is
 /// `None` when the `source_id` does not resolve to a known source claim (dangling reference).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SourceRef {
     pub source_id: String,
     pub title: Option<String>,
@@ -131,7 +131,7 @@ pub struct SourceRef {
 
 /// One citation surfaced on a person's sources panel: the fact it backs, where in the source, and the
 /// resolved source itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Citation {
     /// The id of the claim this citation is attached to.
     pub claim_id: String,
@@ -148,7 +148,7 @@ pub struct Citation {
 /// A resolved custom field on a person. `label`/`field_type` come from the field's `custom/field/v1`
 /// definition (most-corroborated); a value whose `field_id` has no definition degrades to
 /// `label = field_id`, `field_type = "text"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CustomField {
     pub field_id: String,
     pub label: String,
@@ -157,13 +157,13 @@ pub struct CustomField {
 }
 
 /// A `same_as` edge that was not applied because a `different_from` cut it — surfaced, never merged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Conflict {
     pub cut_pair: [String; 2],
 }
 
 /// A directional parent→child edge (stored once, read from either end) between canonical persons.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct ParentChild {
     pub parent: String,
     pub child: String,
@@ -172,7 +172,7 @@ pub struct ParentChild {
 }
 
 /// A symmetric partnership between two canonical persons.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct Partnership {
     pub pair: [String; 2],
     /// A `core/roles/v1` term: `spouse` | `partner`.
@@ -180,7 +180,7 @@ pub struct Partnership {
 }
 
 /// One participant in an event: the canonical person and the role they played.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct Participant {
     pub person: String,
     /// A `core/roles/v1` term: `child` | `parent` | `spouse` | `witness` | `officiant` | …
@@ -189,7 +189,7 @@ pub struct Participant {
 
 /// A projected event (birth, death, marriage, …) — a hyper-edge assembled from the claims targeting
 /// one Event anchor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EventView {
     pub id: String,
     /// The event type, if asserted (most-corroborated value).
@@ -209,7 +209,7 @@ pub struct EventView {
 }
 
 /// A resolved place for an event (§10.3): its time-appropriate name plus its point and parent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PlaceView {
     /// The place anchor id (referenced verbatim; place `same_as` dedup is a documented seam).
     pub id: String,
@@ -228,7 +228,7 @@ pub struct PlaceView {
 /// half siblings fall out of the parent-set grouping (a shared parent-set = full siblings; a partially
 /// shared one = a different union = half siblings). The id is stable across replicas (a function of
 /// the canonical parent-set), so it survives merges and re-projection.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub struct Union {
     /// Stable id: `"union:" + the sorted canonical parent ids joined by '+'`.
     pub id: String,
@@ -241,7 +241,7 @@ pub struct Union {
 }
 
 /// The materialized read model: people, relationships, family unions, events, and identity conflicts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Projection {
     pub people: Vec<Person>,
     pub parent_child: Vec<ParentChild>,

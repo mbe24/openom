@@ -3553,6 +3553,7 @@ dependencies = [
  "openom-edtf",
  "openom-jcs",
  "proptest",
+ "serde",
  "serde_json",
 ]
 
@@ -3620,6 +3621,7 @@ dependencies = [
  "openom-projection",
  "serde_json",
  "thiserror 2.0.20",
+ "wasm-bindgen",
 ]
 
 [[package]]

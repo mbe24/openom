@@ -12,6 +12,8 @@ packages/openom-sealer/tools/
 apps/app/src/vendor/sealer/
 packages/openom-treelog/target-wasm/
 apps/app/src/vendor/treelog/
+packages/openom-tree/target-wasm/
+apps/app/src/vendor/tree/
 
 # Per-machine runner config (scripts/cargo.mjs); .env.example is tracked.
 .env
