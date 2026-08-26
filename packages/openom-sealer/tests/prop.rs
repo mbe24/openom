@@ -2,6 +2,7 @@
 //! the scope/kind guards (a blob for another tree or of another kind is refused before the
 //! AEAD) and the fuzz surface: opening arbitrary bytes never panics — it returns an error.
 
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format};
 use openom_sealer::vault::{recover, unlock};
@@ -88,7 +89,7 @@ proptest! {
     fn unlock_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
         let r = unlock(
             &bytes,
-            b"pass",
+            &Passphrase::new(b"pass".to_vec()),
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
             &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),
@@ -100,8 +101,8 @@ proptest! {
     fn recover_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
         let r = recover(
             &bytes,
-            "some-code",
-            b"pass",
+            &RecoveryCode::new("some-code"),
+            &Passphrase::new(b"pass".to_vec()),
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
             &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),

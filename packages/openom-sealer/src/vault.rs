@@ -17,7 +17,7 @@ use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
     generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code,
     recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
-    HpkePrivate, Kek, RootKeys, RrkSecret,
+    HpkePrivate, Kek, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_did::DidKey;
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
@@ -61,7 +61,7 @@ const MAX_PARALLELISM: u32 = 8;
 /// and the ready sealer set (built from the fresh DEK — one Argon2id, no second unlock).
 pub struct Provisioned {
     pub keyring: Vec<u8>,
-    pub recovery_code: String,
+    pub recovery_code: RecoveryCode,
     pub sealer: SealerSet,
     /// The owner's stable author id — a `did:key` over their PUBLIC identity key. Public; stamped as
     /// `createdBy` on claims. Distinct from the per-context sync replica id.
@@ -82,7 +82,7 @@ pub struct Unlocked {
 /// store/show), the sealer set, and the new `revision`.
 pub struct Recovered {
     pub keyring: Vec<u8>,
-    pub recovery_code: String,
+    pub recovery_code: RecoveryCode,
     pub sealer: SealerSet,
     pub revision: u32,
     /// The NEW owner's stable author id — a `did:key` over the new public identity key (recovery
@@ -94,7 +94,7 @@ pub struct Recovered {
 /// The DEK is unchanged, so the running sealer keeps working — no re-seal of the tree.
 pub struct Rekeyed {
     pub keyring: Vec<u8>,
-    pub recovery_code: String,
+    pub recovery_code: RecoveryCode,
     pub revision: u32,
 }
 
@@ -104,11 +104,12 @@ pub struct Rekeyed {
 /// passphrase-derived identity (revision 1). The owner reaches epochs via the RRK, so the
 /// keyring holds no per-epoch owner passphrase/recovery wrap.
 pub fn provision(
-    passphrase: &[u8],
+    passphrase: &Passphrase,
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<Provisioned, SealerError> {
+    let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
@@ -180,11 +181,12 @@ pub fn provision(
 /// own derived identity (§4a V1).
 pub fn unlock(
     keyring_bytes: &[u8],
-    passphrase: &[u8],
+    passphrase: &Passphrase,
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<Unlocked, SealerError> {
+    let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
@@ -235,13 +237,14 @@ pub fn unlock(
 /// the documented owner-succession boundary. `min_revision` is the caller's watermark floor.
 pub fn recover(
     keyring_bytes: &[u8],
-    recovery_code: &str,
-    new_passphrase: &[u8],
+    recovery_code: &RecoveryCode,
+    new_passphrase: &Passphrase,
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
     min_revision: u32,
 ) -> Result<Recovered, SealerError> {
+    let new_passphrase = new_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
@@ -339,12 +342,14 @@ pub fn recover(
 /// names is what future revisions use. The member's client re-pins on seeing the change.
 pub fn change_passphrase(
     keyring_bytes: &[u8],
-    old_passphrase: &[u8],
-    new_passphrase: &[u8],
+    old_passphrase: &Passphrase,
+    new_passphrase: &Passphrase,
     tree_id: &TreeId,
     member_id: &MemberId,
     min_revision: u32,
 ) -> Result<Rekeyed, SealerError> {
+    let old_passphrase = old_passphrase.expose();
+    let new_passphrase = new_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let Opened {
@@ -391,7 +396,8 @@ pub struct MemberProvision {
 /// Provision a member identity from a passphrase: derive the account's signing + HPKE
 /// keypairs and return the public keys (to share OOB) plus the KDF params (to persist).
 /// The secrets are never returned — they re-derive from the passphrase on unlock.
-pub fn provision_member(passphrase: &[u8]) -> Result<MemberProvision, SealerError> {
+pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, SealerError> {
+    let passphrase = passphrase.expose();
     let kdf = default_kdf_params(generate_salt()?.to_vec());
     let root = derive_root(passphrase, &kdf)?;
     Ok(MemberProvision {
@@ -415,7 +421,7 @@ pub struct MemberAdded {
 #[allow(clippy::too_many_arguments)]
 pub fn add_member(
     keyring_bytes: &[u8],
-    owner_passphrase: &[u8],
+    owner_passphrase: &Passphrase,
     tree_id: &TreeId,
     owner_member_id: &MemberId,
     min_revision: u32,
@@ -424,6 +430,7 @@ pub fn add_member(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<MemberAdded, SealerError> {
+    let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
     let new_member_id = new_member_id.as_str();
@@ -471,7 +478,7 @@ pub fn add_member(
 #[allow(clippy::too_many_arguments)]
 pub fn add_member_as_co_owner(
     keyring_bytes: &[u8],
-    co_owner_passphrase: &[u8],
+    co_owner_passphrase: &Passphrase,
     co_owner_kdf: &KdfParams,
     tree_id: &TreeId,
     co_owner_member_id: &MemberId,
@@ -482,6 +489,7 @@ pub fn add_member_as_co_owner(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<MemberAdded, SealerError> {
+    let co_owner_passphrase = co_owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let co_owner_member_id = co_owner_member_id.as_str();
     let new_member_id = new_member_id.as_str();
@@ -529,7 +537,7 @@ pub fn add_member_as_co_owner(
 #[allow(clippy::too_many_arguments)]
 pub fn unlock_as_member(
     keyring_bytes: &[u8],
-    member_passphrase: &[u8],
+    member_passphrase: &Passphrase,
     member_kdf: &KdfParams,
     tree_id: &TreeId,
     member_id: &MemberId,
@@ -537,6 +545,7 @@ pub fn unlock_as_member(
     replica_id: &ReplicaId,
     min_revision: u32,
 ) -> Result<Unlocked, SealerError> {
+    let member_passphrase = member_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
@@ -589,13 +598,14 @@ pub struct MemberRemoved {
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member(
     keyring_bytes: &[u8],
-    owner_passphrase: &[u8],
+    owner_passphrase: &Passphrase,
     tree_id: &TreeId,
     owner_member_id: &MemberId,
     min_revision: u32,
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<MemberRemoved, SealerError> {
+    let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
     let remove_member_id = remove_member_id.as_str();
@@ -651,7 +661,7 @@ pub fn remove_member(
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member_as_co_owner(
     keyring_bytes: &[u8],
-    co_owner_passphrase: &[u8],
+    co_owner_passphrase: &Passphrase,
     co_owner_kdf: &KdfParams,
     tree_id: &TreeId,
     co_owner_member_id: &MemberId,
@@ -660,6 +670,7 @@ pub fn remove_member_as_co_owner(
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
 ) -> Result<MemberRemoved, SealerError> {
+    let co_owner_passphrase = co_owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let co_owner_member_id = co_owner_member_id.as_str();
     let remove_member_id = remove_member_id.as_str();
@@ -728,12 +739,13 @@ pub struct CoOwnerChanged {
 /// were added — becomes their signer key, so no new key exchange is needed.
 pub fn add_co_owner(
     keyring_bytes: &[u8],
-    founder_passphrase: &[u8],
+    founder_passphrase: &Passphrase,
     tree_id: &TreeId,
     founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
 ) -> Result<CoOwnerChanged, SealerError> {
+    let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
     let target_member_id = target_member_id.as_str();
@@ -806,13 +818,14 @@ pub fn add_co_owner(
 #[allow(clippy::too_many_arguments)]
 pub fn remove_co_owner(
     keyring_bytes: &[u8],
-    founder_passphrase: &[u8],
+    founder_passphrase: &Passphrase,
     tree_id: &TreeId,
     founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
     new_role: MemberRole,
 ) -> Result<CoOwnerChanged, SealerError> {
+    let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
     let target_member_id = target_member_id.as_str();
@@ -1044,7 +1057,7 @@ fn open_as_co_owner(
 struct NewOwnerSecrets {
     root: RootKeys,
     pass_kdf: KdfParams,
-    recovery_code: String,
+    recovery_code: RecoveryCode,
     recovery_kek: Kek,
     recovery_kdf: KdfParams,
 }
@@ -1424,7 +1437,7 @@ mod tests {
         unlock, unlock_as_member,
     };
     use crate::{EntryKind, SealContext, SealerError, SealerSet};
-    use openom_crypto::{derive_root, generate_recovery_code};
+    use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
     use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
     use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole};
@@ -1459,7 +1472,7 @@ mod tests {
     #[test]
     fn provision_then_unlock_on_another_device_opens_the_same_data() {
         let p = provision(
-            b"correct horse",
+            &Passphrase::new(b"correct horse"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"replica-A"),
@@ -1470,7 +1483,7 @@ mod tests {
         // Device B: unlock from the keyring bytes alone, a fresh replica.
         let u = unlock(
             &p.keyring,
-            b"correct horse",
+            &Passphrase::new(b"correct horse"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"replica-B"),
@@ -1486,7 +1499,7 @@ mod tests {
     #[test]
     fn did_key_is_the_founder_key_and_stable_across_unlock() {
         let p = provision(
-            b"correct horse",
+            &Passphrase::new(b"correct horse"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"replica-A"),
@@ -1501,7 +1514,7 @@ mod tests {
         // unlike the per-context replica id.
         let u = unlock(
             &p.keyring,
-            b"correct horse",
+            &Passphrase::new(b"correct horse"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"replica-B"),
@@ -1513,7 +1526,7 @@ mod tests {
     #[test]
     fn recovery_mints_a_fresh_did_key() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1522,7 +1535,7 @@ mod tests {
         let r = recover(
             &p.keyring,
             &p.recovery_code,
-            b"new",
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r2"),
@@ -1542,7 +1555,7 @@ mod tests {
     #[test]
     fn wrong_passphrase_is_rejected() {
         let p = provision(
-            b"right",
+            &Passphrase::new(b"right"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1550,7 +1563,7 @@ mod tests {
         .unwrap();
         assert!(unlock(
             &p.keyring,
-            b"wrong",
+            &Passphrase::new(b"wrong"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1561,7 +1574,7 @@ mod tests {
     #[test]
     fn a_keyring_for_another_tree_is_refused() {
         let p = provision(
-            b"pass",
+            &Passphrase::new(b"pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1570,7 +1583,7 @@ mod tests {
         assert!(matches!(
             unlock(
                 &p.keyring,
-                b"pass",
+                &Passphrase::new(b"pass"),
                 &TreeId::new(b"other-tree-16byt"),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
@@ -1582,7 +1595,7 @@ mod tests {
     #[test]
     fn a_tampered_keyring_fails_verification() {
         let p = provision(
-            b"pass",
+            &Passphrase::new(b"pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1593,7 +1606,7 @@ mod tests {
         let bytes = k.encode_to_vec();
         assert!(unlock(
             &bytes,
-            b"pass",
+            &Passphrase::new(b"pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1604,7 +1617,7 @@ mod tests {
     #[test]
     fn recover_then_unlock_with_the_new_passphrase() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1615,7 +1628,7 @@ mod tests {
         let r = recover(
             &p.keyring,
             &p.recovery_code,
-            b"new",
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r2"),
@@ -1630,7 +1643,7 @@ mod tests {
         );
         assert!(unlock(
             &r.keyring,
-            b"new",
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1638,7 +1651,7 @@ mod tests {
         .is_ok());
         assert!(unlock(
             &r.keyring,
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1649,7 +1662,7 @@ mod tests {
     #[test]
     fn recover_with_the_wrong_code_fails() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1659,7 +1672,7 @@ mod tests {
         assert!(recover(
             &p.keyring,
             &wrong,
-            b"new",
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1671,7 +1684,7 @@ mod tests {
     #[test]
     fn recover_refuses_a_revision_below_the_watermark() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1681,7 +1694,7 @@ mod tests {
             recover(
                 &p.keyring,
                 &p.recovery_code,
-                b"new",
+                &Passphrase::new(b"new"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
@@ -1694,7 +1707,7 @@ mod tests {
     #[test]
     fn recover_guards_against_revision_overflow() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1707,7 +1720,7 @@ mod tests {
             recover(
                 &bytes,
                 &p.recovery_code,
-                b"new",
+                &Passphrase::new(b"new"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
@@ -1720,7 +1733,7 @@ mod tests {
     #[test]
     fn change_passphrase_bumps_revision_and_rotates_the_recovery_code() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1728,19 +1741,19 @@ mod tests {
         .unwrap();
         let re = change_passphrase(
             &p.keyring,
-            b"old",
-            b"new",
+            &Passphrase::new(b"old"),
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
         )
         .unwrap();
         assert_eq!(re.revision, 2);
-        assert_ne!(re.recovery_code, p.recovery_code);
+        assert_ne!(re.recovery_code.expose(), p.recovery_code.expose());
 
         assert!(unlock(
             &re.keyring,
-            b"new",
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1748,7 +1761,7 @@ mod tests {
         .is_ok());
         assert!(unlock(
             &re.keyring,
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -1758,7 +1771,7 @@ mod tests {
         assert!(recover(
             &re.keyring,
             &p.recovery_code,
-            b"x",
+            &Passphrase::new(b"x"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1768,7 +1781,7 @@ mod tests {
         assert!(recover(
             &re.keyring,
             &re.recovery_code,
-            b"x",
+            &Passphrase::new(b"x"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1780,7 +1793,7 @@ mod tests {
     #[test]
     fn change_passphrase_with_the_wrong_old_passphrase_fails() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1788,8 +1801,8 @@ mod tests {
         .unwrap();
         assert!(change_passphrase(
             &p.keyring,
-            b"wrong",
-            b"new",
+            &Passphrase::new(b"wrong"),
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0
@@ -1800,7 +1813,7 @@ mod tests {
     #[test]
     fn absurd_kdf_params_are_rejected_before_running_argon2id() {
         let p = provision(
-            b"pass",
+            &Passphrase::new(b"pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1817,7 +1830,7 @@ mod tests {
         assert!(matches!(
             unlock(
                 &bytes,
-                b"pass",
+                &Passphrase::new(b"pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
@@ -1829,7 +1842,7 @@ mod tests {
     #[test]
     fn provisioned_keyring_is_a_genesis_single_owner() {
         let p = provision(
-            b"pass",
+            &Passphrase::new(b"pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1858,7 +1871,7 @@ mod tests {
     #[test]
     fn change_passphrase_chains_onto_the_prior_revision() {
         let p = provision(
-            b"old",
+            &Passphrase::new(b"old"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -1867,8 +1880,8 @@ mod tests {
         let prior = Keyring::decode(p.keyring.as_slice()).unwrap();
         let re = change_passphrase(
             &p.keyring,
-            b"old",
-            b"new",
+            &Passphrase::new(b"old"),
+            &Passphrase::new(b"new"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -1887,7 +1900,7 @@ mod tests {
     #[test]
     fn owner_adds_a_member_who_unlocks_and_reads_the_tree() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
@@ -1896,10 +1909,10 @@ mod tests {
         let sealed = seal_open(&owner.sealer, b"our shared ancestry"); // owner writes
 
         // The joining member provisions their own identity and shares the public keys OOB.
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -1926,7 +1939,7 @@ mod tests {
         let pinned = founder_key(&owner.keyring);
         let u = unlock_as_member(
             &added.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -1945,16 +1958,16 @@ mod tests {
     #[test]
     fn a_member_unlock_needs_the_pinned_signer_and_right_passphrase() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -1967,7 +1980,7 @@ mod tests {
 
         // Wrong pinned key (an attacker-substituted signer) → rejected before any unwrap.
         let wrong = provision(
-            b"someone else",
+            &Passphrase::new(b"someone else"),
             &TreeId::new(b"other-tree-16byt"),
             &MemberId::new("x"),
             &ReplicaId::new(b"r"),
@@ -1976,7 +1989,7 @@ mod tests {
         let wrong_key = founder_key(&wrong.keyring);
         assert!(unlock_as_member(
             &added.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -1990,7 +2003,7 @@ mod tests {
         let pinned = founder_key(&owner.keyring);
         assert!(unlock_as_member(
             &added.keyring,
-            b"WRONG",
+            &Passphrase::new(b"WRONG"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2004,16 +2017,16 @@ mod tests {
     #[test]
     fn adding_the_same_member_twice_is_rejected() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2026,7 +2039,7 @@ mod tests {
         assert!(matches!(
             add_member(
                 &added.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -2041,7 +2054,7 @@ mod tests {
         assert!(matches!(
             add_member(
                 &owner.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -2057,16 +2070,16 @@ mod tests {
     #[test]
     fn add_member_needs_the_owners_passphrase() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         assert!(add_member(
             &owner.keyring,
-            b"WRONG",
+            &Passphrase::new(b"WRONG"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2084,17 +2097,17 @@ mod tests {
     fn removing_a_member_re_keys_and_denies_them_new_content() {
         // Owner with two members, A (to be removed) and B (stays).
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let a = provision_member(b"a pass").unwrap();
-        let b = provision_member(b"b pass").unwrap();
+        let a = provision_member(&Passphrase::new(b"a pass")).unwrap();
+        let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2106,7 +2119,7 @@ mod tests {
         .unwrap();
         let k2 = add_member(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2123,7 +2136,7 @@ mod tests {
         // (the RRK escrows the new epoch), so it isn't returned here.
         let removed = remove_member(
             &k2.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2140,7 +2153,7 @@ mod tests {
         assert!(matches!(
             unlock_as_member(
                 &removed.keyring,
-                b"a pass",
+                &Passphrase::new(b"a pass"),
                 &a.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER2),
@@ -2154,7 +2167,7 @@ mod tests {
         // B (remaining) unlocks the new epoch and reads the owner's post-removal content.
         let bu = unlock_as_member(
             &removed.keyring,
-            b"b pass",
+            &Passphrase::new(b"b pass"),
             &b.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER3),
@@ -2173,7 +2186,7 @@ mod tests {
         // The owner still unlocks with their passphrase (identity/KEK preserved across re-key).
         assert!(unlock(
             &removed.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2184,16 +2197,16 @@ mod tests {
     #[test]
     fn change_passphrase_on_a_shared_tree_keeps_the_member_and_bridges_trust() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         let shared = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2206,7 +2219,7 @@ mod tests {
         let sealed = {
             let owner_sealer = unlock(
                 &shared.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
@@ -2220,8 +2233,8 @@ mod tests {
         // The owner changes their passphrase on the SHARED tree — no longer refused.
         let re = change_passphrase(
             &shared.keyring,
-            b"owner pass",
-            b"new pass",
+            &Passphrase::new(b"owner pass"),
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2231,7 +2244,7 @@ mod tests {
         // The owner opens with the new passphrase, not the old.
         assert!(unlock(
             &re.keyring,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2239,7 +2252,7 @@ mod tests {
         .is_ok());
         assert!(unlock(
             &re.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2250,7 +2263,7 @@ mod tests {
         // (the old founder co-signed the transition), and reads the owner's content.
         let via_old = unlock_as_member(
             &re.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2270,7 +2283,7 @@ mod tests {
         let new_founder = founder_key(&re.keyring);
         assert!(unlock_as_member(
             &re.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2284,16 +2297,16 @@ mod tests {
     #[test]
     fn recover_on_a_shared_tree_keeps_members_but_forces_reverify() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
         )
         .unwrap();
-        let m = provision_member(b"member pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"member pass")).unwrap();
         let shared = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2309,7 +2322,7 @@ mod tests {
         let rec = recover(
             &shared.keyring,
             &owner.recovery_code,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o2"),
@@ -2318,7 +2331,7 @@ mod tests {
         .unwrap();
         assert!(unlock(
             &rec.keyring,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2329,7 +2342,7 @@ mod tests {
         // verifies — they must re-verify out-of-band and re-pin the new founder key.
         assert!(unlock_as_member(
             &rec.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2341,7 +2354,7 @@ mod tests {
         let new_founder = founder_key(&rec.keyring);
         assert!(unlock_as_member(
             &rec.keyring,
-            b"member pass",
+            &Passphrase::new(b"member pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2357,16 +2370,16 @@ mod tests {
         // A removal makes a second epoch. The recovery code does NOT rotate on a removal
         // (the RRK escrows the new epoch), so the ORIGINAL code still recovers afterward.
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let m = provision_member(b"m pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2378,7 +2391,7 @@ mod tests {
         .unwrap();
         let removed = remove_member(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2390,7 +2403,7 @@ mod tests {
         let rec = recover(
             &removed.keyring,
             &owner.recovery_code,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o3"),
@@ -2399,7 +2412,7 @@ mod tests {
         .unwrap();
         assert!(unlock(
             &rec.keyring,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2409,8 +2422,8 @@ mod tests {
         // change_passphrase after a recover on a multi-epoch tree must not brick.
         let ch = change_passphrase(
             &rec.keyring,
-            b"new pass",
-            b"newer pass",
+            &Passphrase::new(b"new pass"),
+            &Passphrase::new(b"newer pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2418,7 +2431,7 @@ mod tests {
         .unwrap();
         assert!(unlock(
             &ch.keyring,
-            b"newer pass",
+            &Passphrase::new(b"newer pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r")
@@ -2429,7 +2442,7 @@ mod tests {
     #[test]
     fn owner_reads_across_epochs_after_a_rotation() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
@@ -2437,10 +2450,10 @@ mod tests {
         .unwrap();
         let old = seal_open(&owner.sealer, b"old epoch content"); // epoch 0
 
-        let m = provision_member(b"m pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2452,7 +2465,7 @@ mod tests {
         .unwrap();
         let removed = remove_member(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2465,7 +2478,7 @@ mod tests {
         // The owner unlocks a set spanning BOTH epochs and reads old and new content.
         let u = unlock(
             &removed.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
@@ -2486,17 +2499,17 @@ mod tests {
         // Content sealed before the member joins is readable by them (all-epoch wraps +
         // multi-epoch read), which is the family-archive behavior we chose.
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
         let pre = seal_open(&owner.sealer, b"pre-join photo");
-        let m = provision_member(b"m pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2509,7 +2522,7 @@ mod tests {
         let pinned = founder_key(&owner.keyring);
         let u = unlock_as_member(
             &added.keyring,
-            b"m pass",
+            &Passphrase::new(b"m pass"),
             &m.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2527,16 +2540,16 @@ mod tests {
     #[test]
     fn founder_promotes_and_demotes_a_co_owner() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co = provision_member(b"co pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2550,7 +2563,7 @@ mod tests {
         // Promote to co-owner: added to the signer set, member role bumped, founder-signed.
         let promoted = add_co_owner(
             &added.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2572,7 +2585,7 @@ mod tests {
         assert!(matches!(
             add_co_owner(
                 &promoted.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -2583,7 +2596,7 @@ mod tests {
         assert!(matches!(
             add_co_owner(
                 &promoted.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -2595,7 +2608,7 @@ mod tests {
         // Demote back to viewer: removed from signers, role changed.
         let demoted = remove_co_owner(
             &promoted.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2613,7 +2626,7 @@ mod tests {
         assert!(matches!(
             remove_co_owner(
                 &demoted.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -2627,17 +2640,17 @@ mod tests {
     #[test]
     fn a_co_owner_adds_a_member_who_reads_the_tree() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
         let sealed = seal_open(&owner.sealer, b"tree content");
-        let co = provision_member(b"co pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2649,7 +2662,7 @@ mod tests {
         .unwrap();
         let promoted = add_co_owner(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2660,10 +2673,10 @@ mod tests {
 
         // The CO-OWNER (signing with their own identity, reaching DEKs via their own wraps)
         // adds a new member.
-        let m3 = provision_member(b"m3 pass").unwrap();
+        let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
         let added = add_member_as_co_owner(
             &promoted.keyring,
-            b"co pass",
+            &Passphrase::new(b"co pass"),
             &co.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2681,7 +2694,7 @@ mod tests {
         let co_vk = vk(&co.author_public);
         let u = unlock_as_member(
             &added.keyring,
-            b"m3 pass",
+            &Passphrase::new(b"m3 pass"),
             &m3.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER3),
@@ -2699,17 +2712,17 @@ mod tests {
     #[test]
     fn a_co_owner_removes_a_member_forward_securely() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co = provision_member(b"co pass").unwrap();
-        let victim = provision_member(b"v pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
+        let victim = provision_member(&Passphrase::new(b"v pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2721,7 +2734,7 @@ mod tests {
         .unwrap();
         let k2 = add_member(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2733,7 +2746,7 @@ mod tests {
         .unwrap();
         let promoted = add_co_owner(
             &k2.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2745,7 +2758,7 @@ mod tests {
         // The co-owner removes MEMBER3 (an ordinary member) and seals under the new epoch.
         let removed = remove_member_as_co_owner(
             &promoted.keyring,
-            b"co pass",
+            &Passphrase::new(b"co pass"),
             &co.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -2762,7 +2775,7 @@ mod tests {
         assert!(matches!(
             unlock_as_member(
                 &removed.keyring,
-                b"v pass",
+                &Passphrase::new(b"v pass"),
                 &victim.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER3),
@@ -2774,7 +2787,7 @@ mod tests {
         ));
         let ou = unlock(
             &removed.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o2"),
@@ -2789,16 +2802,16 @@ mod tests {
     #[test]
     fn an_ordinary_member_cannot_administer() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let ed = provision_member(b"ed pass").unwrap();
+        let ed = provision_member(&Passphrase::new(b"ed pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2809,12 +2822,12 @@ mod tests {
         )
         .unwrap();
         let pinned = founder_key(&owner.keyring);
-        let m3 = provision_member(b"m3 pass").unwrap();
+        let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
         // MEMBER2 is only an Editor, not a co-owner → NotAuthorized for both ops.
         assert!(matches!(
             add_member_as_co_owner(
                 &k1.keyring,
-                b"ed pass",
+                &Passphrase::new(b"ed pass"),
                 &ed.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER2),
@@ -2830,7 +2843,7 @@ mod tests {
         assert!(matches!(
             remove_member_as_co_owner(
                 &k1.keyring,
-                b"ed pass",
+                &Passphrase::new(b"ed pass"),
                 &ed.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER2),
@@ -2846,17 +2859,17 @@ mod tests {
     #[test]
     fn a_co_owner_cannot_remove_a_signer() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co1 = provision_member(b"co1 pass").unwrap();
-        let co2 = provision_member(b"co2 pass").unwrap();
+        let co1 = provision_member(&Passphrase::new(b"co1 pass")).unwrap();
+        let co2 = provision_member(&Passphrase::new(b"co2 pass")).unwrap();
         let k1 = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2868,7 +2881,7 @@ mod tests {
         .unwrap();
         let k2 = add_member(
             &k1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2880,7 +2893,7 @@ mod tests {
         .unwrap();
         let p1 = add_co_owner(
             &k2.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2889,7 +2902,7 @@ mod tests {
         .unwrap();
         let p2 = add_co_owner(
             &p1.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2901,7 +2914,7 @@ mod tests {
         assert!(matches!(
             remove_member_as_co_owner(
                 &p2.keyring,
-                b"co1 pass",
+                &Passphrase::new(b"co1 pass"),
                 &co1.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER2),
@@ -2915,7 +2928,7 @@ mod tests {
         assert!(matches!(
             remove_member_as_co_owner(
                 &p2.keyring,
-                b"co1 pass",
+                &Passphrase::new(b"co1 pass"),
                 &co1.kdf_params,
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER2),
@@ -2931,16 +2944,16 @@ mod tests {
     #[test]
     fn add_member_rejects_a_signer_role() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let m = provision_member(b"m pass").unwrap();
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
         assert!(add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2952,7 +2965,7 @@ mod tests {
         .is_err());
         assert!(add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2967,16 +2980,16 @@ mod tests {
     #[test]
     fn a_signer_set_change_not_signed_by_the_founder_is_rejected() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co = provision_member(b"co pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -2988,7 +3001,7 @@ mod tests {
         .unwrap();
         let promoted = add_co_owner(
             &added.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3019,7 +3032,7 @@ mod tests {
     #[test]
     fn the_owner_cannot_be_removed_and_a_non_member_is_rejected() {
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-owner"),
@@ -3028,7 +3041,7 @@ mod tests {
         assert!(matches!(
             remove_member(
                 &owner.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -3040,7 +3053,7 @@ mod tests {
         assert!(matches!(
             remove_member(
                 &owner.keyring,
-                b"owner pass",
+                &Passphrase::new(b"owner pass"),
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
@@ -3058,16 +3071,16 @@ mod tests {
         // add a member, promote them to co-owner, then recover the founder and assert the co-owner
         // survives both structurally (still in the signer set) and functionally (still reads).
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co = provision_member(b"co pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3079,7 +3092,7 @@ mod tests {
         .unwrap();
         let promoted = add_co_owner(
             &added.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3090,7 +3103,7 @@ mod tests {
         let rec = recover(
             &promoted.keyring,
             &owner.recovery_code,
-            b"new pass",
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o2"),
@@ -3111,7 +3124,7 @@ mod tests {
         let new_founder = founder_key(&rec.keyring);
         assert!(unlock_as_member(
             &rec.keyring,
-            b"co pass",
+            &Passphrase::new(b"co pass"),
             &co.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),
@@ -3129,16 +3142,16 @@ mod tests {
         // left intact. Assert the co-owner's signer entry survives and, because the old founder
         // co-signed, the co-owner still verifies against the key it pinned before the change.
         let owner = provision(
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o"),
         )
         .unwrap();
-        let co = provision_member(b"co pass").unwrap();
+        let co = provision_member(&Passphrase::new(b"co pass")).unwrap();
         let added = add_member(
             &owner.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3150,7 +3163,7 @@ mod tests {
         .unwrap();
         let promoted = add_co_owner(
             &added.keyring,
-            b"owner pass",
+            &Passphrase::new(b"owner pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3161,8 +3174,8 @@ mod tests {
 
         let re = change_passphrase(
             &promoted.keyring,
-            b"owner pass",
-            b"new pass",
+            &Passphrase::new(b"owner pass"),
+            &Passphrase::new(b"new pass"),
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
@@ -3179,7 +3192,7 @@ mod tests {
         // The old founder co-signed, so the co-owner still verifies against its pre-change pin.
         assert!(unlock_as_member(
             &re.keyring,
-            b"co pass",
+            &Passphrase::new(b"co pass"),
             &co.kdf_params,
             &TreeId::new(TREE),
             &MemberId::new(MEMBER2),

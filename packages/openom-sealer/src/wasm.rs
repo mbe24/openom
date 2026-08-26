@@ -12,9 +12,8 @@
 //! the JS shim (`apps/app/src/core/sealer/`) wraps these calls with ergonomic defaults.
 
 use wasm_bindgen::prelude::*;
-use zeroize::Zeroizing;
 
-use openom_crypto::{Key32, KEY_LEN};
+use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring::{
     epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, KeyringAnchor,
     VerifyingKey,
@@ -252,9 +251,10 @@ impl VaultResult {
 }
 
 // Passphrases and recovery codes arrive as owned `String`s — wasm-bindgen hands us ownership
-// of the copy it wrote into WASM linear memory, so wrapping them in `Zeroizing` immediately
-// scrubs that copy on drop. (The JS-side original string is GC-managed and can't be scrubbed;
-// callers minimise its lifetime — documented in the JS shim.)
+// of the copy it wrote into WASM linear memory. Wrapping a passphrase in `Passphrase` (itself
+// zeroizing) immediately scrubs that copy on drop; a recovery code is shown to the user, so
+// `RecoveryCode` doesn't zeroize. (The JS-side original string is GC-managed and can't be
+// scrubbed; callers minimise its lifetime — documented in the JS shim.)
 
 /// Create a new encrypted tree. Returns the keyring, the recovery code (show once), revision
 /// 1, and the sealer.
@@ -265,9 +265,8 @@ pub fn provision(
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
     let p = vault::provision(
-        passphrase.as_bytes(),
+        &Passphrase::new(passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(member_id),
         &ReplicaId::new(replica_id),
@@ -275,7 +274,7 @@ pub fn provision(
     .map_err(to_js)?;
     Ok(VaultResult {
         keyring: p.keyring,
-        recovery_code: p.recovery_code,
+        recovery_code: p.recovery_code.into_string(),
         did_key: p.did_key.into_string(),
         revision: 1,
         sealer: Some(WasmSealer { inner: p.sealer }),
@@ -291,10 +290,9 @@ pub fn unlock(
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
     let u = vault::unlock(
         keyring,
-        passphrase.as_bytes(),
+        &Passphrase::new(passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(member_id),
         &ReplicaId::new(replica_id),
@@ -321,12 +319,10 @@ pub fn recover(
     replica_id: &[u8],
     min_revision: u32,
 ) -> Result<VaultResult, JsError> {
-    let recovery_code = Zeroizing::new(recovery_code);
-    let new_passphrase = Zeroizing::new(new_passphrase);
     let r = vault::recover(
         keyring,
-        recovery_code.as_str(),
-        new_passphrase.as_bytes(),
+        &RecoveryCode::new(recovery_code),
+        &Passphrase::new(new_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(member_id),
         &ReplicaId::new(replica_id),
@@ -335,7 +331,7 @@ pub fn recover(
     .map_err(to_js)?;
     Ok(VaultResult {
         keyring: r.keyring,
-        recovery_code: r.recovery_code,
+        recovery_code: r.recovery_code.into_string(),
         did_key: r.did_key.into_string(),
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
@@ -353,12 +349,10 @@ pub fn change_passphrase(
     member_id: &str,
     min_revision: u32,
 ) -> Result<VaultResult, JsError> {
-    let old_passphrase = Zeroizing::new(old_passphrase);
-    let new_passphrase = Zeroizing::new(new_passphrase);
     let re = vault::change_passphrase(
         keyring,
-        old_passphrase.as_bytes(),
-        new_passphrase.as_bytes(),
+        &Passphrase::new(old_passphrase.into_bytes()),
+        &Passphrase::new(new_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(member_id),
         min_revision,
@@ -366,7 +360,7 @@ pub fn change_passphrase(
     .map_err(to_js)?;
     Ok(VaultResult {
         keyring: re.keyring,
-        recovery_code: re.recovery_code,
+        recovery_code: re.recovery_code.into_string(),
         did_key: String::new(),
         revision: re.revision,
         sealer: None,
@@ -406,8 +400,7 @@ impl MemberIdentity {
 /// Provision a member identity from a passphrase. Stateless — touches no keyring.
 #[wasm_bindgen(js_name = provisionMember)]
 pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
-    let m = vault::provision_member(passphrase.as_bytes()).map_err(to_js)?;
+    let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(to_js)?;
     Ok(MemberIdentity {
         kdf_params: m.kdf_params.encode_to_vec(),
         author_public: m.author_public,
@@ -431,10 +424,9 @@ pub fn add_member(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let owner_passphrase = Zeroizing::new(owner_passphrase);
     let added = vault::add_member(
         keyring,
-        owner_passphrase.as_bytes(),
+        &Passphrase::new(owner_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(owner_member_id),
         min_revision,
@@ -468,13 +460,12 @@ pub fn unlock_as_member(
     replica_id: &[u8],
     min_revision: u32,
 ) -> Result<VaultResult, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
     let kdf = KdfParams::decode(member_kdf_params)
         .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let u = vault::unlock_as_member(
         keyring,
-        passphrase.as_bytes(),
+        &Passphrase::new(passphrase.into_bytes()),
         &kdf,
         &TreeId::new(tree_id),
         &MemberId::new(member_id),
@@ -505,10 +496,9 @@ pub fn remove_member(
     remove_member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let owner_passphrase = Zeroizing::new(owner_passphrase);
     let r = vault::remove_member(
         keyring,
-        owner_passphrase.as_bytes(),
+        &Passphrase::new(owner_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(owner_member_id),
         min_revision,
@@ -543,13 +533,12 @@ pub fn add_member_as_co_owner(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
     let kdf = KdfParams::decode(member_kdf_params)
         .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let added = vault::add_member_as_co_owner(
         keyring,
-        passphrase.as_bytes(),
+        &Passphrase::new(passphrase.into_bytes()),
         &kdf,
         &TreeId::new(tree_id),
         &MemberId::new(co_owner_member_id),
@@ -585,13 +574,12 @@ pub fn remove_member_as_co_owner(
     remove_member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let passphrase = Zeroizing::new(passphrase);
     let kdf = KdfParams::decode(member_kdf_params)
         .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let r = vault::remove_member_as_co_owner(
         keyring,
-        passphrase.as_bytes(),
+        &Passphrase::new(passphrase.into_bytes()),
         &kdf,
         &TreeId::new(tree_id),
         &MemberId::new(co_owner_member_id),
@@ -621,10 +609,9 @@ pub fn add_co_owner(
     min_revision: u32,
     target_member_id: &str,
 ) -> Result<VaultResult, JsError> {
-    let founder_passphrase = Zeroizing::new(founder_passphrase);
     let r = vault::add_co_owner(
         keyring,
-        founder_passphrase.as_bytes(),
+        &Passphrase::new(founder_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(founder_member_id),
         min_revision,
@@ -653,10 +640,9 @@ pub fn remove_co_owner(
     target_member_id: &str,
     new_role: &str,
 ) -> Result<VaultResult, JsError> {
-    let founder_passphrase = Zeroizing::new(founder_passphrase);
     let r = vault::remove_co_owner(
         keyring,
-        founder_passphrase.as_bytes(),
+        &Passphrase::new(founder_passphrase.into_bytes()),
         &TreeId::new(tree_id),
         &MemberId::new(founder_member_id),
         min_revision,

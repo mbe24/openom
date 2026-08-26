@@ -15,7 +15,7 @@ use openom_protocol::v1::KdfParams;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::CryptoError;
+use crate::{CryptoError, RecoveryCode};
 
 /// Recovery-code entropy in bytes (128 bits).
 pub const RECOVERY_ENTROPY_LEN: usize = 16;
@@ -27,17 +27,18 @@ pub const RECOVERY_ARGON2_PARALLELISM: u32 = 1;
 
 /// Generate a fresh printable recovery code (entropy + checksum, base32, hyphenated).
 /// Display it once; it can't be recovered if lost (§17).
-pub fn generate_recovery_code() -> Result<String, CryptoError> {
+pub fn generate_recovery_code() -> Result<RecoveryCode, CryptoError> {
     let mut entropy = Zeroizing::new([0u8; RECOVERY_ENTROPY_LEN]);
     getrandom::fill(entropy.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
-    Ok(format_code(&entropy))
+    Ok(RecoveryCode::new(format_code(&entropy)))
 }
 
 /// Parse + checksum-verify a recovery code (tolerant of case, spaces, hyphens),
 /// returning its raw entropy. Fails fast on a typo (checksum) before any KDF runs.
 pub fn parse_recovery_code(
-    input: &str,
+    code: &RecoveryCode,
 ) -> Result<Zeroizing<[u8; RECOVERY_ENTROPY_LEN]>, CryptoError> {
+    let input = code.expose();
     let cleaned: String = input
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -96,7 +97,7 @@ mod tests {
     fn generate_parse_round_trip() {
         let code = generate_recovery_code().unwrap();
         // Grouped + parseable back to 16 bytes of entropy.
-        assert!(code.contains('-'));
+        assert!(code.expose().contains('-'));
         assert_eq!(
             parse_recovery_code(&code).unwrap().len(),
             RECOVERY_ENTROPY_LEN
@@ -106,9 +107,9 @@ mod tests {
     #[test]
     fn tolerant_of_formatting() {
         let code = generate_recovery_code().unwrap();
-        let messy = format!("  {}  ", code.to_lowercase().replace('-', " "));
+        let messy = format!("  {}  ", code.expose().to_lowercase().replace('-', " "));
         assert_eq!(
-            *parse_recovery_code(&messy).unwrap(),
+            *parse_recovery_code(&RecoveryCode::new(messy)).unwrap(),
             *parse_recovery_code(&code).unwrap()
         );
     }
@@ -117,7 +118,7 @@ mod tests {
     fn typo_caught_by_checksum() {
         let code = generate_recovery_code().unwrap();
         // Flip the first alphanumeric char to a different valid base32 char.
-        let mut chars: Vec<char> = code.chars().collect();
+        let mut chars: Vec<char> = code.expose().chars().collect();
         let i = chars
             .iter()
             .position(|c| c.is_ascii_alphanumeric())
@@ -125,7 +126,7 @@ mod tests {
         chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
         let typo: String = chars.into_iter().collect();
         assert!(matches!(
-            parse_recovery_code(&typo),
+            parse_recovery_code(&RecoveryCode::new(typo)),
             Err(CryptoError::RecoveryChecksum) | Err(CryptoError::RecoveryFormat)
         ));
     }
@@ -133,11 +134,11 @@ mod tests {
     #[test]
     fn malformed_rejected() {
         assert!(matches!(
-            parse_recovery_code("not base32 !!!"),
+            parse_recovery_code(&RecoveryCode::new("not base32 !!!")),
             Err(CryptoError::RecoveryFormat)
         ));
         assert!(matches!(
-            parse_recovery_code("AAAA"),
+            parse_recovery_code(&RecoveryCode::new("AAAA")),
             Err(CryptoError::RecoveryFormat)
         ));
     }

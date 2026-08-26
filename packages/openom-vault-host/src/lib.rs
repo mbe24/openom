@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
@@ -10,7 +11,6 @@ use openom_protocol::Message;
 use openom_sealer::vault;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use serde::Serialize;
-use zeroize::Zeroizing;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -312,10 +312,9 @@ impl<S: VaultStore> VaultHost<S> {
         passphrase: String,
         member_id: &str,
     ) -> Result<Provisioned> {
-        let passphrase = Zeroizing::new(passphrase);
         let replica = fresh_replica()?;
         let p = vault::provision(
-            passphrase.as_bytes(),
+            &Passphrase::new(passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(member_id),
             &ReplicaId::new(replica),
@@ -325,7 +324,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Provisioned {
             sealer_id: id,
             revision,
-            recovery_code: p.recovery_code,
+            recovery_code: p.recovery_code.into_string(),
             did_key: p.did_key.into_string(),
         })
     }
@@ -340,7 +339,6 @@ impl<S: VaultStore> VaultHost<S> {
         passphrase: String,
         member_id: &str,
     ) -> Result<Unlocked> {
-        let passphrase = Zeroizing::new(passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -349,7 +347,7 @@ impl<S: VaultStore> VaultHost<S> {
         let replica = fresh_replica()?;
         let u = vault::unlock(
             &keyring,
-            passphrase.as_bytes(),
+            &Passphrase::new(passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(member_id),
             &ReplicaId::new(replica),
@@ -386,8 +384,6 @@ impl<S: VaultStore> VaultHost<S> {
         new_passphrase: String,
         member_id: &str,
     ) -> Result<Recovered> {
-        let recovery_code = Zeroizing::new(recovery_code);
-        let new_passphrase = Zeroizing::new(new_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -396,8 +392,8 @@ impl<S: VaultStore> VaultHost<S> {
         let replica = fresh_replica()?;
         let r = vault::recover(
             &keyring,
-            recovery_code.as_str(),
-            new_passphrase.as_bytes(),
+            &RecoveryCode::new(recovery_code),
+            &Passphrase::new(new_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(member_id),
             &ReplicaId::new(replica),
@@ -410,7 +406,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Recovered {
             sealer_id: id,
             revision,
-            recovery_code: r.recovery_code,
+            recovery_code: r.recovery_code.into_string(),
             did_key: r.did_key.into_string(),
         })
     }
@@ -425,8 +421,6 @@ impl<S: VaultStore> VaultHost<S> {
         new_passphrase: String,
         member_id: &str,
     ) -> Result<Rekeyed> {
-        let old_passphrase = Zeroizing::new(old_passphrase);
-        let new_passphrase = Zeroizing::new(new_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -434,8 +428,8 @@ impl<S: VaultStore> VaultHost<S> {
             .map_err(VaultError::storage)?;
         let re = vault::change_passphrase(
             &keyring,
-            old_passphrase.as_bytes(),
-            new_passphrase.as_bytes(),
+            &Passphrase::new(old_passphrase.into_bytes()),
+            &Passphrase::new(new_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(member_id),
             floor,
@@ -443,7 +437,7 @@ impl<S: VaultStore> VaultHost<S> {
         let revision = self.commit_transition(tree_key, &keyring, &re.keyring)?;
         Ok(Rekeyed {
             revision,
-            recovery_code: re.recovery_code,
+            recovery_code: re.recovery_code.into_string(),
         })
     }
 
@@ -451,8 +445,7 @@ impl<S: VaultStore> VaultHost<S> {
     /// the public keys to share OOB with a tree owner and the opaque KDF params the member
     /// persists and passes back at unlock.
     pub fn provision_member(&self, passphrase: String) -> Result<MemberProvisioned> {
-        let passphrase = Zeroizing::new(passphrase);
-        let m = vault::provision_member(passphrase.as_bytes())?;
+        let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes()))?;
         Ok(MemberProvisioned {
             kdf_params: m.kdf_params.encode_to_vec(),
             author_public: m.author_public,
@@ -476,7 +469,6 @@ impl<S: VaultStore> VaultHost<S> {
         member_hpke_public: &[u8],
         member_author_public: &[u8],
     ) -> Result<MemberAdded> {
-        let owner_passphrase = Zeroizing::new(owner_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -484,7 +476,7 @@ impl<S: VaultStore> VaultHost<S> {
             .map_err(VaultError::storage)?;
         let added = vault::add_member(
             &keyring,
-            owner_passphrase.as_bytes(),
+            &Passphrase::new(owner_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(owner_member_id),
             floor,
@@ -510,7 +502,6 @@ impl<S: VaultStore> VaultHost<S> {
         member_id: &str,
         trusted_signers: Vec<Vec<u8>>,
     ) -> Result<Unlocked> {
-        let passphrase = Zeroizing::new(passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -523,7 +514,7 @@ impl<S: VaultStore> VaultHost<S> {
         let replica = fresh_replica()?;
         let u = vault::unlock_as_member(
             &keyring,
-            passphrase.as_bytes(),
+            &Passphrase::new(passphrase.into_bytes()),
             &kdf,
             &TreeId::new(tree_id),
             &MemberId::new(member_id),
@@ -554,7 +545,6 @@ impl<S: VaultStore> VaultHost<S> {
         owner_member_id: &str,
         remove_member_id: &str,
     ) -> Result<MemberRemoved> {
-        let owner_passphrase = Zeroizing::new(owner_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -563,7 +553,7 @@ impl<S: VaultStore> VaultHost<S> {
         let replica = fresh_replica()?;
         let r = vault::remove_member(
             &keyring,
-            owner_passphrase.as_bytes(),
+            &Passphrase::new(owner_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(owner_member_id),
             floor,
@@ -594,7 +584,6 @@ impl<S: VaultStore> VaultHost<S> {
         member_hpke_public: &[u8],
         member_author_public: &[u8],
     ) -> Result<MemberAdded> {
-        let passphrase = Zeroizing::new(passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -606,7 +595,7 @@ impl<S: VaultStore> VaultHost<S> {
         let trusted = parse_trusted_signers(&trusted_signers)?;
         let added = vault::add_member_as_co_owner(
             &keyring,
-            passphrase.as_bytes(),
+            &Passphrase::new(passphrase.into_bytes()),
             &kdf,
             &TreeId::new(tree_id),
             &MemberId::new(co_owner_member_id),
@@ -634,7 +623,6 @@ impl<S: VaultStore> VaultHost<S> {
         trusted_signers: Vec<Vec<u8>>,
         remove_member_id: &str,
     ) -> Result<MemberRemoved> {
-        let passphrase = Zeroizing::new(passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -647,7 +635,7 @@ impl<S: VaultStore> VaultHost<S> {
         let replica = fresh_replica()?;
         let r = vault::remove_member_as_co_owner(
             &keyring,
-            passphrase.as_bytes(),
+            &Passphrase::new(passphrase.into_bytes()),
             &kdf,
             &TreeId::new(tree_id),
             &MemberId::new(co_owner_member_id),
@@ -674,7 +662,6 @@ impl<S: VaultStore> VaultHost<S> {
         founder_member_id: &str,
         target_member_id: &str,
     ) -> Result<CoOwnerChanged> {
-        let founder_passphrase = Zeroizing::new(founder_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -682,7 +669,7 @@ impl<S: VaultStore> VaultHost<S> {
             .map_err(VaultError::storage)?;
         let r = vault::add_co_owner(
             &keyring,
-            founder_passphrase.as_bytes(),
+            &Passphrase::new(founder_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(founder_member_id),
             floor,
@@ -703,7 +690,6 @@ impl<S: VaultStore> VaultHost<S> {
         target_member_id: &str,
         new_role: &str,
     ) -> Result<CoOwnerChanged> {
-        let founder_passphrase = Zeroizing::new(founder_passphrase);
         let keyring = self.require_keyring(tree_key)?;
         let floor = self
             .store
@@ -711,7 +697,7 @@ impl<S: VaultStore> VaultHost<S> {
             .map_err(VaultError::storage)?;
         let r = vault::remove_co_owner(
             &keyring,
-            founder_passphrase.as_bytes(),
+            &Passphrase::new(founder_passphrase.into_bytes()),
             &TreeId::new(tree_id),
             &MemberId::new(founder_member_id),
             floor,
