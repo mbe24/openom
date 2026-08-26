@@ -3579,6 +3579,7 @@ dependencies = [
  "openom-did",
  "openom-keyring",
  "openom-protocol",
+ "openom-roles",
  "proptest",
  "thiserror 2.0.20",
  "wasm-bindgen",

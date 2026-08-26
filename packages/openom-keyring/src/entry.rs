@@ -12,8 +12,8 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use openom_protocol::aad::author_signing_bytes;
-use openom_protocol::v1::{Header, Keyring, Kind, SignerRole};
-use openom_roles::required_role_for_kind;
+use openom_protocol::v1::{Header, Keyring, Kind};
+use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
 use sha2::{Digest, Sha256};
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
@@ -111,7 +111,7 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
     let founder = keyring
         .authorized_signers
         .iter()
-        .find(|s| s.role == SignerRole::Founder as i32)
+        .find(|s| s.role == SIGNER_FOUNDER)
         .map(|s| &s.member_id);
     keyring
         .epochs
@@ -125,7 +125,7 @@ mod tests {
     use super::*;
     use crate::{generate_identity, SigningKey};
     use ed25519_dalek::Signer;
-    use openom_protocol::v1::{KeyEpoch, Member, MemberRole};
+    use openom_protocol::v1::{KeyEpoch, Member, MemberRole, SignerRole};
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;

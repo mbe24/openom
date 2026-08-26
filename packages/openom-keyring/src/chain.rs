@@ -20,14 +20,16 @@
 //! the prior set — that ordering is the whole trick. On success the new anchor carries the
 //! candidate's now-validated signer set forward.
 
-use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole, WrapMethod};
+use openom_protocol::v1::{AuthorizedSigner, Keyring, WrapMethod};
 use openom_protocol::KEYRING_LAYOUT_VERSION;
+// The role constants live in openom-roles (one definition); aliased here to the local names so the
+// comparisons below read unchanged.
+use openom_roles::{
+    MEMBER_OWNER as OWNER_MEMBER, SIGNER_CO_OWNER as CO_OWNER, SIGNER_FOUNDER as FOUNDER,
+};
 
 use crate::{keyring_hash, verify_keyring, verify_keyring_all, verify_keyring_any, VerifyingKey};
 
-const FOUNDER: i32 = SignerRole::Founder as i32;
-const CO_OWNER: i32 = SignerRole::CoOwner as i32;
-const OWNER_MEMBER: i32 = MemberRole::Owner as i32;
 const HPKE: i32 = WrapMethod::X25519Hpke as i32;
 const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
 
@@ -386,7 +388,7 @@ fn signer_keys(signers: &[AuthorizedSigner]) -> Vec<VerifyingKey> {
 mod tests {
     use super::*;
     use crate::{generate_identity, sign_keyring, SigningKey};
-    use openom_protocol::v1::{KeyEpoch, KeyWrap, Member};
+    use openom_protocol::v1::{KeyEpoch, KeyWrap, Member, MemberRole};
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     const EDITOR: i32 = MemberRole::Editor as i32;

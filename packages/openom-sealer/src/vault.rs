@@ -25,9 +25,16 @@ use openom_protocol::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
-    SignerRole, WrapMethod,
+    WrapMethod,
 };
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
+// The founder is the sole authorized signer of a freshly-built single-owner keyring, and the owner is
+// its sole member (§4 multi-signer; V1 builds the degenerate case). The role constants live in
+// openom-roles (one definition); aliased here to the local names used below.
+use openom_roles::{
+    MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER, SIGNER_CO_OWNER as CO_OWNER_SIGNER,
+    SIGNER_FOUNDER as FOUNDER,
+};
 
 use crate::{SealerError, SealerSet};
 
@@ -37,12 +44,6 @@ const HPKE: i32 = WrapMethod::X25519Hpke as i32;
 /// An epoch DEK wrapped to the founder's recovery root key — the founder's access to every
 /// epoch (past, future, and co-owner-minted) via one recovery-key private key.
 const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
-/// The founder is the sole authorized signer of a freshly-built single-owner keyring,
-/// and the owner is its sole member (§4 multi-signer; V1 builds the degenerate case).
-const FOUNDER: i32 = SignerRole::Founder as i32;
-const OWNER: i32 = MemberRole::Owner as i32;
-const CO_OWNER_SIGNER: i32 = SignerRole::CoOwner as i32;
-const CO_OWNER_MEMBER: i32 = MemberRole::CoOwner as i32;
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
