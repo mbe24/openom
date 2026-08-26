@@ -201,12 +201,14 @@ fn to_js(e: SealerError) -> JsError {
 // ---- the keyring vault (passphrase lifecycle) ----
 
 /// The result of a vault flow. Carries only non-secret outputs — the keyring (to store), the
-/// recovery code (to show ONCE), the revision (to watermark), and the sealer HANDLE. No raw
-/// key material (DEK/KEK/identity) ever crosses to JS; the DEK lives inside the sealer.
+/// recovery code (to show ONCE), the revision (to watermark), the author `didKey` (a `did:key` over
+/// the member's PUBLIC identity key — the claim `createdBy`), and the sealer HANDLE. No raw SECRET
+/// key material (DEK/KEK/private identity key) ever crosses to JS; the DEK lives inside the sealer.
 #[wasm_bindgen]
 pub struct VaultResult {
     keyring: Vec<u8>,
     recovery_code: String,
+    did_key: String,
     revision: u32,
     sealer: Option<WasmSealer>,
 }
@@ -223,6 +225,13 @@ impl VaultResult {
     #[wasm_bindgen(getter, js_name = recoveryCode)]
     pub fn recovery_code(&self) -> String {
         self.recovery_code.clone()
+    }
+
+    /// The author `did:key` (over the member's PUBLIC identity key) — stable across tabs; the claim
+    /// `createdBy`. Empty for change-passphrase (no new session).
+    #[wasm_bindgen(getter, js_name = didKey)]
+    pub fn did_key(&self) -> String {
+        self.did_key.clone()
     }
 
     /// The keyring revision the caller must watermark.
@@ -258,6 +267,7 @@ pub fn provision(
     Ok(VaultResult {
         keyring: p.keyring,
         recovery_code: p.recovery_code,
+        did_key: p.did_key,
         revision: 1,
         sealer: Some(WasmSealer { inner: p.sealer }),
     })
@@ -284,6 +294,7 @@ pub fn unlock(
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
+        did_key: u.did_key,
         revision: u.revision,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
@@ -316,6 +327,7 @@ pub fn recover(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: r.recovery_code,
+        did_key: r.did_key,
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -346,6 +358,7 @@ pub fn change_passphrase(
     Ok(VaultResult {
         keyring: re.keyring,
         recovery_code: re.recovery_code,
+        did_key: String::new(),
         revision: re.revision,
         sealer: None,
     })
@@ -425,6 +438,7 @@ pub fn add_member(
     Ok(VaultResult {
         keyring: added.keyring,
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: added.revision,
         sealer: None,
     })
@@ -463,6 +477,7 @@ pub fn unlock_as_member(
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
+        did_key: u.did_key,
         revision: u.revision,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
@@ -495,6 +510,7 @@ pub fn remove_member(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: String::new(), // removal no longer rotates the recovery code (RRK)
+        did_key: String::new(),
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -539,6 +555,7 @@ pub fn add_member_as_co_owner(
     Ok(VaultResult {
         keyring: added.keyring,
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: added.revision,
         sealer: None,
     })
@@ -578,6 +595,7 @@ pub fn remove_member_as_co_owner(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -607,6 +625,7 @@ pub fn add_co_owner(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: r.revision,
         sealer: None,
     })
@@ -639,6 +658,7 @@ pub fn remove_co_owner(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: r.revision,
         sealer: None,
     })
@@ -668,6 +688,7 @@ pub fn accept_remote_keyring(
         return Ok(VaultResult {
             keyring: Vec::new(),
             recovery_code: String::new(),
+            did_key: String::new(),
             revision: anchor_keyring.revision,
             sealer: None,
         });
@@ -681,6 +702,7 @@ pub fn accept_remote_keyring(
     Ok(VaultResult {
         keyring: raw.last().expect("non-empty run").to_vec(),
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: new_anchor.revision,
         sealer: None,
     })
@@ -792,6 +814,7 @@ pub fn accept_reset_keyring(
     Ok(VaultResult {
         keyring: candidate.to_vec(),
         recovery_code: String::new(),
+        did_key: String::new(),
         revision: new_anchor.revision,
         sealer: None,
     })

@@ -3576,6 +3576,7 @@ name = "openom-sealer"
 version = "0.1.0"
 dependencies = [
  "openom-crypto",
+ "openom-did",
  "openom-keyring",
  "openom-protocol",
  "proptest",
