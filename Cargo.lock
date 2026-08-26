@@ -3587,6 +3587,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-sign"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "proptest",
+ "thiserror 2.0.20",
+ "zeroize",
+]
+
+[[package]]
 name = "openom-sync"
 version = "0.1.0"
 dependencies = [

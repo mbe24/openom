@@ -13,6 +13,7 @@ members = [
     "packages/openom-model",
     "packages/openom-jcs",
     "packages/openom-did",
+    "packages/openom-sign",
     "packages/openom-edtf",
     "packages/openom-claim",
     "packages/openom-projection",
