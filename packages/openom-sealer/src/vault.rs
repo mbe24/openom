@@ -16,8 +16,8 @@
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
     generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code,
-    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, HpkeKeypair, Key32,
-    RootKeys, KEY_LEN,
+    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
+    HpkePrivate, Kek, RootKeys, RrkSecret,
 };
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
@@ -111,9 +111,10 @@ pub fn provision(
     let key_id = generate_salt()?.to_vec(); // 16 CSPRNG bytes as the epoch key id
                                             // Bind by field name (not positional): the secret and public can't be swapped into the wrong role.
     let HpkeKeypair {
-        secret: rrk_secret,
+        secret,
         public: rrk_public,
     } = generate_hpke_keypair()?;
+    let rrk_secret = RrkSecret::from(secret);
     let secrets = new_owner_secrets(passphrase)?;
 
     let epoch0 = KeyEpoch {
@@ -158,7 +159,7 @@ pub fn provision(
     let sealer = SealerSet::new(
         tree_id.to_vec(),
         replica_id.to_vec(),
-        vec![(key_id.clone(), dek)],
+        vec![(key_id.clone(), dek.into_inner())],
         key_id,
     );
     Ok(Provisioned {
@@ -192,7 +193,7 @@ pub fn unlock(
     let did_key = openom_did::encode_ed25519(&identity.verifying_key().to_bytes());
     let epochs = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?
         .into_iter()
-        .map(|(k, _e, d)| (k, d))
+        .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
     // Sign entries only on an ATTRIBUTED (shared) write epoch — one wrapped beyond the sole founder.
     // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
@@ -291,7 +292,10 @@ pub fn recover(
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, _)| k.clone())
         .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
-    let epochs = deks.into_iter().map(|(k, _e, d)| (k, d)).collect();
+    let epochs = deks
+        .into_iter()
+        .map(|(k, _e, d)| (k, d.into_inner()))
+        .collect();
     let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
     let did_key = openom_did::encode_ed25519(&secrets.root.identity.verifying_key().to_bytes());
     Ok(Recovered {
@@ -835,7 +839,7 @@ struct Opened {
     identity: SigningKey,
     /// The recovery root private key (unwrapped via the passphrase) — reaches every epoch's
     /// DEK, and is re-wrapped in place by change_passphrase.
-    rrk_secret: Key32,
+    rrk_secret: RrkSecret,
     /// The decoded prior keyring, so a mutating flow preserves its signers/members/epochs.
     keyring: Keyring,
 }
@@ -929,7 +933,7 @@ fn guard_ordinary_role(role: MemberRole) -> Result<(), SealerError> {
 /// (to reach epoch DEKs via their own member wraps), and the decoded keyring + coordinates.
 struct CoOwnerAccess {
     identity: SigningKey,
-    hpke_secret: Key32,
+    hpke_secret: HpkePrivate,
     revision: u32,
     prev_hash: Vec<u8>,
     keyring: Keyring,
@@ -994,7 +998,7 @@ struct NewOwnerSecrets {
     root: RootKeys,
     pass_kdf: KdfParams,
     recovery_code: String,
-    recovery_kek: Key32,
+    recovery_kek: Kek,
     recovery_kdf: KdfParams,
 }
 
@@ -1018,7 +1022,7 @@ fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, SealerErr
 /// KEK and the new recovery-code KEK (the only two ways to reach it), bound to the tree-
 /// scoped rrk AAD.
 fn build_recovery_key(
-    rrk_secret: &[u8; KEY_LEN],
+    rrk_secret: &RrkSecret,
     rrk_public: &[u8],
     tree_id: &[u8],
     member_id: &str,
@@ -1054,7 +1058,7 @@ fn build_recovery_key(
 /// secret), as the `WRAP_METHOD_RRK_HPKE` wrap that gives the founder cross-epoch access.
 fn rrk_wrap_epoch(
     rrk_public: &[u8],
-    dek: &[u8; KEY_LEN],
+    dek: &Dek,
     tree_id: &[u8],
     founder_id: &str,
     key_id: &[u8],
@@ -1077,8 +1081,8 @@ fn open_epoch_dek(
     epoch: &KeyEpoch,
     tree_id: &[u8],
     founder_id: &str,
-    rrk_secret: &Key32,
-) -> Result<Key32, SealerError> {
+    rrk_secret: &RrkSecret,
+) -> Result<Dek, SealerError> {
     let w = epoch
         .wraps
         .iter()
@@ -1086,7 +1090,7 @@ fn open_epoch_dek(
         .ok_or_else(|| SealerError::BadKeyring("epoch missing rrk wrap".into()))?;
     let info = wrap_aad(tree_id, &epoch.key_id, founder_id, RRK_HPKE, epoch.epoch);
     Ok(hpke_unwrap_dek(
-        rrk_secret.as_slice(),
+        rrk_secret.expose(),
         &w.ephemeral_public_key,
         &w.wrapped_dek,
         &info,
@@ -1098,8 +1102,8 @@ fn epoch_deks(
     keyring: &Keyring,
     tree_id: &[u8],
     founder_id: &str,
-    rrk_secret: &Key32,
-) -> Result<Vec<(Vec<u8>, u32, Key32)>, SealerError> {
+    rrk_secret: &RrkSecret,
+) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
     keyring
         .epochs
         .iter()
@@ -1119,8 +1123,8 @@ fn member_epoch_deks(
     keyring: &Keyring,
     tree_id: &[u8],
     member_id: &str,
-    hpke_secret: &Key32,
-) -> Result<Vec<(Vec<u8>, u32, Key32)>, SealerError> {
+    hpke_secret: &HpkePrivate,
+) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
     let mut out = Vec::new();
     for ep in &keyring.epochs {
         if let Some(w) = ep
@@ -1130,7 +1134,7 @@ fn member_epoch_deks(
         {
             let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE, ep.epoch);
             let dek = hpke_unwrap_dek(
-                hpke_secret.as_slice(),
+                hpke_secret.expose(),
                 &w.ephemeral_public_key,
                 &w.wrapped_dek,
                 &info,
@@ -1146,14 +1150,18 @@ fn member_epoch_deks(
 fn sealer_set_from_deks(
     tree_id: &[u8],
     replica_id: &[u8],
-    deks: Vec<(Vec<u8>, u32, Key32)>,
+    deks: Vec<(Vec<u8>, u32, Dek)>,
 ) -> Result<SealerSet, SealerError> {
     let write_key_id = deks
         .iter()
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, _)| k.clone())
         .ok_or(SealerError::MissingWrap)?;
-    let epochs = deks.into_iter().map(|(k, _e, d)| (k, d)).collect();
+    // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
+    let epochs = deks
+        .into_iter()
+        .map(|(k, _e, d)| (k, d.into_inner()))
+        .collect();
     Ok(SealerSet::new(
         tree_id.to_vec(),
         replica_id.to_vec(),
@@ -1194,7 +1202,7 @@ fn founder_member_id(keyring: &Keyring) -> Result<String, SealerError> {
 fn do_add_member(
     mut keyring: Keyring,
     tree_id: &[u8],
-    deks: &[(Vec<u8>, u32, Key32)],
+    deks: &[(Vec<u8>, u32, Dek)],
     identity: &SigningKey,
     prev_hash: Vec<u8>,
     new_revision: u32,
@@ -1205,7 +1213,7 @@ fn do_add_member(
 ) -> Result<MemberAdded, SealerError> {
     for (key_id, epoch, dek) in deks {
         let info = wrap_aad(tree_id, key_id, new_member_id, HPKE, *epoch);
-        let w = hpke_wrap_dek(member_hpke_public, dek.as_slice(), &info)?;
+        let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
         let ep = keyring
             .epochs
             .iter_mut()
@@ -1276,7 +1284,7 @@ fn do_remove_member(
             continue;
         }
         let info = wrap_aad(tree_id, &new_key_id, &m.member_id, HPKE, new_epoch);
-        let w = hpke_wrap_dek(&m.hpke_public_key, new_dek.as_slice(), &info)?;
+        let w = hpke_wrap_dek(&m.hpke_public_key, &new_dek, &info)?;
         wraps.push(KeyWrap {
             member_id: m.member_id.clone(),
             wrap_method: HPKE,

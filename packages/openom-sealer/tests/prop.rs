@@ -10,7 +10,7 @@ use proptest::prelude::*;
 fn sealer(tree: &[u8]) -> Sealer {
     Sealer::from_unwrapped(
         1,
-        openom_crypto::generate_dek().unwrap(),
+        openom_crypto::generate_dek().unwrap().into_inner(),
         tree.to_vec(),
         b"epoch-0".to_vec(),
         b"replica-0".to_vec(),

@@ -445,7 +445,7 @@ mod tests {
     fn sealer() -> Sealer {
         Sealer::from_unwrapped(
             1,
-            openom_crypto::generate_dek().unwrap(),
+            openom_crypto::generate_dek().unwrap().into_inner(),
             b"tree-uuid-16byte".to_vec(),
             b"epoch-0".to_vec(),
             b"replica-0".to_vec(),
@@ -554,7 +554,7 @@ mod tests {
         let a = sealer();
         let b = Sealer::from_unwrapped(
             1,
-            openom_crypto::generate_dek().unwrap(),
+            openom_crypto::generate_dek().unwrap().into_inner(),
             b"other-tree-16byt".to_vec(),
             b"epoch-0".to_vec(),
             b"replica-9".to_vec(),

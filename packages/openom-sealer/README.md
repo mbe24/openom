@@ -65,7 +65,7 @@ use openom_sealer::{EntryKind, SealContext, Sealer};
 // already-unwrapped DEK to keep the example self-contained.
 let sealer = Sealer::from_unwrapped(
     1,
-    generate_dek().unwrap(),
+    generate_dek().unwrap().into_inner(),
     b"tree-uuid-16byte".to_vec(),
     b"epoch-0".to_vec(),
     b"replica-0".to_vec(),

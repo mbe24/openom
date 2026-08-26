@@ -22,7 +22,7 @@ use hpke::{
 
 use zeroize::Zeroizing;
 
-use crate::{CryptoError, Key32, KEY_LEN};
+use crate::{CryptoError, Dek, KEY_LEN};
 
 /// The pinned HPKE KEM / KDF / AEAD for `WRAP_METHOD_X25519_HPKE`.
 type KemImpl = X25519HkdfSha256;
@@ -106,7 +106,7 @@ pub fn generate_hpke_keypair() -> Result<HpkeKeypair, CryptoError> {
 /// the wrap can't be replayed for another member/epoch/tree.
 pub fn hpke_wrap_dek(
     recipient_public: &[u8],
-    dek: &[u8],
+    dek: &Dek,
     info: &[u8],
 ) -> Result<HpkeWrap, CryptoError> {
     let pk = <KemImpl as KemTrait>::PublicKey::from_bytes(recipient_public)
@@ -116,7 +116,7 @@ pub fn hpke_wrap_dek(
         &OpModeS::Base,
         &pk,
         info,
-        dek,
+        dek.expose(),
         &[],
         &mut rng,
     )
@@ -127,14 +127,17 @@ pub fn hpke_wrap_dek(
     })
 }
 
-/// Open an HPKE-wrapped DEK with the member's X25519 secret key. `info` must be the exact
-/// context tuple used at wrap time, or the AEAD tag fails. Returns the zeroizing DEK.
+/// Open an HPKE-wrapped DEK with the member's X25519 secret key. `recipient_secret` stays raw
+/// `&[u8]` on purpose: this is the shared crypto primitive that opens *either* a member wrap or an
+/// RRK wrap, so it is generic over "any 32-byte X25519 scalar" — the caller (`RrkSecret` vs
+/// `HpkePrivate`) is role-typed one layer up, and `.expose()`s here. `info` must be the exact context
+/// tuple used at wrap time, or the AEAD tag fails. Returns the zeroizing DEK.
 pub fn hpke_unwrap_dek(
     recipient_secret: &[u8],
     encapped_key: &[u8],
     ciphertext: &[u8],
     info: &[u8],
-) -> Result<Key32, CryptoError> {
+) -> Result<Dek, CryptoError> {
     let sk = <KemImpl as KemTrait>::PrivateKey::from_bytes(recipient_secret)
         .map_err(|_| CryptoError::Hpke)?;
     let encapped = <KemImpl as KemTrait>::EncappedKey::from_bytes(encapped_key)
@@ -153,7 +156,7 @@ pub fn hpke_unwrap_dek(
     }
     let mut key = [0u8; KEY_LEN];
     key.copy_from_slice(&plaintext);
-    Ok(zeroize::Zeroizing::new(key))
+    Ok(Dek::new(key))
 }
 
 #[cfg(test)]
@@ -162,12 +165,12 @@ mod tests {
 
     const INFO: &[u8] = b"openom:wrap:v1\x00tree\x00key\x00member";
 
-    fn dek() -> [u8; KEY_LEN] {
+    fn dek() -> Dek {
         let mut d = [0u8; KEY_LEN];
         for (i, b) in d.iter_mut().enumerate() {
             *b = i as u8;
         }
-        d
+        Dek::new(d)
     }
 
     #[test]
@@ -175,7 +178,7 @@ mod tests {
         let HpkeKeypair { secret, public } = derive_hpke_keypair(&[7u8; 32]);
         let w = hpke_wrap_dek(&public, &dek(), INFO).unwrap();
         let out = hpke_unwrap_dek(&*secret, &w.encapped_key, &w.ciphertext, INFO).unwrap();
-        assert_eq!(&*out, &dek());
+        assert_eq!(out.expose(), dek().expose());
     }
 
     #[test]

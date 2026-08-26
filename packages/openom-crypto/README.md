@@ -71,17 +71,20 @@ let header = Header {
 };
 
 let plaintext = b"the family tree";
-let ciphertext = seal(1, &header, &dek, plaintext).unwrap();
+let ciphertext = seal(1, &header, dek.expose(), plaintext).unwrap();
 assert_ne!(ciphertext, plaintext);
-assert_eq!(open(1, &header, &dek, &ciphertext).unwrap(), plaintext);
+assert_eq!(open(1, &header, dek.expose(), &ciphertext).unwrap(), plaintext);
 ```
 
 Entry points: `seal_envelope` / `open_envelope` (the high-level call — mints the nonce, builds the
 header, sets `ciphertext_hash`) are what callers should reach for first; `seal` / `open` are the
 lower-level AAD-agnostic primitives they're built on. Key material: `generate_dek`, `generate_salt`,
-`derive_kek`, `derive_root` (the full KEK/identity/HPKE split). Sharing: `wrap_dek` / `unwrap_dek`
-(passphrase- or recovery-code-derived KEK), `hpke_wrap_dek` / `hpke_unwrap_dek` (member public-key
-wrap). Recovery: `generate_recovery_code` / `parse_recovery_code`.
+`derive_kek`, `derive_root` (the full KEK/identity/HPKE split). Secret keys are returned as distinct
+role newtypes — `Dek`, `Kek`, `RrkSecret`, `HpkePrivate` — each opaque (no `Deref`/`Serialize`, a
+`Debug` that prints `Role(..)`, `.expose()` to read the bytes), so the compiler rejects passing one
+role's key where another's is expected and a key can't leak via `{:?}`. Sharing: `wrap_dek` /
+`unwrap_dek` (passphrase- or recovery-code-derived KEK), `hpke_wrap_dek` / `hpke_unwrap_dek` (member
+public-key wrap). Recovery: `generate_recovery_code` / `parse_recovery_code`.
 
 ## Position
 

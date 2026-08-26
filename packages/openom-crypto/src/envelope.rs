@@ -146,27 +146,34 @@ mod tests {
     #[test]
     fn round_trip_xchacha() {
         let dek = generate_dek().unwrap();
-        let env =
-            seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"the family tree").unwrap();
+        let env = seal_envelope(
+            dek.expose(),
+            &params(Aead::Xchacha20Poly1305),
+            b"the family tree",
+        )
+        .unwrap();
         let h = env.header.as_ref().unwrap();
         assert_eq!(h.nonce.len(), 24);
         assert_eq!(h.ciphertext_hash, Sha256::digest(&env.ciphertext).to_vec());
-        assert_eq!(open_envelope(&dek, &env).unwrap(), b"the family tree");
+        assert_eq!(
+            open_envelope(dek.expose(), &env).unwrap(),
+            b"the family tree"
+        );
     }
 
     #[test]
     fn round_trip_aesgcm() {
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Aes256Gcm), b"snapshot").unwrap();
+        let env = seal_envelope(dek.expose(), &params(Aead::Aes256Gcm), b"snapshot").unwrap();
         assert_eq!(env.header.as_ref().unwrap().nonce.len(), 12);
-        assert_eq!(open_envelope(&dek, &env).unwrap(), b"snapshot");
+        assert_eq!(open_envelope(dek.expose(), &env).unwrap(), b"snapshot");
     }
 
     #[test]
     fn nonces_are_fresh_per_seal() {
         let dek = generate_dek().unwrap();
-        let a = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
-        let b = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
+        let a = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), b"x").unwrap();
+        let b = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), b"x").unwrap();
         assert_ne!(a.header.unwrap().nonce, b.header.unwrap().nonce);
         assert_ne!(a.ciphertext, b.ciphertext); // different nonce → different ciphertext
     }
@@ -177,7 +184,7 @@ mod tests {
     #[test]
     fn no_author_leaves_entry_unattributed() {
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"x").unwrap();
+        let env = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), b"x").unwrap();
         let h = env.header.unwrap();
         assert!(
             h.author_signature.is_empty()
@@ -189,18 +196,23 @@ mod tests {
     #[test]
     fn corrupted_ciphertext_fails() {
         let dek = generate_dek().unwrap();
-        let mut env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"payload").unwrap();
+        let mut env =
+            seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), b"payload").unwrap();
         env.ciphertext[0] ^= 0xFF; // hash no longer matches, and the tag would fail too
-        assert!(matches!(open_envelope(&dek, &env), Err(CryptoError::Open)));
+        assert!(matches!(
+            open_envelope(dek.expose(), &env),
+            Err(CryptoError::Open)
+        ));
     }
 
     #[test]
     fn wrong_dek_fails() {
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), b"payload").unwrap();
+        let env =
+            seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), b"payload").unwrap();
         let other = generate_dek().unwrap();
         assert!(matches!(
-            open_envelope(&other, &env),
+            open_envelope(other.expose(), &env),
             Err(CryptoError::Open)
         ));
     }
@@ -209,12 +221,12 @@ mod tests {
     fn dev_key_seals_real_ciphertext() {
         // §16: the dev key produces real ciphertext (inspectable, but not plaintext),
         // tagged with the reserved DEV_KEY_ID the server refuses in production.
-        let dek = crate::dev_dek();
+        let dev = crate::dev_dek();
         let mut p = params(Aead::Xchacha20Poly1305);
         p.key_id = crate::DEV_KEY_ID;
-        let env = seal_envelope(&dek, &p, b"local dev tree").unwrap();
+        let env = seal_envelope(&dev, &p, b"local dev tree").unwrap();
         assert_ne!(env.ciphertext.as_slice(), b"local dev tree".as_slice());
         assert_eq!(env.header.as_ref().unwrap().key_id, crate::DEV_KEY_ID);
-        assert_eq!(open_envelope(&dek, &env).unwrap(), b"local dev tree");
+        assert_eq!(open_envelope(&dev, &env).unwrap(), b"local dev tree");
     }
 }

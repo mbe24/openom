@@ -58,12 +58,12 @@ fn rid(i: u8) -> [u8; 16] {
 fn client(
     replica: u8,
     sealer_replica: &[u8],
-    dek: openom_crypto::Key32,
+    dek: openom_crypto::Dek,
     store: Arc<MemoryStore>,
 ) -> SyncClient<Arc<MemoryStore>> {
     let sealer = Sealer::from_unwrapped(
         1,
-        dek,
+        dek.into_inner(),
         b"tree-uuid-16byte".to_vec(),
         b"epoch-0".to_vec(),
         sealer_replica.to_vec(),
@@ -296,7 +296,7 @@ fn a_transient_append_failure_queues_and_retries_without_loss() {
     let dek = generate_dek().unwrap();
     let sealer = Sealer::from_unwrapped(
         1,
-        dek.clone(),
+        dek.clone().into_inner(),
         b"tree-uuid-16byte".to_vec(),
         b"epoch-0".to_vec(),
         b"replica-a".to_vec(),
@@ -315,7 +315,7 @@ fn a_transient_append_failure_queues_and_retries_without_loss() {
     // A peer over the same store sees both edits and converges.
     let sealer_b = Sealer::from_unwrapped(
         1,
-        dek,
+        dek.into_inner(),
         b"tree-uuid-16byte".to_vec(),
         b"epoch-0".to_vec(),
         b"replica-b".to_vec(),

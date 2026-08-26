@@ -89,7 +89,7 @@ fn format_code(entropy: &[u8; RECOVERY_ENTROPY_LEN]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{derive_kek, generate_dek, unwrap_dek, wrap_dek, Key32, WrapContext};
+    use crate::{derive_kek, generate_dek, unwrap_dek, wrap_dek, WrapContext};
     use openom_protocol::v1::WrapMethod;
 
     #[test]
@@ -159,13 +159,13 @@ mod tests {
 
         // Wrap under the recovery-code-derived KEK.
         let entropy = parse_recovery_code(&code).unwrap();
-        let kek: Key32 = derive_kek(entropy.as_slice(), &params).unwrap();
+        let kek = derive_kek(entropy.as_slice(), &params).unwrap();
         let w = wrap_dek(&kek, &dek, &ctx).unwrap();
 
         // Later, from the code alone, recover the DEK.
         let entropy2 = parse_recovery_code(&code).unwrap();
         let kek2 = derive_kek(entropy2.as_slice(), &params).unwrap();
         let recovered = unwrap_dek(&kek2, &w.nonce, &w.wrapped_dek, &ctx).unwrap();
-        assert_eq!(*recovered, *dek);
+        assert_eq!(recovered.expose(), dek.expose());
     }
 }

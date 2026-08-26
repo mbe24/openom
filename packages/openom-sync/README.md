@@ -53,12 +53,12 @@ let store = Arc::new(MemoryStore::new());
 let dek = generate_dek().unwrap();
 
 let sealer_a = Sealer::from_unwrapped(
-    1, dek.clone(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-a".to_vec(),
+    1, dek.clone().into_inner(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-a".to_vec(),
 );
 let mut a = SyncClient::new(Tree::new([1u8; 16]), sealer_a, store.clone(), "tree");
 
 let sealer_b = Sealer::from_unwrapped(
-    1, dek, b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-b".to_vec(),
+    1, dek.into_inner(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-b".to_vec(),
 );
 let mut b = SyncClient::new(Tree::new([2u8; 16]), sealer_b, store.clone(), "tree");
 

@@ -300,7 +300,7 @@ mod tests {
                 keyring_revision: 3,
             }),
         };
-        let env = seal_envelope(&dek, &params, b"a change").unwrap();
+        let env = seal_envelope(dek.expose(), &params, b"a change").unwrap();
         let header = env.header.as_ref().unwrap();
         assert!(!header.author_signature.is_empty(), "signed");
         assert_eq!(header.author_member_id, "m1");
@@ -308,7 +308,7 @@ mod tests {
 
         // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
         let kr = governing(vec![member("m1", MemberRole::Admin, &author)]);
-        let plaintext = open_envelope(&dek, &env).unwrap();
+        let plaintext = open_envelope(dek.expose(), &env).unwrap();
         assert_eq!(
             verify_entry(VERSION, header, &plaintext, &kr),
             Ok(()),

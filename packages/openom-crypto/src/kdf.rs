@@ -1,14 +1,15 @@
 //! Passphrase → KEK via Argon2id (§6), plus CSPRNG helpers for DEKs and salts.
 //!
-//! The KEK never leaves this crate as raw bytes past a [`Key32`] (zeroized on drop).
-//! Argon2 params live in the wire `KdfParams` so cost can rise over time (§4) — a
-//! wrap carries the exact params it was derived under, so an old wrap stays openable.
+//! Key material leaves this crate only as a role newtype ([`Kek`] / [`Dek`]) — opaque and
+//! zeroized on drop, its bytes reachable only via `.expose()`. Argon2 params live in the wire
+//! `KdfParams` so cost can rise over time (§4) — a wrap carries the exact params it was derived
+//! under, so an old wrap stays openable.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use openom_protocol::v1::KdfParams;
 use zeroize::Zeroizing;
 
-use crate::{CryptoError, Key32, KEY_LEN, SALT_LEN};
+use crate::{CryptoError, Dek, Kek, KEY_LEN, SALT_LEN};
 
 /// Argon2id memory cost (KiB) — ~19 MiB, the OWASP minimum for Argon2id. Explicit and
 /// versioned in `KdfParams`, so it can rise without breaking old wraps.
@@ -21,7 +22,7 @@ pub const DEFAULT_ARGON2_PARALLELISM: u32 = 1;
 /// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt +
 /// costs). Deterministic in its inputs — the same passphrase + params yield the same
 /// KEK, which is what lets a second device join from the passphrase alone (§4).
-pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Key32, CryptoError> {
+pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Kek, CryptoError> {
     let p = Params::new(
         params.memory_kib,
         params.iterations,
@@ -34,7 +35,7 @@ pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Key32, Crypto
     argon
         .hash_password_into(passphrase, &params.salt, out.as_mut_slice())
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
-    Ok(out)
+    Ok(out.into())
 }
 
 /// `KdfParams` with the default Argon2id costs and the given `salt`.
@@ -48,10 +49,10 @@ pub fn default_kdf_params(salt: Vec<u8>) -> KdfParams {
 }
 
 /// A fresh random 256-bit DEK (per tree, per epoch — §6).
-pub fn generate_dek() -> Result<Key32, CryptoError> {
+pub fn generate_dek() -> Result<Dek, CryptoError> {
     let mut dek = Zeroizing::new([0u8; KEY_LEN]);
     getrandom::fill(dek.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
-    Ok(dek)
+    Ok(dek.into())
 }
 
 /// A fresh random Argon2id salt.
@@ -80,7 +81,7 @@ mod tests {
         let p = fast_params(b"salt-0123456789ab");
         let a = derive_kek(b"correct horse", &p).unwrap();
         let b = derive_kek(b"correct horse", &p).unwrap();
-        assert_eq!(*a, *b);
+        assert_eq!(a.expose(), b.expose());
     }
 
     #[test]
@@ -88,14 +89,14 @@ mod tests {
         let p = fast_params(b"salt-0123456789ab");
         let a = derive_kek(b"passphrase one", &p).unwrap();
         let b = derive_kek(b"passphrase two", &p).unwrap();
-        assert_ne!(*a, *b);
+        assert_ne!(a.expose(), b.expose());
     }
 
     #[test]
     fn different_salt_differs() {
         let a = derive_kek(b"same pass", &fast_params(b"salt-aaaaaaaaaaaa")).unwrap();
         let b = derive_kek(b"same pass", &fast_params(b"salt-bbbbbbbbbbbb")).unwrap();
-        assert_ne!(*a, *b);
+        assert_ne!(a.expose(), b.expose());
     }
 
     #[test]
@@ -112,15 +113,18 @@ mod tests {
             tree_id: vec![0x11; 16],
             ..Default::default()
         };
-        let ct = seal(1, &h, &kek, b"wrapped-by-passphrase").unwrap();
-        assert_eq!(open(1, &h, &kek, &ct).unwrap(), b"wrapped-by-passphrase");
+        let ct = seal(1, &h, kek.expose(), b"wrapped-by-passphrase").unwrap();
+        assert_eq!(
+            open(1, &h, kek.expose(), &ct).unwrap(),
+            b"wrapped-by-passphrase"
+        );
     }
 
     #[test]
     fn generated_deks_are_random_and_sized() {
         let a = generate_dek().unwrap();
         let b = generate_dek().unwrap();
-        assert_eq!(a.len(), KEY_LEN);
-        assert_ne!(*a, *b); // astronomically unlikely to collide
+        assert_eq!(a.expose().len(), KEY_LEN);
+        assert_ne!(a.expose(), b.expose()); // astronomically unlikely to collide
     }
 }

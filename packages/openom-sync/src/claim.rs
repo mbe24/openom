@@ -225,7 +225,7 @@ mod tests {
     use journal::DocStore;
     use openom_claim::envelope::{Claim, Record};
     use openom_crdt::{ChannelItem, Op, OpKind};
-    use openom_crypto::generate_dek;
+    use openom_crypto::{generate_dek, Dek};
     use openom_sealer::Sealer;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -233,12 +233,12 @@ mod tests {
 
     fn client(
         replica: &[u8],
-        dek: openom_crypto::Key32,
+        dek: Dek,
         store: Arc<MemoryStore>,
     ) -> ClaimSyncClient<Arc<MemoryStore>> {
         let sealer = Sealer::from_unwrapped(
             1,
-            dek,
+            dek.into_inner(),
             b"tree-uuid-16byte".to_vec(),
             b"epoch-0".to_vec(),
             replica.to_vec(),

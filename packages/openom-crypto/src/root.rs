@@ -20,7 +20,9 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::{derive_hpke_keypair, derive_kek, CryptoError, Key32, HPKE_PUBLIC_LEN, KEY_LEN};
+use crate::{
+    derive_hpke_keypair, derive_kek, CryptoError, HpkePrivate, Kek, HPKE_PUBLIC_LEN, KEY_LEN,
+};
 use openom_protocol::v1::KdfParams;
 
 /// HKDF `info` label for the KEK. **Frozen.**
@@ -33,9 +35,9 @@ const HKDF_HPKE_INFO: &[u8] = b"openom:hpke:v1";
 /// The keys a passphrase unlocks: the DEK-wrapping KEK, the keyring-signing identity, and
 /// the X25519 HPKE keypair (secret + public) for receiving a shared DEK wrap.
 pub struct RootKeys {
-    pub kek: Key32,
+    pub kek: Kek,
     pub identity: SigningKey,
-    pub hpke_secret: Zeroizing<[u8; 32]>,
+    pub hpke_secret: HpkePrivate,
     pub hpke_public: [u8; HPKE_PUBLIC_LEN],
 }
 
@@ -43,9 +45,10 @@ pub struct RootKeys {
 /// The passphrase should already be a [`Zeroizing`] buffer at the call site; this scrubs
 /// every intermediate (the master, the identity seed, and the HPKE IKM) on the way out.
 pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, CryptoError> {
-    // The Argon2id output is the HKDF master (derive_kek is exactly that Argon2id step).
+    // The Argon2id output is the HKDF master (derive_kek is exactly that Argon2id step). It is typed
+    // Kek by reuse; only the HKDF_KEK_INFO expansion below is the KEK the caller wraps with.
     let master = derive_kek(passphrase, params)?;
-    let hk = Hkdf::<Sha256>::new(None, master.as_slice());
+    let hk = Hkdf::<Sha256>::new(None, master.expose());
 
     let mut kek = Zeroizing::new([0u8; KEY_LEN]);
     hk.expand(HKDF_KEK_INFO, kek.as_mut_slice())
@@ -62,9 +65,9 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
     let hpke = derive_hpke_keypair(&hpke_ikm);
 
     Ok(RootKeys {
-        kek,
+        kek: kek.into(),
         identity,
-        hpke_secret: hpke.secret,
+        hpke_secret: hpke.secret.into(),
         hpke_public: hpke.public,
     })
 }
@@ -93,7 +96,7 @@ mod tests {
     fn is_deterministic_for_the_same_passphrase() {
         let a = derive_root(b"correct horse", &params()).unwrap();
         let b = derive_root(b"correct horse", &params()).unwrap();
-        assert_eq!(a.kek.as_slice(), b.kek.as_slice());
+        assert_eq!(a.kek.expose(), b.kek.expose());
         assert_eq!(a.identity.to_bytes(), b.identity.to_bytes());
         assert_eq!(
             a.identity.verifying_key().to_bytes(),
@@ -105,7 +108,7 @@ mod tests {
     fn a_different_passphrase_gives_different_keys() {
         let a = derive_root(b"passphrase-one", &params()).unwrap();
         let b = derive_root(b"passphrase-two", &params()).unwrap();
-        assert_ne!(a.kek.as_slice(), b.kek.as_slice());
+        assert_ne!(a.kek.expose(), b.kek.expose());
         assert_ne!(a.identity.to_bytes(), b.identity.to_bytes());
     }
 
@@ -113,7 +116,7 @@ mod tests {
     fn a_different_salt_gives_different_keys() {
         let a = derive_root(b"same pass", &default_kdf_params(vec![1u8; 16])).unwrap();
         let b = derive_root(b"same pass", &default_kdf_params(vec![2u8; 16])).unwrap();
-        assert_ne!(a.kek.as_slice(), b.kek.as_slice());
+        assert_ne!(a.kek.expose(), b.kek.expose());
         assert_ne!(a.identity.to_bytes(), b.identity.to_bytes());
     }
 
@@ -121,27 +124,33 @@ mod tests {
     fn kek_and_identity_are_independent() {
         // Siblings: the KEK bytes and the identity seed must not coincide.
         let r = derive_root(b"whatever", &params()).unwrap();
-        assert_ne!(r.kek.as_slice(), &r.identity.to_bytes());
+        assert_ne!(r.kek.expose(), &r.identity.to_bytes());
     }
 
     #[test]
     fn the_hpke_keypair_is_deterministic_independent_and_usable() {
-        use crate::{hpke_unwrap_dek, hpke_wrap_dek};
+        use crate::{hpke_unwrap_dek, hpke_wrap_dek, Dek};
         let a = derive_root(b"member pass", &params()).unwrap();
         let b = derive_root(b"member pass", &params()).unwrap();
         assert_eq!(
-            *a.hpke_secret, *b.hpke_secret,
+            a.hpke_secret.expose(),
+            b.hpke_secret.expose(),
             "same passphrase => same HPKE key"
         );
         assert_eq!(a.hpke_public, b.hpke_public);
         // Independent from the KEK and the identity seed (siblings).
-        assert_ne!(a.kek.as_slice(), a.hpke_secret.as_slice());
-        assert_ne!(&a.identity.to_bytes(), &*a.hpke_secret);
+        assert_ne!(a.kek.expose(), a.hpke_secret.expose());
+        assert_ne!(&a.identity.to_bytes(), a.hpke_secret.expose());
         // The derived public/secret actually form a working HPKE pair.
-        let w = hpke_wrap_dek(&a.hpke_public, &[9u8; KEY_LEN], b"info").unwrap();
-        let out =
-            hpke_unwrap_dek(&*a.hpke_secret, &w.encapped_key, &w.ciphertext, b"info").unwrap();
-        assert_eq!(&*out, &[9u8; KEY_LEN]);
+        let w = hpke_wrap_dek(&a.hpke_public, &Dek::new([9u8; KEY_LEN]), b"info").unwrap();
+        let out = hpke_unwrap_dek(
+            a.hpke_secret.expose(),
+            &w.encapped_key,
+            &w.ciphertext,
+            b"info",
+        )
+        .unwrap();
+        assert_eq!(out.expose(), &[9u8; KEY_LEN]);
 
         let c = derive_root(b"other pass", &params()).unwrap();
         assert_ne!(

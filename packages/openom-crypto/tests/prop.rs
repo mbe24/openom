@@ -35,8 +35,8 @@ proptest! {
     #[test]
     fn round_trips(plaintext in proptest::collection::vec(any::<u8>(), 0..2048), aead in aead()) {
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(aead), &plaintext).unwrap();
-        prop_assert_eq!(open_envelope(&dek, &env).unwrap(), plaintext);
+        let env = seal_envelope(dek.expose(), &params(aead), &plaintext).unwrap();
+        prop_assert_eq!(open_envelope(dek.expose(), &env).unwrap(), plaintext);
     }
 
     #[test]
@@ -46,18 +46,18 @@ proptest! {
         aead in aead(),
     ) {
         let dek = generate_dek().unwrap();
-        let mut env = seal_envelope(&dek, &params(aead), &plaintext).unwrap();
+        let mut env = seal_envelope(dek.expose(), &params(aead), &plaintext).unwrap();
         let i = idx % env.ciphertext.len();
         env.ciphertext[i] ^= 0xFF;
-        prop_assert!(open_envelope(&dek, &env).is_err());
+        prop_assert!(open_envelope(dek.expose(), &env).is_err());
     }
 
     #[test]
     fn the_wrong_key_is_rejected(plaintext in proptest::collection::vec(any::<u8>(), 0..1024)) {
         let dek = generate_dek().unwrap();
         let other = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
-        prop_assert!(open_envelope(&other, &env).is_err());
+        let env = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
+        prop_assert!(open_envelope(other.expose(), &env).is_err());
     }
 
     #[test]
@@ -68,10 +68,10 @@ proptest! {
         // The whole header is the AEAD's AAD, so changing any header field must break open —
         // even though the (untouched) ciphertext still matches its ciphertext_hash.
         let dek = generate_dek().unwrap();
-        let mut env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
+        let mut env = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
         let h = env.header.as_mut().unwrap();
         h.replica_counter = h.replica_counter.wrapping_add(bump);
-        prop_assert!(open_envelope(&dek, &env).is_err());
+        prop_assert!(open_envelope(dek.expose(), &env).is_err());
     }
 
     #[test]
@@ -80,7 +80,7 @@ proptest! {
         // decodes to must also never panic.
         if let Ok(env) = Envelope::decode(bytes.as_slice()) {
             let dek = generate_dek().unwrap();
-            let _ = open_envelope(&dek, &env);
+            let _ = open_envelope(dek.expose(), &env);
         }
     }
 
@@ -92,7 +92,7 @@ proptest! {
     ) {
         // Seal a real envelope, splice random bytes into its encoded form, re-decode, open.
         let dek = generate_dek().unwrap();
-        let env = seal_envelope(&dek, &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
+        let env = seal_envelope(dek.expose(), &params(Aead::Xchacha20Poly1305), &plaintext).unwrap();
         let mut enc = env.encode_to_vec();
         let start = at % enc.len();
         for (k, b) in smudge.iter().enumerate() {
@@ -100,7 +100,7 @@ proptest! {
             enc[j] = *b;
         }
         if let Ok(env2) = Envelope::decode(enc.as_slice()) {
-            let _ = open_envelope(&dek, &env2);
+            let _ = open_envelope(dek.expose(), &env2);
         }
     }
 }

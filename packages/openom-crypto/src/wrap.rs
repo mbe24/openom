@@ -10,7 +10,7 @@ use openom_protocol::aad::{rrk_wrap_aad, wrap_aad};
 use zeroize::Zeroizing;
 
 use crate::seal::{xchacha_open, xchacha_seal};
-use crate::{CryptoError, Key32, KEY_LEN};
+use crate::{CryptoError, Dek, Kek, RrkSecret, KEY_LEN};
 
 /// XChaCha20-Poly1305 nonce length for a wrap.
 const WRAP_NONCE_LEN: usize = 24;
@@ -32,11 +32,7 @@ pub struct WrappedDek {
 }
 
 /// Wrap `dek` under `kek`, bound to `ctx`. Generates a fresh nonce.
-pub fn wrap_dek(
-    kek: &Key32,
-    dek: &[u8; KEY_LEN],
-    ctx: &WrapContext,
-) -> Result<WrappedDek, CryptoError> {
+pub fn wrap_dek(kek: &Kek, dek: &Dek, ctx: &WrapContext) -> Result<WrappedDek, CryptoError> {
     let mut nonce = [0u8; WRAP_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
     let aad = wrap_aad(
@@ -46,7 +42,7 @@ pub fn wrap_dek(
         ctx.wrap_method,
         ctx.epoch,
     );
-    let wrapped_dek = xchacha_seal(kek, &nonce, &aad, dek)?;
+    let wrapped_dek = xchacha_seal(kek.expose(), &nonce, &aad, dek.expose())?;
     Ok(WrappedDek {
         nonce: nonce.to_vec(),
         wrapped_dek,
@@ -57,11 +53,11 @@ pub fn wrap_dek(
 /// A wrong KEK, a corrupted wrap, or a mismatched context all fail as
 /// [`CryptoError::Open`].
 pub fn unwrap_dek(
-    kek: &Key32,
+    kek: &Kek,
     nonce: &[u8],
     wrapped_dek: &[u8],
     ctx: &WrapContext,
-) -> Result<Key32, CryptoError> {
+) -> Result<Dek, CryptoError> {
     let aad = wrap_aad(
         ctx.tree_id,
         ctx.key_id,
@@ -69,20 +65,20 @@ pub fn unwrap_dek(
         ctx.wrap_method,
         ctx.epoch,
     );
-    let dek_bytes = Zeroizing::new(xchacha_open(kek, nonce, &aad, wrapped_dek)?);
+    let dek_bytes = Zeroizing::new(xchacha_open(kek.expose(), nonce, &aad, wrapped_dek)?);
     let dek: [u8; KEY_LEN] = dek_bytes
         .as_slice()
         .try_into()
         .map_err(|_| CryptoError::KeyLength)?;
-    Ok(Zeroizing::new(dek))
+    Ok(Dek::new(dek))
 }
 
 /// Wrap the recovery root key's 32-byte private key under `kek`, bound to the tree-scoped
 /// rrk AAD (not the epoch tuple). Used for the founder's passphrase and recovery-code wraps
 /// of the RRK private key.
 pub fn wrap_rrk_secret(
-    kek: &Key32,
-    secret: &[u8; KEY_LEN],
+    kek: &Kek,
+    secret: &RrkSecret,
     tree_id: &[u8],
     member_id: &str,
     wrap_method: i32,
@@ -90,7 +86,7 @@ pub fn wrap_rrk_secret(
     let mut nonce = [0u8; WRAP_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
     let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
-    let wrapped_dek = xchacha_seal(kek, &nonce, &aad, secret)?;
+    let wrapped_dek = xchacha_seal(kek.expose(), &nonce, &aad, secret.expose())?;
     Ok(WrappedDek {
         nonce: nonce.to_vec(),
         wrapped_dek,
@@ -100,20 +96,20 @@ pub fn wrap_rrk_secret(
 /// Unwrap the recovery root key's private key under `kek`, verifying the tree-scoped rrk
 /// AAD. A wrong KEK / corrupted wrap / mismatched context all fail as [`CryptoError::Open`].
 pub fn unwrap_rrk_secret(
-    kek: &Key32,
+    kek: &Kek,
     nonce: &[u8],
     wrapped: &[u8],
     tree_id: &[u8],
     member_id: &str,
     wrap_method: i32,
-) -> Result<Key32, CryptoError> {
+) -> Result<RrkSecret, CryptoError> {
     let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
-    let bytes = Zeroizing::new(xchacha_open(kek, nonce, &aad, wrapped)?);
+    let bytes = Zeroizing::new(xchacha_open(kek.expose(), nonce, &aad, wrapped)?);
     let secret: [u8; KEY_LEN] = bytes
         .as_slice()
         .try_into()
         .map_err(|_| CryptoError::KeyLength)?;
-    Ok(Zeroizing::new(secret))
+    Ok(RrkSecret::new(secret))
 }
 
 #[cfg(test)]
@@ -131,8 +127,8 @@ mod tests {
         }
     }
 
-    fn kek() -> Key32 {
-        Zeroizing::new([42u8; KEY_LEN])
+    fn kek() -> Kek {
+        Kek::new([42u8; KEY_LEN])
     }
 
     #[test]
@@ -140,14 +136,14 @@ mod tests {
         let dek = generate_dek().unwrap();
         let w = wrap_dek(&kek(), &dek, &ctx()).unwrap();
         let unwrapped = unwrap_dek(&kek(), &w.nonce, &w.wrapped_dek, &ctx()).unwrap();
-        assert_eq!(*unwrapped, *dek);
+        assert_eq!(unwrapped.expose(), dek.expose());
     }
 
     #[test]
     fn wrong_kek_fails() {
         let dek = generate_dek().unwrap();
         let w = wrap_dek(&kek(), &dek, &ctx()).unwrap();
-        let other: Key32 = Zeroizing::new([7u8; KEY_LEN]);
+        let other = Kek::new([7u8; KEY_LEN]);
         assert!(matches!(
             unwrap_dek(&other, &w.nonce, &w.wrapped_dek, &ctx()),
             Err(CryptoError::Open)
@@ -189,7 +185,7 @@ mod tests {
     fn wrapped_dek_is_not_plaintext() {
         let dek = generate_dek().unwrap();
         let w = wrap_dek(&kek(), &dek, &ctx()).unwrap();
-        assert_ne!(w.wrapped_dek.as_slice(), dek.as_slice());
+        assert_ne!(w.wrapped_dek.as_slice(), dek.expose().as_slice());
         assert!(w.wrapped_dek.len() > KEY_LEN); // + AEAD tag
     }
 }
