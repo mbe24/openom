@@ -101,17 +101,19 @@ pub struct Person {
 }
 
 /// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2). The projection's
-/// job for media is *attach the link to the canonical person*; the media *shape* is open and varies by
-/// kind — an image carries `width`/`height`, a document carries a `coverage` locator, a future kind
-/// whatever it needs — so it is carried through as the claim value's map rather than mirrored as a
-/// fixed set of typed fields. Consumers read what applies: `mediaHash` (always present), `mime`,
-/// `width`/`height`, `role`, `caption`, `crop`, `coverage`, …; `role == "portrait"` is the portrait
-/// selection (a disputable `preferred` portrait slot is a later refinement).
+/// job for media is *attach the link to the canonical person*. It breaks out the one guaranteed field
+/// — the blob's `media_hash` (the thing you fetch) — and carries the rest of the shape, which is open
+/// and varies by kind (an image has `width`/`height`, a document has a `coverage` locator, a future
+/// kind whatever it needs), as an open value map rather than a fixed set of typed fields.
+/// `role == "portrait"` is the portrait selection (a disputable `preferred` portrait slot is later).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaLink {
     /// The media_link claim's id — the stable UI handle for this link.
     pub claim_id: String,
-    /// The claim's value as an open object map (always carries at least `mediaHash`).
+    /// The linked blob's content hash — always present, fetched out-of-band from object storage.
+    pub media_hash: String,
+    /// The rest of the claim's value as an open map: `mime`, `width`/`height`, `role`, `caption`,
+    /// `crop`, `coverage`, … as they apply to this media's kind.
     pub value: serde_json::Map<String, Value>,
 }
 
@@ -791,9 +793,17 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     let mut media_by_person: BTreeMap<String, Vec<MediaLink>> = BTreeMap::new();
     for (target, cid, value) in &media_links {
         if let Some(canon) = canon_of(&eff_target(cid, target)) {
+            let media_hash = value
+                .get("mediaHash")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let mut rest = value.as_object().cloned().unwrap_or_default();
+            rest.remove("mediaHash");
             media_by_person.entry(canon).or_default().push(MediaLink {
                 claim_id: cid.clone(),
-                value: value.as_object().cloned().unwrap_or_default(),
+                media_hash,
+                value: rest,
             });
         }
     }
