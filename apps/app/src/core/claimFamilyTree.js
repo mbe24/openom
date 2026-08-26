@@ -366,6 +366,21 @@ export class ClaimFamilyTree {
     this.#bump();
   }
 
+  /** Merge store entries appended since our cursor — e.g. by another tab into the shared DocStore —
+   *  into the engine WITHOUT re-appending (the store already holds them), then refresh the view. The
+   *  cross-tab tick (tabSync.js) calls this on a BroadcastChannel ping; set-union makes the tail replay
+   *  idempotent, so the loop is dumb. Returns whether anything was merged. */
+  async syncTail() {
+    await this.#ensure();
+    const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
+    if (!updates.length) return false;
+    for (const u of updates) this.#engine.merge(toU8(u));
+    this.#cursor = cursor ?? this.#cursor + updates.length;
+    this.#materialize();
+    this.#bump();
+    return true;
+  }
+
   // ------------------------------------------------------------------ loading
   // Snapshot payload = [SNAP_TAG][u32 BE coverage cursor][engine snapshot bytes] — same envelope as the
   // treelog engine, so the DocStore stays an opaque-byte store.

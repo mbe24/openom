@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createClaimTree } from '../app/src/core/tree/index.js';
 import { ClaimFamilyTree, seedAppId, V } from '../app/src/core/claimFamilyTree.js';
+import { tabSync } from '../app/src/core/tabSync.js';
 
 const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(wasmUrl));
@@ -261,6 +262,44 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
     expect(fam.facts.marriage).toBe('1925');
     expect(cft.canUndo).toBe(false); // seeding is not undoable
     expect(seedAppId('p_dad')).toBe('p_dad'); // the symbolic id is the anchor id
+  });
+
+  it('syncTail merges another writer\'s tail from the shared store (no re-append)', async () => {
+    const store = fakeStore();
+    const a = new ClaimFamilyTree(store, 'shared', null, 'did:key:zA');
+    await a.hydrate();
+    const b = new ClaimFamilyTree(store, 'shared', null, 'did:key:zB');
+    await b.hydrate();
+
+    const p = await a.createPerson({ given: 'Ada', sex: 'F' });
+    expect(b.person(p.id)).toBeUndefined(); // b hasn't caught up
+    expect(await b.syncTail()).toBe(true);
+    expect(b.person(p.id)?.given).toBe('Ada');
+
+    // Bidirectional: b writes, a catches up; both converge, and the shared log isn't double-appended.
+    const q = await b.createPerson({ given: 'Grace', sex: 'F' });
+    await a.syncTail();
+    expect(a.person(q.id)?.given).toBe('Grace');
+    const strip = (m) => ({ ...m, families: m.families.map(({ createdAt, updatedAt, ...f }) => f) });
+    expect(strip(a.toJSON())).toEqual(strip(b.toJSON()));
+    expect(await a.syncTail()).toBe(false); // fully caught up — nothing new in the shared tail
+  });
+
+  it.skipIf(typeof BroadcastChannel === 'undefined')('tabSync converges the other tab on a ping', async () => {
+    const store = fakeStore();
+    const a = new ClaimFamilyTree(store, 'bc-doc', null, 'did:key:zA');
+    await a.hydrate();
+    const b = new ClaimFamilyTree(store, 'bc-doc', null, 'did:key:zB');
+    await b.hydrate();
+    const offA = tabSync(a, 'bc-doc');
+    const offB = tabSync(b, 'bc-doc');
+    try {
+      const p = await a.createPerson({ given: 'Ada', sex: 'F' });
+      await new Promise((r) => setTimeout(r, 80)); // let the BroadcastChannel ping + syncTail land
+      expect(b.person(p.id)?.given).toBe('Ada');
+    } finally {
+      offA(); offB();
+    }
   });
 
   it('reset clears the tree', async () => {

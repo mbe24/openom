@@ -1,5 +1,6 @@
 import { FamilyTree, seedAppId as treelogSeedAppId } from './familyTree.js';
 import { ClaimFamilyTree, seedAppId as claimSeedAppId } from './claimFamilyTree.js';
+import { tabSync } from './tabSync.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
 
@@ -24,6 +25,7 @@ export class TreeLibrary {
   #store;
   #schema;
   #open = new Map();
+  #ticks = new Map(); // docId -> cross-tab tabSync cleanup
 
   constructor(store, schema = null) {
     this.#store = store;
@@ -34,18 +36,21 @@ export class TreeLibrary {
     return this.#store.list();
   }
 
+  #track(docId, tree) {
+    this.#open.set(docId, tree);
+    this.#ticks.set(docId, tabSync(tree, docId));
+    return tree;
+  }
+
   async open(docId = 'tree-1') {
     if (this.#open.has(docId)) return this.#open.get(docId);
     const tree = new (Engine())(this.#store, docId, this.#schema);
     await tree.hydrate();
-    this.#open.set(docId, tree);
-    return tree;
+    return this.#track(docId, tree);
   }
 
   async create(docId = 'tree-' + Date.now()) {
-    const tree = new (Engine())(this.#store, docId, this.#schema);
-    this.#open.set(docId, tree);
-    return tree;
+    return this.#track(docId, new (Engine())(this.#store, docId, this.#schema));
   }
 
   async openSeeded(datasetId = 'bach') {
@@ -63,6 +68,8 @@ export class TreeLibrary {
   }
 
   close(docId) {
+    this.#ticks.get(docId)?.();
+    this.#ticks.delete(docId);
     this.#open.delete(docId);
   }
 }
