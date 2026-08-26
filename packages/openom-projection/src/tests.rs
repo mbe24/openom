@@ -312,6 +312,44 @@ fn media_links_attach_to_person() {
 }
 
 #[test]
+fn media_link_carries_the_full_shape() {
+    // The media view round-trips the full shape (§10.2), and `role == "portrait"` is the selection.
+    let recs = vec![
+        person("pA"),
+        claim(
+            "m1",
+            P_MEDIA_LINK,
+            "pA",
+            json!({
+                "mediaHash": "sha256:9f2b",
+                "mime": "image/jpeg",
+                "width": 800,
+                "height": 600,
+                "kind": "image",
+                "role": "portrait",
+                "order": 0,
+                "caption": "Ada in 1852",
+                "crop": { "x": 10, "y": 20, "w": 100, "h": 100 },
+            }),
+            "did:key:z6MkA",
+        ),
+    ];
+    let p = project(&recs, &Policy::default());
+    let m = &p.people[0].media[0];
+    assert_eq!(m.media_hash, "sha256:9f2b");
+    assert_eq!(m.mime.as_deref(), Some("image/jpeg"));
+    assert_eq!((m.width, m.height), (Some(800), Some(600)));
+    assert_eq!(m.kind.as_deref(), Some("image"));
+    assert_eq!(m.role.as_deref(), Some("portrait"));
+    assert_eq!(m.order, Some(0));
+    assert_eq!(m.caption.as_deref(), Some("Ada in 1852"));
+    assert_eq!(
+        m.crop,
+        Some(json!({ "x": 10, "y": 20, "w": 100, "h": 100 }))
+    );
+}
+
+#[test]
 fn event_place_renders_time_bounded_name() {
     // Königsberg → Kaliningrad; an 1845 birth renders the name whose validRange covers 1845.
     let recs = vec![
