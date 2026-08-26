@@ -53,8 +53,8 @@ mod seal;
 mod wrap;
 pub use envelope::{open_envelope, seal_envelope, AuthorContext, SealParams};
 pub use hpke_wrap::{
-    derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeWrap,
-    HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
+    derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeKeypair,
+    HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
 pub use kdf::{
     default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,

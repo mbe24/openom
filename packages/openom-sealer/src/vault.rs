@@ -16,7 +16,8 @@
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
     generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code,
-    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Key32, RootKeys, KEY_LEN,
+    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, HpkeKeypair, Key32,
+    RootKeys, KEY_LEN,
 };
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
@@ -108,7 +109,11 @@ pub fn provision(
 ) -> Result<Provisioned, SealerError> {
     let dek = generate_dek()?;
     let key_id = generate_salt()?.to_vec(); // 16 CSPRNG bytes as the epoch key id
-    let (rrk_secret, rrk_public) = generate_hpke_keypair()?;
+                                            // Bind by field name (not positional): the secret and public can't be swapped into the wrong role.
+    let HpkeKeypair {
+        secret: rrk_secret,
+        public: rrk_public,
+    } = generate_hpke_keypair()?;
     let secrets = new_owner_secrets(passphrase)?;
 
     let epoch0 = KeyEpoch {

@@ -59,13 +59,13 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
     let mut hpke_ikm = Zeroizing::new([0u8; 32]);
     hk.expand(HKDF_HPKE_INFO, hpke_ikm.as_mut_slice())
         .map_err(|_| CryptoError::Kdf("hkdf expand (hpke)".into()))?;
-    let (hpke_secret, hpke_public) = derive_hpke_keypair(&hpke_ikm);
+    let hpke = derive_hpke_keypair(&hpke_ikm);
 
     Ok(RootKeys {
         kek,
         identity,
-        hpke_secret: Zeroizing::new(hpke_secret),
-        hpke_public,
+        hpke_secret: hpke.secret,
+        hpke_public: hpke.public,
     })
 }
 
