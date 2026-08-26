@@ -1,0 +1,26 @@
+# openom-crdt — the claim model's convergent operation layer: a CRDT. It holds the operation *types*
+# (ChannelItem = Assert | Op; OpKind = Remove / Supersede / Revoke) and their *merge* — the pure
+# set-union fold `materialize`, which folds a set of ops into the live record set. It is NOT a log: it
+# owns no storage and appends nothing (the durable log lives in `journal`; the in-memory op set in
+# `openom-sync` / `openom-tree`). Domain-agnostic — it folds opaque records and tracks their liveness
+# (add / remove / supersede / revoke) but never interprets a claim's meaning (that is
+# openom-projection's job), and the projection can never name these types (§8.2 / principle 6).
+# Convergence is by set-union with no shared clock — the claim-model replacement for commute's merge.
+[package]
+name = "openom-crdt"
+description = "The claim model's convergent operation layer (a CRDT): the operation types (ChannelItem/Op/OpKind) plus their set-union merge (materialize) folding a set of ops into the live record set. Same-author observed-remove, clock-free, domain-agnostic. Not a log — owns no storage."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# The records an operation asserts/supersedes are openom-claim Records; ContentAddressed is the shared
+# hashing seam so an Op computes its id through the exact same JCS path a Claim does.
+openom-claim.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

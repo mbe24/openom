@@ -1,9 +1,9 @@
-# openom-oplog
+# openom-crdt
 
-> The operations channel of the claim data model: the operation type + the set-union fold that
-> materializes the live record set from a grow-only op set.
+> The claim model's convergent operation layer — a CRDT: the operation types + their set-union merge
+> (`materialize`) that folds a set of ops into the live record set. Not a log (it owns no storage).
 
-**Status:** built · operations layer — the claim-model direction, in active flux · design.data-model-claims.v1.md §8.2
+**Status:** built · convergent op layer (a CRDT) — the claim-model direction, in active flux · design.data-model-claims.v1.md §8.2
 **Last updated:** 2026-08-26
 
 ## What it is — and is not
@@ -16,16 +16,19 @@ own grow-only set that converges by **set-union**: two replicas that have seen t
 compute the same live record set, with no shared clock. `materialize` is the fold — `{ChannelItem} →
 live records` — and its output is the **snapshot** the projection reads.
 
-It is **domain-agnostic**: it folds opaque records by id and tracks their liveness; it never interprets
-what a claim *means* (that is `openom-projection`). It holds **no** transport concern — the
+It is a **CRDT, not a log**: it holds the operation *types* and their *merge* (`materialize`), but owns
+no storage and appends nothing — the durable log lives in `journal`, and the decoded in-memory op set
+in `openom-sync` / `openom-tree` (each rebuilt by replaying the journal). It is **domain-agnostic**: it
+folds opaque records by id and tracks their liveness; it never interprets what a claim *means* (that is
+`openom-projection`). It holds **no** transport concern — the
 `(replica_id, replica_counter)` idempotency dot rides the journal entry that *wraps* an item, never
 inside the content-addressed `Op` (a dot in the hash would make the same logical op hash differently
 per device and defeat dedup). And the projection depends on **no** operations crate, so the two
 channels stay structurally separate: nothing in the read model can name an `Op`.
 
-This is the claim-model successor to the **op-log half** of `openom-treelog`, minus `commute`'s
-Lamport ordering — convergence is by set-union, and the domain composition it used to bundle now lives
-in `openom-claim` (the record types) and `openom-projection` (the epistemic read model).
+It is the claim-model replacement for `commute`'s **merge**, minus the Lamport ordering — convergence
+is by set-union — and the domain composition `openom-treelog` used to bundle now lives in
+`openom-claim` (the record types) and `openom-projection` (the epistemic read model).
 
 ## Shape
 
@@ -46,20 +49,20 @@ the attribution-forgery gap a duplicate envelope would open.
 
 | id | guarantee | why it matters | verified by |
 |----|-----------|----------------|-------------|
-| **OPLOG-1** | Convergent: the fold depends only on the *set* of items — not delivery order, not duplication. | Replicas agree without a shared clock — the whole point of set-union. | `tests::materialize_is_order_independent`, `tests::duplicate_items_are_idempotent` |
-| **OPLOG-2** | Same-author observed-remove: a `Remove` / `Supersede` / `Revoke` is honored only when its author matches the target record's (or op's) author; an op naming an unknown or other-author target is a deterministic no-op everywhere. | Censorship resistance — you can remove only your own record — as a pure fold, defense-in-depth below the transport authorization. | `tests::same_author_remove_drops_the_record`, `tests::other_author_remove_is_a_noop`, `tests::remove_of_an_unknown_target_is_a_noop`, `tests::other_author_supersede_neither_removes_nor_injects`, `tests::other_author_revoke_does_not_restore` |
-| **OPLOG-3** | Supersede: atomically removes `prior` and asserts `replacement`; a chain keeps only the last; two concurrent same-author supersedes of one prior fork into two live records (documented, not LWW); a replacement attributed to another author is dropped, not injected. | Edits converge deterministically; a forged replacement can't manufacture a corroborating author. | `tests::same_author_supersede_replaces_the_record`, `tests::supersede_chain_keeps_only_the_last`, `tests::concurrent_supersede_of_one_prior_forks_into_two_live`, `tests::other_author_supersede_neither_removes_nor_injects` |
-| **OPLOG-4** | Revoke: a same-author `Revoke` of a `Remove` restores the *original* record id (non-monotone liveness, still order-independent), so attestations/citations bound to it survive the undo; revoking an unknown or non-remove op is ignored. | Undo-of-remove without minting a new id (which a re-assert would, orphaning bound facts). | `tests::same_author_revoke_restores_a_removed_record`, `tests::revoke_of_an_unknown_or_non_remove_op_is_ignored` |
-| **OPLOG-5** | Content-addressed & id-verified: an `Op`'s id is `sha256(JCS(envelope − id − signature − embedded-record-signature))`; ingest (`TryFrom` / deserialize) rejects a stated id that doesn't match and a forged embedded replacement id; signing the replacement never shifts the op id. | One hashing path (shared `ContentAddressed` seam), and there is no id-skipping ingest door. | `tests::op_id_is_stable_when_the_embedded_replacement_is_signed`, `tests::a_tampered_op_id_fails_ingest`, `tests::an_op_with_a_forged_embedded_replacement_id_fails_ingest`, `tests::op_roundtrips_through_serde_and_verifies_its_id`, `tests::channel_item_dispatches_on_type` |
+| **CRDT-1** | Convergent: the fold depends only on the *set* of items — not delivery order, not duplication. | Replicas agree without a shared clock — the whole point of set-union. | `tests::materialize_is_order_independent`, `tests::duplicate_items_are_idempotent` |
+| **CRDT-2** | Same-author observed-remove: a `Remove` / `Supersede` / `Revoke` is honored only when its author matches the target record's (or op's) author; an op naming an unknown or other-author target is a deterministic no-op everywhere. | Censorship resistance — you can remove only your own record — as a pure fold, defense-in-depth below the transport authorization. | `tests::same_author_remove_drops_the_record`, `tests::other_author_remove_is_a_noop`, `tests::remove_of_an_unknown_target_is_a_noop`, `tests::other_author_supersede_neither_removes_nor_injects`, `tests::other_author_revoke_does_not_restore` |
+| **CRDT-3** | Supersede: atomically removes `prior` and asserts `replacement`; a chain keeps only the last; two concurrent same-author supersedes of one prior fork into two live records (documented, not LWW); a replacement attributed to another author is dropped, not injected. | Edits converge deterministically; a forged replacement can't manufacture a corroborating author. | `tests::same_author_supersede_replaces_the_record`, `tests::supersede_chain_keeps_only_the_last`, `tests::concurrent_supersede_of_one_prior_forks_into_two_live`, `tests::other_author_supersede_neither_removes_nor_injects` |
+| **CRDT-4** | Revoke: a same-author `Revoke` of a `Remove` restores the *original* record id (non-monotone liveness, still order-independent), so attestations/citations bound to it survive the undo; revoking an unknown or non-remove op is ignored. | Undo-of-remove without minting a new id (which a re-assert would, orphaning bound facts). | `tests::same_author_revoke_restores_a_removed_record`, `tests::revoke_of_an_unknown_or_non_remove_op_is_ignored` |
+| **CRDT-5** | Content-addressed & id-verified: an `Op`'s id is `sha256(JCS(envelope − id − signature − embedded-record-signature))`; ingest (`TryFrom` / deserialize) rejects a stated id that doesn't match and a forged embedded replacement id; signing the replacement never shifts the op id. | One hashing path (shared `ContentAddressed` seam), and there is no id-skipping ingest door. | `tests::op_id_is_stable_when_the_embedded_replacement_is_signed`, `tests::a_tampered_op_id_fails_ingest`, `tests::an_op_with_a_forged_embedded_replacement_id_fails_ingest`, `tests::op_roundtrips_through_serde_and_verifies_its_id`, `tests::channel_item_dispatches_on_type` |
 
-Run: `node scripts/cargo.mjs test -p openom-oplog` (from the repo root; on Windows cargo runs under
+Run: `node scripts/cargo.mjs test -p openom-crdt` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage
 
 ```rust
 use openom_claim::envelope::{Claim, Record};
-use openom_oplog::{materialize, ChannelItem, Op, OpKind};
+use openom_crdt::{materialize, ChannelItem, Op, OpKind};
 
 let author = "did:key:z6MkA";
 

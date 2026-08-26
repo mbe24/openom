@@ -5,7 +5,7 @@
 //! Same transport as the treelog path: a claim update **is** a delta — an op-based change — so it
 //! seals as a `Kind::Delta` entry with `Format::OpenomOps`, appends to the tree's one log, and is
 //! deduped by the replica dot exactly like any other delta. The payload is a batch of [`ChannelItem`]s
-//! (from `openom-oplog`); inbound, they accumulate into a set that [`materialize`] folds into the live
+//! (from `openom-crdt`); inbound, they accumulate into a set that [`materialize`] folds into the live
 //! record set — the snapshot the projection reads.
 //!
 //! **Single-engine-per-app-instance:** the whole app runs either treelog or claims, so this client's
@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use journal::DocStore;
 use openom_claim::envelope::Record;
-use openom_oplog::{materialize, ChannelItem};
+use openom_crdt::{materialize, ChannelItem};
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer};
@@ -32,7 +32,7 @@ use crate::Result;
 /// isomorphic to JSON, so the content-hash identity and open-world extensibility are untouched by the
 /// choice. See OPE-199.
 pub mod codec {
-    use openom_oplog::ChannelItem;
+    use openom_crdt::ChannelItem;
     use openom_protocol::v1::Format;
 
     /// The wire `Format` tag for the current codec (`FORMAT_OPENOM_OPS` = "JSON op-log entries").
@@ -240,8 +240,8 @@ mod tests {
     use journal::memory::MemoryStore;
     use journal::DocStore;
     use openom_claim::envelope::{Claim, Record};
+    use openom_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::generate_dek;
-    use openom_oplog::{ChannelItem, Op, OpKind};
     use openom_sealer::Sealer;
     use serde_json::json;
     use std::collections::BTreeSet;

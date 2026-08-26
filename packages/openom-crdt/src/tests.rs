@@ -276,7 +276,7 @@ fn a_tampered_op_id_fails_ingest() {
     let old = name_claim("pA", "Ada", &did(1), 1);
     let mut v = serde_json::to_value(remove(&old, &did(1))).unwrap();
     v["createdBy"] = json!(did(2)); // content changed, stated id now stale
-    assert!(matches!(Op::try_from(v), Err(OplogError::IdMismatch)));
+    assert!(matches!(Op::try_from(v), Err(CrdtError::IdMismatch)));
 }
 
 #[test]

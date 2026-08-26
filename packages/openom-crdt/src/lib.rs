@@ -40,13 +40,13 @@ impl<'de> Deserialize<'de> for ChannelItem {
 }
 
 impl TryFrom<Value> for ChannelItem {
-    type Error = OplogError;
+    type Error = CrdtError;
 
     fn try_from(v: Value) -> Result<Self, Self::Error> {
         let type_uri = v
             .get("type")
             .and_then(Value::as_str)
-            .ok_or(OplogError::MissingType)?;
+            .ok_or(CrdtError::MissingType)?;
         if type_uri == OP_TYPE {
             Ok(ChannelItem::Op(Op::try_from(v)?))
         } else {
@@ -138,7 +138,7 @@ impl Op {
         created_at: i64,
         created_by: impl Into<String>,
         kind: OpKind,
-    ) -> Result<Self, OplogError> {
+    ) -> Result<Self, CrdtError> {
         let mut op = Op {
             id: String::new(),
             type_uri: OP_TYPE.to_owned(),
@@ -176,7 +176,7 @@ impl<'de> Deserialize<'de> for Op {
 }
 
 impl TryFrom<Value> for Op {
-    type Error = OplogError;
+    type Error = CrdtError;
 
     fn try_from(v: Value) -> Result<Self, Self::Error> {
         // A distinct local shape carries the structural derive, so this path never recurses through
@@ -196,9 +196,9 @@ impl TryFrom<Value> for Op {
             kind: OpKind,
         }
 
-        let raw = Raw::deserialize(&v).map_err(OplogError::Malformed)?;
+        let raw = Raw::deserialize(&v).map_err(CrdtError::Malformed)?;
         if raw.type_uri != OP_TYPE {
-            return Err(OplogError::WrongType(raw.type_uri));
+            return Err(CrdtError::WrongType(raw.type_uri));
         }
         let op = Op {
             id: raw.id,
@@ -209,7 +209,7 @@ impl TryFrom<Value> for Op {
             kind: raw.kind,
         };
         if op.id != op.content_id()? {
-            return Err(OplogError::IdMismatch);
+            return Err(CrdtError::IdMismatch);
         }
         Ok(op)
     }
@@ -217,7 +217,7 @@ impl TryFrom<Value> for Op {
 
 /// Ingesting an operation from untrusted JSON failed.
 #[derive(Debug, thiserror::Error)]
-pub enum OplogError {
+pub enum CrdtError {
     /// No `type` discriminator on the envelope.
     #[error("missing type discriminator")]
     MissingType,

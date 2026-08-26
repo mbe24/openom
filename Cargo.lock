@@ -3457,6 +3457,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-crdt"
+version = "0.1.0"
+dependencies = [
+ "openom-claim",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [
@@ -3535,17 +3546,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-oplog"
-version = "0.1.0"
-dependencies = [
- "openom-claim",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "openom-projection"
 version = "0.1.0"
 dependencies = [
@@ -3590,8 +3590,8 @@ dependencies = [
  "commute",
  "journal",
  "openom-claim",
+ "openom-crdt",
  "openom-crypto",
- "openom-oplog",
  "openom-protocol",
  "openom-sealer",
  "openom-treelog",

@@ -14,7 +14,7 @@ journal = { path = "../journal" }
 openom-protocol = { path = "../openom-protocol" }
 # The claim-model sync path (ClaimSyncClient) — independent of treelog/commute, so those can be
 # dropped later (OPE-210) without touching it. openom-claim supplies the Record the fold returns.
-openom-oplog = { path = "../openom-oplog" }
+openom-crdt = { path = "../openom-crdt" }
 openom-claim = { path = "../openom-claim" }
 serde_json.workspace = true
 thiserror.workspace = true
