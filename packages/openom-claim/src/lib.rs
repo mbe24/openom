@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use openom_sign::{Signature, SigningKey, VerifyingKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -115,10 +115,10 @@ pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> 
         return Ok(SigCheck::Bad);
     };
     let ch = content_hash(envelope)?;
-    // verify_strict additionally rejects small-order keys / torsion components (defence in depth for
-    // a load-bearing signature) — standard verify already rejects the non-canonical-S malleability.
+    // The seam's verify is verify_strict — additionally rejecting small-order keys / torsion components
+    // (defence in depth for a load-bearing signature); the weaker plain verify is not reachable here.
     Ok(
-        match vk.verify_strict(&signing_message(&ch), &Signature::from_bytes(sig)) {
+        match vk.verify(&signing_message(&ch), &Signature::from_bytes(sig)) {
             Ok(()) => SigCheck::Valid,
             Err(_) => SigCheck::Bad,
         },
@@ -156,7 +156,7 @@ impl ContentAddressed for envelope::Claim {}
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use ed25519_dalek::SigningKey;
+    use openom_sign::SigningKey;
     use proptest::prelude::*;
 
     /// Arbitrary float-free JSON objects for a claim's `value`.
@@ -175,7 +175,7 @@ mod proptests {
         // A claim signed by its createdBy key verifies; any content change flips it to Bad.
         #[test]
         fn sign_verify_and_tamper(seed in any::<[u8; 32]>(), value in arb_obj()) {
-            let key = SigningKey::from_bytes(&seed);
+            let key = SigningKey::from_seed(&seed);
             let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
             let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, 1);
             c.compute_id().unwrap();
@@ -218,7 +218,7 @@ mod tests {
     }
 
     fn signer(seed: u8) -> (SigningKey, String) {
-        let key = SigningKey::from_bytes(&[seed; 32]);
+        let key = SigningKey::from_seed(&[seed; 32]);
         let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
         (key, did)
     }

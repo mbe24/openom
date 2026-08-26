@@ -17,7 +17,7 @@
 //! signature are derived by the crate-root seam ([`crate::claim_id`] etc.); the bridge methods here
 //! ([`Claim::compute_id`], …) route the typed value through it, so there is one canonicalization path.
 
-use ed25519_dalek::SigningKey;
+use openom_sign::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -364,7 +364,7 @@ mod tests {
     use serde_json::json;
 
     fn author() -> (SigningKey, String) {
-        let key = SigningKey::from_bytes(&[5u8; 32]);
+        let key = SigningKey::from_seed(&[5u8; 32]);
         let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
         (key, did)
     }

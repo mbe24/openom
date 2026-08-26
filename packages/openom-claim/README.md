@@ -47,12 +47,12 @@ hashing/verifying an arbitrary envelope must never panic, OOM, or hang.
 ## Usage
 
 ```rust
-use ed25519_dalek::SigningKey;
+use openom_sign::SigningKey;
 use openom_claim::{claim_id, fingerprint, sign, verify, SigCheck};
 use openom_did::encode_ed25519;
 use serde_json::json;
 
-let key = SigningKey::from_bytes(&[7u8; 32]);
+let key = SigningKey::from_seed(&[7u8; 32]);
 let did = encode_ed25519(&key.verifying_key().to_bytes());
 
 let claim = json!({

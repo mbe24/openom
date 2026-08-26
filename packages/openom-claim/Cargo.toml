@@ -13,7 +13,8 @@ rust-version.workspace = true
 [dependencies]
 openom-jcs.workspace = true
 openom-did.workspace = true
-ed25519-dalek.workspace = true
+# Ed25519 sign/verify goes through the seam (verify_strict-only), never raw dalek (§0 / OPE-205).
+openom-sign.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

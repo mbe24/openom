@@ -39,11 +39,11 @@ impl Default for RecordSchema {
 mod tests {
     use super::*;
     use crate::envelope::{Claim, Verdict, TYPE_PERSON};
-    use ed25519_dalek::SigningKey;
+    use openom_sign::SigningKey;
     use serde_json::json;
 
     fn did() -> String {
-        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let key = SigningKey::from_seed(&[3u8; 32]);
         openom_did::encode_ed25519(&key.verifying_key().to_bytes())
     }
 
