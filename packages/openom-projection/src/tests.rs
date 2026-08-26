@@ -306,7 +306,7 @@ fn media_links_attach_to_person() {
     let hashes: Vec<_> = p.people[0]
         .media
         .iter()
-        .map(|m| m.media_hash.as_str())
+        .map(|m| m.value.get("mediaHash").and_then(|v| v.as_str()).unwrap())
         .collect();
     assert_eq!(hashes, vec!["sha256:9f2b", "sha256:aaaa"]); // sorted by claim id: m1 then m2
 }
@@ -336,16 +336,21 @@ fn media_link_carries_the_full_shape() {
     ];
     let p = project(&recs, &Policy::default());
     let m = &p.people[0].media[0];
-    assert_eq!(m.media_hash, "sha256:9f2b");
-    assert_eq!(m.mime.as_deref(), Some("image/jpeg"));
-    assert_eq!((m.width, m.height), (Some(800), Some(600)));
-    assert_eq!(m.kind.as_deref(), Some("image"));
-    assert_eq!(m.role.as_deref(), Some("portrait"));
-    assert_eq!(m.order, Some(0));
-    assert_eq!(m.caption.as_deref(), Some("Ada in 1852"));
+    assert_eq!(m.claim_id, "m1");
+    // The whole open value passes through verbatim (`role == "portrait"` is the portrait selection).
     assert_eq!(
-        m.crop,
-        Some(json!({ "x": 10, "y": 20, "w": 100, "h": 100 }))
+        Value::Object(m.value.clone()),
+        json!({
+            "mediaHash": "sha256:9f2b",
+            "mime": "image/jpeg",
+            "width": 800,
+            "height": 600,
+            "kind": "image",
+            "role": "portrait",
+            "order": 0,
+            "caption": "Ada in 1852",
+            "crop": { "x": 10, "y": 20, "w": 100, "h": 100 },
+        })
     );
 }
 

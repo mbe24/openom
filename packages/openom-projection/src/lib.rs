@@ -94,57 +94,25 @@ pub struct Person {
     /// borne by an event a person merely participates in are not yet folded in (a documented seam).
     pub sources: Vec<Citation>,
     /// Media linked to this person (§10.2) — portraits and other blobs, via `media_link/v1` claims
-    /// targeting the person, each carrying the full media shape (mime/size/role/caption/crop). Sorted
-    /// by claim id; a link with `role == "portrait"` is the portrait (a disputable `preferred`
-    /// portrait slot is a later refinement).
+    /// targeting the person, each carrying its claim's open value map (mediaHash + mime/size/role/
+    /// caption/crop/coverage as they apply). Sorted by claim id; a link with `role == "portrait"` is
+    /// the portrait (a disputable `preferred` portrait slot is a later refinement).
     pub media: Vec<MediaLink>,
 }
 
-/// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2). Carries the full
-/// media shape so an engine's media surface (attach / portrait / crop) round-trips.
+/// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2). The projection's
+/// job for media is *attach the link to the canonical person*; the media *shape* is open and varies by
+/// kind — an image carries `width`/`height`, a document carries a `coverage` locator, a future kind
+/// whatever it needs — so it is carried through as the claim value's map rather than mirrored as a
+/// fixed set of typed fields. Consumers read what applies: `mediaHash` (always present), `mime`,
+/// `width`/`height`, `role`, `caption`, `crop`, `coverage`, …; `role == "portrait"` is the portrait
+/// selection (a disputable `preferred` portrait slot is a later refinement).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaLink {
+    /// The media_link claim's id — the stable UI handle for this link.
     pub claim_id: String,
-    /// The content hash of the blob (out-of-band, fetched from object storage).
-    pub media_hash: String,
-    /// A coverage/locator within the blob (e.g. `{page, entry}`) for partial media, if given.
-    pub coverage: Option<Value>,
-    /// MIME type of the blob, if given (e.g. `image/jpeg`).
-    pub mime: Option<String>,
-    /// Pixel width / height of the blob, if given.
-    pub width: Option<i64>,
-    pub height: Option<i64>,
-    /// Coarse kind (e.g. `image`, `document`), if given — usually derivable from `mime`.
-    pub kind: Option<String>,
-    /// The link's role — `portrait` marks this as the person's portrait, otherwise a document/other.
-    pub role: Option<String>,
-    /// Display order among a person's media, if given.
-    pub order: Option<i64>,
-    /// Caption text, if given.
-    pub caption: Option<String>,
-    /// A crop rectangle (a native object, e.g. `{x, y, w, h}`) for the portrait, if given.
-    pub crop: Option<Value>,
-}
-
-/// Build a [`MediaLink`] view from a `media_link/v1` claim's value, carrying the full media shape
-/// (§10.2). `role == "portrait"` is the portrait selection (a disputable `preferred` portrait slot is
-/// a later refinement).
-fn media_link_view(claim_id: String, value: &Value) -> MediaLink {
-    let s = |k: &str| value.get(k).and_then(Value::as_str).map(str::to_owned);
-    let i = |k: &str| value.get(k).and_then(Value::as_i64);
-    MediaLink {
-        claim_id,
-        media_hash: s("mediaHash").unwrap_or_default(),
-        coverage: value.get("coverage").cloned(),
-        mime: s("mime"),
-        width: i("width"),
-        height: i("height"),
-        kind: s("kind"),
-        role: s("role"),
-        order: i("order"),
-        caption: s("caption"),
-        crop: value.get("crop").cloned(),
-    }
+    /// The claim's value as an open object map (always carries at least `mediaHash`).
+    pub value: serde_json::Map<String, Value>,
 }
 
 /// A source referenced by a citation, resolved from its `core/source/v1` claim. Every field is
@@ -823,10 +791,10 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     let mut media_by_person: BTreeMap<String, Vec<MediaLink>> = BTreeMap::new();
     for (target, cid, value) in &media_links {
         if let Some(canon) = canon_of(&eff_target(cid, target)) {
-            media_by_person
-                .entry(canon)
-                .or_default()
-                .push(media_link_view(cid.clone(), value));
+            media_by_person.entry(canon).or_default().push(MediaLink {
+                claim_id: cid.clone(),
+                value: value.as_object().cloned().unwrap_or_default(),
+            });
         }
     }
     for links in media_by_person.values_mut() {
