@@ -125,7 +125,7 @@ pub fn verify_transition(
     if signer_set_differs(&prior.trusted_signers, &candidate.authorized_signers) {
         let founder_signed = prior
             .founder()
-            .and_then(|s| signer_key(s))
+            .and_then(signer_key)
             .map(|k| verify_keyring(candidate, &k).is_ok())
             .unwrap_or(false);
         let unanimous = verify_keyring_all(candidate, &prior_keys).is_ok();
