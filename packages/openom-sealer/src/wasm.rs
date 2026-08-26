@@ -19,6 +19,7 @@ use openom_keyring::{
     epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, KeyringAnchor,
     VerifyingKey,
 };
+use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
@@ -262,8 +263,13 @@ pub fn provision(
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
     let passphrase = Zeroizing::new(passphrase);
-    let p =
-        vault::provision(passphrase.as_bytes(), tree_id, member_id, replica_id).map_err(to_js)?;
+    let p = vault::provision(
+        passphrase.as_bytes(),
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
+        &ReplicaId::new(replica_id),
+    )
+    .map_err(to_js)?;
     Ok(VaultResult {
         keyring: p.keyring,
         recovery_code: p.recovery_code,
@@ -286,9 +292,9 @@ pub fn unlock(
     let u = vault::unlock(
         keyring,
         passphrase.as_bytes(),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
+        &ReplicaId::new(replica_id),
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -318,9 +324,9 @@ pub fn recover(
         keyring,
         recovery_code.as_str(),
         new_passphrase.as_bytes(),
-        tree_id,
-        member_id,
-        replica_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
+        &ReplicaId::new(replica_id),
         min_revision,
     )
     .map_err(to_js)?;
@@ -350,8 +356,8 @@ pub fn change_passphrase(
         keyring,
         old_passphrase.as_bytes(),
         new_passphrase.as_bytes(),
-        tree_id,
-        member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
         min_revision,
     )
     .map_err(to_js)?;
@@ -426,10 +432,10 @@ pub fn add_member(
     let added = vault::add_member(
         keyring,
         owner_passphrase.as_bytes(),
-        tree_id,
-        owner_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(owner_member_id),
         min_revision,
-        new_member_id,
+        &MemberId::new(new_member_id),
         parse_member_role(role)?,
         member_hpke_public,
         member_author_public,
@@ -467,10 +473,10 @@ pub fn unlock_as_member(
         keyring,
         passphrase.as_bytes(),
         &kdf,
-        tree_id,
-        member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(member_id),
         &trusted,
-        replica_id,
+        &ReplicaId::new(replica_id),
         min_revision,
     )
     .map_err(to_js)?;
@@ -500,11 +506,11 @@ pub fn remove_member(
     let r = vault::remove_member(
         keyring,
         owner_passphrase.as_bytes(),
-        tree_id,
-        owner_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(owner_member_id),
         min_revision,
-        remove_member_id,
-        replica_id,
+        &MemberId::new(remove_member_id),
+        &ReplicaId::new(replica_id),
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -542,11 +548,11 @@ pub fn add_member_as_co_owner(
         keyring,
         passphrase.as_bytes(),
         &kdf,
-        tree_id,
-        co_owner_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(co_owner_member_id),
         &trusted,
         min_revision,
-        new_member_id,
+        &MemberId::new(new_member_id),
         parse_member_role(role)?,
         member_hpke_public,
         member_author_public,
@@ -584,12 +590,12 @@ pub fn remove_member_as_co_owner(
         keyring,
         passphrase.as_bytes(),
         &kdf,
-        tree_id,
-        co_owner_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(co_owner_member_id),
         &trusted,
         min_revision,
-        remove_member_id,
-        replica_id,
+        &MemberId::new(remove_member_id),
+        &ReplicaId::new(replica_id),
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -616,10 +622,10 @@ pub fn add_co_owner(
     let r = vault::add_co_owner(
         keyring,
         founder_passphrase.as_bytes(),
-        tree_id,
-        founder_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(founder_member_id),
         min_revision,
-        target_member_id,
+        &MemberId::new(target_member_id),
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -648,10 +654,10 @@ pub fn remove_co_owner(
     let r = vault::remove_co_owner(
         keyring,
         founder_passphrase.as_bytes(),
-        tree_id,
-        founder_member_id,
+        &TreeId::new(tree_id),
+        &MemberId::new(founder_member_id),
         min_revision,
-        target_member_id,
+        &MemberId::new(target_member_id),
         parse_member_role(new_role)?,
     )
     .map_err(to_js)?;

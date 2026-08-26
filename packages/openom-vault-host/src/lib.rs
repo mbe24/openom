@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openom_keyring::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
+use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::Message;
 use openom_sealer::vault;
@@ -313,7 +314,12 @@ impl<S: VaultStore> VaultHost<S> {
     ) -> Result<Provisioned> {
         let passphrase = Zeroizing::new(passphrase);
         let replica = fresh_replica()?;
-        let p = vault::provision(passphrase.as_bytes(), tree_id, member_id, &replica)?;
+        let p = vault::provision(
+            passphrase.as_bytes(),
+            &TreeId::new(tree_id),
+            &MemberId::new(member_id),
+            &ReplicaId::new(replica),
+        )?;
         let revision = self.commit_reset(tree_key, &p.keyring)?;
         let id = self.register(p.sealer)?;
         Ok(Provisioned {
@@ -344,9 +350,9 @@ impl<S: VaultStore> VaultHost<S> {
         let u = vault::unlock(
             &keyring,
             passphrase.as_bytes(),
-            tree_id,
-            member_id,
-            &replica,
+            &TreeId::new(tree_id),
+            &MemberId::new(member_id),
+            &ReplicaId::new(replica),
         )?;
         if u.revision < floor {
             // `u.sealer` drops here — Key32 is Zeroizing, so the DEK is scrubbed — before it is
@@ -392,9 +398,9 @@ impl<S: VaultStore> VaultHost<S> {
             &keyring,
             recovery_code.as_str(),
             new_passphrase.as_bytes(),
-            tree_id,
-            member_id,
-            &replica,
+            &TreeId::new(tree_id),
+            &MemberId::new(member_id),
+            &ReplicaId::new(replica),
             floor,
         )?;
         // Recovery installs a fresh founder identity with no endorsement from the old chain —
@@ -430,8 +436,8 @@ impl<S: VaultStore> VaultHost<S> {
             &keyring,
             old_passphrase.as_bytes(),
             new_passphrase.as_bytes(),
-            tree_id,
-            member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(member_id),
             floor,
         )?;
         let revision = self.commit_transition(tree_key, &keyring, &re.keyring)?;
@@ -479,10 +485,10 @@ impl<S: VaultStore> VaultHost<S> {
         let added = vault::add_member(
             &keyring,
             owner_passphrase.as_bytes(),
-            tree_id,
-            owner_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(owner_member_id),
             floor,
-            new_member_id,
+            &MemberId::new(new_member_id),
             parse_member_role(role)?,
             member_hpke_public,
             member_author_public,
@@ -519,10 +525,10 @@ impl<S: VaultStore> VaultHost<S> {
             &keyring,
             passphrase.as_bytes(),
             &kdf,
-            tree_id,
-            member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(member_id),
             &trusted,
-            &replica,
+            &ReplicaId::new(replica),
             floor,
         )?;
         self.store
@@ -558,11 +564,11 @@ impl<S: VaultStore> VaultHost<S> {
         let r = vault::remove_member(
             &keyring,
             owner_passphrase.as_bytes(),
-            tree_id,
-            owner_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(owner_member_id),
             floor,
-            remove_member_id,
-            &replica,
+            &MemberId::new(remove_member_id),
+            &ReplicaId::new(replica),
         )?;
         let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
         let id = self.register(r.sealer)?;
@@ -602,11 +608,11 @@ impl<S: VaultStore> VaultHost<S> {
             &keyring,
             passphrase.as_bytes(),
             &kdf,
-            tree_id,
-            co_owner_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(co_owner_member_id),
             &trusted,
             floor,
-            new_member_id,
+            &MemberId::new(new_member_id),
             parse_member_role(role)?,
             member_hpke_public,
             member_author_public,
@@ -643,12 +649,12 @@ impl<S: VaultStore> VaultHost<S> {
             &keyring,
             passphrase.as_bytes(),
             &kdf,
-            tree_id,
-            co_owner_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(co_owner_member_id),
             &trusted,
             floor,
-            remove_member_id,
-            &replica,
+            &MemberId::new(remove_member_id),
+            &ReplicaId::new(replica),
         )?;
         let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
         let id = self.register(r.sealer)?;
@@ -677,10 +683,10 @@ impl<S: VaultStore> VaultHost<S> {
         let r = vault::add_co_owner(
             &keyring,
             founder_passphrase.as_bytes(),
-            tree_id,
-            founder_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(founder_member_id),
             floor,
-            target_member_id,
+            &MemberId::new(target_member_id),
         )?;
         let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
         Ok(CoOwnerChanged { revision })
@@ -706,10 +712,10 @@ impl<S: VaultStore> VaultHost<S> {
         let r = vault::remove_co_owner(
             &keyring,
             founder_passphrase.as_bytes(),
-            tree_id,
-            founder_member_id,
+            &TreeId::new(tree_id),
+            &MemberId::new(founder_member_id),
             floor,
-            target_member_id,
+            &MemberId::new(target_member_id),
             parse_member_role(new_role)?,
         )?;
         let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;

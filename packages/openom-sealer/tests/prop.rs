@@ -2,6 +2,7 @@
 //! the scope/kind guards (a blob for another tree or of another kind is refused before the
 //! AEAD) and the fuzz surface: opening arbitrary bytes never panics — it returns an error.
 
+use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format};
 use openom_sealer::vault::{recover, unlock};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
@@ -85,13 +86,27 @@ proptest! {
     // member, so these return before any Argon2id runs — the fuzz stays cheap.)
     #[test]
     fn unlock_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        let r = unlock(&bytes, b"pass", b"tree-uuid-16byte", "acct-1", b"replica-0");
+        let r = unlock(
+            &bytes,
+            b"pass",
+            &TreeId::new(b"tree-uuid-16byte".as_slice()),
+            &MemberId::new("acct-1"),
+            &ReplicaId::new(b"replica-0".as_slice()),
+        );
         prop_assert!(r.is_err());
     }
 
     #[test]
     fn recover_on_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..4096)) {
-        let r = recover(&bytes, "some-code", b"pass", b"tree-uuid-16byte", "acct-1", b"replica-0", 0);
+        let r = recover(
+            &bytes,
+            "some-code",
+            b"pass",
+            &TreeId::new(b"tree-uuid-16byte".as_slice()),
+            &MemberId::new("acct-1"),
+            &ReplicaId::new(b"replica-0".as_slice()),
+            0,
+        );
         prop_assert!(r.is_err());
     }
 }
