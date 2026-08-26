@@ -34,6 +34,7 @@ extra surface.
 | **DID-4** | Decode validates every layer in order — scheme prefix, multibase marker, multicodec, key length — and returns the specific `DidError`, never a generic failure. | Callers can distinguish "not a did:key" from "wrong key type" without re-parsing. | `tests::rejects_malformed` |
 | **DID-5** | Decoding a canonical externally-produced `did:key` and re-encoding it reproduces the exact string. | Proves interop with other did:key implementations, not just internal consistency. | `tests::known_ed25519_vector` |
 | **DID-6** | `MemberDirectory` resolves both directions (`member_id → did:key`, `did:key → member_id`) and returns `None` for unknown ids. | The resolution seam must be a true bijection over the keyring's members, not encode-only. | `tests::member_directory_resolves_both_ways` |
+| **DID-7** | `DidKey` is a validated newtype: `parse`/`TryFrom` only construct one from a well-formed Ed25519 `did:key` (rejecting other methods and junk), `from_public_key`/`to_public_key` round-trip, and `From<DidKey> for String` is the transparent inverse. | The author id is a distinct type from a bare `String` — it can't be swapped with a recovery code or member id at a boundary, and every `DidKey` in hand is guaranteed decodable. | `tests::didkey_is_a_validated_newtype` |
 
 Run: `node scripts/cargo.mjs test -p openom-did` (from the repo root; on Windows cargo runs under
 WSL2/Docker). Fuzz: `cargo +nightly fuzz run decode` (from `packages/openom-did/fuzz`).

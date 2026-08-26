@@ -60,6 +60,75 @@ pub fn decode_ed25519(did: &str) -> Result<[u8; 32], DidError> {
     rest.try_into().map_err(|_| DidError::BadLength)
 }
 
+/// A validated Ed25519 `did:key` identity (`did:key:z6Mk…`). A distinct type from a bare `String`, so
+/// at a boundary it can't be swapped with a recovery code, a member id, or any other string — and it
+/// is guaranteed well-formed: every `DidKey` decodes to a 32-byte Ed25519 key. It is the stable author
+/// id stamped as a claim's `createdBy`; the envelope itself keeps `createdBy` as an opaque string, so
+/// this type guards the id where it is *handled* (vault outputs, the JS boundary), not on the wire.
+///
+/// No `Serialize`/`Deserialize`: this crate stays dependency-free (only `thiserror`), so a
+/// serialization boundary converts explicitly via [`as_str`](DidKey::as_str) / [`into_string`]
+/// (DidKey::into_string) and [`TryFrom`], keeping validation an explicit, visible step.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DidKey(String);
+
+impl DidKey {
+    /// Wrap a `did:key` string, validating that it decodes to an Ed25519 key.
+    pub fn parse(s: impl Into<String>) -> Result<Self, DidError> {
+        let s = s.into();
+        decode_ed25519(&s)?;
+        Ok(DidKey(s))
+    }
+
+    /// The `did:key` for an Ed25519 public key — always valid, never fails.
+    pub fn from_public_key(public_key: &[u8; 32]) -> Self {
+        DidKey(encode_ed25519(public_key))
+    }
+
+    /// The `did:key` string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The 32-byte Ed25519 public key this id encodes.
+    pub fn to_public_key(&self) -> [u8; 32] {
+        // Infallible: a `DidKey` is validated on construction and is immutable.
+        decode_ed25519(&self.0).expect("a DidKey is a validated did:key")
+    }
+
+    /// Consume into the owned `did:key` string — for a boundary that needs a plain `String` (a
+    /// wasm-bindgen getter, an IPC DTO).
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for DidKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for DidKey {
+    type Error = DidError;
+    fn try_from(s: String) -> Result<Self, DidError> {
+        DidKey::parse(s)
+    }
+}
+
+impl TryFrom<&str> for DidKey {
+    type Error = DidError;
+    fn try_from(s: &str) -> Result<Self, DidError> {
+        DidKey::parse(s)
+    }
+}
+
+impl From<DidKey> for String {
+    fn from(d: DidKey) -> String {
+        d.0
+    }
+}
+
 // ---- member-resolution seam ---------------------------------------------------------------------
 
 /// Resolve between an application `member_id` and its `did:key`. The keyring builds the concrete
@@ -260,6 +329,24 @@ mod tests {
         // A pathological createdBy must fail fast, not drive the O(n²) decode for minutes.
         let did = format!("did:key:z{}", "1".repeat(10_000));
         assert_eq!(decode_ed25519(&did), Err(DidError::BadLength));
+    }
+
+    #[test]
+    fn didkey_is_a_validated_newtype() {
+        let pk = [7u8; 32];
+        let d = DidKey::from_public_key(&pk);
+        assert!(d.as_str().starts_with("did:key:z6Mk"));
+        assert_eq!(d.to_public_key(), pk);
+
+        // parse round-trips a well-formed did:key and rejects junk / other DID methods.
+        assert_eq!(DidKey::parse(d.as_str().to_owned()).unwrap(), d);
+        assert!(DidKey::parse("did:web:example.com").is_err());
+        assert!(DidKey::parse("not a did:key").is_err());
+
+        // TryFrom<String> validates; From<DidKey> is the transparent inverse (for a String boundary).
+        let s: String = d.clone().into();
+        assert_eq!(DidKey::try_from(s).unwrap(), d);
+        assert!(DidKey::try_from("did:web:x".to_string()).is_err());
     }
 
     #[test]
