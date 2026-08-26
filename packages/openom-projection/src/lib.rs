@@ -308,6 +308,10 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
                 }
                 continue;
             }
+            // A record of a type this build doesn't recognize is not part of any structured view yet.
+            // It still survives in the materialized set (reachable for a generic renderer — OPE-212b/c);
+            // here it is simply skipped.
+            Record::Unknown(_) => continue,
             Record::Claim(c) => c,
         };
         let pred = c.predicate.as_str();

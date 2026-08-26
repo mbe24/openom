@@ -1,14 +1,19 @@
 //! The frozen record shapes — the typed side of `record.schema.json`.
 //!
-//! A [`Record`] is everything the store syncs — one of two shapes:
+//! A [`Record`] is everything the store syncs — one of three shapes:
 //! - [`Anchor`] — pure identity (`id`, `type`, creation provenance); a Person/Event/Place/Tree.
 //! - [`Claim`] — the universal envelope. An attestation is just a Claim with the `attest` predicate
 //!   ([`Claim::attestation`]); there is no `targetType`, and — deliberately — **no tombstone claim**:
 //!   deletion and edit-supersession are *operations*, not records, so they live in the operations
 //!   channel as their own type and can never be handed to something expecting a [`Record`].
+//! - [`Unknown`](Record::Unknown) — a record of a `type` this build doesn't recognize, kept verbatim.
+//!   The forward-compat seam: an older client carries a newer version's data type through untouched
+//!   instead of dropping it or halting the batch. Which types are *known* is a closed-world concern of
+//!   the schema + projection layer, not this ingest boundary.
 //!
 //! Parsing a [`Record`] from JSON (`TryFrom<Value>`) is the parse-don't-validate ingest boundary — it
-//! dispatches on `type` and, for a Claim, verifies its content-hash `id`. The id / fingerprint /
+//! dispatches on `type`, verifies a Claim's content-hash `id`, and preserves an unrecognized type as
+//! [`Unknown`](Record::Unknown) behind two id guards (non-empty, non-`sha256:`). The id / fingerprint /
 //! signature are derived by the crate-root seam ([`crate::claim_id`] etc.); the bridge methods here
 //! ([`Claim::compute_id`], …) route the typed value through it, so there is one canonicalization path.
 
@@ -178,15 +183,27 @@ impl Claim {
     }
 }
 
-/// A record the store syncs: a pure-identity [`Anchor`] or a [`Claim`] — the claim-model **data**.
-/// Operations (delete, edit-supersession) are **not** records; they live in the operations channel as
-/// their own type, so an operation can never be passed where a `Record` is expected (the projection,
-/// the exporter). This is the coarse data-vs-operations boundary made a compile-time fact.
+/// A record the store syncs: a pure-identity [`Anchor`], a [`Claim`], or an [`Unknown`](Record::Unknown)
+/// record whose `type` this build doesn't recognize — the claim-model **data**. Operations (delete,
+/// edit-supersession) are **not** records; they live in the operations channel as their own type, so an
+/// operation can never be passed where a `Record` is expected (the projection, the exporter). This is
+/// the coarse data-vs-operations boundary made a compile-time fact.
+///
+/// `Unknown` is the forward-compatibility seam: the mechanism (this crate + `openom-crdt`) treats a
+/// record's `type` as **shape**, not **vocabulary** — it folds records by id and author and never needs
+/// to know what a type *means*. So a record of a type introduced by a newer app version is preserved
+/// verbatim rather than rejected: an older client carries it through the fold and re-syncs it untouched
+/// instead of dropping it or halting the batch. Deciding which types are *known* (and rendering them) is
+/// a closed-world concern that lives in the schema + projection layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Record {
     Anchor(Anchor),
     Claim(Claim),
+    /// A record whose `type` is neither [`TYPE_CLAIM`] nor a known anchor type — kept as its full,
+    /// original JSON so it round-trips byte-for-byte. Its `id` is guaranteed present, non-empty, and
+    /// **not** content-addressed (`sha256:…`) — see [`Record::try_from`].
+    Unknown(Value),
 }
 
 impl<'de> Deserialize<'de> for Record {
@@ -201,11 +218,12 @@ impl<'de> Deserialize<'de> for Record {
 }
 
 impl Record {
-    /// The record's id (`sha256:…` for a Claim, a UUID for an Anchor).
+    /// The record's id (`sha256:…` for a Claim, a UUID for an Anchor, the preserved `id` for an Unknown).
     pub fn id(&self) -> &str {
         match self {
             Record::Anchor(a) => &a.id,
             Record::Claim(c) => &c.id,
+            Record::Unknown(v) => v.get("id").and_then(Value::as_str).unwrap_or_default(),
         }
     }
 
@@ -214,14 +232,17 @@ impl Record {
         match self {
             Record::Anchor(a) => &a.type_uri,
             Record::Claim(c) => &c.type_uri,
+            Record::Unknown(v) => v.get("type").and_then(Value::as_str).unwrap_or_default(),
         }
     }
 
-    /// Serialize back to the canonical JSON envelope.
+    /// Serialize back to the canonical JSON envelope. For an [`Unknown`](Record::Unknown) this is the
+    /// original JSON verbatim, so a type this build doesn't understand re-syncs unchanged.
     pub fn to_value(&self) -> Value {
         match self {
             Record::Anchor(a) => serde_json::to_value(a).expect("Anchor serializes"),
             Record::Claim(c) => c.to_value(),
+            Record::Unknown(v) => v.clone(),
         }
     }
 
@@ -230,6 +251,10 @@ impl Record {
         match self {
             Record::Anchor(a) => &a.created_by,
             Record::Claim(c) => &c.created_by,
+            Record::Unknown(v) => v
+                .get("createdBy")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
         }
     }
 
@@ -238,6 +263,10 @@ impl Record {
         match self {
             Record::Anchor(a) => a.created_at,
             Record::Claim(c) => c.created_at,
+            Record::Unknown(v) => v
+                .get("createdAt")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
         }
     }
 }
@@ -247,8 +276,10 @@ impl TryFrom<Value> for Record {
 
     /// The parse-don't-validate ingest boundary: dispatch on `type`, deserialize the matching shape,
     /// and — for a Claim, whose `id` is content-derived — verify the stored id equals a fresh hash of
-    /// its content (an Anchor's id is a random UUID, so there is nothing to recompute). After this, a
-    /// `Record` in hand means "a well-formed record whose id is correct".
+    /// its content (an Anchor's id is a random UUID, so there is nothing to recompute). A `type` this
+    /// build doesn't recognize is **not** rejected: it is preserved verbatim as an
+    /// [`Unknown`](Record::Unknown) (the forward-compat seam) after the two id guards below. After this,
+    /// a `Record` in hand means "a well-formed record whose id is correct or opaque-but-safe".
     fn try_from(v: Value) -> Result<Self, Self::Error> {
         let type_uri = v
             .get("type")
@@ -269,7 +300,22 @@ impl TryFrom<Value> for Record {
                     serde_json::from_value(v).map_err(|e| ClaimError::Malformed("anchor", e))?;
                 Ok(Record::Anchor(a))
             }
-            _ => Err(ClaimError::UnknownType(type_uri)),
+            // Unknown type: preserve opaquely so newer-version data flows through an older client
+            // untouched. Two guards keep the fold sound: the record must have a non-empty string `id`
+            // (the fold keys on it), and that id must NOT be content-addressed (`sha256:…`) — those are
+            // reserved for claims/ops, and first-writer-wins-by-id would otherwise let an unknown record
+            // squat a claim's slot. A legitimate new anchor type uses a UUID id, so it passes.
+            _ => {
+                let id = v
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or(ClaimError::MissingId)?;
+                if id.starts_with("sha256:") {
+                    return Err(ClaimError::ReservedId(id.to_owned()));
+                }
+                Ok(Record::Unknown(v))
+            }
         }
     }
 }
@@ -372,14 +418,60 @@ mod tests {
             Err(crate::ClaimError::IdMismatch)
         ));
 
-        // …and an unknown or missing type is rejected.
-        assert!(matches!(
-            Record::try_from(json!({ "type": "openom.org/core/widget/v1" })),
-            Err(crate::ClaimError::UnknownType(_))
-        ));
+        // …an unknown type is now PRESERVED opaquely (forward-compat), not rejected…
+        let widget = json!({
+            "id": "widget-uuid", "type": "openom.org/core/widget/v1",
+            "createdAt": 1, "createdBy": did, "extra": { "n": 1 },
+        });
+        let rec = Record::try_from(widget.clone()).unwrap();
+        assert!(matches!(rec, Record::Unknown(_)));
+        assert_eq!(
+            rec.to_value(),
+            widget,
+            "an unknown type round-trips verbatim"
+        );
+
+        // …but a missing type is still rejected.
         assert!(matches!(
             Record::try_from(json!({})),
             Err(crate::ClaimError::MissingType)
+        ));
+    }
+
+    #[test]
+    fn unknown_records_are_preserved_but_guarded() {
+        let (_, did) = author();
+
+        // A novel anchor type with a UUID id is preserved verbatim — including a field a typed Anchor
+        // would drop (`tonnage`), so nothing is lost when an older client carries it forward.
+        let vessel = json!({
+            "id": "vessel-uuid", "type": "openom.org/core/vessel/v1",
+            "createdAt": 7, "createdBy": did, "tonnage": 200,
+        });
+        let rec = Record::try_from(vessel.clone()).unwrap();
+        assert!(matches!(rec, Record::Unknown(_)));
+        assert_eq!(rec.id(), "vessel-uuid");
+        assert_eq!(rec.type_uri(), "openom.org/core/vessel/v1");
+        assert_eq!(rec.created_by(), did);
+        assert_eq!(rec.created_at(), 7);
+        assert_eq!(rec.to_value(), vessel);
+
+        // Deserialize (the embedded-in-an-operation path) routes through the same boundary.
+        let back: Record = serde_json::from_value(vessel.clone()).unwrap();
+        assert_eq!(back, Record::Unknown(vessel));
+
+        // An unknown type with no id can't be folded (the fold keys on id) → rejected.
+        assert!(matches!(
+            Record::try_from(json!({ "type": "openom.org/core/vessel/v1" })),
+            Err(crate::ClaimError::MissingId)
+        ));
+        // An unknown type carrying a content-addressed id would squat a claim's slot → rejected.
+        assert!(matches!(
+            Record::try_from(json!({
+                "id": "sha256:deadbeef", "type": "openom.org/core/vessel/v1",
+                "createdAt": 1, "createdBy": did,
+            })),
+            Err(crate::ClaimError::ReservedId(_))
         ));
     }
 

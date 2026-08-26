@@ -35,9 +35,15 @@ pub enum ClaimError {
     /// A record has no string `type`.
     #[error("record has no string type")]
     MissingType,
-    /// A record's `type` is neither the claim type nor a known anchor type.
-    #[error("unknown record type: {0}")]
-    UnknownType(String),
+    /// A record whose `type` this build doesn't recognize has no non-empty string `id` — it cannot be
+    /// folded (the fold keys on `id`), so it is malformed rather than merely-unknown.
+    #[error("unknown-type record has no id")]
+    MissingId,
+    /// A record whose `type` this build doesn't recognize used a content-addressed (`sha256:…`) `id`.
+    /// Those are reserved for claims and operations; an unknown record carrying one is refused so it
+    /// can never squat a claim's content-address in the first-writer-wins fold.
+    #[error("unknown-type record uses a reserved content-addressed id: {0}")]
+    ReservedId(String),
     /// A claim's stored `id` does not match a fresh hash of its content.
     #[error("claim id does not match its content")]
     IdMismatch,

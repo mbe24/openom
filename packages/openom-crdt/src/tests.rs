@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use openom_claim::envelope::{Claim, Record};
 use proptest::prelude::*;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::*;
 
@@ -331,5 +331,145 @@ proptest! {
     #[test]
     fn materialize_is_order_independent(shuffled in Just(scenario()).prop_shuffle()) {
         prop_assert_eq!(materialize(&shuffled), materialize(&scenario()));
+    }
+}
+
+// --- forward-compatibility: unknown types are opaque data, not vocabulary (OPE-212a) ----------
+//
+// The mechanism (this crate + openom-claim) treats a record's `type` and a claim's `predicate`/`value`
+// as SHAPE, never VOCABULARY: the fold keys on id + author + op-kind and must never read what a type or
+// predicate *means*. These tests lock that in so a future data-model type (e.g. `recipe`) flows through
+// an older client untouched instead of being dropped or halting the batch.
+
+/// A record of a type this build doesn't recognize, carrying an extra field a typed anchor would drop.
+fn unknown(id: &str, type_uri: &str, author: &str) -> Record {
+    Record::try_from(json!({
+        "id": id,
+        "type": type_uri,
+        "createdAt": 9,
+        "createdBy": author,
+        "note": "opaque payload",
+    }))
+    .unwrap()
+}
+
+/// Arbitrary float-free JSON objects (JCS — and therefore a claim's content hash — rejects floats).
+fn arb_value() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(Value::Null),
+        any::<bool>().prop_map(Value::Bool),
+        any::<i64>().prop_map(|n| Value::Number(n.into())),
+        ".*".prop_map(Value::String),
+    ];
+    prop::collection::hash_map("[a-z]{1,6}", leaf, 0..6)
+        .prop_map(|m| Value::Object(m.into_iter().collect()))
+}
+
+#[test]
+fn a_novel_type_is_preserved_through_the_fold() {
+    // The forcing function: before OPE-212a this `type` failed to parse at all, poisoning the batch.
+    let vessel = unknown("vessel-1", "openom.org/core/vessel/v1", &did(1));
+    assert!(matches!(vessel, Record::Unknown(_)));
+    let known = name_claim("pA", "Ada", &did(1), 1);
+
+    let live = materialize(&[
+        ChannelItem::Assert(vessel.clone()),
+        ChannelItem::Assert(known.clone()),
+    ]);
+    assert_eq!(live.len(), 2, "the unknown record folds in like any other");
+    let got = live.iter().find(|r| r.id() == "vessel-1").unwrap();
+    assert_eq!(
+        got.to_value(),
+        vessel.to_value(),
+        "preserved verbatim, incl. its extra field"
+    );
+}
+
+#[test]
+fn an_unknown_record_obeys_the_same_ops_as_any_record() {
+    // Same-author remove kills it; other-author remove is a no-op — createdBy is read from the
+    // preserved JSON, so op semantics apply to an unknown type exactly as to a known one.
+    let vessel = unknown("vessel-1", "openom.org/core/vessel/v1", &did(1));
+    assert!(materialize(&[
+        ChannelItem::Assert(vessel.clone()),
+        ChannelItem::Op(remove(&vessel, &did(1))),
+    ])
+    .is_empty());
+    assert_eq!(
+        live(&[
+            ChannelItem::Assert(vessel.clone()),
+            ChannelItem::Op(remove(&vessel, &did(2))),
+        ]),
+        ids([&vessel])
+    );
+}
+
+#[test]
+fn a_batch_with_novel_items_round_trips_through_the_codec_untouched() {
+    let vessel = unknown("vessel-1", "openom.org/core/vessel/v1", &did(1));
+    // A novel-predicate claim whose VALUE contains keys that collide with envelope field names — a
+    // mechanism that special-cased or normalized payloads would corrupt this; a blind one preserves it.
+    let novel_pred = {
+        let mut c = Claim::new(
+            "pA",
+            "x-test.example/frobnicate/v9",
+            json!({
+                "id": "nested", "type": "nested", "predicate": "nested", "signature": "nested",
+                "deep": [1, 2, { "k": true }],
+            }),
+            &did(1),
+            1,
+        );
+        c.compute_id().unwrap();
+        Record::Claim(c)
+    };
+    let known = name_claim("pB", "Ada", &did(2), 1);
+
+    // Mixed batch: nothing dropped or mutated on the wire.
+    let batch = vec![
+        ChannelItem::Assert(vessel.clone()),
+        ChannelItem::Assert(novel_pred.clone()),
+        ChannelItem::Assert(known),
+    ];
+    assert_eq!(
+        codec::decode(&codec::encode(&batch).unwrap()).unwrap(),
+        batch
+    );
+
+    // A batch of ONLY novel items still decodes — a novel item can't be masked by known neighbours.
+    let only_novel = vec![ChannelItem::Assert(vessel), ChannelItem::Assert(novel_pred)];
+    assert_eq!(
+        codec::decode(&codec::encode(&only_novel).unwrap()).unwrap(),
+        only_novel
+    );
+}
+
+proptest! {
+    /// The lock: the fold's decision (live vs dead) and its output bytes are independent of a claim's
+    /// predicate and value. Substituting an arbitrary novel predicate + arbitrary value never changes
+    /// whether a record survives, and the survivor is preserved byte-for-byte (id stays current, so no
+    /// field was normalized, coerced, or dropped). A plain encode/decode round-trip would be a
+    /// tautology; asserting invariance of the *decision* under substitution is what rules out the
+    /// mechanism secretly reading the payload.
+    #[test]
+    fn the_fold_ignores_predicate_and_value(
+        pred in "x-test\\.example/[a-z]{1,12}/v[0-9]",
+        value in arb_value(),
+        remove_it in any::<bool>(),
+    ) {
+        let mut c = Claim::new("pA", &pred, value, &did(1), 1);
+        c.compute_id().unwrap();
+        let rec = Record::Claim(c.clone());
+        let assert = ChannelItem::Assert(rec.clone());
+
+        if remove_it {
+            let rm = ChannelItem::Op(remove(&rec, &did(1)));
+            prop_assert!(materialize(&[assert, rm]).is_empty());
+        } else {
+            let mat = materialize(&[assert]);
+            prop_assert_eq!(mat.len(), 1);
+            prop_assert!(matches!(&mat[0], Record::Claim(lc) if lc.id_is_current().unwrap()));
+            prop_assert_eq!(mat[0].to_value(), c.to_value());
+        }
     }
 }

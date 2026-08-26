@@ -4,7 +4,7 @@
 > Ed25519 sign/verify.
 
 **Status:** built · load-bearing primitive · design.data-model-claims.v1.md §4
-**Last updated:** 2026-08-25
+**Last updated:** 2026-08-26
 
 ## What it is — and is not
 
@@ -38,6 +38,7 @@ can verify.
 | **CLAIM-5** | `content_ref` is a stable, field-selective content address: any key order over the same intrinsic value yields the same reference; different content never does. | `equivalent_to` / `derived_from` / `preferred.claimId` point at *what a claim says*, stable across authors — not at a minted id. | `tests::content_ref_is_stable_and_field_selective` |
 | **CLAIM-6** | The typed `envelope::Claim` (`compute_id` / `fingerprint` / `sign_with` / `verify` / `id_is_current`) routes through the exact same seam as the `Value` primitives. | Two implementations of the same hash would be exactly the silent-fork risk this crate exists to prevent. | `envelope::tests::claim_roundtrips_and_ids_match_the_seam`, `envelope::tests::compute_id_then_sign_keeps_the_id`, `envelope::tests::typed_verify_and_id_drift_detection` |
 | **CLAIM-7** | The frozen record schema (`validation` feature, Draft 2020-12) rejects a malformed id/type/`createdBy`/signature pattern and a bad attest verdict. | The typed shape and the wire shape can't silently drift apart. | `schema::tests::a_real_claim_and_anchor_validate`, `schema::tests::attestation_value_is_constrained`, `schema::tests::junk_and_malformed_ids_are_rejected` |
+| **CLAIM-8** | `Record::try_from` (the parse-don't-validate ingest boundary) verifies a Claim's content-hash id, parses a known anchor type as typed, and preserves an unrecognized `type` verbatim as `Record::Unknown` — provided it has a non-empty, non-content-addressed (`sha256:`) id; a missing id or a reserved `sha256:` id is refused. | Forward-compat: a newer version's record type flows through an older client untouched, yet an unknown record can neither be unfoldable (no id) nor squat a claim's content-address. | `envelope::tests::record_try_from_dispatches_and_verifies_the_id`, `envelope::tests::unknown_records_are_preserved_but_guarded`, `envelope::tests::record_serde_roundtrips_and_verifies_embedded_ids` |
 
 Run: `node scripts/cargo.mjs test -p openom-claim` (from the repo root; on Windows cargo runs under
 WSL2/Docker). Fuzz: `cargo +nightly fuzz run hash_and_verify` (from `packages/openom-claim/fuzz`) —
