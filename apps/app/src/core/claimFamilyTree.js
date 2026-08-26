@@ -369,6 +369,13 @@ export class ClaimFamilyTree {
   // ------------------------------------------------------------------ loading
   // Snapshot payload = [SNAP_TAG][u32 BE coverage cursor][engine snapshot bytes] — same envelope as the
   // treelog engine, so the DocStore stays an opaque-byte store.
+  #wrapSnapshot(snap, cursor) {
+    const out = new Uint8Array(5 + snap.length);
+    out[0] = SNAP_TAG;
+    new DataView(out.buffer).setUint32(1, cursor >>> 0, false);
+    out.set(snap, 5);
+    return out;
+  }
   #unwrapSnapshot(b) {
     if (b.length >= 5 && b[0] === SNAP_TAG) {
       const cursor = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(1, false);
@@ -393,6 +400,8 @@ export class ClaimFamilyTree {
     this.#cursor = cursor ?? this.#cursor + updates.length;
     this.#materialize();
     this.#bump();
+    // Bound reload cost: once the replayed tail is long, fold it into a fresh snapshot.
+    if (updates.length > COMPACT_AT) await this.compact().catch(() => {});
   }
 
   toJSON() {
@@ -888,7 +897,68 @@ export class ClaimFamilyTree {
     const mine = this.#liveMine(link.subjectId, V.P_MEDIA_LINK).find((c) => c.id === linkId);
     if (mine) await this.#commit([this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop }, this.#at())]);
   }
-  async seed() { return notImplemented('seed'); }
-  async compact() { return notImplemented('compact'); }
-  async reset() { return notImplemented('reset'); }
+  // ------------------------------------------------------------------ seed / compact / reset
+  /** Translate legacy v2 seed ops (upsertPerson / upsertFamily, from seed.js) into claim/anchor ops.
+   *  The symbolic seed id (e.g. "p_jsb") is used directly as the anchor id, so cross-references resolve
+   *  and `seedAppId` is the identity. Not undoable (seeding clears the stacks). Fact-less person-general
+   *  sources are skipped (they need a host claim — OPE-216). */
+  async seed(ops) {
+    await this.#ensure();
+    const out = [], cache = new Map();
+    for (const o of ops) {
+      if (o.type === 'upsertPerson') {
+        out.push(this.#engine.assertAnchor(o.id, V.TYPE_PERSON, this.#at()));
+        this.#applyPatch(o.id, { ...NEW_PERSON, ...o.fields }, out, cache);
+      } else if (o.type === 'upsertFamily') {
+        const spouses = o.fields.spouses ?? [];
+        const children = o.fields.children ?? [];
+        if (spouses.length >= 2) {
+          const pair = [spouses[0], spouses[1]].sort();
+          out.push(this.#engine.assertClaim(spouses[0], V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+        }
+        for (const c of children) {
+          for (const s of spouses) {
+            out.push(this.#engine.assertClaim(c, V.P_PARENT, { parentPersonId: s, kind: 'biological' }, this.#at()));
+          }
+        }
+        const facts = o.fields.facts ?? {};
+        if (facts.marriage || facts.place) {
+          const eid = uuid();
+          out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
+          out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
+          for (const s of spouses) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: s, role: 'spouse' }, this.#at()));
+          if (facts.marriage) out.push(this.#engine.assertClaim(eid, V.P_DATE, { edtf: String(facts.marriage) }, this.#at()));
+          if (facts.place) this.#setEventPlace(eid, facts.place, out);
+        }
+      }
+    }
+    await this.#commit(out); // no `before` → not undoable
+    this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
+  }
+
+  /** Fold the whole live set into one snapshot covering log entries 0..#cursor, so the next load
+   *  restores it and replays only the tail. */
+  async compact() {
+    await this.#ensure();
+    const prev = await this.#store.readSnapshot(this.#docId);
+    const payload = this.#wrapSnapshot(this.#engine.snapshot(), this.#cursor);
+    try {
+      await this.#store.putSnapshot(this.#docId, payload, prev?.version ?? null);
+    } catch (err) {
+      if (err?.name !== 'ConflictError') throw err;
+    }
+  }
+
+  async reset() {
+    await this.#store.delete(this.#docId);
+    this.#engine = await createClaimTree({ createdBy: this.#author });
+    this.#cursor = 0;
+    this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
+    this.#materialize();
+    this.#bump();
+  }
 }
+
+/** The app-facing id a seeded entity gets — for the claim engine the anchor id IS the symbolic seed
+ *  string, so this is the identity (unlike the treelog engine, which hex-encoded the byte id). */
+export const seedAppId = (symbolic) => symbolic;

@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createClaimTree } from '../app/src/core/tree/index.js';
-import { ClaimFamilyTree, V } from '../app/src/core/claimFamilyTree.js';
+import { ClaimFamilyTree, seedAppId, V } from '../app/src/core/claimFamilyTree.js';
 
 const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(wasmUrl));
@@ -242,6 +242,33 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
     expect(cft.person(p.id).given).toBe('Ada');
     await cft.undo();
     expect(cft.person(p.id).given).toBe('A');
+  });
+
+  it('seed() translates v2 upsert ops into a claim-backed tree', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-seed', null, 'did:key:zLocal');
+    await cft.seed([
+      { type: 'upsertPerson', id: 'p_dad', fields: { given: 'John', sex: 'M', birth: '1900' } },
+      { type: 'upsertPerson', id: 'p_mom', fields: { given: 'Jane', sex: 'F' } },
+      { type: 'upsertPerson', id: 'p_kid', fields: { given: 'Kid' } },
+      { type: 'upsertFamily', id: 'f_1', fields: { spouses: ['p_dad', 'p_mom'], children: ['p_kid'], facts: { marriage: '1925' } } },
+    ]);
+    expect(cft.allPeople().length).toBe(3);
+    expect(cft.person('p_dad').given).toBe('John');
+    expect(cft.person('p_dad').birth).toBe('1900');
+    const fam = cft.allFamilies()[0];
+    expect(fam.spouses.slice().sort()).toEqual(['p_dad', 'p_mom']);
+    expect(fam.children).toEqual(['p_kid']);
+    expect(fam.facts.marriage).toBe('1925');
+    expect(cft.canUndo).toBe(false); // seeding is not undoable
+    expect(seedAppId('p_dad')).toBe('p_dad'); // the symbolic id is the anchor id
+  });
+
+  it('reset clears the tree', async () => {
+    const cft = new ClaimFamilyTree(fakeStore(), 'tree-r', null, 'did:key:zLocal');
+    await cft.createPerson({ given: 'A' });
+    expect(cft.allPeople().length).toBe(1);
+    await cft.reset();
+    expect(cft.allPeople().length).toBe(0);
   });
 
   it('round-trips through a snapshot with an identical read model', async () => {
