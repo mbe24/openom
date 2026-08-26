@@ -70,6 +70,27 @@ pub enum Verdict {
     Reject,
 }
 
+/// The target of an attestation: *either* a specific claim (by its content-hash `id`) *or* a fact (by
+/// its `fingerprint`, so the vote follows the fact across authors and re-imports — §4.1). Both are
+/// `sha256:…` strings; this enum forces the writer to declare which, so a claim id and a fingerprint
+/// can't be conflated at the one place attestations are built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttestTarget {
+    /// A specific claim instance, by its content-hash `id`.
+    Claim(String),
+    /// A fact, by its dedup `fingerprint` (`sha256:` hex).
+    Fingerprint(String),
+}
+
+impl AttestTarget {
+    /// The `sha256:` string stored as the attestation's `targetId`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            AttestTarget::Claim(s) | AttestTarget::Fingerprint(s) => s,
+        }
+    }
+}
+
 /// The universal claim envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,9 +133,11 @@ impl Claim {
         }
     }
 
-    /// An attestation (`support`/`reject`) targeting a claim id or fingerprint.
+    /// An attestation (`support`/`reject`) targeting a claim (by id) or a fact (by fingerprint) — the
+    /// [`AttestTarget`] forces the caller to say which, so the two `sha256:` string kinds can't be
+    /// conflated here.
     pub fn attestation(
-        target: impl Into<String>,
+        target: &AttestTarget,
         verdict: Verdict,
         reason: Option<String>,
         created_by: impl Into<String>,
@@ -129,7 +152,7 @@ impl Claim {
             value.insert("reason".into(), Value::String(r));
         }
         Claim::new(
-            target,
+            target.as_str(),
             PREDICATE_ATTEST,
             Value::Object(value),
             created_by,
@@ -370,7 +393,7 @@ mod tests {
     fn attestation_shape() {
         let (_, did) = author();
         let att = Claim::attestation(
-            "sha256:aa",
+            &AttestTarget::Claim("sha256:aa".into()),
             Verdict::Reject,
             Some("1850 census".into()),
             &did,
