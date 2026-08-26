@@ -755,7 +755,7 @@ mod tests {
     // exactly the part worth cross-checking against a hand-written oracle.
 
     fn sk(seed: u8) -> SigningKey {
-        SigningKey::from_bytes(&[seed; 32])
+        SigningKey::from_seed(&[seed; 32])
     }
     // Fixed, distinct identities (deterministic, so proptest shrinking reproduces).
     fn founder_k() -> SigningKey {

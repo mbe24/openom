@@ -13,18 +13,19 @@ openom-protocol.workspace = true
 openom-crypto.workspace = true
 # The capability→role policy verify_entry enforces.
 openom-roles.workspace = true
-ed25519-dalek.workspace = true
-zeroize.workspace = true
-getrandom.workspace = true
+# Ed25519 key types + the verify_strict-only verify (the raw ed25519-dalek edge lives only there).
+openom-sign.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
+# Only generate_identity (a random-seed test helper) needs a CSPRNG; gated behind `test-util` so
+# production never mints a non-recoverable random identity (real identities are passphrase-derived).
+getrandom = { workspace = true, optional = true }
+
+[features]
+# Exposes generate_identity for downstream crates' tests. Off in production. Enabling it pulls getrandom.
+test-util = ["dep:getrandom"]
 
 [dev-dependencies]
 proptest.workspace = true
-
-# generate_identity uses getrandom; on wasm (via openom-sealer) enable the browser backend, mirroring
-# openom-crypto. Pair with RUSTFLAGS=--cfg getrandom_backend="wasm_js" at the wasm build step.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
-getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
-getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# This crate's own tests use generate_identity, so getrandom is always present for the test build.
+getrandom.workspace = true

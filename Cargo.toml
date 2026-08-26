@@ -48,6 +48,7 @@ openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }
+openom-sign = { path = "packages/openom-sign" }
 openom-edtf = { path = "packages/openom-edtf" }
 openom-claim = { path = "packages/openom-claim" }
 openom-projection = { path = "packages/openom-projection" }

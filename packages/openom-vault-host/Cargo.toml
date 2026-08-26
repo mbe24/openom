@@ -21,3 +21,7 @@ default = []
 # A durable SqliteVaultStore for the Tauri host. Off by default so the pure logic + its tests
 # build without SQLite; the Tauri crate turns it on.
 sqlite = ["dep:rusqlite"]
+
+[dev-dependencies]
+# Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
+openom-keyring = { workspace = true, features = ["test-util"] }

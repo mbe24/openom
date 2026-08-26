@@ -47,12 +47,14 @@ WSL2/Docker).
 ## Usage
 
 ```rust
-use openom_keyring::{bootstrap_from_genesis, generate_identity, keyring_hash, sign_keyring, verify_transition};
+use openom_keyring::{bootstrap_from_genesis, keyring_hash, sign_keyring, verify_transition, SigningKey};
 use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, Keyring, KeyWrap, Member, MemberRole, SignerRole, WrapMethod,
 };
 
-let founder = generate_identity().unwrap();
+// In production an identity is passphrase-derived (openom_crypto::derive_root); a fixed seed keeps this
+// example deterministic.
+let founder = SigningKey::from_seed(&[7u8; 32]);
 let founder_key = founder.verifying_key().to_bytes().to_vec();
 let wrap = |id: &str, method: WrapMethod| KeyWrap {
     member_id: id.into(),
@@ -116,8 +118,8 @@ Entry points: `bootstrap_from_genesis` / `bootstrap_from_oob` (first-sight trust
 `verify_transition` / `verify_walk` (chain a candidate, or a contiguous run, onto an anchor),
 `verify_reset` (the recovery/provision writer's self-check), `verify_entry` /
 `epoch_is_attributed` (landed-entry authorship), and `sign_keyring` / `verify_keyring` /
-`verify_keyring_any` / `verify_keyring_all` / `keyring_hash` / `generate_identity` (the signing
-layer underneath all of it).
+`verify_keyring_any` / `verify_keyring_all` / `keyring_hash` (the signing layer underneath all of it;
+`generate_identity` is a `test-util`-gated random-identity helper, not a production path).
 
 ## Position
 

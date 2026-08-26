@@ -15,8 +15,8 @@
 //! - Expand 32-byte outputs with the exact ASCII labels below; the HPKE output is the IKM
 //!   fed to the KEM's DeriveKeyPair (`derive_hpke_keypair`).
 
-use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
+use openom_sign::SigningKey;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -57,7 +57,7 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
     let mut seed = Zeroizing::new([0u8; 32]);
     hk.expand(HKDF_IDENTITY_INFO, seed.as_mut_slice())
         .map_err(|_| CryptoError::Kdf("hkdf expand (identity)".into()))?;
-    let identity = SigningKey::from_bytes(&seed);
+    let identity = SigningKey::from_seed(&seed);
 
     let mut hpke_ikm = Zeroizing::new([0u8; 32]);
     hk.expand(HKDF_HPKE_INFO, hpke_ikm.as_mut_slice())
@@ -72,15 +72,8 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
     })
 }
 
-// Compile-time confirmation (not an assumption) that the derived owner identity scrubs its
-// secret seed on drop — a concrete `where` bound is checked at definition, so this fails to
-// compile if ed25519-dalek's `zeroize` feature ever stops providing ZeroizeOnDrop.
-#[allow(dead_code)]
-fn _identity_zeroizes_on_drop()
-where
-    SigningKey: zeroize::ZeroizeOnDrop,
-{
-}
+// The owner identity's seed scrubs on drop — proven at compile time inside `openom-sign` (the crate
+// that owns the key type), so there is no dalek `zeroize` bound to restate here.
 
 #[cfg(test)]
 mod tests {
@@ -97,7 +90,8 @@ mod tests {
         let a = derive_root(b"correct horse", &params()).unwrap();
         let b = derive_root(b"correct horse", &params()).unwrap();
         assert_eq!(a.kek.expose(), b.kek.expose());
-        assert_eq!(a.identity.to_bytes(), b.identity.to_bytes());
+        // The identity's seed is not readable (openom-sign holds it opaquely); its public key is a
+        // faithful proxy for "same identity" — a deterministic function of the seed.
         assert_eq!(
             a.identity.verifying_key().to_bytes(),
             b.identity.verifying_key().to_bytes()
@@ -109,7 +103,10 @@ mod tests {
         let a = derive_root(b"passphrase-one", &params()).unwrap();
         let b = derive_root(b"passphrase-two", &params()).unwrap();
         assert_ne!(a.kek.expose(), b.kek.expose());
-        assert_ne!(a.identity.to_bytes(), b.identity.to_bytes());
+        assert_ne!(
+            a.identity.verifying_key().to_bytes(),
+            b.identity.verifying_key().to_bytes()
+        );
     }
 
     #[test]
@@ -117,14 +114,24 @@ mod tests {
         let a = derive_root(b"same pass", &default_kdf_params(vec![1u8; 16])).unwrap();
         let b = derive_root(b"same pass", &default_kdf_params(vec![2u8; 16])).unwrap();
         assert_ne!(a.kek.expose(), b.kek.expose());
-        assert_ne!(a.identity.to_bytes(), b.identity.to_bytes());
+        assert_ne!(
+            a.identity.verifying_key().to_bytes(),
+            b.identity.verifying_key().to_bytes()
+        );
     }
 
     #[test]
     fn kek_and_identity_are_independent() {
-        // Siblings: the KEK bytes and the identity seed must not coincide.
+        // Siblings: the KEK bytes and the identity seed must not coincide. The seed is opaque, so
+        // compare via the public key — had the seed equalled the KEK, an identity derived from the KEK
+        // bytes would reproduce this public key.
         let r = derive_root(b"whatever", &params()).unwrap();
-        assert_ne!(r.kek.expose(), &r.identity.to_bytes());
+        assert_ne!(
+            SigningKey::from_seed(r.kek.expose())
+                .verifying_key()
+                .to_bytes(),
+            r.identity.verifying_key().to_bytes()
+        );
     }
 
     #[test]
@@ -138,9 +145,15 @@ mod tests {
             "same passphrase => same HPKE key"
         );
         assert_eq!(a.hpke_public, b.hpke_public);
-        // Independent from the KEK and the identity seed (siblings).
+        // Independent from the KEK and the identity seed (siblings). The identity seed is opaque, so
+        // compare via the public key (see kek_and_identity_are_independent).
         assert_ne!(a.kek.expose(), a.hpke_secret.expose());
-        assert_ne!(&a.identity.to_bytes(), a.hpke_secret.expose());
+        assert_ne!(
+            SigningKey::from_seed(a.hpke_secret.expose())
+                .verifying_key()
+                .to_bytes(),
+            a.identity.verifying_key().to_bytes()
+        );
         // The derived public/secret actually form a working HPKE pair.
         let w = hpke_wrap_dek(&a.hpke_public, &Dek::new([9u8; KEY_LEN]), b"info").unwrap();
         let out = hpke_unwrap_dek(
@@ -161,7 +174,6 @@ mod tests {
 
     #[test]
     fn the_derived_identity_signs_and_verifies() {
-        use ed25519_dalek::{Signer, Verifier};
         let r = derive_root(b"signer", &params()).unwrap();
         let msg = b"keyring bytes";
         let sig = r.identity.sign(msg);

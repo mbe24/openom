@@ -3475,13 +3475,13 @@ dependencies = [
  "argon2",
  "chacha20poly1305 0.11.0",
  "data-encoding",
- "ed25519-dalek",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "hkdf 0.12.4",
  "hpke",
  "openom-protocol",
+ "openom-sign",
  "proptest",
  "rand_core 0.6.4",
  "sha2 0.10.9",
@@ -3520,17 +3520,14 @@ dependencies = [
 name = "openom-keyring"
 version = "0.1.0"
 dependencies = [
- "ed25519-dalek",
- "getrandom 0.2.17",
  "getrandom 0.3.4",
- "getrandom 0.4.3",
  "openom-crypto",
  "openom-protocol",
  "openom-roles",
+ "openom-sign",
  "proptest",
  "sha2 0.10.9",
  "thiserror 2.0.20",
- "zeroize",
 ]
 
 [[package]]

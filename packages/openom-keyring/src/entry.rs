@@ -10,10 +10,10 @@
 //! epoch-consistency closes the "seal under the current key, stamp an old revision" forge; the
 //! retained-old-key variant is the documented residual left for the full-A log-frontier slice.
 
-use ed25519_dalek::{Signature, VerifyingKey};
 use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
 use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
+use openom_sign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
@@ -89,10 +89,10 @@ pub fn verify_entry(
     let signature = Signature::from_bytes(&sig_bytes);
     let plaintext_hash = Sha256::digest(plaintext);
     let msg = author_signing_bytes(version, header, plaintext_hash.as_slice());
-    // verify_strict, not verify: reject small-order / torsion author keys — defense in depth matching
-    // the claim signing path, since a member's author key comes from the (shared, attacker-influenced)
-    // keyring.
-    key.verify_strict(&msg, &signature)
+    // The seam's verify is verify_strict — it rejects small-order / torsion author keys (a member's
+    // author key comes from the shared, attacker-influenced keyring), and the weaker plain verify is
+    // not reachable here by construction.
+    key.verify(&msg, &signature)
         .map_err(|_| EntryError::BadSignature)?;
 
     // Role (numeric, lower = stronger): the author's role must be at least as strong as required.
@@ -127,7 +127,6 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::{generate_identity, SigningKey};
-    use ed25519_dalek::Signer;
     use openom_protocol::v1::{KeyEpoch, Member, MemberRole, SignerRole};
 
     const KID: &[u8] = b"epoch-key-0";

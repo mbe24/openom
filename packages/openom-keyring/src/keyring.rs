@@ -16,24 +16,30 @@
 //! client watermark concern (the caller persists the highest `revision`/last hash + the
 //! trusted signer set, and rejects a regression or an unendorsed set change, §4/§10).
 
-use ed25519_dalek::Signer;
 use openom_protocol::aad::keyring_signing_bytes;
 use openom_protocol::v1::{Keyring, KeyringSignature};
 use sha2::{Digest, Sha256};
 
 use openom_crypto::CryptoError;
 
-pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+// The Ed25519 key types come from the signing seam — the one crate that holds the ed25519-dalek edge —
+// whose only verify is verify_strict. Downstream (openom-sealer, openom-vault-host) consume these
+// through this re-export, not ed25519-dalek directly, so retargeting it here migrates them for free.
+// Load-bearing: keep these names resolving here.
+pub use openom_sign::{Signature, SigningKey, VerifyingKey};
 
 /// Ed25519 signature length in bytes.
 const SIG_LEN: usize = 64;
 
-/// Generate a fresh signer identity (Ed25519). The seed is protected like the DEK
-/// (passphrase-wrapped, §6); `SigningKey` zeroizes on drop.
+/// Generate a random signer identity (Ed25519) — a **test helper**, not a production path: real
+/// identities are passphrase-derived (`openom_crypto::derive_root`) so they can be re-derived and
+/// recovered, whereas a random one cannot. Gated behind `test-util` (and the crate's own tests) so
+/// production code can never mint a non-recoverable identity. `SigningKey` zeroizes on drop.
+#[cfg(any(test, feature = "test-util"))]
 pub fn generate_identity() -> Result<SigningKey, CryptoError> {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).map_err(|e| CryptoError::Rng(e.to_string()))?;
-    Ok(SigningKey::from_bytes(&seed))
+    Ok(SigningKey::from_seed(&seed))
 }
 
 /// Append a signature from `signing_key` to the keyring (the any-of model): compute the
@@ -66,10 +72,10 @@ pub fn verify_keyring_any(
         };
         let signature = Signature::from_bytes(&sig_bytes);
         for key in trusted {
-            // verify_strict, not verify: additionally reject small-order / torsion public keys, matching
-            // the claim signing path (openom-claim). A keyring signer's key is attacker-influenced in a
-            // shared tree, so the load-bearing keyring signature gets the same defense in depth.
-            if key.verify_strict(&msg, &signature).is_ok() {
+            // The seam's verify is verify_strict — it additionally rejects small-order / torsion public
+            // keys (a keyring signer's key is attacker-influenced in a shared tree), and the plain,
+            // weaker verify is not reachable from here by construction.
+            if key.verify(&msg, &signature).is_ok() {
                 return Ok(*key);
             }
         }

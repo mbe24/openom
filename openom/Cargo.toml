@@ -60,5 +60,7 @@ tower-http.workspace = true
 [dev-dependencies]
 # Integration tests drive the router in-process via ServiceExt::oneshot (no socket).
 tower = { version = "0.5", features = ["util"] }
+# tests/api.rs mints ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
+openom-keyring = { workspace = true, features = ["test-util"] }
 # Metering tests seed accounts with tiny caps directly, to drive the rate/capacity gates.
 sqlx.workspace = true

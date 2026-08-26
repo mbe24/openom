@@ -8,9 +8,9 @@
 //! concern: `seal_envelope` seals the plaintext **as given** and just records
 //! `params.compression`, so zstd (and its WASM cost) stays out of this layer.
 
-use ed25519_dalek::{Signer, SigningKey};
 use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
+use openom_sign::SigningKey;
 use sha2::{Digest, Sha256};
 
 use crate::{open, seal, CryptoError, KEY_LEN};
