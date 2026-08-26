@@ -11,6 +11,10 @@ pub mod v1 {
 /// byte string a Rust and a WASM/JS build must produce identically.
 pub mod aad;
 
+/// Identity newtypes (`TreeId` / `ReplicaId` / `MemberId`) so the vault surface can't confuse one
+/// opaque id byte-string for another at a call site. Wrap the proto's own fields; no wire change.
+pub mod ids;
+
 /// The `Envelope.version` this build reads and writes (data-format spec §3). An
 /// envelope carrying a higher version is opened read-only rather than misread.
 pub const ENVELOPE_VERSION: u32 = 1;
