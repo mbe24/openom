@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use openom_claim::envelope::{Anchor, Claim, Record};
+use openom_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
 use openom_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_projection::{project, Policy, Projection};
 use serde_json::Value;
@@ -65,11 +65,17 @@ impl Tree {
             created_at,
         );
         c.compute_id()?;
-        self.emit(ChannelItem::Assert(Record::Claim(c)))
+        self.emit(vec![ChannelItem::Assert(Record::Claim(c))])
     }
 
     /// Assert an identity anchor (Person / Event / Place / Tree) with the given id, authored by this
     /// replica. Anchor ids are opaque (a caller-minted UUID) — the engine does not generate them.
+    ///
+    /// The anchor is born with its **existence claim** (`PREDICATE_EXISTENCE`, value `{}`) in the same
+    /// batch — the single root proposition "this individual is real". It is the citation host for
+    /// evidence of existence and the target other authors `attest`/refute; they never mint a second
+    /// existence claim. Deriving it from the anchor's own fields (no fresh randomness) keeps a
+    /// crash-retry idempotent: re-asserting the same anchor re-mints the identical claim id.
     pub fn assert_anchor(
         &mut self,
         id: &str,
@@ -82,7 +88,18 @@ impl Tree {
             created_at,
             created_by: self.created_by.clone(),
         };
-        self.emit(ChannelItem::Assert(Record::Anchor(anchor)))
+        let mut existence = Claim::new(
+            id,
+            PREDICATE_EXISTENCE,
+            Value::Object(serde_json::Map::new()),
+            self.created_by.as_str(),
+            created_at,
+        );
+        existence.compute_id()?;
+        self.emit(vec![
+            ChannelItem::Assert(Record::Anchor(anchor)),
+            ChannelItem::Assert(Record::Claim(existence)),
+        ])
     }
 
     /// Remove one of this author's own records by id (same-author observed-remove). Undoable by
@@ -95,7 +112,7 @@ impl Tree {
                 target: target.to_owned(),
             },
         )?;
-        self.emit(ChannelItem::Op(op))
+        self.emit(vec![ChannelItem::Op(op)])
     }
 
     /// Edit: atomically supersede the `prior` record with a fresh claim value, authored by this
@@ -124,7 +141,7 @@ impl Tree {
                 replacement: Box::new(Record::Claim(c)),
             },
         )?;
-        self.emit(ChannelItem::Op(op))
+        self.emit(vec![ChannelItem::Op(op)])
     }
 
     /// Undo a same-author `Remove` by its operation id — restores the original record (before the GC
@@ -137,14 +154,16 @@ impl Tree {
                 removal: removal_op_id.to_owned(),
             },
         )?;
-        self.emit(ChannelItem::Op(op))
+        self.emit(vec![ChannelItem::Op(op)])
     }
 
-    /// Encode the minted item as a one-item batch, track it locally, and return the bytes. (A caller
-    /// batching several edits into one entry can `merge` the concatenated set instead — pre-release.)
-    fn emit(&mut self, item: ChannelItem) -> Result<Vec<u8>, TreeError> {
-        let bytes = codec::encode(std::slice::from_ref(&item))?;
-        self.items.insert(item.id().to_owned(), item);
+    /// Encode the minted item(s) as one batch, track them locally, and return the bytes. Most edits emit
+    /// a single item; `assert_anchor` emits two (anchor + existence claim) so they land atomically.
+    fn emit(&mut self, items: Vec<ChannelItem>) -> Result<Vec<u8>, TreeError> {
+        let bytes = codec::encode(&items)?;
+        for item in items {
+            self.items.insert(item.id().to_owned(), item);
+        }
         Ok(bytes)
     }
 

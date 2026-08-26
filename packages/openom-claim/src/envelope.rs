@@ -31,6 +31,11 @@ pub const TYPE_PLACE: &str = "openom.org/core/place/v1";
 pub const TYPE_TREE: &str = "openom.org/core/tree/v1";
 
 pub const PREDICATE_ATTEST: &str = "openom.org/core/attest/v1";
+/// The predicate of the one **existence** claim minted alongside every anchor — the proposition "this
+/// individual is real", value `{}`. It is the single root a person's existence hangs on: it is the
+/// citation host for evidence of existence, and other authors support/refute it via `attest` rather
+/// than minting their own. Auto-minted by the engine (see `openom_tree::Tree::assert_anchor`).
+pub const PREDICATE_EXISTENCE: &str = "openom.org/core/existence/v1";
 
 /// A pure identity anchor: `{ id, type, createdAt, createdBy }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

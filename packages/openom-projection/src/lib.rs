@@ -29,6 +29,7 @@ const P_PLACE_POINT: &str = "openom.org/core/place_point/v1"; // {latitude, long
 const P_PLACE_NAME: &str = "openom.org/core/place_name/v1"; // {name, validRange} — time-bounded, §10.3
 const P_PART_OF: &str = "openom.org/core/part_of/v1"; // {parentPlaceId} — modern nesting
 const P_MEDIA_LINK: &str = "openom.org/core/media_link/v1"; // {mediaHash, coverage?} — blob ↔ anchor
+const P_EXISTENCE: &str = "openom.org/core/existence/v1"; // the root "this individual is real", value {}
 const DEFAULT_KIND: &str = "biological";
 const DEFAULT_ROLE: &str = "partner";
 
@@ -609,6 +610,13 @@ fn collect(deduped: &[&Record]) -> Collected {
                         info.fingerprint = fingerprint_str(c);
                     }
                 }
+            }
+            P_EXISTENCE => {
+                // The root existence proposition, auto-minted with each anchor (value {}). Any citation
+                // it carries is already harvested above into `citations` (→ Person.sources), and any
+                // attestation targeting it is collected under P_ATTEST for the deferred existence-dispute
+                // view; the claim itself asserts no structured fact, so it is consumed here rather than
+                // surfaced as an unknown/"other" claim. Its target is the anchor, already a node.
             }
             // A predicate this build doesn't recognize: keep the claim verbatim (OPE-212b). It is
             // NOT added to `nodes` — an unknown predicate must not mint a spurious person — and is

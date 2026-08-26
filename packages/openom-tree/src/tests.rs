@@ -127,14 +127,16 @@ fn live_claims_of_any_returns_every_predicate_including_unrecognized() {
     )
     .unwrap();
 
-    // Both the known name claim and the unrecognized-predicate claim come back — a generic renderer
-    // can enumerate the whole subject regardless of what the projection understands.
+    // The known name claim, the unrecognized-predicate claim, AND the existence claim auto-minted with
+    // the anchor all come back — a generic renderer can enumerate the whole subject regardless of what
+    // the projection understands.
     let all = a.live_claims_of_any("pA");
-    assert_eq!(all.len(), 2);
+    assert_eq!(all.len(), 3);
     let preds: std::collections::BTreeSet<&str> =
         all.iter().filter_map(|c| c["predicate"].as_str()).collect();
     assert!(preds.contains(NAME));
     assert!(preds.contains("openom.org/x/occupation/v1"));
+    assert!(preds.contains(openom_claim::envelope::PREDICATE_EXISTENCE));
 
     assert!(a.live_claims_of_any("nope").is_empty());
 }
