@@ -320,7 +320,7 @@ impl<S: VaultStore> VaultHost<S> {
             sealer_id: id,
             revision,
             recovery_code: p.recovery_code,
-            did_key: p.did_key,
+            did_key: p.did_key.into_string(),
         })
     }
 
@@ -366,7 +366,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Unlocked {
             sealer_id: id,
             revision: u.revision,
-            did_key: u.did_key,
+            did_key: u.did_key.into_string(),
         })
     }
 
@@ -405,7 +405,7 @@ impl<S: VaultStore> VaultHost<S> {
             sealer_id: id,
             revision,
             recovery_code: r.recovery_code,
-            did_key: r.did_key,
+            did_key: r.did_key.into_string(),
         })
     }
 
@@ -532,7 +532,7 @@ impl<S: VaultStore> VaultHost<S> {
         Ok(Unlocked {
             sealer_id: id,
             revision: u.revision,
-            did_key: u.did_key,
+            did_key: u.did_key.into_string(),
         })
     }
 

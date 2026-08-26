@@ -267,7 +267,7 @@ pub fn provision(
     Ok(VaultResult {
         keyring: p.keyring,
         recovery_code: p.recovery_code,
-        did_key: p.did_key,
+        did_key: p.did_key.into_string(),
         revision: 1,
         sealer: Some(WasmSealer { inner: p.sealer }),
     })
@@ -294,7 +294,7 @@ pub fn unlock(
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
-        did_key: u.did_key,
+        did_key: u.did_key.into_string(),
         revision: u.revision,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
@@ -327,7 +327,7 @@ pub fn recover(
     Ok(VaultResult {
         keyring: r.keyring,
         recovery_code: r.recovery_code,
-        did_key: r.did_key,
+        did_key: r.did_key.into_string(),
         revision: r.revision,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -477,7 +477,7 @@ pub fn unlock_as_member(
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
-        did_key: u.did_key,
+        did_key: u.did_key.into_string(),
         revision: u.revision,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })

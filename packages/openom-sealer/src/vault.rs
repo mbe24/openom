@@ -19,6 +19,7 @@ use openom_crypto::{
     recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
     HpkePrivate, Kek, RootKeys, RrkSecret,
 };
+use openom_did::DidKey;
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
 use openom_protocol::v1::{
@@ -63,7 +64,7 @@ pub struct Provisioned {
     pub sealer: SealerSet,
     /// The owner's stable author id — a `did:key` over their PUBLIC identity key. Public; stamped as
     /// `createdBy` on claims. Distinct from the per-context sync replica id.
-    pub did_key: String,
+    pub did_key: DidKey,
 }
 
 /// Result of [`unlock`]: the sealer set (all epochs the caller can reach) plus the keyring
@@ -73,7 +74,7 @@ pub struct Unlocked {
     pub revision: u32,
     /// The member's stable author id — a `did:key` over their PUBLIC identity key (see
     /// [`Provisioned::did_key`]). Stable across a member's tabs/reloads.
-    pub did_key: String,
+    pub did_key: DidKey,
 }
 
 /// Result of [`recover`]: a freshly re-provisioned keyring + a NEW recovery code (both to
@@ -85,7 +86,7 @@ pub struct Recovered {
     pub revision: u32,
     /// The NEW owner's stable author id — a `did:key` over the new public identity key (recovery
     /// mints a fresh identity, so this differs from the pre-recovery did:key).
-    pub did_key: String,
+    pub did_key: DidKey,
 }
 
 /// Result of [`change_passphrase`]: the new keyring + a rotated recovery code + new revision.
@@ -131,7 +132,7 @@ pub fn provision(
     };
     let recovery_key = build_recovery_key(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?;
     let author_public = secrets.root.identity.verifying_key().to_bytes();
-    let did_key = openom_did::encode_ed25519(&author_public);
+    let did_key = openom_did::DidKey::from_public_key(&author_public);
     let identity_pub = author_public.to_vec();
 
     let mut keyring = Keyring {
@@ -190,7 +191,7 @@ pub fn unlock(
     } = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
     // The did:key is over the PUBLIC identity key — capture it before `identity` may move into the
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
-    let did_key = openom_did::encode_ed25519(&identity.verifying_key().to_bytes());
+    let did_key = openom_did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
     let epochs = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?
         .into_iter()
         .map(|(k, _e, d)| (k, d.into_inner()))
@@ -297,7 +298,8 @@ pub fn recover(
         .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
     let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
-    let did_key = openom_did::encode_ed25519(&secrets.root.identity.verifying_key().to_bytes());
+    let did_key =
+        openom_did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
     Ok(Recovered {
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
@@ -528,7 +530,7 @@ pub fn unlock_as_member(
     // means a removed member.
     let deks = member_epoch_deks(&keyring, tree_id, member_id, &root.hpke_secret)?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
-    let did_key = openom_did::encode_ed25519(&root.identity.verifying_key().to_bytes());
+    let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
         sealer,
         revision: keyring.revision,
@@ -1427,8 +1429,8 @@ mod tests {
         let p = provision(b"correct horse", TREE, MEMBER, b"replica-A").unwrap();
         // The did:key is the founder's PUBLIC identity key, encoded — not any secret.
         let founder = founder_key(&p.keyring).to_bytes();
-        assert_eq!(p.did_key, openom_did::encode_ed25519(&founder));
-        assert!(p.did_key.starts_with("did:key:z6Mk"));
+        assert_eq!(p.did_key.as_str(), openom_did::encode_ed25519(&founder));
+        assert!(p.did_key.as_str().starts_with("did:key:z6Mk"));
 
         // Stable across a re-unlock on another device (same passphrase → same identity → same did:key),
         // unlike the per-context replica id.
@@ -1445,7 +1447,7 @@ mod tests {
             "recovery derives a new identity → new did:key"
         );
         assert_eq!(
-            r.did_key,
+            r.did_key.as_str(),
             openom_did::encode_ed25519(&founder_key(&r.keyring).to_bytes())
         );
     }
