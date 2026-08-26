@@ -37,6 +37,18 @@ mood, lowercase start, no trailing period.
 
 Run quick type checks, format checks, and unit tests after a series of commits.
 
+## Code style
+
+Prefer functions under ~150 lines. A longer one should be split into named phases or helper
+functions — unless the logic is irreducibly coupled (shared mutable state that can't be cleanly
+threaded across a call boundary), in which case say why in a brief comment. This is a guideline, not
+a hard gate: a clear phase structure and readability matter more than the exact line count.
+
+Reach for the type system to make errors impossible rather than merely caught: newtype
+domain values that would otherwise be interchangeable primitives (ids, keys, codes — a `TreeId` is
+not a `ReplicaId`, a `Dek` is not a `Kek`), so a wrong-argument slip is a compile error, not a
+runtime one.
+
 ## Package & app documentation
 
 Every crate in `packages/` and every unit in `apps/` has a `README.md`, wired as the module doc
