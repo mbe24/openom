@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 use journal::DocStore;
 use openom_claim::envelope::Record;
 use openom_oplog::{materialize, ChannelItem};
-use openom_protocol::v1::Compression;
+use openom_protocol::v1::{Compression, Envelope, Format};
+use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer};
 
 use crate::Result;
@@ -67,6 +68,9 @@ pub struct ClaimSyncClient<S: DocStore> {
     // journal is its durable authority; this map is rebuilt by replaying the log (`pull_claims` from
     // an unset cursor). `materialize` folds it into the live records.
     items: BTreeMap<String, ChannelItem>,
+    // CAS token for this tree's single snapshot slot — the version from the last put/read, passed to
+    // the next put_snapshot so a concurrent writer can't silently clobber it.
+    snapshot_version: Option<String>,
 }
 
 impl<S: DocStore> ClaimSyncClient<S> {
@@ -81,6 +85,7 @@ impl<S: DocStore> ClaimSyncClient<S> {
             pull_cursor: None,
             pending: Vec::new(),
             items: BTreeMap::new(),
+            snapshot_version: None,
         }
     }
 
@@ -158,6 +163,63 @@ impl<S: DocStore> ClaimSyncClient<S> {
         }
         self.pull_cursor = Some(new_cursor);
         Ok(ingested)
+    }
+
+    /// Publish a snapshot of the live record set — [`materialize`] over the accumulated ops, as a set
+    /// of `Assert`s — CAS'd on the prior snapshot version and stamped with the log seq it covers
+    /// through. A fresh client then [`bootstrap_claims`](Self::bootstrap_claims) from the snapshot +
+    /// only the tail. This is the byte-preserving fold: dead (removed / superseded) records drop out,
+    /// but disputed-yet-live claims and attestations stay — refutation memory is preserved. Folding
+    /// out a pre-snapshot remove also makes it irrevocable (the structural GC horizon). Pulling first,
+    /// so the snapshot reflects the whole log, is the caller's responsibility. Returns the covered seq.
+    pub fn compact_claims(&mut self) -> Result<u64> {
+        let covered = match self.pull_cursor {
+            Some(c) => c,
+            None => self.store.read_updates(&self.doc, None)?.1,
+        };
+        let live: Vec<ChannelItem> = self
+            .materialize()
+            .into_iter()
+            .map(ChannelItem::Assert)
+            .collect();
+        let ctx = SealContext {
+            kind: EntryKind::Snapshot,
+            format: Format::OpenomJson,
+            compression: Compression::None,
+            replica_counter: self.next_counter,
+            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
+            covers_through_seq: covered,
+            blob_id: Vec::new(),
+        };
+        let out = self.sealer.seal_entry(&ctx, &codec::encode(&live)?)?;
+        let version =
+            self.store
+                .put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
+        self.snapshot_version = Some(version);
+        self.next_counter += 1;
+        self.prev_hash = out.ciphertext_hash;
+        Ok(covered)
+    }
+
+    /// Bring a fresh client up to date the fast way: load the stored snapshot (if any) into the set,
+    /// then pull only the ops after the seq it covers. Falls back to a full log replay when there is
+    /// no snapshot. Idempotent — safe even if the snapshot and the tail overlap (re-insert by id).
+    pub fn bootstrap_claims(&mut self) -> Result<()> {
+        if let Some(snap) = self.store.read_snapshot(&self.doc)? {
+            let covered = Envelope::decode(snap.bytes.as_slice())
+                .ok()
+                .and_then(|e| e.header)
+                .map(|h| h.covers_through_seq)
+                .unwrap_or(0);
+            let plaintext = self.sealer.open_entry(EntryKind::Snapshot, &snap.bytes)?;
+            for item in codec::decode(&plaintext)? {
+                self.items.insert(item.id().to_owned(), item);
+            }
+            self.snapshot_version = Some(snap.version);
+            self.pull_cursor = Some(covered);
+        }
+        self.pull_claims()?;
+        Ok(())
     }
 }
 
@@ -347,6 +409,62 @@ mod tests {
         assert!(
             intruder.pull_claims().is_err(),
             "a wrong DEK must not decrypt the log"
+        );
+    }
+
+    #[test]
+    fn a_fresh_client_bootstraps_from_a_snapshot_plus_the_tail() {
+        let store = Arc::new(MemoryStore::new());
+        let dek = generate_dek().unwrap();
+        let mut a = client(b"replica-a", dek.clone(), store.clone());
+
+        let pa = person("pA", "did:key:z6MkA");
+        let pb = person("pB", "did:key:z6MkA");
+        a.push_claims(&[pa.clone(), pb.clone()]).unwrap();
+        a.compact_claims().unwrap(); // snapshot covers the two people
+        let na = name_claim("pA", "Ada", "did:key:z6MkA", 2); // a tail op after the snapshot
+        a.push_claims(&[na.clone()]).unwrap();
+
+        let mut c = client(b"replica-c", dek, store.clone());
+        c.bootstrap_claims().unwrap(); // snapshot (two people) + only the tail (the name)
+        assert_eq!(live(&c), live(&a));
+        assert_eq!(live(&c), set(&[&pa, &pb, &na]));
+    }
+
+    #[test]
+    fn bootstrap_without_a_snapshot_replays_the_whole_log() {
+        let store = Arc::new(MemoryStore::new());
+        let dek = generate_dek().unwrap();
+        let mut a = client(b"replica-a", dek.clone(), store.clone());
+        let pa = person("pA", "did:key:z6MkA");
+        a.push_claims(&[pa.clone()]).unwrap();
+
+        let mut c = client(b"replica-c", dek, store.clone());
+        c.bootstrap_claims().unwrap(); // no snapshot → full log replay
+        assert_eq!(live(&c), set(&[&pa]));
+    }
+
+    #[test]
+    fn compaction_folds_out_removed_records() {
+        // The snapshot is the live set: a same-author-removed record is folded out and never reaches
+        // a bootstrapping client (the structural GC horizon), while a live record survives.
+        let store = Arc::new(MemoryStore::new());
+        let dek = generate_dek().unwrap();
+        let mut a = client(b"replica-a", dek.clone(), store.clone());
+        let keep = name_claim("pA", "Ada", "did:key:z6MkA", 1);
+        let gone = name_claim("pB", "Zzz", "did:key:z6MkA", 1);
+        a.push_claims(&[keep.clone(), gone.clone()]).unwrap();
+        a.push_claims(&[remove(&gone, "did:key:z6MkA")]).unwrap();
+        a.compact_claims().unwrap();
+
+        // A fresh client bootstraps only from the snapshot (the tail is empty) — the removed record
+        // is absent, and the record it never touched survives.
+        let mut c = client(b"replica-c", dek, store.clone());
+        c.bootstrap_claims().unwrap();
+        assert_eq!(
+            live(&c),
+            set(&[&keep]),
+            "removed record folded out of the snapshot"
         );
     }
 }
