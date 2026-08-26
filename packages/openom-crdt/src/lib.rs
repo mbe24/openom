@@ -314,5 +314,24 @@ pub fn materialize(items: &[ChannelItem]) -> Vec<Record> {
         .collect()
 }
 
+/// Serialize a batch of [`ChannelItem`]s to / from the sealed payload bytes — the single op-batch
+/// codec, shared by every transport (`openom-sync`'s `ClaimSyncClient`, the `openom-tree` engine) so
+/// they emit byte-identical bytes and a future CBOR swap (OPE-199, `ldclabs/cbor2`) touches exactly one
+/// place. V1 is plain `serde_json`; a decoded item's content-hash id is re-verified by `ChannelItem`'s
+/// deserializer (the parse-don't-validate ingest boundary).
+pub mod codec {
+    use crate::ChannelItem;
+
+    /// Encode a batch of channel items to the sealed payload bytes.
+    pub fn encode(items: &[ChannelItem]) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(items)
+    }
+
+    /// Decode a sealed payload back to channel items (each id re-verified on decode).
+    pub fn decode(bytes: &[u8]) -> Result<Vec<ChannelItem>, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests;

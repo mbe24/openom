@@ -3612,6 +3612,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-tree"
+version = "0.1.0"
+dependencies = [
+ "openom-claim",
+ "openom-crdt",
+ "openom-projection",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-treelog"
 version = "0.1.0"
 dependencies = [

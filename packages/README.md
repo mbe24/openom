@@ -43,6 +43,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **commute-format** — bridge: JSON documents ⇄ mergeable commute cells.
 - **openom-treelog** — the family-tree domain over `commute` — *the current engine, being replaced by the claim model.*
 - **openom-crdt** — the claim model's convergent operation layer (a CRDT): the operation types + their set-union merge (`materialize`) folding a set of ops into the live record set (add / remove / supersede / revoke, same-author observed-remove). Not a log — owns no storage. Domain-agnostic, clock-free. *(claim model — replaces `commute`'s merge)*
+- **openom-tree** — the claim-model family-tree **engine**: composes `openom-crdt` (the fold) + `openom-projection` (the read model) into the app's read+write surface; owns the record set + author id, mints op batches for the transport to seal, and projects the read model. Key-less. *(claim model — replaces `openom-treelog`'s engine role; wasm veneer = increment B)*
 
 **Storage / sync** (transport; opaque bytes)
 - **journal** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.

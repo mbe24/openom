@@ -17,6 +17,7 @@ members = [
     "packages/openom-claim",
     "packages/openom-projection",
     "packages/openom-crdt",
+    "packages/openom-tree",
     "packages/openom-attestation-zkp",
     "packages/openom-sealer",
     "packages/openom-vault-host",
@@ -50,6 +51,7 @@ openom-edtf = { path = "packages/openom-edtf" }
 openom-claim = { path = "packages/openom-claim" }
 openom-projection = { path = "packages/openom-projection" }
 openom-crdt = { path = "packages/openom-crdt" }
+openom-tree = { path = "packages/openom-tree" }
 journal = { path = "packages/journal" }
 commute = { path = "packages/commute" }
 

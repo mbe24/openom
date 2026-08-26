@@ -25,30 +25,14 @@ use openom_sealer::{EntryKind, SealContext, Sealer};
 
 use crate::Result;
 
-/// The one place claim ops are encoded to / decoded from the sealed payload bytes — the **swappable
-/// codec seam**. V1 is plain `serde_json`: self-describing, debuggable, buildless-web-friendly, and
-/// the `sha256(JCS)` id round-trips trivially. Swapping to CBOR later (for storage) is confined to
-/// these two functions plus [`FORMAT`](codec::FORMAT); both encodings are self-describing and
-/// isomorphic to JSON, so the content-hash identity and open-world extensibility are untouched by the
-/// choice. See OPE-199.
+/// Transport-side codec bits: the wire [`FORMAT`](codec::FORMAT) tag, plus the batch `encode`/`decode`
+/// re-exported from [`openom_crdt::codec`] — the one place the op-batch codec lives, shared with the
+/// `openom-tree` engine so both emit byte-identical bytes (and a CBOR swap, OPE-199, touches it once).
 pub mod codec {
-    use openom_crdt::ChannelItem;
-    use openom_protocol::v1::Format;
+    /// The wire `Format` tag for claim entries (`FORMAT_OPENOM_OPS` = "JSON op-log entries").
+    pub const FORMAT: openom_protocol::v1::Format = openom_protocol::v1::Format::OpenomOps;
 
-    /// The wire `Format` tag for the current codec (`FORMAT_OPENOM_OPS` = "JSON op-log entries").
-    pub const FORMAT: Format = Format::OpenomOps;
-
-    /// Encode a batch of channel items to the sealed payload bytes.
-    pub fn encode(items: &[ChannelItem]) -> std::result::Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(items)
-    }
-
-    /// Decode a sealed payload back to channel items. Each item's id is re-verified by
-    /// `ChannelItem`'s deserializer (the parse-don't-validate ingest boundary), so a tampered id or a
-    /// forged embedded record is rejected here.
-    pub fn decode(bytes: &[u8]) -> std::result::Result<Vec<ChannelItem>, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
+    pub use openom_crdt::codec::{decode, encode};
 }
 
 /// One device's view of a claim-model tree: the [`Sealer`] holding its DEK, a shared [`DocStore`], the
