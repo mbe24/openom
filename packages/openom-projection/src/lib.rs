@@ -312,6 +312,345 @@ struct Collected {
     other_claims: Vec<(String, String, String, Value, String)>,
 }
 
+fn collect(deduped: &[&Record]) -> Collected {
+    // Anchors, and person-scoped claims. Deletion and edit-supersession are operations applied
+    // upstream (the ops→snapshot layer, §8.2); the projection consumes the already-live claim set.
+    let mut anchors: BTreeSet<String> = BTreeSet::new();
+    let mut same_as: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
+    let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
+    let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
+    let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
+    let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
+    let mut biography_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, text, author)
+    let mut field_label: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> label -> authors
+    let mut field_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> type -> authors
+    let mut custom_values: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, fieldId, value, author)
+    let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
+    let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
+    let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
+    let mut partnership: BTreeMap<([String; 2], String), PairInfo> = BTreeMap::new(); // (canonical pair, role) -> info
+    let mut event_anchors: BTreeSet<String> = BTreeSet::new();
+    let mut event_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> type -> authors
+    let mut event_date: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> edtf -> authors
+    let mut event_place: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> placeId -> authors
+    let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
+    let mut sources: BTreeMap<String, Value> = BTreeMap::new(); // source claim id -> its value
+    let mut citations: Vec<(String, String, String, Value)> = Vec::new(); // (targetId, citing claimId, predicate, citation)
+    #[allow(clippy::type_complexity)]
+    let mut place_point: BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>> =
+        BTreeMap::new(); // placeId -> canonical(point) -> (authors, pointValue)
+    let mut place_name: BTreeMap<String, BTreeMap<(String, String), BTreeSet<String>>> =
+        BTreeMap::new(); // placeId -> (validRange, name) -> authors
+    let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
+    let mut media_links: Vec<(String, String, Value)> = Vec::new(); // (target, claimId, value)
+    let mut other_claims: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, predicate, value, author) — unrecognized predicates
+
+    for &r in deduped {
+        let c: &Claim = match r {
+            Record::Anchor(a) => {
+                match a.type_uri.as_str() {
+                    TYPE_PERSON => {
+                        anchors.insert(a.id.clone());
+                    }
+                    TYPE_EVENT => {
+                        event_anchors.insert(a.id.clone());
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            // A record of a type this build doesn't recognize is not part of any structured view yet.
+            // It still survives in the materialized set (reachable for a generic renderer — OPE-212b/c);
+            // here it is simply skipped.
+            Record::Unknown(_) => continue,
+            Record::Claim(c) => c,
+        };
+        let pred = c.predicate.as_str();
+        let id = c.id.as_str();
+        // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
+        // Today only a single-object citation is captured; an array citation is a documented seam.
+        if let Some(Citations::One(cit)) = &c.citation {
+            if let Ok(cit_val) = serde_json::to_value(cit) {
+                citations.push((
+                    c.target_id.clone(),
+                    id.to_string(),
+                    pred.to_string(),
+                    cit_val,
+                ));
+            }
+        }
+        match pred {
+            P_SOURCE => {
+                sources.insert(id.to_string(), c.value.clone());
+            }
+            P_PLACE_POINT => {
+                if let (Some(t), Some(v), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    Some(&c.value),
+                    Some(c.created_by.as_str()),
+                ) {
+                    place_point
+                        .entry(t.to_string())
+                        .or_default()
+                        .entry(v.to_string())
+                        .or_insert_with(|| (BTreeSet::new(), v.clone()))
+                        .0
+                        .insert(a.to_string());
+                }
+            }
+            P_PLACE_NAME => {
+                if let (Some(t), Some(name), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("name").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let range = c
+                        .value
+                        .get("validRange")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    place_name
+                        .entry(t.to_string())
+                        .or_default()
+                        .entry((range.to_string(), name.to_string()))
+                        .or_default()
+                        .insert(a.to_string());
+                }
+            }
+            P_PART_OF => tally(&mut part_of, c, "parentPlaceId"),
+            P_MEDIA_LINK => {
+                // Keep the whole value so the media view round-trips mime/width/height/role/order/
+                // caption/crop/kind (§10.2); require only `mediaHash` (the blob this links).
+                if c.value.get("mediaHash").and_then(Value::as_str).is_some() {
+                    media_links.push((c.target_id.clone(), id.to_string(), c.value.clone()));
+                }
+            }
+            P_SAME_AS => collect_pair(&mut same_as, c, id),
+            P_DIFFERENT_FROM => collect_pair(&mut different_from, c, id),
+            P_ATTEST => {
+                if let (Some(t), Some(verdict), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("verdict").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let v = attests.entry(t.to_string()).or_default();
+                    match verdict {
+                        "support" => {
+                            v.support.insert(a.to_string());
+                        }
+                        "reject" => {
+                            v.reject.insert(a.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            P_PREFERRED => {
+                if let (Some(person), Some(for_pred), Some(claim_ref), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("for").and_then(Value::as_str),
+                    c.value.get("claimId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let info = preferred
+                        .entry((
+                            person.to_string(),
+                            for_pred.to_string(),
+                            claim_ref.to_string(),
+                        ))
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(c);
+                    }
+                }
+            }
+            P_PARENT => {
+                if let (Some(child), Some(parent), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("parentPersonId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let kind = c
+                        .value
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or(DEFAULT_KIND);
+                    let info = parent_child
+                        .entry((child.to_string(), parent.to_string(), kind.to_string()))
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(c);
+                    }
+                }
+            }
+            P_PARTNERSHIP => {
+                if let (Some(p), Some(a)) = (pair(c), Some(c.created_by.as_str())) {
+                    let role = c
+                        .value
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or(DEFAULT_ROLE);
+                    let info = partnership.entry((p, role.to_string())).or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(c);
+                    }
+                }
+            }
+            P_EVENT_TYPE => tally(&mut event_type, c, "type"),
+            P_DATE => tally(&mut event_date, c, "edtf"),
+            P_EVENT_PLACE => tally(&mut event_place, c, "placeId"),
+            P_PARTICIPANT => {
+                if let (Some(evt), Some(person), Some(role)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("personId").and_then(Value::as_str),
+                    c.value.get("role").and_then(Value::as_str),
+                ) {
+                    participants
+                        .entry(evt.to_string())
+                        .or_default()
+                        .insert((person.to_string(), role.to_string()));
+                }
+            }
+            P_NAME => {
+                if let (Some(t), Some(v)) = (Some(c.target_id.as_str()), Some(&c.value)) {
+                    name_claims.push((t.to_string(), id.to_string(), v.clone()));
+                }
+            }
+            P_SEX => {
+                if let (Some(t), Some(sex), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("sex").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    sex_claims.push((
+                        t.to_string(),
+                        id.to_string(),
+                        sex.to_string(),
+                        a.to_string(),
+                    ));
+                }
+            }
+            P_BIOGRAPHY => {
+                if let (Some(t), Some(text), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("text").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    biography_claims.push((
+                        t.to_string(),
+                        id.to_string(),
+                        text.to_string(),
+                        a.to_string(),
+                    ));
+                }
+            }
+            P_CUSTOM_FIELD => {
+                if let (Some(fid), Some(a)) = (
+                    c.value.get("fieldId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let val = &c.value;
+                    if let Some(label) = val.get("label").and_then(Value::as_str) {
+                        field_label
+                            .entry(fid.to_string())
+                            .or_default()
+                            .entry(label.to_string())
+                            .or_default()
+                            .insert(a.to_string());
+                    }
+                    if let Some(ty) = val.get("type").and_then(Value::as_str) {
+                        field_type
+                            .entry(fid.to_string())
+                            .or_default()
+                            .entry(ty.to_string())
+                            .or_default()
+                            .insert(a.to_string());
+                    }
+                }
+            }
+            P_CUSTOM_VALUE => {
+                if let (Some(t), Some(fid), Some(val), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("fieldId").and_then(Value::as_str),
+                    c.value.get("value"),
+                    Some(c.created_by.as_str()),
+                ) {
+                    custom_values.push((
+                        t.to_string(),
+                        id.to_string(),
+                        fid.to_string(),
+                        val.clone(),
+                        a.to_string(),
+                    ));
+                }
+            }
+            P_REATTRIBUTE => {
+                if let (Some(target), Some(person), Some(a)) = (
+                    Some(c.target_id.as_str()),
+                    c.value.get("personId").and_then(Value::as_str),
+                    Some(c.created_by.as_str()),
+                ) {
+                    let info = reattribute
+                        .entry(target.to_string())
+                        .or_default()
+                        .entry(person.to_string())
+                        .or_default();
+                    info.authors.insert(a.to_string());
+                    info.claim_ids.insert(id.to_string());
+                    if info.fingerprint.is_none() {
+                        info.fingerprint = fingerprint_str(c);
+                    }
+                }
+            }
+            // A predicate this build doesn't recognize: keep the claim verbatim (OPE-212b). It is
+            // NOT added to `nodes` — an unknown predicate must not mint a spurious person — and is
+            // routed after clustering to its target's person, or to `Projection.unclassified`.
+            _ => other_claims.push((
+                c.target_id.clone(),
+                id.to_string(),
+                pred.to_string(),
+                c.value.clone(),
+                c.created_by.clone(),
+            )),
+        }
+    }
+
+    Collected {
+        anchors,
+        same_as,
+        different_from,
+        attests,
+        name_claims,
+        sex_claims,
+        biography_claims,
+        field_label,
+        field_type,
+        custom_values,
+        reattribute,
+        preferred,
+        parent_child,
+        partnership,
+        event_anchors,
+        event_type,
+        event_date,
+        event_place,
+        participants,
+        sources,
+        citations,
+        place_point,
+        place_name,
+        part_of,
+        media_links,
+        other_claims,
+    }
+}
+
 /// Project a record set into the read model. Pure: the result depends only on the set of records and
 /// the policy, never on their order. Three phases: **collect** (fold records into [`Collected`]),
 /// **resolve** identity (cluster same_as/different_from, reattribute, canonicalize), **assemble** the
@@ -355,344 +694,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         part_of,
         media_links,
         other_claims,
-    } = {
-        // Anchors, and person-scoped claims. Deletion and edit-supersession are operations applied
-        // upstream (the ops→snapshot layer, §8.2); the projection consumes the already-live claim set.
-        let mut anchors: BTreeSet<String> = BTreeSet::new();
-        let mut same_as: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
-        let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
-        let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
-        let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
-        let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
-        let mut biography_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, text, author)
-        let mut field_label: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> label -> authors
-        let mut field_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> type -> authors
-        let mut custom_values: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, fieldId, value, author)
-        let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
-        let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
-        let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
-        let mut partnership: BTreeMap<([String; 2], String), PairInfo> = BTreeMap::new(); // (canonical pair, role) -> info
-        let mut event_anchors: BTreeSet<String> = BTreeSet::new();
-        let mut event_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> type -> authors
-        let mut event_date: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> edtf -> authors
-        let mut event_place: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> placeId -> authors
-        let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
-        let mut sources: BTreeMap<String, Value> = BTreeMap::new(); // source claim id -> its value
-        let mut citations: Vec<(String, String, String, Value)> = Vec::new(); // (targetId, citing claimId, predicate, citation)
-        #[allow(clippy::type_complexity)]
-        let mut place_point: BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>> =
-            BTreeMap::new(); // placeId -> canonical(point) -> (authors, pointValue)
-        let mut place_name: BTreeMap<String, BTreeMap<(String, String), BTreeSet<String>>> =
-            BTreeMap::new(); // placeId -> (validRange, name) -> authors
-        let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
-        let mut media_links: Vec<(String, String, Value)> = Vec::new(); // (target, claimId, value)
-        let mut other_claims: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, predicate, value, author) — unrecognized predicates
-
-        for &r in &deduped {
-            let c: &Claim = match r {
-                Record::Anchor(a) => {
-                    match a.type_uri.as_str() {
-                        TYPE_PERSON => {
-                            anchors.insert(a.id.clone());
-                        }
-                        TYPE_EVENT => {
-                            event_anchors.insert(a.id.clone());
-                        }
-                        _ => {}
-                    }
-                    continue;
-                }
-                // A record of a type this build doesn't recognize is not part of any structured view yet.
-                // It still survives in the materialized set (reachable for a generic renderer — OPE-212b/c);
-                // here it is simply skipped.
-                Record::Unknown(_) => continue,
-                Record::Claim(c) => c,
-            };
-            let pred = c.predicate.as_str();
-            let id = c.id.as_str();
-            // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
-            // Today only a single-object citation is captured; an array citation is a documented seam.
-            if let Some(Citations::One(cit)) = &c.citation {
-                if let Ok(cit_val) = serde_json::to_value(cit) {
-                    citations.push((
-                        c.target_id.clone(),
-                        id.to_string(),
-                        pred.to_string(),
-                        cit_val,
-                    ));
-                }
-            }
-            match pred {
-                P_SOURCE => {
-                    sources.insert(id.to_string(), c.value.clone());
-                }
-                P_PLACE_POINT => {
-                    if let (Some(t), Some(v), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        Some(&c.value),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        place_point
-                            .entry(t.to_string())
-                            .or_default()
-                            .entry(v.to_string())
-                            .or_insert_with(|| (BTreeSet::new(), v.clone()))
-                            .0
-                            .insert(a.to_string());
-                    }
-                }
-                P_PLACE_NAME => {
-                    if let (Some(t), Some(name), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("name").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let range = c
-                            .value
-                            .get("validRange")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        place_name
-                            .entry(t.to_string())
-                            .or_default()
-                            .entry((range.to_string(), name.to_string()))
-                            .or_default()
-                            .insert(a.to_string());
-                    }
-                }
-                P_PART_OF => tally(&mut part_of, c, "parentPlaceId"),
-                P_MEDIA_LINK => {
-                    // Keep the whole value so the media view round-trips mime/width/height/role/order/
-                    // caption/crop/kind (§10.2); require only `mediaHash` (the blob this links).
-                    if c.value.get("mediaHash").and_then(Value::as_str).is_some() {
-                        media_links.push((c.target_id.clone(), id.to_string(), c.value.clone()));
-                    }
-                }
-                P_SAME_AS => collect_pair(&mut same_as, c, id),
-                P_DIFFERENT_FROM => collect_pair(&mut different_from, c, id),
-                P_ATTEST => {
-                    if let (Some(t), Some(verdict), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("verdict").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let v = attests.entry(t.to_string()).or_default();
-                        match verdict {
-                            "support" => {
-                                v.support.insert(a.to_string());
-                            }
-                            "reject" => {
-                                v.reject.insert(a.to_string());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                P_PREFERRED => {
-                    if let (Some(person), Some(for_pred), Some(claim_ref), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("for").and_then(Value::as_str),
-                        c.value.get("claimId").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let info = preferred
-                            .entry((
-                                person.to_string(),
-                                for_pred.to_string(),
-                                claim_ref.to_string(),
-                            ))
-                            .or_default();
-                        info.authors.insert(a.to_string());
-                        info.claim_ids.insert(id.to_string());
-                        if info.fingerprint.is_none() {
-                            info.fingerprint = fingerprint_str(c);
-                        }
-                    }
-                }
-                P_PARENT => {
-                    if let (Some(child), Some(parent), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("parentPersonId").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let kind = c
-                            .value
-                            .get("kind")
-                            .and_then(Value::as_str)
-                            .unwrap_or(DEFAULT_KIND);
-                        let info = parent_child
-                            .entry((child.to_string(), parent.to_string(), kind.to_string()))
-                            .or_default();
-                        info.authors.insert(a.to_string());
-                        info.claim_ids.insert(id.to_string());
-                        if info.fingerprint.is_none() {
-                            info.fingerprint = fingerprint_str(c);
-                        }
-                    }
-                }
-                P_PARTNERSHIP => {
-                    if let (Some(p), Some(a)) = (pair(c), Some(c.created_by.as_str())) {
-                        let role = c
-                            .value
-                            .get("role")
-                            .and_then(Value::as_str)
-                            .unwrap_or(DEFAULT_ROLE);
-                        let info = partnership.entry((p, role.to_string())).or_default();
-                        info.authors.insert(a.to_string());
-                        info.claim_ids.insert(id.to_string());
-                        if info.fingerprint.is_none() {
-                            info.fingerprint = fingerprint_str(c);
-                        }
-                    }
-                }
-                P_EVENT_TYPE => tally(&mut event_type, c, "type"),
-                P_DATE => tally(&mut event_date, c, "edtf"),
-                P_EVENT_PLACE => tally(&mut event_place, c, "placeId"),
-                P_PARTICIPANT => {
-                    if let (Some(evt), Some(person), Some(role)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("personId").and_then(Value::as_str),
-                        c.value.get("role").and_then(Value::as_str),
-                    ) {
-                        participants
-                            .entry(evt.to_string())
-                            .or_default()
-                            .insert((person.to_string(), role.to_string()));
-                    }
-                }
-                P_NAME => {
-                    if let (Some(t), Some(v)) = (Some(c.target_id.as_str()), Some(&c.value)) {
-                        name_claims.push((t.to_string(), id.to_string(), v.clone()));
-                    }
-                }
-                P_SEX => {
-                    if let (Some(t), Some(sex), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("sex").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        sex_claims.push((
-                            t.to_string(),
-                            id.to_string(),
-                            sex.to_string(),
-                            a.to_string(),
-                        ));
-                    }
-                }
-                P_BIOGRAPHY => {
-                    if let (Some(t), Some(text), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("text").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        biography_claims.push((
-                            t.to_string(),
-                            id.to_string(),
-                            text.to_string(),
-                            a.to_string(),
-                        ));
-                    }
-                }
-                P_CUSTOM_FIELD => {
-                    if let (Some(fid), Some(a)) = (
-                        c.value.get("fieldId").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let val = &c.value;
-                        if let Some(label) = val.get("label").and_then(Value::as_str) {
-                            field_label
-                                .entry(fid.to_string())
-                                .or_default()
-                                .entry(label.to_string())
-                                .or_default()
-                                .insert(a.to_string());
-                        }
-                        if let Some(ty) = val.get("type").and_then(Value::as_str) {
-                            field_type
-                                .entry(fid.to_string())
-                                .or_default()
-                                .entry(ty.to_string())
-                                .or_default()
-                                .insert(a.to_string());
-                        }
-                    }
-                }
-                P_CUSTOM_VALUE => {
-                    if let (Some(t), Some(fid), Some(val), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("fieldId").and_then(Value::as_str),
-                        c.value.get("value"),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        custom_values.push((
-                            t.to_string(),
-                            id.to_string(),
-                            fid.to_string(),
-                            val.clone(),
-                            a.to_string(),
-                        ));
-                    }
-                }
-                P_REATTRIBUTE => {
-                    if let (Some(target), Some(person), Some(a)) = (
-                        Some(c.target_id.as_str()),
-                        c.value.get("personId").and_then(Value::as_str),
-                        Some(c.created_by.as_str()),
-                    ) {
-                        let info = reattribute
-                            .entry(target.to_string())
-                            .or_default()
-                            .entry(person.to_string())
-                            .or_default();
-                        info.authors.insert(a.to_string());
-                        info.claim_ids.insert(id.to_string());
-                        if info.fingerprint.is_none() {
-                            info.fingerprint = fingerprint_str(c);
-                        }
-                    }
-                }
-                // A predicate this build doesn't recognize: keep the claim verbatim (OPE-212b). It is
-                // NOT added to `nodes` — an unknown predicate must not mint a spurious person — and is
-                // routed after clustering to its target's person, or to `Projection.unclassified`.
-                _ => other_claims.push((
-                    c.target_id.clone(),
-                    id.to_string(),
-                    pred.to_string(),
-                    c.value.clone(),
-                    c.created_by.clone(),
-                )),
-            }
-        }
-
-        Collected {
-            anchors,
-            same_as,
-            different_from,
-            attests,
-            name_claims,
-            sex_claims,
-            biography_claims,
-            field_label,
-            field_type,
-            custom_values,
-            reattribute,
-            preferred,
-            parent_child,
-            partnership,
-            event_anchors,
-            event_type,
-            event_date,
-            event_place,
-            participants,
-            sources,
-            citations,
-            place_point,
-            place_name,
-            part_of,
-            media_links,
-            other_claims,
-        }
-    };
+    } = collect(&deduped);
 
     // --- resolve (phase 2 of 3): identity clustering + reattribution + canonicalization ---------
     // --- nodes = every id that participates as a person -----------------------------------------
