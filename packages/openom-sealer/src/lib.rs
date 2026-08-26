@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use openom_crypto::{open_envelope, seal_envelope, CryptoError, Key32};
+use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
 
@@ -190,17 +191,17 @@ impl Sealer {
     pub fn from_unwrapped(
         version: u32,
         dek: Key32,
-        tree_id: Vec<u8>,
-        key_id: Vec<u8>,
-        replica_id: Vec<u8>,
+        tree_id: TreeId,
+        key_id: KeyId,
+        replica_id: ReplicaId,
     ) -> Self {
         Sealer {
             version,
             dek,
             aead: Aead::Xchacha20Poly1305,
-            tree_id,
-            key_id,
-            replica_id,
+            tree_id: tree_id.into_bytes(),
+            key_id: key_id.into_bytes(),
+            replica_id: replica_id.into_bytes(),
             author: None,
         }
     }
@@ -237,12 +238,12 @@ impl Sealer {
     /// well-known DEK, tagged with `DEV_KEY_ID` — which the server refuses under
     /// `RUN_MODE=production`. This is what lets the web app run the full seal/open path
     /// with no server and no unlock flow, for fast UI iteration.
-    pub fn dev(tree_id: Vec<u8>, replica_id: Vec<u8>) -> Self {
+    pub fn dev(tree_id: TreeId, replica_id: ReplicaId) -> Self {
         Self::from_unwrapped(
             openom_protocol::ENVELOPE_VERSION,
             openom_crypto::dev_dek(),
             tree_id,
-            openom_crypto::DEV_KEY_ID.to_vec(),
+            KeyId::new(openom_crypto::DEV_KEY_ID.to_vec()),
             replica_id,
         )
     }
@@ -349,20 +350,23 @@ impl SealerSet {
     /// Build a set from `(key_id, dek)` per reachable epoch. `write_key_id` must be one of
     /// them (the latest epoch) — new entries seal under it.
     pub fn new(
-        tree_id: Vec<u8>,
-        replica_id: Vec<u8>,
+        tree_id: TreeId,
+        replica_id: ReplicaId,
         epochs: Vec<(Vec<u8>, Key32)>,
-        write_key_id: Vec<u8>,
+        write_key_id: KeyId,
     ) -> Self {
+        let tree_id = tree_id.into_bytes();
+        let replica_id = replica_id.into_bytes();
+        let write_key_id = write_key_id.into_bytes();
         let sealers = epochs
             .into_iter()
             .map(|(key_id, dek)| {
                 Sealer::from_unwrapped(
                     openom_protocol::ENVELOPE_VERSION,
                     dek,
-                    tree_id.clone(),
-                    key_id,
-                    replica_id.clone(),
+                    TreeId::new(tree_id.clone()),
+                    KeyId::new(key_id),
+                    ReplicaId::new(replica_id.clone()),
                 )
             })
             .collect();
@@ -446,9 +450,9 @@ mod tests {
         Sealer::from_unwrapped(
             1,
             openom_crypto::generate_dek().unwrap().into_inner(),
-            b"tree-uuid-16byte".to_vec(),
-            b"epoch-0".to_vec(),
-            b"replica-0".to_vec(),
+            TreeId::new(b"tree-uuid-16byte".to_vec()),
+            KeyId::new(b"epoch-0".to_vec()),
+            ReplicaId::new(b"replica-0".to_vec()),
         )
     }
 
@@ -555,9 +559,9 @@ mod tests {
         let b = Sealer::from_unwrapped(
             1,
             openom_crypto::generate_dek().unwrap().into_inner(),
-            b"other-tree-16byt".to_vec(),
-            b"epoch-0".to_vec(),
-            b"replica-9".to_vec(),
+            TreeId::new(b"other-tree-16byt".to_vec()),
+            KeyId::new(b"epoch-0".to_vec()),
+            ReplicaId::new(b"replica-9".to_vec()),
         );
         let out = a
             .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"secret")
@@ -582,7 +586,10 @@ mod tests {
 
     #[test]
     fn dev_sealer_tags_the_reserved_key_id() {
-        let s = Sealer::dev(b"tree-uuid-16byte".to_vec(), b"replica-0".to_vec());
+        let s = Sealer::dev(
+            TreeId::new(b"tree-uuid-16byte".to_vec()),
+            ReplicaId::new(b"replica-0".to_vec()),
+        );
         let out = s
             .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"local dev")
             .unwrap();

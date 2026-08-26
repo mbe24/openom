@@ -22,7 +22,7 @@ use openom_crypto::{
 use openom_did::DidKey;
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
-use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
     SignerRole, WrapMethod,
@@ -162,10 +162,10 @@ pub fn provision(
     sign_keyring(&mut keyring, &secrets.root.identity);
 
     let sealer = SealerSet::new(
-        tree_id.to_vec(),
-        replica_id.to_vec(),
+        TreeId::new(tree_id),
+        ReplicaId::new(replica_id),
         vec![(key_id.clone(), dek.into_inner())],
-        key_id,
+        KeyId::new(key_id),
     );
     Ok(Provisioned {
         keyring: keyring.encode_to_vec(),
@@ -207,7 +207,12 @@ pub fn unlock(
     // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
     // skips verification for them); the moment the tree is shared, the sealer starts signing (§B3).
     let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
-    let mut sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
+    let mut sealer = SealerSet::new(
+        TreeId::new(tree_id),
+        ReplicaId::new(replica_id),
+        epochs,
+        KeyId::new(write_key_id),
+    );
     if attributed {
         sealer = sealer.with_author(identity, member_id.to_string(), revision);
     }
@@ -307,7 +312,12 @@ pub fn recover(
         .into_iter()
         .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
-    let sealer = SealerSet::new(tree_id.to_vec(), replica_id.to_vec(), epochs, write_key_id);
+    let sealer = SealerSet::new(
+        TreeId::new(tree_id),
+        ReplicaId::new(replica_id),
+        epochs,
+        KeyId::new(write_key_id),
+    );
     let did_key =
         openom_did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
     Ok(Recovered {
@@ -1200,10 +1210,10 @@ fn sealer_set_from_deks(
         .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
     Ok(SealerSet::new(
-        tree_id.to_vec(),
-        replica_id.to_vec(),
+        TreeId::new(tree_id),
+        ReplicaId::new(replica_id),
         epochs,
-        write_key_id,
+        KeyId::new(write_key_id),
     ))
 }
 

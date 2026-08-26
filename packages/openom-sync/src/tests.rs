@@ -5,6 +5,7 @@ use super::*;
 use journal::memory::MemoryStore;
 use journal::{Caps, DocStore, Snapshot, StoreError, Update};
 use openom_crypto::generate_dek;
+use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::Sealer;
 use openom_treelog::{Pedigree, Tree, TreeOp};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,9 +65,9 @@ fn client(
     let sealer = Sealer::from_unwrapped(
         1,
         dek.into_inner(),
-        b"tree-uuid-16byte".to_vec(),
-        b"epoch-0".to_vec(),
-        sealer_replica.to_vec(),
+        TreeId::new(b"tree-uuid-16byte".to_vec()),
+        KeyId::new(b"epoch-0".to_vec()),
+        ReplicaId::new(sealer_replica.to_vec()),
     );
     SyncClient::new(Tree::new(rid(replica)), sealer, store, "tree")
 }
@@ -297,9 +298,9 @@ fn a_transient_append_failure_queues_and_retries_without_loss() {
     let sealer = Sealer::from_unwrapped(
         1,
         dek.clone().into_inner(),
-        b"tree-uuid-16byte".to_vec(),
-        b"epoch-0".to_vec(),
-        b"replica-a".to_vec(),
+        TreeId::new(b"tree-uuid-16byte".to_vec()),
+        KeyId::new(b"epoch-0".to_vec()),
+        ReplicaId::new(b"replica-a".to_vec()),
     );
     let mut a = SyncClient::new(Tree::new(rid(1)), sealer, store.clone(), "tree");
 
@@ -316,9 +317,9 @@ fn a_transient_append_failure_queues_and_retries_without_loss() {
     let sealer_b = Sealer::from_unwrapped(
         1,
         dek.into_inner(),
-        b"tree-uuid-16byte".to_vec(),
-        b"epoch-0".to_vec(),
-        b"replica-b".to_vec(),
+        TreeId::new(b"tree-uuid-16byte".to_vec()),
+        KeyId::new(b"epoch-0".to_vec()),
+        ReplicaId::new(b"replica-b".to_vec()),
     );
     let mut b = SyncClient::new(Tree::new(rid(2)), sealer_b, store.clone(), "tree");
     b.pull().unwrap();

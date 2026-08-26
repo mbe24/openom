@@ -226,6 +226,7 @@ mod tests {
     use openom_claim::envelope::{Claim, Record};
     use openom_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::{generate_dek, Dek};
+    use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
     use openom_sealer::Sealer;
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -239,9 +240,9 @@ mod tests {
         let sealer = Sealer::from_unwrapped(
             1,
             dek.into_inner(),
-            b"tree-uuid-16byte".to_vec(),
-            b"epoch-0".to_vec(),
-            replica.to_vec(),
+            TreeId::new(b"tree-uuid-16byte".to_vec()),
+            KeyId::new(b"epoch-0".to_vec()),
+            ReplicaId::new(replica.to_vec()),
         );
         ClaimSyncClient::new(sealer, store, "tree")
     }

@@ -2,7 +2,7 @@
 //! the scope/kind guards (a blob for another tree or of another kind is refused before the
 //! AEAD) and the fuzz surface: opening arbitrary bytes never panics — it returns an error.
 
-use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format};
 use openom_sealer::vault::{recover, unlock};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
@@ -12,9 +12,9 @@ fn sealer(tree: &[u8]) -> Sealer {
     Sealer::from_unwrapped(
         1,
         openom_crypto::generate_dek().unwrap().into_inner(),
-        tree.to_vec(),
-        b"epoch-0".to_vec(),
-        b"replica-0".to_vec(),
+        TreeId::new(tree),
+        KeyId::new(b"epoch-0".to_vec()),
+        ReplicaId::new(b"replica-0".to_vec()),
     )
 }
 

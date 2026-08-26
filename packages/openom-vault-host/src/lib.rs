@@ -781,7 +781,10 @@ impl<S: VaultStore> VaultHost<S> {
     /// well-known key — no keyring, no unlock.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
         let replica = fresh_replica()?;
-        let id = self.register(SealerSet::single(Sealer::dev(tree_id.to_vec(), replica)))?;
+        let id = self.register(SealerSet::single(Sealer::dev(
+            TreeId::new(tree_id),
+            ReplicaId::new(replica),
+        )))?;
         Ok(Unlocked {
             sealer_id: id,
             revision: 0,

@@ -44,6 +44,7 @@ WSL2/Docker).
 ```rust
 use journal::memory::MemoryStore;
 use openom_crypto::generate_dek;
+use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::Sealer;
 use openom_sync::SyncClient;
 use openom_treelog::{Tree, TreeOp};
@@ -53,12 +54,14 @@ let store = Arc::new(MemoryStore::new());
 let dek = generate_dek().unwrap();
 
 let sealer_a = Sealer::from_unwrapped(
-    1, dek.clone().into_inner(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-a".to_vec(),
+    1, dek.clone().into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
+    KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-a".to_vec()),
 );
 let mut a = SyncClient::new(Tree::new([1u8; 16]), sealer_a, store.clone(), "tree");
 
 let sealer_b = Sealer::from_unwrapped(
-    1, dek.into_inner(), b"tree-uuid-16byte".to_vec(), b"epoch-0".to_vec(), b"replica-b".to_vec(),
+    1, dek.into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
+    KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-b".to_vec()),
 );
 let mut b = SyncClient::new(Tree::new([2u8; 16]), sealer_b, store.clone(), "tree");
 

@@ -19,7 +19,7 @@ use openom_keyring::{
     epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, KeyringAnchor,
     VerifyingKey,
 };
-use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
@@ -62,7 +62,10 @@ impl WasmSealer {
     /// server and no unlock flow, for fast UI iteration. Production refuses its `key_id`.
     pub fn dev(tree_id: &[u8], replica_id: &[u8]) -> WasmSealer {
         WasmSealer {
-            inner: SealerSet::single(Sealer::dev(tree_id.to_vec(), replica_id.to_vec())),
+            inner: SealerSet::single(Sealer::dev(
+                TreeId::new(tree_id),
+                ReplicaId::new(replica_id),
+            )),
         }
     }
 
@@ -88,9 +91,9 @@ impl WasmSealer {
         let mut sealer = Sealer::from_unwrapped(
             ENVELOPE_VERSION,
             key,
-            tree_id.to_vec(),
-            key_id.to_vec(),
-            replica_id.to_vec(),
+            TreeId::new(tree_id),
+            KeyId::new(key_id),
+            ReplicaId::new(replica_id),
         );
         if let Some(name) = aead {
             sealer = sealer.with_aead(parse_aead(&name)?);

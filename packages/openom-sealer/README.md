@@ -59,6 +59,7 @@ under WSL2/Docker).
 
 ```rust
 use openom_crypto::generate_dek;
+use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::{EntryKind, SealContext, Sealer};
 
 // Normally built by vault::provision / vault::unlock from a passphrase; shown here from an
@@ -66,9 +67,9 @@ use openom_sealer::{EntryKind, SealContext, Sealer};
 let sealer = Sealer::from_unwrapped(
     1,
     generate_dek().unwrap().into_inner(),
-    b"tree-uuid-16byte".to_vec(),
-    b"epoch-0".to_vec(),
-    b"replica-0".to_vec(),
+    TreeId::new(b"tree-uuid-16byte".to_vec()),
+    KeyId::new(b"epoch-0".to_vec()),
+    ReplicaId::new(b"replica-0".to_vec()),
 );
 
 let ctx = SealContext::snapshot(1, Vec::new(), 0);
