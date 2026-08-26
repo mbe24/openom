@@ -916,6 +916,47 @@ fn childless_partnership_is_a_union() {
     );
 }
 
+#[test]
+fn unknown_predicates_surface_on_the_person_or_unclassified() {
+    let recs = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        // A predicate this build doesn't know, about a KNOWN person → attaches to pA.other, verbatim.
+        claim(
+            "o1",
+            "openom.org/x/occupation/v1",
+            "pA",
+            json!({ "title": "mathematician" }),
+            "did:key:z6MkA",
+        ),
+        // An unknown predicate about a NON-person target (a future anchor kind) → unclassified, and
+        // must NOT mint a spurious person.
+        claim(
+            "o2",
+            "openom.org/x/recipe/v1",
+            "rec-1",
+            json!({ "name": "sourdough" }),
+            "did:key:z6MkA",
+        ),
+    ];
+    let p = project(&recs, &Policy::default());
+
+    // Exactly one person (pA) — the recipe claim did not create one.
+    assert_eq!(p.people.len(), 1);
+    let pa = &p.people[0];
+    assert_eq!(pa.id, "pA");
+    assert_eq!(pa.other.len(), 1);
+    assert_eq!(pa.other[0].claim_id, "o1");
+    assert_eq!(pa.other[0].predicate, "openom.org/x/occupation/v1");
+    assert_eq!(pa.other[0].value, json!({ "title": "mathematician" }));
+
+    // The non-person unknown claim is preserved verbatim in `unclassified`, not dropped.
+    assert_eq!(p.unclassified.len(), 1);
+    assert_eq!(p.unclassified[0].claim_id, "o2");
+    assert_eq!(p.unclassified[0].target_id, "rec-1");
+    assert_eq!(p.unclassified[0].value, json!({ "name": "sourdough" }));
+}
+
 // ---- properties --------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]

@@ -209,6 +209,20 @@ impl Tree {
             .collect()
     }
 
+    /// Every live claim about `target`, whatever its predicate (after the fold) — the predicate-less
+    /// reader a generic renderer uses to enumerate a subject's claims, **including** ones under
+    /// predicates this build doesn't recognize (whose projection counterpart is `Person.other` /
+    /// `Projection.unclassified`). So a newer app version's data is editable here with no code change.
+    pub fn live_claims_of_any(&self, target: &str) -> Vec<Value> {
+        self.materialized()
+            .iter()
+            .filter_map(|r| match r {
+                Record::Claim(c) if c.target_id.as_str() == target => Some(c.to_value()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {

@@ -107,6 +107,13 @@ impl WasmTree {
         serde_json::to_string(&self.inner.live_claims_of(target, predicate)).map_err(to_js)
     }
 
+    /// Every live claim about `target`, whatever its predicate — a JSON array of records, for a
+    /// generic renderer that enumerates a subject's claims (incl. unrecognized predicates).
+    #[wasm_bindgen(js_name = liveClaimsOfAny)]
+    pub fn live_claims_of_any(&self, target: &str) -> Result<String, JsError> {
+        serde_json::to_string(&self.inner.live_claims_of_any(target)).map_err(to_js)
+    }
+
     /// The canonical person id an anchor resolves to (or `undefined`).
     #[wasm_bindgen(js_name = resolveId)]
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {

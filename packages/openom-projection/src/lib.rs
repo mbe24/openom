@@ -98,6 +98,29 @@ pub struct Person {
     /// caption/crop/coverage as they apply). Sorted by claim id; a link with `role == "portrait"` is
     /// the portrait (a disputable `preferred` portrait slot is a later refinement).
     pub media: Vec<MediaLink>,
+    /// Claims about this person whose `predicate` this build doesn't recognize, surfaced verbatim so a
+    /// newer data-model vocabulary is visible (and re-editable) with no projection change (OPE-212b).
+    /// A generic front-end renders these as key/value until a bespoke view exists. Sorted by claim id.
+    pub other: Vec<GenericClaimView>,
+}
+
+/// A live claim whose `predicate` this build doesn't recognize — the read-model counterpart of the
+/// mechanism's opaque [`Record::Unknown`](openom_claim::envelope::Record::Unknown) (OPE-212a). Carried
+/// verbatim (an unknown predicate has no known semantics to corroborate) so new vocabulary shows up in
+/// the UI immediately; a generic renderer displays it as key/value. Attached to a [`Person`] when its
+/// (effective) target resolves to one, else carried in [`Projection::unclassified`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct GenericClaimView {
+    /// The claim's id — the stable UI handle.
+    pub claim_id: String,
+    /// The claim's subject (its `targetId`; the effective target after `reattribute_to`).
+    pub target_id: String,
+    /// The unrecognized predicate URI.
+    pub predicate: String,
+    /// The claim's value, verbatim.
+    pub value: Value,
+    /// The claim's author (`createdBy`).
+    pub created_by: String,
 }
 
 /// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2). The projection's
@@ -249,6 +272,10 @@ pub struct Projection {
     pub unions: Vec<Union>,
     pub events: Vec<EventView>,
     pub conflicts: Vec<Conflict>,
+    /// Unknown-predicate claims whose (effective) target does not resolve to a person — a claim about
+    /// a newer anchor kind, an event, or a not-yet-known subject (OPE-212b). Kept so no live data is
+    /// invisible; sorted by (target, predicate, claim id).
+    pub unclassified: Vec<GenericClaimView>,
 }
 
 /// Project a record set into the read model. Pure: the result depends only on the set of records and
@@ -293,6 +320,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         BTreeMap::new(); // placeId -> (validRange, name) -> authors
     let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
     let mut media_links: Vec<(String, String, Value)> = Vec::new(); // (target, claimId, value)
+    let mut other_claims: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, predicate, value, author) — unrecognized predicates
 
     for &r in &deduped {
         let c: &Claim = match r {
@@ -557,7 +585,16 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
                     }
                 }
             }
-            _ => {}
+            // A predicate this build doesn't recognize: keep the claim verbatim (OPE-212b). It is
+            // NOT added to `nodes` — an unknown predicate must not mint a spurious person — and is
+            // routed after clustering to its target's person, or to `Projection.unclassified`.
+            _ => other_claims.push((
+                c.target_id.clone(),
+                id.to_string(),
+                pred.to_string(),
+                c.value.clone(),
+                c.created_by.clone(),
+            )),
         }
     }
 
@@ -816,6 +853,34 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         links.dedup();
     }
 
+    // Unknown-predicate claims (OPE-212b): attach each to the canonical person its (effective) target
+    // resolves to; claims whose target isn't a person (a newer anchor kind, an event, a not-yet-known
+    // subject) go to `unclassified` rather than minting a spurious person. Verbatim — no corroboration.
+    let mut other_by_person: BTreeMap<String, Vec<GenericClaimView>> = BTreeMap::new();
+    let mut unclassified: Vec<GenericClaimView> = Vec::new();
+    for (target, cid, pred, value, author) in &other_claims {
+        let view = GenericClaimView {
+            claim_id: cid.clone(),
+            target_id: target.clone(),
+            predicate: pred.clone(),
+            value: value.clone(),
+            created_by: author.clone(),
+        };
+        match canon_of(&eff_target(cid, target)) {
+            Some(canon) => other_by_person.entry(canon).or_default().push(view),
+            None => unclassified.push(view),
+        }
+    }
+    for views in other_by_person.values_mut() {
+        views.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
+    }
+    unclassified.sort_by(|a, b| {
+        a.target_id
+            .cmp(&b.target_id)
+            .then_with(|| a.predicate.cmp(&b.predicate))
+            .then_with(|| a.claim_id.cmp(&b.claim_id))
+    });
+
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
@@ -883,6 +948,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         let custom_fields = customs_of.remove(canon).unwrap_or_default();
         let sources = sources_by_person.remove(canon).unwrap_or_default();
         let media = media_by_person.remove(canon).unwrap_or_default();
+        let other = other_by_person.remove(canon).unwrap_or_default();
         people.push(Person {
             id: canon.clone(),
             also,
@@ -893,6 +959,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             custom_fields,
             sources,
             media,
+            other,
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1051,6 +1118,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         unions,
         events,
         conflicts,
+        unclassified,
     }
 }
 

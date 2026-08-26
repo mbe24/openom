@@ -113,3 +113,28 @@ fn live_claims_of_returns_matching_records() {
     assert_eq!(names[0]["value"], name_value("Ada"));
     assert!(a.live_claims_of("pA", "openom.org/core/date/v1").is_empty());
 }
+
+#[test]
+fn live_claims_of_any_returns_every_predicate_including_unrecognized() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim(
+        "pA",
+        "openom.org/x/occupation/v1", // a predicate this build doesn't recognize
+        json!({ "title": "mathematician" }),
+        1,
+    )
+    .unwrap();
+
+    // Both the known name claim and the unrecognized-predicate claim come back — a generic renderer
+    // can enumerate the whole subject regardless of what the projection understands.
+    let all = a.live_claims_of_any("pA");
+    assert_eq!(all.len(), 2);
+    let preds: std::collections::BTreeSet<&str> =
+        all.iter().filter_map(|c| c["predicate"].as_str()).collect();
+    assert!(preds.contains(NAME));
+    assert!(preds.contains("openom.org/x/occupation/v1"));
+
+    assert!(a.live_claims_of_any("nope").is_empty());
+}
