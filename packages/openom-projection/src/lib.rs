@@ -1192,22 +1192,21 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     let unions: Vec<Union> = union_children
         .iter()
         .map(|(parents, children)| {
-            let marriage_event = (parents.len() == 2)
-                .then(|| {
-                    let want: BTreeSet<&String> = parents.iter().collect();
-                    events
-                        .iter()
-                        .find(|e| {
-                            matches!(e.event_type.as_deref(), Some("marriage") | Some("divorce"))
-                                && e.participants
-                                    .iter()
-                                    .map(|p| &p.person)
-                                    .collect::<BTreeSet<_>>()
-                                    == want
-                        })
-                        .map(|e| e.id.clone())
+            // The union's marriage/divorce event is one whose participant-person set is exactly this
+            // union's parents. Usually a couple, but a single-parent family can carry one too — a
+            // marriage whose other spouse isn't recorded in the tree — so this is not restricted to two.
+            let want: BTreeSet<&String> = parents.iter().collect();
+            let marriage_event = events
+                .iter()
+                .find(|e| {
+                    matches!(e.event_type.as_deref(), Some("marriage") | Some("divorce"))
+                        && e.participants
+                            .iter()
+                            .map(|p| &p.person)
+                            .collect::<BTreeSet<_>>()
+                            == want
                 })
-                .flatten();
+                .map(|e| e.id.clone());
             Union {
                 id: format!("union:{}", parents.join("+")),
                 parents: parents.clone(),
