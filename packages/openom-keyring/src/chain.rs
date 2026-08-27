@@ -720,6 +720,49 @@ mod tests {
         k
     }
 
+    #[test]
+    fn a_non_curve_point_signer_key_is_rejected_as_malformed() {
+        // A 32-byte public key that isn't a valid Ed25519 point must be rejected AS malformed — kills
+        // check_structure's `len != 32 || signer_key.is_none()` -> `&&` (which would let a 32-byte
+        // non-point slip past to a different, later error).
+        let mut bad = [0u8; 32];
+        bad[0] = 2; // y = 2 has no matching x on the curve (see openom-sign)
+        let mut k = genesis(&key(), &[], &[]);
+        k.authorized_signers[0].public_key = bad.to_vec();
+        assert_eq!(
+            check_structure(&k),
+            Err(ChainError::BadStructure("signer key malformed"))
+        );
+    }
+
+    #[test]
+    fn exactly_max_signers_does_not_trip_the_size_cap() {
+        // A signer list of EXACTLY MAX_SIGNERS is not "too large" — kills `> MAX_SIGNERS` -> `>=`. These
+        // signers are otherwise invalid, so check_structure still rejects, just not for size.
+        let signers: Vec<AuthorizedSigner> = (0..MAX_SIGNERS)
+            .map(|i| AuthorizedSigner {
+                public_key: vec![],
+                member_id: format!("m{i}"),
+                role: 0,
+            })
+            .collect();
+        let k = Keyring {
+            tree_id: TREE.to_vec(),
+            revision: 1,
+            layout_version: 1,
+            prev_keyring_hash: vec![],
+            authorized_signers: signers,
+            members: vec![],
+            signatures: vec![],
+            recovery_keys: vec![],
+            epochs: vec![],
+        };
+        assert_ne!(
+            check_structure(&k),
+            Err(ChainError::BadStructure("list too large"))
+        );
+    }
+
     /// A well-formed successor: revision+1, chained hash, `mutate` applied, then signed by
     /// each key in `sign_with`.
     fn next(
