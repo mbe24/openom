@@ -23,10 +23,7 @@ members = [
     "packages/openom-sealer",
     "packages/openom-vault-host",
     "packages/journal",
-    "packages/commute",
-    "packages/openom-treelog",
     "packages/openom-sync",
-    "packages/commute-format",
     "openom",
     "apps/src-tauri",
 ]
@@ -55,7 +52,6 @@ openom-projection = { path = "packages/openom-projection" }
 openom-crdt = { path = "packages/openom-crdt" }
 openom-tree = { path = "packages/openom-tree" }
 journal = { path = "packages/journal" }
-commute = { path = "packages/commute" }
 
 # Protocol / serialization.
 prost = "0.14"
@@ -145,8 +141,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # fuzz-style coverage of the decode/open paths without a nightly libFuzzer setup.
 proptest = "1"
 
-# The wasm build profile (sealer + treelog). MUST live in this ROOT manifest — Cargo
-# ignores `[profile.*]` in member manifests. `scripts/build-{sealer,treelog}.mjs` build
+# The wasm build profile (sealer + tree). MUST live in this ROOT manifest — Cargo
+# ignores `[profile.*]` in member manifests. `scripts/build-{sealer,tree}.mjs` build
 # with `--profile wasm-release`. Tuned for STARTUP, not smallest module: opt-level=3, so
 # the compute on the critical path (Argon2id unlock, seal/open, CRDT snapshot decode)
 # runs fast — the same trade the chatletting/libzaungast browser demos landed on, where

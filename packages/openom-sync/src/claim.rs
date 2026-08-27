@@ -1,8 +1,6 @@
-//! The claim-model sync client — the op-based counterpart to [`SyncClient`](crate::SyncClient),
-//! deliberately independent of `openom-treelog`/`commute` so those can be deleted (OPE-210) without
-//! touching it.
+//! The claim-model sync client — op-based, with a `materialize` fold over the accumulated ops.
 //!
-//! Same transport as the treelog path: a claim update **is** a delta — an op-based change — so it
+//! A claim update **is** a delta — an op-based change — so it
 //! seals as a `Kind::Delta` entry with `Format::OpenomOps`, appends to the tree's one log, and is
 //! deduped by the replica dot exactly like any other delta. The payload is a batch of [`ChannelItem`]s
 //! (from `openom-crdt`); inbound, they accumulate into a set that [`materialize`] folds into the live
