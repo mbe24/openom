@@ -92,6 +92,56 @@ fn is_member(k: &TestEngine, id: &[u8; 32]) -> bool {
     k.state().active_members().iter().any(|(m, _)| m == id)
 }
 
+// ── OPE-258: authority-aware resolution (Phase 0) ──
+// RED until the resolver consults `AccessControl` at each op's causal position. Pins the
+// authority-blind hole: a member who is NOT authorized to remove can still fire strong-remove's
+// invalidation (rule 1) and suppress the victim's concurrent, *authorized* ops — even though the
+// unauthorized remove itself never takes effect.
+#[test]
+#[ignore = "RED until OPE-258: keyeo resolver is authority-blind (StrongRemove ignores AccessControl)"]
+fn an_unauthorized_remove_must_not_invalidate_the_victims_concurrent_ops() {
+    let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
+    // Admin-only administration; bob is an Editor — NOT authorized to remove.
+    let mut k = strong_remove_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Editor, [0xbb; 32]),
+    ]);
+    // Concurrent (both children of the Create op, id 1):
+    //   op2: alice (Admin, authorized) adds carol
+    //   op3: bob   (Editor, UNAUTHORIZED) removes alice
+    k.apply(make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: carol,
+            role: TestRole::Editor,
+            author_public_key: carol,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    ))
+    .unwrap();
+    k.apply(make_op(
+        3,
+        vec![1],
+        &[2u8; 32],
+        MembershipAction::Remove { member: alice },
+    ))
+    .unwrap();
+
+    // Bob's remove is unauthorized → it must have NO effect: alice stays a member, and her concurrent,
+    // authorized Add(carol) must survive. Today's authority-blind resolver fires rule 1 and drops carol.
+    assert!(
+        is_member(&k, &alice),
+        "alice must remain — bob is not authorized to remove her"
+    );
+    assert!(
+        is_member(&k, &carol),
+        "alice's authorized Add(carol) must survive an unauthorized concurrent Remove(alice)"
+    );
+}
+
 // ── Basic operations ──
 
 #[test]
