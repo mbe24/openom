@@ -178,6 +178,23 @@ mod tests {
 
     const INFO: &[u8] = b"openom:wrap:v1\x00tree\x00key\x00member";
 
+    #[test]
+    fn os_csprng_produces_entropy_not_constants() {
+        use rand_core::RngCore;
+        // next_u32/next_u64 vary across calls — kills `next_u32/next_u64 -> 0`/`1` (a constant would
+        // make two calls compare equal). Collision odds are 2^-32 / 2^-64.
+        assert_ne!(OsCsprng.next_u32(), OsCsprng.next_u32());
+        assert_ne!(OsCsprng.next_u64(), OsCsprng.next_u64());
+        // fill_bytes / try_fill_bytes actually write entropy — kills `fill_bytes -> ()` and
+        // `try_fill_bytes -> Ok(())`, both of which would leave the buffer all-zero.
+        let mut a = [0u8; 32];
+        OsCsprng.fill_bytes(&mut a);
+        assert_ne!(a, [0u8; 32]);
+        let mut b = [0u8; 32];
+        OsCsprng.try_fill_bytes(&mut b).unwrap();
+        assert_ne!(b, [0u8; 32]);
+    }
+
     fn dek() -> Dek {
         let mut d = [0u8; KEY_LEN];
         for (i, b) in d.iter_mut().enumerate() {

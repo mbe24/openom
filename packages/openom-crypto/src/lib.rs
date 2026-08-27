@@ -111,3 +111,25 @@ pub enum CryptoError {
     #[error("HPKE wrap/unwrap failed")]
     Hpke,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dev_dek_is_the_fixed_nonzero_hash() {
+        // Not Default (all-zero): the dev DEK is a SHA-256, so it's non-zero and deterministic.
+        // Kills `dev_dek -> Default::default()`.
+        assert_ne!(*dev_dek(), [0u8; KEY_LEN]);
+        assert_eq!(*dev_dek(), *dev_dek());
+    }
+
+    #[test]
+    fn cipher_suite_names_the_primitives() {
+        // Kills `cipher_suite -> ""` / `"xyzzy"`.
+        assert_eq!(
+            cipher_suite(),
+            "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
+        );
+    }
+}

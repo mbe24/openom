@@ -131,6 +131,22 @@ mod tests {
     }
 
     #[test]
+    fn default_params_carry_the_salt_and_default_costs() {
+        // Kills `default_kdf_params -> Default::default()` (which would drop the salt and zero the costs).
+        let p = default_kdf_params(vec![1, 2, 3]);
+        assert_eq!(p.salt, vec![1, 2, 3]);
+        assert_eq!(p.memory_kib, DEFAULT_ARGON2_MEMORY_KIB);
+        assert_eq!(p.iterations, DEFAULT_ARGON2_ITERATIONS);
+        assert_eq!(p.parallelism, DEFAULT_ARGON2_PARALLELISM);
+    }
+
+    #[test]
+    fn generated_salts_are_random() {
+        // Kills `generate_salt -> Ok([0; SALT_LEN])` / `Ok([1; SALT_LEN])`.
+        assert_ne!(generate_salt().unwrap(), generate_salt().unwrap());
+    }
+
+    #[test]
     fn generated_deks_are_random_and_sized() {
         let a = generate_dek().unwrap();
         let b = generate_dek().unwrap();

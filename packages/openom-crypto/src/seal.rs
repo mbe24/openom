@@ -150,6 +150,21 @@ mod tests {
 
     const KEY: [u8; KEY_LEN] = [7u8; KEY_LEN];
 
+    #[test]
+    fn check_nonce_requires_the_exact_length() {
+        // Kills `check_nonce -> Ok(())` (which would accept any nonce length and defeat the guard
+        // at all four seal/open call sites).
+        assert!(check_nonce(&[0u8; XCHACHA_NONCE_LEN], XCHACHA_NONCE_LEN).is_ok());
+        assert!(matches!(
+            check_nonce(&[0u8; XCHACHA_NONCE_LEN - 1], XCHACHA_NONCE_LEN),
+            Err(CryptoError::NonceLength)
+        ));
+        assert!(matches!(
+            check_nonce(&[0u8; AES_GCM_NONCE_LEN + 1], AES_GCM_NONCE_LEN),
+            Err(CryptoError::NonceLength)
+        ));
+    }
+
     fn header(aead: AeadAlg, nonce: Vec<u8>) -> Header {
         Header {
             kind: Kind::Snapshot as i32,
