@@ -392,6 +392,37 @@ mod tests {
     }
 
     #[test]
+    fn attest_target_as_str_returns_the_inner_hash() {
+        // kills AttestTarget::as_str -> ""/"xyzzy"
+        assert_eq!(AttestTarget::Claim("sha256:aa".into()).as_str(), "sha256:aa");
+        assert_eq!(
+            AttestTarget::Fingerprint("sha256:bb".into()).as_str(),
+            "sha256:bb"
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_distinct_claims() {
+        // kills Claim::fingerprint -> Ok([0;32])/Ok([1;32]) (a constant collides every claim)
+        let (_, did) = author();
+        let a = Claim::new(
+            "per_uuid",
+            "openom.org/core/name/v1",
+            json!({ "given": "Ada" }),
+            &did,
+            hlc(1),
+        );
+        let b = Claim::new(
+            "per_uuid",
+            "openom.org/core/name/v1",
+            json!({ "given": "Grace" }),
+            &did,
+            hlc(1),
+        );
+        assert_ne!(a.fingerprint().unwrap(), b.fingerprint().unwrap());
+    }
+
+    #[test]
     fn claim_roundtrips_and_ids_match_the_seam() {
         let (_, did) = author();
         let mut c = Claim::new(

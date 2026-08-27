@@ -307,8 +307,37 @@ mod tests {
             "2026-02-30T00:00:00.000000Z",    // Feb 30 does not exist
             "2027-02-29T00:00:00.000000Z",    // 2027 is not a leap year
             "2026-04-31T00:00:00.000000Z",    // April has 30 days
+            // Each of these is length-correct with exactly one wrong separator, so ONLY that
+            // separator's guard rejects it (kills the individual `||` -> `&&` mutations that a
+            // wrong-length or multi-error string can't isolate).
+            "2026-02222T13:10:00.000000Z",    // b[7] is not '-'
+            "2026-02-22T13:10000.000000Z",    // b[16] is not ':'
+            "2026-02-22T13:10:000000000Z",    // b[19] is not '.'
+            "2026-02-22T13:10:00.0000000",    // b[26] is not 'Z'
+            "2026-02-22T13:10:60.000000Z",    // second 60 (> 59), with a valid separator layout
         ] {
             assert!(bad.parse::<Hlc>().is_err(), "{bad:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn accessors_report_the_components() {
+        // kills millis -> 0/1/-1 and logical -> 0/1
+        let h = Hlc::new(1_234_567, 42);
+        assert_eq!(h.millis(), 1_234_567);
+        assert_eq!(h.logical(), 42);
+    }
+
+    #[test]
+    fn civil_math_covers_the_negative_branches() {
+        // Every other anchor is >= 1970, so `days >= 0` and neither the negative-z branch of
+        // civil_from_days nor the negative-year branch of days_from_civil is exercised by cargo test
+        // (both ARE Kani-proven). Year 0 sits before the +719468 shift's epoch, so it drives both.
+        for s in [
+            "0000-01-01T00:00:00.000000Z", // z < 0 after the shift -> civil_from_days negative-z branch
+            "0000-02-29T00:00:00.000000Z", // days_from_civil m<=2 -> y = -1 -> negative-year branch
+        ] {
+            assert_eq!(s.parse::<Hlc>().unwrap().to_string(), s, "{s} must round-trip");
         }
     }
 
