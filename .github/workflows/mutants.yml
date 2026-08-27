@@ -11,7 +11,7 @@ on:
     inputs:
       packages:
         description: 'Space-separated crates to mutate (all must already have real test coverage)'
-        default: 'openom-sign openom-crdt openom-keyring'
+        default: 'openom-sign openom-crdt openom-keyring openom-crypto'
       timeout:
         description: 'Per-mutant test timeout, seconds (bounds a mutant that loops forever)'
         default: '120'

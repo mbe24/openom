@@ -78,11 +78,18 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{default_kdf_params, generate_salt};
+    use crate::generate_salt;
 
+    // Tiny Argon2id cost so these tests run in sub-milliseconds. The cost is a security property
+    // (it's the passphrase brute-force defense) exercised in the field at production strength, NOT in
+    // unit logic tests — what derive_root's tests check (the HKDF split into KEK/identity/HPKE, key
+    // independence, determinism, zeroize-on-drop) is cost-INDEPENDENT, so cheap params lose no coverage
+    // and still exercise the real Argon2id path. The production cost is pinned in kdf.rs.
+    fn cheap(salt: Vec<u8>) -> KdfParams {
+        KdfParams { salt, memory_kib: 8, iterations: 1, parallelism: 1 }
+    }
     fn params() -> KdfParams {
-        // A cheap fixed salt/params for tests (real use gets a CSPRNG salt).
-        default_kdf_params(vec![7u8; 16])
+        cheap(vec![7u8; 16])
     }
 
     #[test]
@@ -111,8 +118,8 @@ mod tests {
 
     #[test]
     fn a_different_salt_gives_different_keys() {
-        let a = derive_root(b"same pass", &default_kdf_params(vec![1u8; 16])).unwrap();
-        let b = derive_root(b"same pass", &default_kdf_params(vec![2u8; 16])).unwrap();
+        let a = derive_root(b"same pass", &cheap(vec![1u8; 16])).unwrap();
+        let b = derive_root(b"same pass", &cheap(vec![2u8; 16])).unwrap();
         assert_ne!(a.kek.expose(), b.kek.expose());
         assert_ne!(
             a.identity.verifying_key().to_bytes(),
@@ -184,6 +191,6 @@ mod tests {
     fn salt_is_usable_from_the_generator() {
         // Smoke: a real CSPRNG salt flows through without panicking.
         let salt = generate_salt().unwrap().to_vec();
-        let _ = derive_root(b"pass", &default_kdf_params(salt)).unwrap();
+        let _ = derive_root(b"pass", &cheap(salt)).unwrap();
     }
 }

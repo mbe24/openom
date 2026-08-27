@@ -77,6 +77,16 @@ mod tests {
     }
 
     #[test]
+    fn production_kdf_params_are_pinned() {
+        // The passphrase KDF's cost IS the brute-force defense, so a silent weakening is a security
+        // regression. This pins the production values instantly (it asserts constants — it does NOT run
+        // Argon2id). Raising the cost is deliberate: bump these together with the constants.
+        assert_eq!(DEFAULT_ARGON2_MEMORY_KIB, 19_456); // ~19 MiB, the OWASP Argon2id minimum
+        assert_eq!(DEFAULT_ARGON2_ITERATIONS, 2);
+        assert_eq!(DEFAULT_ARGON2_PARALLELISM, 1);
+    }
+
+    #[test]
     fn deterministic_in_passphrase_and_params() {
         let p = fast_params(b"salt-0123456789ab");
         let a = derive_kek(b"correct horse", &p).unwrap();
