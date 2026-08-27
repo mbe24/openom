@@ -23,6 +23,7 @@ members = [
     "packages/openom-vault-host",
     "packages/journal",
     "packages/openom-sync",
+    "packages/keyeo",
     "openom",
     "apps/src-tauri",
 ]
