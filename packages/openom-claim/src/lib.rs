@@ -17,7 +17,7 @@ pub const F_VALUE: &str = "value";
 pub const F_CREATED_BY: &str = "createdBy";
 
 /// Domain-separation tag: a claim signature can never verify as some other Ed25519 signature
-/// elsewhere in the system (mirrors `openom-attestation-zkp`' domain prefix).
+/// elsewhere in the system (the same per-purpose domain-prefix discipline used across the crates).
 const SIGN_DOMAIN: &[u8] = b"openom-claim-v1";
 
 /// A hashing/signing failure.

@@ -46,7 +46,6 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **journal** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.
 - **openom-sync** — the client sync loop: seal local deltas to the store, merge peers' deltas back.
 - **openom-sealer** — the client sealer: a stateful session holding the unlocked DEK, sealing/opening envelopes (wasm veneer + Tauri).
-- **openom-attestation-zkp** — the **dormant** ZK-deferred signed-attestation *sidecar*: a member signs a fact's content hash, independent of the tree, riding `journal`. Superseded by the claim-based `core/attest/v1` attestation; kept for a possible future ZK need, slated for deletion (release WP, OPE-109).
 
 **Access control / identity / custody**
 - **openom-keyring** — the keyring/membership mechanism: chain verification, entry authorship, signing.

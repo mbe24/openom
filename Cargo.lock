@@ -3436,16 +3436,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-attestation-zkp"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "openom-claim"
 version = "0.1.0"
 dependencies = [

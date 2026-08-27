@@ -14,7 +14,10 @@ rust-version.workspace = true
 
 [dependencies]
 # The only place this appears in the workspace. `zeroize` feature = the signing seed scrubs on drop.
-ed25519-dalek.workspace = true
+# The ONE ed25519-dalek edge in the workspace: a direct, explicit-version dep (NOT a
+# [workspace.dependencies] entry), so no other crate can casually draw `ed25519-dalek.workspace = true`
+# and roll its own plain verify. openom-sign is the sole, auditable Ed25519 dependency (OPE-215).
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 # For the compile-time ZeroizeOnDrop proof on the signing key.
 zeroize.workspace = true
 thiserror.workspace = true
