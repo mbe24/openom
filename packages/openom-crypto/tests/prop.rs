@@ -4,6 +4,7 @@
 //! untrusted bytes never panics — only ever Ok or Err. That last one is the fuzz surface a
 //! keyless server and every reader are exposed to.
 
+use arbitrary::{Arbitrary, Unstructured};
 use openom_crypto::{generate_dek, open_envelope, seal_envelope, SealParams};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Kind};
 use openom_protocol::Message;
@@ -101,6 +102,90 @@ proptest! {
         }
         if let Ok(env2) = Envelope::decode(enc.as_slice()) {
             let _ = open_envelope(dek.expose(), &env2);
+        }
+    }
+}
+
+// ---- Structured fuzzing with `arbitrary` (stable, runs under `cargo test`) --------------------
+//
+// The same structured seal/open fuzzing the nightly cargo-fuzz crate (fuzz/) does, but driven on
+// stable: proptest supplies the entropy, `arbitrary` shapes it into a typed `SealInput`. This is the
+// locally-runnable half of the pair — the fuzz/ crate reuses the identical derive for deep, corpus-
+// driven runs under `cargo +nightly fuzz`. Keeping both means the property is exercised every
+// `cargo test` AND fuzzable in depth where a nightly toolchain exists.
+
+#[derive(Arbitrary, Debug)]
+struct SealInput {
+    plaintext: Vec<u8>,
+    /// Pick the AEAD suite (both are frozen options).
+    aes_gcm: bool,
+    key_id: Vec<u8>,
+    tree_id: Vec<u8>,
+    replica_id: Vec<u8>,
+    replica_counter: u64,
+    /// `Some((index, byte))` corrupts one ciphertext byte; `None` checks the clean round-trip.
+    tamper: Option<(usize, u8)>,
+}
+
+/// The two frozen envelope invariants over a structured input: a validly-sealed envelope opens back
+/// to its exact plaintext, and any real ciphertext change fails authentication (never opens, never
+/// panics). Shared verbatim with the fuzz/ target's body.
+fn check_seal_input(input: SealInput) {
+    let dek = generate_dek().unwrap();
+    let aead = if input.aes_gcm {
+        Aead::Aes256Gcm
+    } else {
+        Aead::Xchacha20Poly1305
+    };
+    let params = SealParams {
+        version: 1,
+        kind: Kind::Snapshot,
+        format: Format::OpenomJson,
+        aead,
+        compression: Compression::None,
+        key_id: &input.key_id,
+        tree_id: &input.tree_id,
+        replica_id: &input.replica_id,
+        replica_counter: input.replica_counter,
+        prev_ciphertext_hash: b"",
+        covers_through_seq: 0,
+        blob_id: b"",
+        author: None,
+    };
+
+    // Only assert on a real envelope — if these params are rejected there is nothing to check.
+    let Ok(mut env) = seal_envelope(dek.expose(), &params, &input.plaintext) else {
+        return;
+    };
+
+    match input.tamper {
+        None => assert_eq!(
+            open_envelope(dek.expose(), &env).unwrap(),
+            input.plaintext,
+            "a validly-sealed envelope must open back to its plaintext"
+        ),
+        Some((idx, byte)) if !env.ciphertext.is_empty() => {
+            let i = idx % env.ciphertext.len();
+            if env.ciphertext[i] != byte {
+                env.ciphertext[i] = byte;
+                assert!(
+                    open_envelope(dek.expose(), &env).is_err(),
+                    "a corrupted ciphertext must not authenticate"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+proptest! {
+    #[test]
+    fn arbitrary_structured_seal_open(entropy in proptest::collection::vec(any::<u8>(), 0..4096)) {
+        // proptest generates the raw entropy (and shrinks it on failure); `arbitrary` turns it into a
+        // structured SealInput. A short buffer that can't fill the struct just yields Err — skip it.
+        let u = Unstructured::new(&entropy);
+        if let Ok(input) = SealInput::arbitrary_take_rest(u) {
+            check_seal_input(input);
         }
     }
 }

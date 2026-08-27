@@ -29,6 +29,10 @@ rand_core.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# Structured fuzz input: proptest supplies the entropy, `arbitrary` shapes it into a typed
+# SealInput (tests/prop.rs). The nightly cargo-fuzz crate (fuzz/) reuses the same derive for
+# deep corpus runs; this dev-dep is what makes the structured fuzzing runnable on stable.
+arbitrary = { version = "1.4.2", features = ["derive"] }
 
 # WASM (the web sealer) needs getrandom's browser backend enabled — only for wasm32;
 # native uses the OS RNG directly. Several getrandom majors reach this crate
