@@ -515,7 +515,7 @@ fn a_batch_with_novel_items_round_trips_through_the_codec_untouched() {
                 "id": "nested", "type": "nested", "predicate": "nested", "signature": "nested",
                 "deep": [1, 2, { "k": true }],
             }),
-            &did(1),
+            did(1),
             hlc(1),
         );
         c.compute_id().unwrap();
@@ -555,7 +555,7 @@ proptest! {
         value in arb_value(),
         remove_it in any::<bool>(),
     ) {
-        let mut c = Claim::new("pA", &pred, value, &did(1), hlc(1));
+        let mut c = Claim::new("pA", &pred, value, did(1), hlc(1));
         c.compute_id().unwrap();
         let rec = Record::Claim(c.clone());
         let assert = ChannelItem::Assert(rec.clone());
