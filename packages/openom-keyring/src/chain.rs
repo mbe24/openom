@@ -603,6 +603,37 @@ mod transition_verification {
             Err(ChainError::NonSequential),
         );
     }
+
+    /// A signer with a symbolic role but a fixed, position-distinct 1-byte key (enough to make two
+    /// signers unequal under `same_signer`; empty `member_id` keeps the String compare O(1)).
+    fn signer(tag: u8, role: i32) -> AuthorizedSigner {
+        AuthorizedSigner {
+            public_key: vec![tag],
+            member_id: String::new(),
+            role,
+        }
+    }
+
+    /// An unchanged signer set is NOT a "set change": `signer_set_differs(s, s) == false`, for any
+    /// roles. This is the gate (line ~209) that routes a revision to the ordinary-signature policy
+    /// (any prior signer) vs the founder-or-unanimity policy — a false positive here would force needless
+    /// unanimity (an availability bug), a false negative would let a signer-set change slip through under
+    /// a single ordinary signature (a security bug). Pure, no crypto. Diagnostic: a broken `same_signer`
+    /// (a dropped or inverted field compare) makes a signer fail to match itself → `differs` → fails.
+    ///
+    /// NOTE on `is_self_removal`'s deeper anti-mutiny scoping: it is a POOR Kani target and stays with
+    /// the differential proptest oracle + mutants. Its structural gate is masked by the downstream
+    /// `signer_key` (a wrong-length key → `None` → `false`, so a gate mutation still returns `false`),
+    /// and every construction that would isolate a single gate term needs a candidate that is either
+    /// founder-less (structurally impossible post-`check_structure` → vacuous) or reaches the
+    /// un-modellable `VerifyingKey`.
+    #[kani::proof]
+    #[kani::unwind(3)] // the nested any() over the two-element set (2 iterations + 1)
+    fn an_unchanged_signer_set_does_not_differ() {
+        let (r0, r1): (i32, i32) = (kani::any(), kani::any());
+        let s = vec![signer(0, r0), signer(1, r1)];
+        assert!(!signer_set_differs(&s, &s));
+    }
 }
 
 #[cfg(test)]
