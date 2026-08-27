@@ -55,6 +55,63 @@ impl HlcClock {
     }
 }
 
+/// Kani proof harnesses for the engine clock — compiled only under `cargo kani` (`--cfg kani`), never
+/// in the normal build. Run: `node scripts/kani.mjs -p openom-tree`. The clock's guarantee (a re-mint
+/// can never reproduce an already-used id) reduces to two properties proven here over ALL inputs: `next`
+/// is strictly monotonic and `observe` never regresses. Both take primitive inputs; `next`'s only loop
+/// is the logical carry, bounded to one iteration by the maintained `logical < 1000` invariant.
+#[cfg(kani)]
+mod clock_verification {
+    use super::*;
+
+    /// A realistic epoch-ms magnitude — keeps `millis` and the carry well inside `i64` (no overflow).
+    const MAX_MILLIS: i64 = 300_000_000_000_000;
+
+    /// For any prior state (holding the clock's own `logical < 1000` invariant) and ANY physical
+    /// reading, `next` returns a timestamp strictly greater than the prior state and preserves the
+    /// invariant — so a subsequent mint can never collide with an id already drawn.
+    #[kani::proof]
+    #[kani::unwind(2)] // the carry loop runs at most once when logical < 1000 (999 + 1 = 1000 → one carry)
+    fn next_is_strictly_monotonic() {
+        let last_millis: i64 = kani::any();
+        let logical: u32 = kani::any();
+        kani::assume(logical < LOGICAL_PER_MILLI); // the invariant next/observe maintain
+        kani::assume((0..MAX_MILLIS).contains(&last_millis));
+        let now_millis: i64 = kani::any();
+        kani::assume((0..MAX_MILLIS).contains(&now_millis));
+
+        let mut clock = HlcClock { last_millis, logical };
+        let before = (last_millis, logical);
+        let out = clock.next(now_millis);
+
+        assert_eq!((out.millis(), out.logical()), (clock.last_millis, clock.logical));
+        assert!((clock.last_millis, clock.logical) > before, "strictly increasing");
+        assert!(clock.logical < LOGICAL_PER_MILLI, "invariant preserved");
+    }
+
+    /// `observe` never regresses: after observing any timestamp the clock is at least as high as both
+    /// its prior state and the observed one (the HLC receive rule). Loop-free.
+    #[kani::proof]
+    fn observe_never_regresses() {
+        let last_millis: i64 = kani::any();
+        let logical: u32 = kani::any();
+        kani::assume(logical < LOGICAL_PER_MILLI);
+        kani::assume((0..MAX_MILLIS).contains(&last_millis));
+        let at_millis: i64 = kani::any();
+        let at_logical: u32 = kani::any();
+        kani::assume(at_logical < LOGICAL_PER_MILLI);
+        kani::assume((0..MAX_MILLIS).contains(&at_millis));
+
+        let mut clock = HlcClock { last_millis, logical };
+        let before = (last_millis, logical);
+        let at = Hlc::new(at_millis, at_logical);
+        clock.observe(at);
+
+        assert!((clock.last_millis, clock.logical) >= before);
+        assert!((clock.last_millis, clock.logical) >= (at.millis(), at.logical()));
+    }
+}
+
 /// An edit or ingest failed.
 #[derive(Debug, thiserror::Error)]
 pub enum TreeError {
