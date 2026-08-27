@@ -2832,6 +2832,7 @@ dependencies = [
  "hpke",
  "petgraph",
  "postcard",
+ "proptest",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
@@ -3624,6 +3625,16 @@ dependencies = [
  "proptest",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-keyring-dag"
+version = "0.1.0"
+dependencies = [
+ "keyeo",
+ "openom-roles",
+ "openom-sign",
+ "serde",
 ]
 
 [[package]]

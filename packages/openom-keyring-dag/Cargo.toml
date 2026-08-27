@@ -1,0 +1,13 @@
+[package]
+name = "openom-keyring-dag"
+description = "openom — wires openom roles/signing/keys onto the generic keyeo group-membership DAG (sequencer-free keyring, OPE-137)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+keyeo.workspace = true
+openom-sign.workspace = true
+openom-roles.workspace = true
+serde.workspace = true
