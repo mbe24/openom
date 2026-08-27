@@ -19,8 +19,10 @@ fn only_id(batch: &[u8]) -> String {
 #[test]
 fn two_engines_converge_over_the_same_ops() {
     let mut a = Tree::new(DID);
-    let pa = a.assert_anchor("pA", PERSON, 1).unwrap();
-    let na = a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    let pa = a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
 
     let mut b = Tree::new("did:key:z6MkB"); // a different replica...
     b.merge(&pa).unwrap();
@@ -36,7 +38,9 @@ fn two_engines_converge_over_the_same_ops() {
 fn a_same_author_remove_drops_the_claim() {
     let mut a = Tree::new(DID);
     a.assert_anchor("pA", PERSON, 1).unwrap();
-    let na = a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
     assert_eq!(a.project().people[0].names.len(), 1);
 
     a.remove(&only_id(&na), 2).unwrap();
@@ -50,7 +54,9 @@ fn a_same_author_remove_drops_the_claim() {
 fn supersede_replaces_a_claim() {
     let mut a = Tree::new(DID);
     a.assert_anchor("pA", PERSON, 1).unwrap();
-    let na = a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
     a.supersede_claim(&only_id(&na), "pA", NAME, name_value("Ada Lovelace"), 2)
         .unwrap();
 
@@ -62,11 +68,14 @@ fn supersede_replaces_a_claim() {
 fn revoke_restores_a_removed_claim() {
     let mut a = Tree::new(DID);
     a.assert_anchor("pA", PERSON, 1).unwrap();
-    let na = a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
-    let rm = a.remove(&only_id(&na), 2).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+    let rm_id = a.remove(&only_id(&na), 2).unwrap(); // remove hands back the Remove op's own id
+    a.flush().unwrap();
     assert!(a.project().people[0].names.is_empty());
 
-    a.revoke(&only_id(&rm), 3).unwrap();
+    a.revoke(&rm_id, 3).unwrap();
     assert_eq!(
         a.project().people[0].names.len(),
         1,
@@ -139,4 +148,27 @@ fn live_claims_of_any_returns_every_predicate_including_unrecognized() {
     assert!(preds.contains(openom_claim::envelope::PREDICATE_EXISTENCE));
 
     assert!(a.live_claims_of_any("nope").is_empty());
+}
+
+#[test]
+fn one_settled_intention_flushes_as_a_single_batch() {
+    // The mints of one intention accumulate; flush emits ONE batch carrying all of them, so a peer sees
+    // the whole edit atomically (never, e.g., an anchor with no claims). A second flush is empty.
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap(); // anchor + existence claim
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim("pA", "openom.org/core/sex/v1", json!({ "sex": "F" }), 1)
+        .unwrap();
+    let batch = a.flush().unwrap();
+    assert_eq!(
+        codec::decode(&batch).unwrap().len(),
+        4,
+        "anchor + existence + name + sex in one batch, not four"
+    );
+    assert!(
+        a.flush().unwrap().is_empty(),
+        "nothing minted since → empty flush"
+    );
+    // The optimistic apply is immediate (independent of flush): the read model already reflects it.
+    assert_eq!(a.project().people[0].names.len(), 1);
 }

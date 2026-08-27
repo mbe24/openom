@@ -32,6 +32,12 @@ impl WasmTree {
         self.inner.set_moderators(dids.into_iter().collect());
     }
 
+    /// Encode the current intention's minted items as ONE op-batch to seal + append (empty if nothing
+    /// was minted). Call once per settled edit, after the mint calls.
+    pub fn flush(&mut self) -> Result<Vec<u8>, JsError> {
+        self.inner.flush().map_err(to_js)
+    }
+
     /// Assert a claim (`value_json` = the claim value as JSON). Returns op-batch bytes to seal.
     #[wasm_bindgen(js_name = assertClaim)]
     pub fn assert_claim(
@@ -60,8 +66,9 @@ impl WasmTree {
             .map_err(to_js)
     }
 
-    /// Remove one of this author's own records by id.
-    pub fn remove(&mut self, target: &str, created_at: f64) -> Result<Vec<u8>, JsError> {
+    /// Remove one of this author's own records by id. Returns the Remove op's id (for a later revoke);
+    /// the op itself is carried out on the next `flush`.
+    pub fn remove(&mut self, target: &str, created_at: f64) -> Result<String, JsError> {
         self.inner.remove(target, created_at as i64).map_err(to_js)
     }
 

@@ -58,7 +58,9 @@ async function fixtureBatches() {
   claim('per_kid', V.P_PARENT, { parentPersonId: 'per_ada', kind: 'biological' });
   claim('per_kid', V.P_PARENT, { parentPersonId: 'per_byron', kind: 'biological' });
 
-  return out;
+  // The engine now accumulates mints and emits one batch at flush (one settled intention = one entry);
+  // the per-call returns above are empty. Take the whole fixture as a single batch to feed via merge.
+  return [eng.flush()];
 }
 
 describe.skipIf(!built)('FamilyTree read adapter (projection → v2 views)', () => {

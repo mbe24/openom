@@ -36,6 +36,10 @@ pub struct Tree {
     /// moderates their own tree. A shared tree calls [`set_moderators`](Tree::set_moderators) with the
     /// keyring's Maintainer+ set on unlock and on every keyring-head change (so a role change re-folds).
     moderators: BTreeSet<String>,
+    /// Items minted in the current intention, accumulated by [`emit`](Tree::emit) and encoded into one
+    /// op-batch by [`flush`](Tree::flush): one settled edit = one sealed entry, so a peer never sees a
+    /// half-formed record set (e.g. an event anchor with no type). Applied to `items` immediately.
+    pending: Vec<ChannelItem>,
 }
 
 impl Tree {
@@ -46,6 +50,7 @@ impl Tree {
             moderators: BTreeSet::from([created_by.clone()]),
             created_by,
             items: BTreeMap::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -117,8 +122,10 @@ impl Tree {
     }
 
     /// Remove one of this author's own records by id (same-author observed-remove). Undoable by
-    /// [`revoke`](Tree::revoke) up to the compaction (GC) horizon.
-    pub fn remove(&mut self, target: &str, created_at: i64) -> Result<Vec<u8>, TreeError> {
+    /// [`revoke`](Tree::revoke) up to the compaction (GC) horizon. Returns the Remove op's own id so
+    /// the caller can later revoke it — the minted op only reaches the store on the next [`flush`], but
+    /// its content id is known now.
+    pub fn remove(&mut self, target: &str, created_at: i64) -> Result<String, TreeError> {
         let op = Op::new(
             created_at,
             self.created_by.as_str(),
@@ -126,7 +133,10 @@ impl Tree {
                 target: target.to_owned(),
             },
         )?;
-        self.emit(vec![ChannelItem::Op(op)])
+        let item = ChannelItem::Op(op);
+        let id = item.id().to_owned();
+        self.emit(vec![item])?;
+        Ok(id)
     }
 
     /// Edit: atomically supersede the `prior` record with a fresh claim value, authored by this
@@ -171,14 +181,29 @@ impl Tree {
         self.emit(vec![ChannelItem::Op(op)])
     }
 
-    /// Encode the minted item(s) as one batch, track them locally, and return the bytes. Most edits emit
-    /// a single item; `assert_anchor` emits two (anchor + existence claim) so they land atomically.
+    /// Accumulate the minted item(s) into the current intention's batch and apply them to the live set
+    /// immediately (so a later read in the same intention sees them). The encoded op-batch is produced
+    /// once by [`flush`](Tree::flush), not here — so a whole edit (e.g. `addMarriage` with its event) is
+    /// one sealed entry rather than a train of single-op entries a peer could observe half-formed.
+    /// Returns no bytes (an empty vec, so the mint methods keep their signature) — [`flush`](Tree::flush)
+    /// is the sole producer of the encoded batch.
     fn emit(&mut self, items: Vec<ChannelItem>) -> Result<Vec<u8>, TreeError> {
-        let bytes = codec::encode(&items)?;
         for item in items {
+            self.pending.push(item.clone());
             self.items.insert(item.id().to_owned(), item);
         }
-        Ok(bytes)
+        Ok(Vec::new())
+    }
+
+    /// Encode everything minted since the last flush as ONE op-batch and clear the buffer (empty bytes
+    /// if nothing was minted). The single emit point: the caller flushes once per settled intention.
+    pub fn flush(&mut self) -> Result<Vec<u8>, TreeError> {
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = codec::encode(&self.pending)?;
+        self.pending.clear();
+        Ok(batch)
     }
 
     // --- ingest / snapshot ----------------------------------------------------------------------

@@ -16,7 +16,8 @@ const ensureInit = (initInput) => (ready ??= init(initInput));
 
 function wrap(inner) {
   return {
-    // --- edits: each returns the encoded op batch (Uint8Array) to seal + append ---
+    // --- edits: mints accumulate in the engine (see flush below); the return is unused except for
+    //     `remove`, which hands back the Remove op's id so an anchor removal can later be revoked ---
     assertAnchor: (id, typeUri, createdAt) => inner.assertAnchor(id, typeUri, createdAt),
     assertClaim: (target, predicate, value, createdAt) =>
       inner.assertClaim(target, predicate, JSON.stringify(value), createdAt),
@@ -24,6 +25,9 @@ function wrap(inner) {
       inner.supersedeClaim(prior, target, predicate, JSON.stringify(value), createdAt),
     remove: (target, createdAt) => inner.remove(target, createdAt),
     revoke: (removalOpId, createdAt) => inner.revoke(removalOpId, createdAt),
+    // Encode everything minted since the last flush as ONE op-batch (empty if nothing) — one settled
+    // intention = one sealed store entry. The mint methods above now accumulate; flush produces the batch.
+    flush: () => inner.flush(),
 
     // --- role authority: the did:keys currently at Maintainer+ whose remove/supersede/revoke ops the
     //     fold honors (a solo tree defaults to its own author) ---

@@ -547,16 +547,12 @@ export class FamilyTree {
     return m;
   }
 
-  /** Remove a record, remembering the Remove op's id (decoded from the batch) so an anchor removal can
+  /** Remove a record, remembering the Remove op's id (returned by the engine) so an anchor removal can
    *  later be revoked — a claim revives by re-assertion (fresh content-hash id), but an anchor's id is
    *  fixed, so its removal must be undone by revoke, not a re-assert the tombstone still suppresses. */
-  #remove(recordId, out) {
-    const bytes = this.#engine.remove(recordId, this.#at());
-    out.push(bytes);
-    try {
-      const op = JSON.parse(new TextDecoder().decode(bytes))[0];
-      if (op?.id) this.#removeOpId.set(recordId, op.id);
-    } catch { /* best-effort — only anchor removals need the op id for undo */ }
+  #remove(recordId, _out) {
+    const opId = this.#engine.remove(recordId, this.#at());
+    if (opId) this.#removeOpId.set(recordId, opId);
   }
 
   /** A commit's inverse frame: which of my records it added (to remove on undo) and removed (to
@@ -601,8 +597,12 @@ export class FamilyTree {
 
   /** Apply the collected op batches: persist, emit to the sync controller, re-materialize, notify, and
    *  (when `before` is given) record the inverse frame for undo. */
-  async #commit(out, before = null, { silent = false } = {}) {
-    const batches = out.filter(Boolean);
+  async #commit(_out, before = null, { silent = false } = {}) {
+    // One settled intention = one op-batch: the engine accumulated this edit's ops as they were minted;
+    // flush() encodes them as a single entry (empty if nothing minted). `_out` is vestigial (the mint
+    // calls now return empty) — the engine is the source of truth.
+    const batch = this.#engine.flush();
+    const batches = batch && batch.length ? [batch] : [];
     if (batches.length) await profile('store.append', () => this.#store.append(this.#docId, batches));
     this.#cursor += batches.length;
     if (this.#deltaListeners.size) for (const d of batches) for (const fn of this.#deltaListeners) fn(d);
@@ -633,8 +633,9 @@ export class FamilyTree {
   }
 
   /** Commit an undo/redo's ops, pushing the resulting inverse frame onto `target` (the opposite stack). */
-  async #commitReplay(out, before, target) {
-    const batches = out.filter(Boolean);
+  async #commitReplay(_out, before, target) {
+    const batch = this.#engine.flush();
+    const batches = batch && batch.length ? [batch] : [];
     if (batches.length) await this.#store.append(this.#docId, batches);
     this.#cursor += batches.length;
     if (this.#deltaListeners.size) for (const d of batches) for (const fn of this.#deltaListeners) fn(d);
