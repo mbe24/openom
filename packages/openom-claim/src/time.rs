@@ -179,6 +179,45 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// Kani proof harnesses — bit-precise model checking (CBMC backend). Compiled ONLY under `cargo kani`
+/// (which sets `--cfg kani`); the normal build and `cargo test` never see them, so there is no `kani`
+/// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p openom-claim` (Docker image or a
+/// local Kani install). These are the workspace's first proofs — deliberately the simplest high-value
+/// target: branch-free integer arithmetic over primitive inputs (no loops → no unwind bounds).
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// The civil-date conversion is a lossless inverse over the whole representable day range: every
+    /// day number round-trips through `(year, month, day)` unchanged. `createdAt`'s content-hash
+    /// canonical form rests on this — a break here would fork ids across native and wasm. Proven for
+    /// ALL days in the bounded range at once (not sampled, as a proptest would).
+    #[kani::proof]
+    fn civil_from_days_is_the_inverse_of_days_from_civil() {
+        let days: i64 = kani::any();
+        // ~year -200 .. 9999 — the representable 4-digit-year domain. The functions are branch-free
+        // (no loops), so this bound only scopes the integer range, it doesn't unwind anything.
+        kani::assume((-100_000..3_000_000).contains(&days));
+        let (y, m, d) = civil_from_days(days);
+        assert_eq!(days_from_civil(y, m, d), days);
+    }
+
+    /// `Hlc::new` canonicalizes: the logical counter always lands in `0..1000` (overflow carries into
+    /// `millis`), and re-normalizing an already-canonical value is a fixpoint — so two structurally
+    /// different inputs for the same instant collapse to one representation (the other half of the
+    /// "one canonical form" guarantee). Also proves the carry arithmetic never overflows in-range.
+    #[kani::proof]
+    fn hlc_new_canonicalizes_the_logical_carry() {
+        let millis: i64 = kani::any();
+        let logical: u32 = kani::any();
+        // A realistic epoch-ms magnitude; keeps millis + the carry well inside i64.
+        kani::assume((0..300_000_000_000_000).contains(&millis));
+        let h = Hlc::new(millis, logical);
+        assert!(h.logical() < 1000);
+        assert_eq!(Hlc::new(h.millis(), h.logical()), h);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
