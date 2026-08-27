@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 // @integration — boots the WHOLE app on the claim-based engine (localStorage['openom.engine']='claim'),
-// the OPE-187 merge gate: the running GUI must display + edit names backed by ClaimFamilyTree (OPE-201),
+// the OPE-187 merge gate: the running GUI must display + edit names backed by FamilyTree (OPE-201),
 // build/load with no page errors, and survive a reload (hydrate from the claim log). Run with
 // `pnpm test:e2e:full`. Excluded from the default `test:e2e` run.
 

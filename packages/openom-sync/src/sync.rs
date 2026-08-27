@@ -34,7 +34,7 @@ pub mod codec {
 
 /// One device's view of a claim-model tree: the [`Sealer`] holding its DEK, a shared [`DocStore`], the
 /// outbound replica chain (counter + prev hash), the inbound cursor, and the accumulated op set.
-pub struct ClaimSyncClient<S: DocStore> {
+pub struct SyncClient<S: DocStore> {
     sealer: Sealer,
     store: S,
     doc: String,
@@ -54,10 +54,10 @@ pub struct ClaimSyncClient<S: DocStore> {
     snapshot_version: Option<String>,
 }
 
-impl<S: DocStore> ClaimSyncClient<S> {
+impl<S: DocStore> SyncClient<S> {
     /// Wrap a freshly-unlocked claim tree. `doc` is the store key for this tree's log.
     pub fn new(sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
-        ClaimSyncClient {
+        SyncClient {
             sealer,
             store,
             doc: doc.into(),
@@ -204,9 +204,9 @@ impl<S: DocStore> ClaimSyncClient<S> {
     }
 }
 
-impl<S: DocStore> std::fmt::Debug for ClaimSyncClient<S> {
+impl<S: DocStore> std::fmt::Debug for SyncClient<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClaimSyncClient")
+        f.debug_struct("SyncClient")
             .field("doc", &self.doc)
             .field("next_counter", &self.next_counter)
             .field("pending", &self.pending.len())
@@ -217,7 +217,7 @@ impl<S: DocStore> std::fmt::Debug for ClaimSyncClient<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::ClaimSyncClient;
+    use super::SyncClient;
     use journal::memory::MemoryStore;
     use journal::DocStore;
     use openom_claim::envelope::{Claim, Record};
@@ -233,7 +233,7 @@ mod tests {
         replica: &[u8],
         dek: Dek,
         store: Arc<MemoryStore>,
-    ) -> ClaimSyncClient<Arc<MemoryStore>> {
+    ) -> SyncClient<Arc<MemoryStore>> {
         let sealer = Sealer::from_unwrapped(
             1,
             dek.into_inner(),
@@ -241,7 +241,7 @@ mod tests {
             KeyId::new(b"epoch-0".to_vec()),
             ReplicaId::new(replica.to_vec()),
         );
-        ClaimSyncClient::new(sealer, store, "tree")
+        SyncClient::new(sealer, store, "tree")
     }
 
     fn person(id: &str, author: &str) -> ChannelItem {
@@ -278,7 +278,7 @@ mod tests {
         )
     }
 
-    fn live(c: &ClaimSyncClient<Arc<MemoryStore>>) -> BTreeSet<String> {
+    fn live(c: &SyncClient<Arc<MemoryStore>>) -> BTreeSet<String> {
         c.materialize()
             .into_iter()
             .map(|r| r.id().to_owned())

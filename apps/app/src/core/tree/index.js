@@ -46,7 +46,7 @@ function wrap(inner) {
  *   placeholder is used if omitted, e.g. a read-only shadow run); `snapshot` — restore from a
  *   snapshot batch; `initInput` — wasm init input for non-browser hosts (tests pass the .wasm bytes).
  */
-export async function createClaimTree({ createdBy, snapshot, initInput } = {}) {
+export async function createTree({ createdBy, snapshot, initInput } = {}) {
   await ensureInit(initInput);
   const inner = new WasmTree(createdBy ?? 'did:key:zLocalReplica');
   if (snapshot) inner.loadSnapshot(snapshot);

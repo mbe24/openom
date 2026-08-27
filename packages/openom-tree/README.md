@@ -3,7 +3,7 @@
 > The app-facing family-tree engine: it composes `openom-crdt` (the set-union fold) and
 > `openom-projection` (the read model) into the read+write surface the app talks to.
 
-**Status:** built · pure engine (`rlib`) + `#[wasm_bindgen]` veneer (`WasmTree`) + `build-tree.mjs` → `vendor/tree/` · the JS `ClaimFamilyTree` adapter (OPE-201) is next · claim-model direction
+**Status:** built · pure engine (`rlib`) + `#[wasm_bindgen]` veneer (`WasmTree`) + `build-tree.mjs` → `vendor/tree/` · the JS `FamilyTree` adapter (OPE-201) is next · claim-model direction
 **Last updated:** 2026-08-26
 
 ## What it is
@@ -50,5 +50,5 @@ Composes `openom-crdt` + `openom-projection` (+ `openom-claim` types). It depend
 crate and holds **no** key material — edits are raw op-batch bytes the caller seals (via the existing
 sealer-worker + store stack). The `#[wasm_bindgen]` veneer (`WasmTree`) +
 `scripts/build-tree.mjs` → `apps/app/src/vendor/tree/` (gitignored) are built; next is the JS
-`ClaimFamilyTree` adapter (OPE-201) that wraps `WasmTree` at the `library.js` factory. Takes over
+`FamilyTree` adapter (OPE-201) that wraps `WasmTree` at the `library.js` factory. Takes over
 `openom-treelog`'s engine/veneer role; full dependency graph in `packages/README.md`.

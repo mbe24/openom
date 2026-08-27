@@ -1,4 +1,4 @@
-import { ClaimFamilyTree, seedAppId } from './claimFamilyTree.js';
+import { FamilyTree, seedAppId } from './familyTree.js';
 import { tabSync } from './tabSync.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
@@ -39,13 +39,13 @@ export class TreeLibrary {
 
   async open(docId = 'tree-1') {
     if (this.#open.has(docId)) return this.#open.get(docId);
-    const tree = new ClaimFamilyTree(this.#store, docId, this.#schema);
+    const tree = new FamilyTree(this.#store, docId, this.#schema);
     await tree.hydrate();
     return this.#track(docId, tree);
   }
 
   async create(docId = 'tree-' + Date.now()) {
-    return this.#track(docId, new ClaimFamilyTree(this.#store, docId, this.#schema));
+    return this.#track(docId, new FamilyTree(this.#store, docId, this.#schema));
   }
 
   async openSeeded(datasetId = 'bach') {

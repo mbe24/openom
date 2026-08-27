@@ -1,13 +1,13 @@
-// OPE-201 stage 1: the claim engine driven through the ClaimFamilyTree READ adapter. Asserts a small
-// claim set via the low-level shim, feeds the resulting op batches into a ClaimFamilyTree, and checks
+// OPE-201 stage 1: the claim engine driven through the FamilyTree READ adapter. Asserts a small
+// claim set via the low-level shim, feeds the resulting op batches into a FamilyTree, and checks
 // the projection maps back to the v2 view shapes the UI reads (person.given/.surname/.sex/.birth,
 // family.spouses/.children/.facts, the citation → sources mapping). Needs the built tree wasm
 // (node scripts/build-tree.mjs); skips cleanly when absent so a fresh checkout stays green.
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClaimTree } from '../app/src/core/tree/index.js';
-import { ClaimFamilyTree, seedAppId, V } from '../app/src/core/claimFamilyTree.js';
+import { createTree } from '../app/src/core/tree/index.js';
+import { FamilyTree, seedAppId, V } from '../app/src/core/familyTree.js';
 import { tabSync } from '../app/src/core/tabSync.js';
 
 const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
@@ -30,7 +30,7 @@ function fakeStore() {
 
 // Build the fixture claim set once, as a flat list of op-batch bytes, via the low-level shim.
 async function fixtureBatches() {
-  const eng = await createClaimTree({ initInput, createdBy: 'did:key:zAuthor' });
+  const eng = await createTree({ initInput, createdBy: 'did:key:zAuthor' });
   const out = [];
   let clock = 1_700_000_000_000;
   const at = () => clock++;
@@ -61,14 +61,14 @@ async function fixtureBatches() {
   return out;
 }
 
-describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)', () => {
-  // Prime the wasm init with the .wasm bytes before any ClaimFamilyTree is constructed (in node there
+describe.skipIf(!built)('FamilyTree read adapter (projection → v2 views)', () => {
+  // Prime the wasm init with the .wasm bytes before any FamilyTree is constructed (in node there
   // is no fetch to load it lazily; the module-level init caches the first call's input).
-  beforeAll(async () => { await createClaimTree({ initInput }); });
+  beforeAll(async () => { await createTree({ initInput }); });
 
   async function loaded() {
     const batches = await fixtureBatches();
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-1', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-1', null, 'did:key:zLocal');
     for (const batch of batches) await cft.mergeRemote(batch);
     return cft;
   }
@@ -108,7 +108,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('createPerson mints a person the projection surfaces (name/sex/birth)', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-w', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace', sex: 'F', birth: '1815' });
     expect(p.given).toBe('Ada');
     expect(p.surname).toBe('Lovelace');
@@ -118,7 +118,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('updatePerson supersedes in place — no duplicate claims, other parts preserved', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w2', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-w2', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace' });
     await cft.updatePerson(p.id, { surname: 'Byron' });
     const u = cft.person(p.id);
@@ -128,7 +128,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('supersedes an event date + sets its place', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-w3', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-w3', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'A', birth: '1800' });
     await cft.updatePerson(p.id, { birth: '1815', birthPlace: 'London' });
     const u = cft.person(p.id);
@@ -139,16 +139,16 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
 
   it('persists ops to the store and replays them on hydrate', async () => {
     const store = fakeStore();
-    const cft = new ClaimFamilyTree(store, 'tree-p', null, 'did:key:zLocal');
+    const cft = new FamilyTree(store, 'tree-p', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
-    const restored = new ClaimFamilyTree(store, 'tree-p', null, 'did:key:zLocal');
+    const restored = new FamilyTree(store, 'tree-p', null, 'did:key:zLocal');
     await restored.hydrate();
     expect(restored.person(p.id)?.given).toBe('Ada');
     expect(restored.person(p.id)?.sex).toBe('F');
   });
 
   it('addMarriage + addChild build a family (union) with spouses, children, marriage facts', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b1', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-b1', null, 'did:key:zLocal');
     const a = await cft.createPerson({ given: 'Ada', sex: 'F' });
     const fam = await cft.addMarriage(a.id, { given: 'George', sex: 'M' }, { marriage: '1835' });
     expect(fam.spouses.length).toBe(2);
@@ -160,7 +160,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('addParents attaches a father and mother to a child', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b2', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-b2', null, 'did:key:zLocal');
     const child = await cft.createPerson({ given: 'Kid' });
     const fam = await cft.addParents(child.id, { given: 'Dad' }, { given: 'Mom' });
     expect(fam.spouses.length).toBe(2);
@@ -170,7 +170,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('deletePerson removes the person and drops their dangling relationships', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b3', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-b3', null, 'did:key:zLocal');
     const a = await cft.createPerson({ given: 'Ada' });
     const fam = await cft.addMarriage(a.id, { given: 'George' });
     const other = fam.spouses.find((s) => s !== a.id);
@@ -181,7 +181,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('attachMedia sets a portrait the view surfaces', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-b4', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-b4', null, 'did:key:zLocal');
     const a = await cft.createPerson({ given: 'Ada' });
     const { linkId } = await cft.attachMedia(a.id, { hash: 'sha256:img1', mime: 'image/png', role: 'portrait' });
     expect(linkId).toBeTruthy();
@@ -190,7 +190,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('undo/redo a field edit (supersede)', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u1', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-u1', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', surname: 'Lovelace' });
     await cft.updatePerson(p.id, { surname: 'Byron' });
     expect(cft.person(p.id).surname).toBe('Byron');
@@ -204,7 +204,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('undo createPerson removes the person; redo restores it', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u2', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-u2', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
     expect(cft.allPeople().length).toBe(1);
     await cft.undo();
@@ -216,7 +216,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('undo a delete restores the person', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-u3', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-u3', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'Ada', sex: 'F' });
     await cft.deletePerson(p.id);
     expect(cft.person(p.id)).toBeUndefined();
@@ -226,7 +226,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('settle overlay: silent edits show but do not mint (undo hits the create, not a keystroke)', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-s1', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-s1', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'A' });
     await cft.updatePerson(p.id, { given: 'Ad' }, { silent: true });
     await cft.updatePerson(p.id, { given: 'Ada' }, { silent: true });
@@ -236,7 +236,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('settle mints once and is a single undo step', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-s2', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-s2', null, 'did:key:zLocal');
     const p = await cft.createPerson({ given: 'A' });
     await cft.updatePerson(p.id, { given: 'Ad' }, { silent: true });
     await cft.updatePerson(p.id, { given: 'Ada' }); // settle
@@ -246,7 +246,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('seed() translates v2 upsert ops into a claim-backed tree', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-seed', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-seed', null, 'did:key:zLocal');
     await cft.seed([
       { type: 'upsertPerson', id: 'p_dad', fields: { given: 'John', sex: 'M', birth: '1900' } },
       { type: 'upsertPerson', id: 'p_mom', fields: { given: 'Jane', sex: 'F' } },
@@ -266,9 +266,9 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
 
   it('syncTail merges another writer\'s tail from the shared store (no re-append)', async () => {
     const store = fakeStore();
-    const a = new ClaimFamilyTree(store, 'shared', null, 'did:key:zA');
+    const a = new FamilyTree(store, 'shared', null, 'did:key:zA');
     await a.hydrate();
-    const b = new ClaimFamilyTree(store, 'shared', null, 'did:key:zB');
+    const b = new FamilyTree(store, 'shared', null, 'did:key:zB');
     await b.hydrate();
 
     const p = await a.createPerson({ given: 'Ada', sex: 'F' });
@@ -287,9 +287,9 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
 
   it.skipIf(typeof BroadcastChannel === 'undefined')('tabSync converges the other tab on a ping', async () => {
     const store = fakeStore();
-    const a = new ClaimFamilyTree(store, 'bc-doc', null, 'did:key:zA');
+    const a = new FamilyTree(store, 'bc-doc', null, 'did:key:zA');
     await a.hydrate();
-    const b = new ClaimFamilyTree(store, 'bc-doc', null, 'did:key:zB');
+    const b = new FamilyTree(store, 'bc-doc', null, 'did:key:zB');
     await b.hydrate();
     const offA = tabSync(a, 'bc-doc');
     const offB = tabSync(b, 'bc-doc');
@@ -303,7 +303,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
   });
 
   it('reset clears the tree', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'tree-r', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'tree-r', null, 'did:key:zLocal');
     await cft.createPerson({ given: 'A' });
     expect(cft.allPeople().length).toBe(1);
     await cft.reset();
@@ -322,7 +322,7 @@ describe.skipIf(!built)('ClaimFamilyTree read adapter (projection → v2 views)'
 
     const store = fakeStore();
     await store.putSnapshot('tree-2', cft.snapshotBytes(), null);
-    const restored = new ClaimFamilyTree(store, 'tree-2', null, 'did:key:zLocal');
+    const restored = new FamilyTree(store, 'tree-2', null, 'did:key:zLocal');
     await restored.hydrate();
     expect(strip(restored.toJSON())).toEqual(before);
   });

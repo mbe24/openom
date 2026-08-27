@@ -7,7 +7,7 @@
 // This file is being built in stages (OPE-201): stage 1 is the READ adapter (projection → the v2 view
 // shapes the UI reads) + load/merge/snapshot; the write surface (create/update/delete/marriage/child/
 // media/undo/redo/seed) lands in stage 2 and currently throws.
-import { createClaimTree } from './tree/index.js';
+import { createTree } from './tree/index.js';
 import { Clock } from './clock.js';
 import { compareSiblings } from './sort.js';
 import { profile } from './profile.js';
@@ -75,10 +75,10 @@ const trimExtract = (s) => {
 };
 
 const notImplemented = (what) => {
-  throw new Error(`ClaimFamilyTree: ${what} is not implemented yet (OPE-201 stage 2)`);
+  throw new Error(`FamilyTree: ${what} is not implemented yet (OPE-201 stage 2)`);
 };
 
-export class ClaimFamilyTree {
+export class FamilyTree {
   revision = 0;
   people = new Map();
   families = new Map();
@@ -110,7 +110,7 @@ export class ClaimFamilyTree {
     this.#docId = docId;
     this.#schema = schema;
     this.#author = createdBy ?? DEFAULT_AUTHOR;
-    this.#ready = createClaimTree({ createdBy: this.#author });
+    this.#ready = createTree({ createdBy: this.#author });
   }
 
   #clock = new Clock();
@@ -405,7 +405,7 @@ export class ClaimFamilyTree {
     if (snap) {
       const raw = toU8(snap.bytes);
       const { snapshot, cursor } = this.#unwrapSnapshot(raw);
-      this.#engine = await createClaimTree({ createdBy: this.#author, snapshot });
+      this.#engine = await createTree({ createdBy: this.#author, snapshot });
       this.#cursor = cursor;
     }
     const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
@@ -966,7 +966,7 @@ export class ClaimFamilyTree {
 
   async reset() {
     await this.#store.delete(this.#docId);
-    this.#engine = await createClaimTree({ createdBy: this.#author });
+    this.#engine = await createTree({ createdBy: this.#author });
     this.#cursor = 0;
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
     this.#materialize();

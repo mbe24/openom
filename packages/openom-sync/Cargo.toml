@@ -1,6 +1,6 @@
 [package]
 name = "openom-sync"
-description = "openom — the client sync loop: seal claim-op deltas to the store and merge peers' deltas back (E2EE, multi-device). Op-based ClaimSyncClient with a materialize fold."
+description = "openom — the client sync loop: seal claim-op deltas to the store and merge peers' deltas back (E2EE, multi-device). Op-based SyncClient with a materialize fold."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -10,7 +10,7 @@ rust-version.workspace = true
 openom-sealer = { path = "../openom-sealer" }
 journal = { path = "../journal" }
 openom-protocol = { path = "../openom-protocol" }
-# The claim-model sync path (ClaimSyncClient). openom-claim supplies the Record the fold returns.
+# The claim-model sync path (SyncClient). openom-claim supplies the Record the fold returns.
 openom-crdt = { path = "../openom-crdt" }
 openom-claim = { path = "../openom-claim" }
 serde_json.workspace = true

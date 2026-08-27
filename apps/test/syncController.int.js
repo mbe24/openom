@@ -5,8 +5,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClaimTree } from '../app/src/core/tree/index.js';
-import { ClaimFamilyTree } from '../app/src/core/claimFamilyTree.js';
+import { createTree } from '../app/src/core/tree/index.js';
+import { FamilyTree } from '../app/src/core/familyTree.js';
 import { SyncController } from '../app/src/core/sync.js';
 import { createSyncedDeltaSync } from '../app/src/core/syncedDeltaSync.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
@@ -15,7 +15,7 @@ import { MemoryStore } from '../app/src/core/store.js';
 const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(wasmUrl));
 const initInput = built ? { module_or_path: fs.readFileSync(fileURLToPath(wasmUrl)) } : undefined;
-beforeAll(async () => { if (built) await createClaimTree({ initInput }); });
+beforeAll(async () => { if (built) await createTree({ initInput }); });
 
 // An in-memory stand-in for the server's delta log, matching the RemoteStore methods the controller uses.
 class FakeRemote {
@@ -50,8 +50,8 @@ const identity = async (b) => b;
 describe.skipIf(!built)('SyncController — two replicas converge through the delta log', () => {
   it('propagates creates, edits, and concurrent field edits, converging', async () => {
     const remote = new FakeRemote();
-    const a = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
-    const b = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await a.hydrate();
     await b.hydrate();
     const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
@@ -89,7 +89,7 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
 
   it('a second device catches up from the log via bootstrap()', async () => {
     const remote = new FakeRemote();
-    const a = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await a.hydrate();
     const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
     await a.createPerson({ given: 'Grace' });
@@ -97,7 +97,7 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     await sa.push();
 
     // A brand-new device with an empty store catches up purely from the log.
-    const c = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const c = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await c.hydrate();
     const sc = new SyncController({ tree: c, remote, docId: 'doc', seal: identity, open: identity });
     await sc.bootstrap();
@@ -107,8 +107,8 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
 
   it('drops an entry that fails verification and merges the rest (order-insensitive)', async () => {
     const remote = new FakeRemote();
-    const a = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
-    const b = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await a.hydrate();
     await b.hydrate();
     const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
@@ -134,8 +134,8 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
 
   it('createSyncedDeltaSync wires the verifier: a forged entry is dropped, the rest merge', async () => {
     const remote = new FakeRemote();
-    const a = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
-    const b = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await a.hydrate();
     await b.hydrate();
     const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
@@ -168,7 +168,7 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
       readSnapshot: async () => ({ bytes: forged }),
       readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
     };
-    const b = new ClaimFamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await b.hydrate();
     const verify = async () => {
       throw new Error('forged snapshot');

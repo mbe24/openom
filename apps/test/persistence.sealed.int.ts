@@ -2,8 +2,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fc from 'fast-check';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClaimTree } from '../app/src/core/tree/index.js';
-import { ClaimFamilyTree } from '../app/src/core/claimFamilyTree.js';
+import { createTree } from '../app/src/core/tree/index.js';
+import { FamilyTree } from '../app/src/core/familyTree.js';
 import { SealedStore } from '../app/src/core/sealedStore.js';
 import { MemoryStore } from '../app/src/core/store.js';
 
@@ -17,7 +17,7 @@ import { MemoryStore } from '../app/src/core/store.js';
 const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(wasmUrl));
 const initInput = built ? { module_or_path: fs.readFileSync(fileURLToPath(wasmUrl)) } : undefined;
-beforeAll(async () => { if (built) await createClaimTree({ initInput }); });
+beforeAll(async () => { if (built) await createTree({ initInput }); });
 
 function byteSealer() {
   const MARK = 0xe5; // proves the bytes actually passed through seal(), not a bypass
@@ -40,7 +40,7 @@ function byteSealer() {
 const sealedStore = () => new SealedStore(new MemoryStore(), byteSealer());
 
 async function reload(store: any, doc: string) {
-  const t = new ClaimFamilyTree(store, doc, null, 'did:key:zLocal');
+  const t = new FamilyTree(store, doc, null, 'did:key:zLocal');
   await t.hydrate();
   return t;
 }
@@ -48,7 +48,7 @@ async function reload(store: any, doc: string) {
 describe.skipIf(!built)('persistence through an encrypting store (claim engine)', () => {
   it('re-hydrates deltas written through the sealer (the reload path)', async () => {
     const store = sealedStore();
-    const a = new ClaimFamilyTree(store, 'tree-1', null, 'did:key:zLocal');
+    const a = new FamilyTree(store, 'tree-1', null, 'did:key:zLocal');
     await a.hydrate();
     const ada = await a.createPerson({ given: 'Ada', surname: 'Lovelace', birth: '1815' });
     const bea = await a.createPerson({ given: 'Bea' });
@@ -62,7 +62,7 @@ describe.skipIf(!built)('persistence through an encrypting store (claim engine)'
 
   it('re-hydrates through a snapshot too (the compact path)', async () => {
     const store = sealedStore();
-    const a = new ClaimFamilyTree(store, 'tree-2', null, 'did:key:zLocal');
+    const a = new FamilyTree(store, 'tree-2', null, 'did:key:zLocal');
     await a.hydrate();
     const solo = await a.createPerson({ given: 'Solo' });
     await a.compact();
@@ -92,7 +92,7 @@ describe.skipIf(!built)('persistence through an encrypting store (claim engine)'
         async (steps) => {
           const store = sealedStore();
           const doc = 'fuzz';
-          const a = new ClaimFamilyTree(store, doc, null, 'did:key:zLocal');
+          const a = new FamilyTree(store, doc, null, 'did:key:zLocal');
           await a.hydrate();
           const ids: string[] = [];
           const oracle = new Map<string, string>(); // id -> given, live people only

@@ -1,13 +1,13 @@
 // App-level acceptance for the claim engine:
-//   1. two ClaimFamilyTree replicas exchanging deltas (onDelta → mergeRemote) converge to an identical
+//   1. two FamilyTree replicas exchanging deltas (onDelta → mergeRemote) converge to an identical
 //      read model under shuffled interleavings (the set-union CRDT's order-independence);
 //   2. per-surface round-trips (create/update/addChild/addMarriage/attachMedia/delete/undo/redo).
 // Needs the built claim-engine wasm (node scripts/build-tree.mjs); skips cleanly when it's absent.
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createClaimTree } from '../app/src/core/tree/index.js';
-import { ClaimFamilyTree } from '../app/src/core/claimFamilyTree.js';
+import { createTree } from '../app/src/core/tree/index.js';
+import { FamilyTree } from '../app/src/core/familyTree.js';
 
 const treeWasm = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(treeWasm));
@@ -39,12 +39,12 @@ const interleave = (a) => {
 
 describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
   beforeAll(async () => {
-    await createClaimTree({ initInput: treeInit });
+    await createTree({ initInput: treeInit });
   });
 
   async function authored(build) {
     const batches = [];
-    const a = new ClaimFamilyTree(fakeStore(), 'a', null, 'did:key:zA');
+    const a = new FamilyTree(fakeStore(), 'a', null, 'did:key:zA');
     const off = a.onDelta((d) => batches.push(d));
     await build(a);
     off();
@@ -62,7 +62,7 @@ describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
     });
     const orders = [batches, [...batches].reverse(), rotate(batches, 3), interleave(batches)];
     for (const order of orders) {
-      const b = new ClaimFamilyTree(fakeStore(), 'b', null, 'did:key:zB');
+      const b = new FamilyTree(fakeStore(), 'b', null, 'did:key:zB');
       for (const d of order) await b.mergeRemote(d);
       expect(strip(b.toJSON())).toEqual(strip(a.toJSON()));
     }
@@ -74,7 +74,7 @@ describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
       await t.createPerson({ given: 'Alan', sex: 'M' });
     });
     const bBatches = [];
-    const b = new ClaimFamilyTree(fakeStore(), 'b2', null, 'did:key:zB');
+    const b = new FamilyTree(fakeStore(), 'b2', null, 'did:key:zB');
     const off = b.onDelta((d) => bBatches.push(d));
     await b.createPerson({ given: 'Grace', sex: 'F' });
     off();
@@ -85,7 +85,7 @@ describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
   });
 
   it('per-surface round-trips: create/update/addMarriage/addChild/attachMedia/delete/undo/redo', async () => {
-    const cft = new ClaimFamilyTree(fakeStore(), 'rt', null, 'did:key:zLocal');
+    const cft = new FamilyTree(fakeStore(), 'rt', null, 'did:key:zLocal');
     const a = await cft.createPerson({ given: 'Ada', surname: 'Lovelace', sex: 'F', birth: '1815' });
     expect(cft.person(a.id).birth).toBe('1815');
 

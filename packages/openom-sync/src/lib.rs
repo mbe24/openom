@@ -17,5 +17,5 @@ pub enum SyncError {
 
 type Result<T> = std::result::Result<T, SyncError>;
 
-mod claim;
-pub use claim::ClaimSyncClient;
+mod sync;
+pub use sync::SyncClient;

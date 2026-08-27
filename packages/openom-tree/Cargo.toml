@@ -4,7 +4,7 @@
 # ops as batch bytes for the transport to seal, merges peers' batches, snapshots/loads, and projects.
 # Key-less — it never holds the DEK (sealing is the transport's / sealer-worker's job). Takes over
 # openom-treelog's engine role. The #[wasm_bindgen] veneer (WasmTree) + build-tree.mjs are built; the
-# JS ClaimFamilyTree adapter (OPE-201) that wraps WasmTree at library.js is the next step.
+# JS FamilyTree adapter (OPE-201) that wraps WasmTree at library.js is the next step.
 [package]
 name = "openom-tree"
 description = "The app-facing family-tree engine: composes openom-crdt (set-union fold) + openom-projection (read model) into a read+write surface. Owns the in-memory record set + author id; mints op batches for the transport to seal, merges, snapshots, and projects. Key-less. Takes over openom-treelog's engine role."
