@@ -1,17 +1,12 @@
-import { FamilyTree, seedAppId as treelogSeedAppId } from './familyTree.js';
-import { ClaimFamilyTree, seedAppId as claimSeedAppId } from './claimFamilyTree.js';
+import { ClaimFamilyTree, seedAppId } from './claimFamilyTree.js';
 import { tabSync } from './tabSync.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
 
-// Engine selection during the claim-model migration (OPE-201): the claim-based engine is opt-in via
-// localStorage['openom.engine'] === 'claim'; the default stays the treelog engine until the cutover
-// (OPE-178). Both share the same public surface, so only the factory + the seed-id helper differ.
-function useClaimEngine() {
-  try { return globalThis.localStorage?.getItem('openom.engine') === 'claim'; } catch { return false; }
-}
-const Engine = () => (useClaimEngine() ? ClaimFamilyTree : FamilyTree);
-export const seedAppId = (s) => (useClaimEngine() ? claimSeedAppId(s) : treelogSeedAppId(s));
+// The claim-based engine is the app's only family-tree engine; the former treelog fallback (and its
+// localStorage['openom.engine'] toggle) was dropped at the cutover. seedAppId maps a symbolic seed id
+// to its stable app-facing anchor id.
+export { seedAppId };
 
 /** Die mitgelieferten Baeume. Jeder liegt in einem eigenen Dokument. */
 export const DATASETS = [
@@ -44,13 +39,13 @@ export class TreeLibrary {
 
   async open(docId = 'tree-1') {
     if (this.#open.has(docId)) return this.#open.get(docId);
-    const tree = new (Engine())(this.#store, docId, this.#schema);
+    const tree = new ClaimFamilyTree(this.#store, docId, this.#schema);
     await tree.hydrate();
     return this.#track(docId, tree);
   }
 
   async create(docId = 'tree-' + Date.now()) {
-    return this.#track(docId, new (Engine())(this.#store, docId, this.#schema));
+    return this.#track(docId, new ClaimFamilyTree(this.#store, docId, this.#schema));
   }
 
   async openSeeded(datasetId = 'bach') {

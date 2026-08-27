@@ -1,26 +1,17 @@
-// OPE-198 — app-level acceptance for the claim engine:
+// App-level acceptance for the claim engine:
 //   1. two ClaimFamilyTree replicas exchanging deltas (onDelta → mergeRemote) converge to an identical
 //      read model under shuffled interleavings (the set-union CRDT's order-independence);
-//   2. shadow-parity — seeded from the same v2 ops, the claim engine reproduces the legacy treelog
-//      engine's read model (person fields + family structure), modulo id representation;
-//   3. per-surface round-trips (create/update/addChild/addMarriage/attachMedia/delete/undo/redo).
-// Needs both built wasms (node scripts/build-tree.mjs, node scripts/build-treelog.mjs); skips cleanly
-// when either is absent.
+//   2. per-surface round-trips (create/update/addChild/addMarriage/attachMedia/delete/undo/redo).
+// Needs the built claim-engine wasm (node scripts/build-tree.mjs); skips cleanly when it's absent.
 import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createClaimTree } from '../app/src/core/tree/index.js';
-import { createTree } from '../app/src/core/treelog/index.js';
 import { ClaimFamilyTree } from '../app/src/core/claimFamilyTree.js';
-import { FamilyTree } from '../app/src/core/familyTree.js';
-import { seedOps } from '../app/src/core/seed.js';
-import { khaldunOps } from '../app/src/core/seedKhaldun.js';
 
 const treeWasm = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
-const treelogWasm = new URL('../app/src/vendor/treelog/openom_treelog_bg.wasm', import.meta.url);
-const built = fs.existsSync(fileURLToPath(treeWasm)) && fs.existsSync(fileURLToPath(treelogWasm));
+const built = fs.existsSync(fileURLToPath(treeWasm));
 const treeInit = built ? { module_or_path: fs.readFileSync(fileURLToPath(treeWasm)) } : undefined;
-const treelogInit = built ? { module_or_path: fs.readFileSync(fileURLToPath(treelogWasm)) } : undefined;
 
 function fakeStore() {
   const logs = new Map();
@@ -35,10 +26,6 @@ function fakeStore() {
   };
 }
 
-// A treelog seed id is `hex(utf8(symbolic))`; recover the symbolic id so the two engines' entities line
-// up (the claim engine uses the symbolic id directly as the anchor id).
-const symOf = (hexId) => new TextDecoder().decode(Uint8Array.from(hexId.match(/../g).map((h) => parseInt(h, 16))));
-
 // Drop the wall-clock createdAt/updatedAt the family view stamps (not part of the read-model contract).
 const strip = (m) => ({ ...m, families: m.families.map(({ createdAt, updatedAt, ...f }) => f) });
 
@@ -50,10 +37,9 @@ const interleave = (a) => {
   return out;
 };
 
-describe.skipIf(!built)('claim engine — convergence + treelog shadow-parity (OPE-198)', () => {
+describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
   beforeAll(async () => {
     await createClaimTree({ initInput: treeInit });
-    await createTree({ initInput: treelogInit });
   });
 
   async function authored(build) {
@@ -96,33 +82,6 @@ describe.skipIf(!built)('claim engine — convergence + treelog shadow-parity (O
     for (const d of interleave(ba)) await b.mergeRemote(d);
     expect(a.allPeople().length).toBe(3);
     expect(strip(a.toJSON())).toEqual(strip(b.toJSON()));
-  });
-
-  it.each([
-    ['Bach', seedOps],
-    ['Khaldun', khaldunOps],
-  ])('shadow-parity: the claim engine reproduces the treelog view on the %s seed', async (_name, ops) => {
-    const tl = new FamilyTree(fakeStore(), 'tl', null);
-    await tl.seed(ops());
-    const cl = new ClaimFamilyTree(fakeStore(), 'cl', null, 'did:key:zLocal');
-    await cl.seed(ops());
-
-    const normPeople = (tree, mapId) =>
-      tree.allPeople().map((p) => ({
-        id: mapId(p.id), given: p.given, surname: p.surname, sex: p.sex,
-        birth: p.birth, death: p.death, birthPlace: p.birthPlace, deathPlace: p.deathPlace,
-      })).sort((x, y) => x.id.localeCompare(y.id));
-    const normFamilies = (tree, mapId) =>
-      tree.allFamilies().map((f) => ({
-        spouses: f.spouses.map(mapId).sort(),
-        children: f.children.map(mapId).sort(),
-        marriage: f.facts?.marriage ?? '',
-        place: f.facts?.place ?? '',
-      })).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
-
-    expect(cl.allPeople().length).toBe(tl.allPeople().length);
-    expect(normPeople(cl, (x) => x)).toEqual(normPeople(tl, symOf));
-    expect(normFamilies(cl, (x) => x)).toEqual(normFamilies(tl, symOf));
   });
 
   it('per-surface round-trips: create/update/addMarriage/addChild/attachMedia/delete/undo/redo', async () => {
