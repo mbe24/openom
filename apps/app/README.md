@@ -83,9 +83,9 @@ src/core/              orchestration — no UI, no rendering.
   syncedDeltaSync.js       wires SyncController together with landed-entry verification (§B3).
   replicator.js            drives a SyncStore to convergence: pull/push + the plaintext merge loop.
   remoteStore.js           DocStore over HTTP to the openom server (opaque bytes, no crypto).
-  claimFamilyTree.js       the opened tree, backed by the openom-tree claim engine (wasm).
+  familyTree.js            the opened tree, backed by the openom-tree claim engine (wasm). The engine
+                           owns a monotonic HLC and stamps each op's createdAt itself (no JS clock).
   tree/                    the web shim over packages/openom-tree (wasm): index.js wraps the engine.
-  clock.js                 the engine's monotonic HLC (per-device monotonic createdAt).
   tabSync.js               cross-tab convergence via BroadcastChannel (merge-the-tail on append).
   sealer/                  the crypto vault + session, see below.
   model.js                 the v2 document shape (names/events/parent+child links).

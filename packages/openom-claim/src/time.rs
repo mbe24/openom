@@ -106,7 +106,15 @@ impl FromStr for Hlc {
         {
             return Err(HlcParseError);
         }
+        // Reject a calendar-invalid date (e.g. 2026-02-30, or 2027-02-29 in a non-leap year): the range
+        // checks above allow day 1..=31 for every month, but `days_from_civil` would silently normalize
+        // an impossible date, so two distinct strings could alias one `Hlc` and re-serialize to bytes
+        // this node never received. A round-trip through the inverse conversion enforces real-calendar
+        // validity exactly, keeping Display and FromStr true inverses over the accepted domain.
         let days = days_from_civil(y, mo as u32, d as u32);
+        if civil_from_days(days) != (y, mo as u32, d as u32) {
+            return Err(HlcParseError);
+        }
         let millis = ((days * 86_400 + h * 3600 + mi * 60 + sec) * 1000) + ms;
         // `logical` is exactly three digits → already < LOGICAL_PER_MILLI, so no carry is possible.
         Ok(Hlc {
@@ -234,6 +242,9 @@ mod tests {
             "2026-02-22T24:10:00.000000Z",    // hour 24
             "2026-02-22T13:10:00.00000xZ",    // non-digit in the fraction
             "1771765800000",                  // the old bare-int form
+            "2026-02-30T00:00:00.000000Z",    // Feb 30 does not exist
+            "2027-02-29T00:00:00.000000Z",    // 2027 is not a leap year
+            "2026-04-31T00:00:00.000000Z",    // April has 30 days
         ] {
             assert!(bad.parse::<Hlc>().is_err(), "{bad:?} must not parse");
         }

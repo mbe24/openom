@@ -84,6 +84,38 @@ fn revoke_restores_a_removed_claim() {
 }
 
 #[test]
+fn ingesting_advances_the_clock_so_a_rebuild_cannot_reuse_a_tombstoned_id() {
+    // The HLC receive rule. A creates a claim and removes it (tombstone by id).
+    let mut a = Tree::new(DID);
+    a.assert_claim("pA", NAME, name_value("Ada"), 100).unwrap();
+    let created = a.flush().unwrap();
+    let claim_id = only_id(&created);
+    a.remove(&claim_id, 101).unwrap();
+    let removed = a.flush().unwrap();
+
+    // B is a rebuild — a reload, or the SAME user's second device (createdBy is the vault's stable
+    // did:key, so ids collide across a user's replicas). It merges A's log, which tombstones that id.
+    let mut b = Tree::new(DID);
+    b.merge(&created).unwrap();
+    b.merge(&removed).unwrap();
+    assert!(
+        b.live_claims_of("pA", NAME).is_empty(),
+        "the claim is tombstoned in the rebuilt engine"
+    );
+
+    // B re-creates the identical content while its wall clock reads BEFORE A's timestamps (skew /
+    // NTP step-back). Because merge advanced B's clock past 101, the re-assert draws a fresh createdAt
+    // → a new id → it lives, instead of reproducing the still-tombstoned id and folding back to dead.
+    b.assert_claim("pA", NAME, name_value("Ada"), 50).unwrap();
+    b.flush().unwrap();
+    assert_eq!(
+        b.live_claims_of("pA", NAME).len(),
+        1,
+        "the re-created claim is live — the clock never reused the dead id"
+    );
+}
+
+#[test]
 fn snapshot_load_roundtrips() {
     let mut a = Tree::new(DID);
     a.assert_anchor("pA", PERSON, 1).unwrap();

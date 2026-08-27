@@ -71,6 +71,16 @@ impl ChannelItem {
             ChannelItem::Op(op) => &op.created_by,
         }
     }
+
+    /// The item's timestamp (`createdAt`). Lets an ingesting engine advance its own clock past every
+    /// timestamp it has seen (the HLC receive rule), so a later local mint can never reproduce an
+    /// already-used id.
+    pub fn created_at(&self) -> Hlc {
+        match self {
+            ChannelItem::Assert(r) => r.created_at(),
+            ChannelItem::Op(op) => op.created_at,
+        }
+    }
 }
 
 /// The envelope for a remove / supersede / revoke operation. `id` is the content hash of the

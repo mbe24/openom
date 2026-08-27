@@ -13,10 +13,12 @@ use serde_json::Value;
 const LOGICAL_PER_MILLI: u32 = 1000;
 
 /// The engine-owned Hybrid Logical Clock. Every mint stamps `created_at` through [`next`](HlcClock::next),
-/// so no caller can supply a non-monotonic or colliding timestamp — the id-collision bug where a fast
-/// create→undo→redo reproduced a still-tombstoned id is structurally impossible. The caller passes only a
-/// physical wall-clock reading (`Date::now()` on the web); the clock sanitizes it into a strictly
-/// increasing `(millis, logical)`.
+/// so no caller can supply a non-monotonic or colliding timestamp; every ingest advances it through
+/// [`observe`](HlcClock::observe) (the HLC receive rule), so after hydrating a set the next local mint is
+/// past every timestamp already present. Together these make the id-collision bug — where a fast
+/// create→undo→redo (even across a reload or a second device) reproduced a still-tombstoned id —
+/// structurally impossible: a re-assert always draws a fresh, unused `created_at`. The caller passes only
+/// a physical wall-clock reading (`Date::now()` on the web); the clock sanitizes it.
 #[derive(Default)]
 struct HlcClock {
     last_millis: i64,
@@ -40,6 +42,16 @@ impl HlcClock {
             }
         }
         Hlc::new(self.last_millis, self.logical)
+    }
+
+    /// The receive rule: advance so the clock is at least as high as a timestamp just ingested (from a
+    /// peer's op or a snapshot). A subsequent [`next`](HlcClock::next) is then strictly greater than
+    /// everything seen, so a re-mint can never collide with an existing id.
+    fn observe(&mut self, at: Hlc) {
+        if (at.millis(), at.logical()) > (self.last_millis, self.logical) {
+            self.last_millis = at.millis();
+            self.logical = at.logical();
+        }
     }
 }
 
@@ -250,6 +262,7 @@ impl Tree {
         let items = codec::decode(bytes)?;
         let n = items.len();
         for item in items {
+            self.clock.observe(item.created_at());
             self.items.insert(item.id().to_owned(), item);
         }
         Ok(n)
@@ -270,6 +283,7 @@ impl Tree {
     /// Load a snapshot batch into the set (idempotent; combine with further `merge`d tail ops).
     pub fn load_snapshot(&mut self, bytes: &[u8]) -> Result<(), TreeError> {
         for item in codec::decode(bytes)? {
+            self.clock.observe(item.created_at());
             self.items.insert(item.id().to_owned(), item);
         }
         Ok(())
