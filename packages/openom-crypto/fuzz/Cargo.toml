@@ -1,0 +1,38 @@
+# cargo-fuzz targets for openom-crypto's untrusted-input boundaries. This is a DETACHED crate (its own
+# empty [workspace]) so it never touches the stable workspace build — the main crates build on stable
+# in the container; these run under nightly libFuzzer:
+#   cd packages/openom-crypto && cargo +nightly fuzz run seal_open
+# The stable proptests in tests/prop.rs cover the same invariants for CI (round-trip, tamper-rejection,
+# decode-never-panics); these are for deep, corpus-driven fuzzing with structured `arbitrary` input.
+[package]
+name = "openom-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Structured fuzz input (derive a typed SealInput instead of hand-slicing &[u8]).
+arbitrary = { version = "1.4.2", features = ["derive"] }
+openom-crypto = { path = ".." }
+# Envelope + the Aead/Format/Kind/Compression enums the SealParams needs.
+openom-protocol = { path = "../../openom-protocol" }
+
+[[bin]]
+name = "seal_open"
+path = "fuzz_targets/seal_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open_bytes"
+path = "fuzz_targets/open_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
