@@ -349,4 +349,67 @@ mod tests {
             Err(JcsError::NotObject)
         ));
     }
+
+    #[test]
+    fn to_canonical_and_hash_reflect_the_value() {
+        // The Serialize entry point (not just to_canonical_value) yields the canonical bytes — kills
+        // `to_canonical -> Ok(vec![]/[0]/[1])`.
+        assert_eq!(
+            to_canonical(&json!({ "b": 1, "a": 2 })).unwrap(),
+            br#"{"a":2,"b":1}"#.to_vec()
+        );
+        // The content hash distinguishes distinct values — kills `canonical_hash -> Ok([0;32]/[1;32])`.
+        assert_ne!(
+            canonical_hash(&json!({ "x": 1 })).unwrap(),
+            canonical_hash(&json!({ "x": 2 })).unwrap()
+        );
+    }
+
+    #[test]
+    fn depth_guard_admits_exactly_max_and_counts_object_nesting() {
+        // Exactly MAX_DEPTH nesting is allowed — kills `depth > MAX_DEPTH` -> `>=`/`==` (both reject at
+        // the cap; the existing MAX_DEPTH+5 test can't see this, staying too-deep under either mutant).
+        let mut at = json!(0);
+        for _ in 0..MAX_DEPTH {
+            at = Value::Array(vec![at]);
+        }
+        assert!(to_canonical_value(&at).is_ok());
+        // OBJECT nesting must increment depth too — kills the object branch's `depth + 1` -> `depth * 1`
+        // (the existing deep test nests arrays, so it never exercises line 128).
+        let mut obj = json!(0);
+        for _ in 0..(MAX_DEPTH + 2) {
+            let mut m = serde_json::Map::new();
+            m.insert("k".to_string(), obj);
+            obj = Value::Object(m);
+        }
+        assert!(matches!(to_canonical_value(&obj), Err(JcsError::TooDeep)));
+    }
+
+    #[test]
+    fn utf16_order_uses_the_shared_prefix_continuation() {
+        // Two keys sharing the prefix 'a', differing only in the next code unit: U+10000 (surrogate
+        // D800..) vs U+E000 (BMP). UTF-16 puts D800 < E000, so "a\u{10000}" sorts FIRST — but only if
+        // utf16_cmp CONTINUES past the equal 'a'. Byte order is the opposite (F0.. > EE..), so mutating
+        // the `x == y => continue` guard to `false` makes the equal-prefix keys compare Equal, keep map
+        // order, and emit the reverse. (Insert the BMP key first so this holds for either Map ordering.)
+        let astral = "a\u{10000}";
+        let bmp = "a\u{e000}";
+        let mut map = serde_json::Map::new();
+        map.insert(bmp.to_string(), json!(1));
+        map.insert(astral.to_string(), json!(2));
+        let out = canon(Value::Object(map));
+        assert!(
+            out.find(astral).unwrap() < out.find(bmp).unwrap(),
+            "shared-prefix key must sort by UTF-16 continuation: {out}"
+        );
+    }
+
+    #[test]
+    fn write_string_escapes_only_below_0x20_with_lowercase_hex() {
+        // Space (0x20) is literal, not escaped — kills `(c as u32) < 0x20` -> `<= 0x20`.
+        assert_eq!(canon(json!("a b")), r#""a b""#);
+        // A control whose low nibble is >= 10 uses the correct hex letter — kills hex_lower's
+        // `nibble - 10` -> `nibble / 10` (which would turn every a–f nibble into 'b').
+        assert_eq!(canon(json!("\u{0f}")), "\"\\u000f\"");
+    }
 }
