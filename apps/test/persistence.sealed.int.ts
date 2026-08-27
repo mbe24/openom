@@ -2,22 +2,22 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fc from 'fast-check';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { createTree } from '../app/src/core/treelog/index.js';
-import { FamilyTree } from '../app/src/core/familyTree.js';
+import { createClaimTree } from '../app/src/core/tree/index.js';
+import { ClaimFamilyTree } from '../app/src/core/claimFamilyTree.js';
 import { SealedStore } from '../app/src/core/sealedStore.js';
 import { MemoryStore } from '../app/src/core/store.js';
 
-// The treelog-backed FamilyTree written through an encrypting store must re-hydrate intact in a fresh
-// instance (a reload) — this is the "make it real": a user's own sealed-at-rest tree, not just the
-// in-memory demo. The sealer here faithfully models the WASM sealer's byte contract: seal takes a
-// Uint8Array; ANYTHING ELSE coerces to empty bytes (exactly as wasm-bindgen's &[u8] does), so a caller
-// that hands the store a non-byte payload fails here the same way it would in the browser. The engine's
-// edit deltas and snapshots are Uint8Array, so they pass through cleanly — that's what this guards.
+// The claim engine written through an encrypting store must re-hydrate intact in a fresh instance (a
+// reload) — this is the "make it real": a user's own sealed-at-rest tree, not just the in-memory demo.
+// The sealer here faithfully models the WASM sealer's byte contract: seal takes a Uint8Array; ANYTHING
+// ELSE coerces to empty bytes (exactly as wasm-bindgen's &[u8] does), so a caller that hands the store a
+// non-byte payload fails here the same way it would in the browser. The engine's edit deltas and
+// snapshots are Uint8Array, so they pass through cleanly — that's what this guards.
 
-const wasmUrl = new URL('../app/src/vendor/treelog/openom_treelog_bg.wasm', import.meta.url);
+const wasmUrl = new URL('../app/src/vendor/tree/openom_tree_bg.wasm', import.meta.url);
 const built = fs.existsSync(fileURLToPath(wasmUrl));
 const initInput = built ? { module_or_path: fs.readFileSync(fileURLToPath(wasmUrl)) } : undefined;
-beforeAll(async () => { if (built) await createTree({ initInput }); });
+beforeAll(async () => { if (built) await createClaimTree({ initInput }); });
 
 function byteSealer() {
   const MARK = 0xe5; // proves the bytes actually passed through seal(), not a bypass
@@ -40,15 +40,15 @@ function byteSealer() {
 const sealedStore = () => new SealedStore(new MemoryStore(), byteSealer());
 
 async function reload(store: any, doc: string) {
-  const t = new FamilyTree(store, doc);
+  const t = new ClaimFamilyTree(store, doc, null, 'did:key:zLocal');
   await t.hydrate();
   return t;
 }
 
-describe.skipIf(!built)('persistence through an encrypting store (treelog engine)', () => {
+describe.skipIf(!built)('persistence through an encrypting store (claim engine)', () => {
   it('re-hydrates deltas written through the sealer (the reload path)', async () => {
     const store = sealedStore();
-    const a = new FamilyTree(store, 'tree-1');
+    const a = new ClaimFamilyTree(store, 'tree-1', null, 'did:key:zLocal');
     await a.hydrate();
     const ada = await a.createPerson({ given: 'Ada', surname: 'Lovelace', birth: '1815' });
     const bea = await a.createPerson({ given: 'Bea' });
@@ -62,7 +62,7 @@ describe.skipIf(!built)('persistence through an encrypting store (treelog engine
 
   it('re-hydrates through a snapshot too (the compact path)', async () => {
     const store = sealedStore();
-    const a = new FamilyTree(store, 'tree-2');
+    const a = new ClaimFamilyTree(store, 'tree-2', null, 'did:key:zLocal');
     await a.hydrate();
     const solo = await a.createPerson({ given: 'Solo' });
     await a.compact();
@@ -92,7 +92,7 @@ describe.skipIf(!built)('persistence through an encrypting store (treelog engine
         async (steps) => {
           const store = sealedStore();
           const doc = 'fuzz';
-          const a = new FamilyTree(store, doc);
+          const a = new ClaimFamilyTree(store, doc, null, 'did:key:zLocal');
           await a.hydrate();
           const ids: string[] = [];
           const oracle = new Map<string, string>(); // id -> given, live people only

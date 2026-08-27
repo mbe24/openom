@@ -32,11 +32,11 @@ build-script check fatal; a container's pnpm has no such policy. Docker Desktop 
 
 Two things this app *depends on* but does not itself build:
 
-- **The wasm engines** (`src/vendor/sealer/`, `src/vendor/treelog/`) are generated, gitignored
-  output — `node scripts/build-sealer.mjs` / `node scripts/build-treelog.mjs` **from the repo
+- **The wasm engines** (`src/vendor/sealer/`, `src/vendor/tree/`) are generated, gitignored
+  output — `node scripts/build-sealer.mjs` / `node scripts/build-tree.mjs` **from the repo
   root**. Both compile Rust→wasm inside Docker (the host can't run cargo build scripts under
   company policy — same reason `scripts/cargo.mjs` uses Docker/WSL2 for native crate tests), then
-  run `wasm-bindgen` on the host. Run these once before `pnpm serve` if `src/vendor/{sealer,treelog}/`
+  run `wasm-bindgen` on the host. Run these once before `pnpm serve` if `src/vendor/{sealer,tree}/`
   is empty.
 - **`pnpm test:store`** (from `apps/`) runs `node ../scripts/cargo.mjs test -p journal -p openom`
   — the native-crate store-conformance suite, not this app's JS — and on Windows that cargo run
@@ -52,11 +52,11 @@ bundles this exact same `apps/app/` tree for the desktop/mobile shell, so the bo
 would no longer be the same tree Tauri serves.
 
 It talks to the family-tree engine and the crypto sealer as **wasm modules vendored under
-`src/vendor/`** (openom-treelog and openom-sealer, compiled from `packages/`) — this app owns no
+`src/vendor/`** (openom-tree and openom-sealer, compiled from `packages/`) — this app owns no
 domain logic in Rust and re-implements none of it in JS; `src/core/` is the JS orchestration
-*around* those wasm cores (storage, sync, sessions), not a parallel engine. A third engine,
-**openom-projection** (the claim-model read model — see `packages/README.md`'s architecture seams),
-is the pending addition once the claim-model swap lands; there is no `src/vendor/projection/` yet.
+*around* those wasm cores (storage, sync, sessions), not a parallel engine. openom-tree is the
+claim-model engine (an openom-crdt set-union fold + an openom-projection read model); it replaced
+the former treelog engine at the claim-model cutover.
 
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
 `data-view` state, no CSS framework, and no dependency-injection container — `src/ui/dom.js`'s `h()`
@@ -83,10 +83,10 @@ src/core/              orchestration — no UI, no rendering.
   syncedDeltaSync.js       wires SyncController together with landed-entry verification (§B3).
   replicator.js            drives a SyncStore to convergence: pull/push + the plaintext merge loop.
   remoteStore.js           DocStore over HTTP to the openom server (opaque bytes, no crypto).
-  familyTree.js            the opened tree, backed by the treelog CRDT engine (wasm).
-  treelog/                 the web shim over packages/openom-treelog (wasm): index.js wraps the
-                           engine; project.js is the shadow-mode parity check for the claim-model
-                           engine swap in progress.
+  claimFamilyTree.js       the opened tree, backed by the openom-tree claim engine (wasm).
+  tree/                    the web shim over packages/openom-tree (wasm): index.js wraps the engine.
+  clock.js                 the engine's monotonic HLC (per-device monotonic createdAt).
+  tabSync.js               cross-tab convergence via BroadcastChannel (merge-the-tail on append).
   sealer/                  the crypto vault + session, see below.
   model.js                 the v2 document shape (names/events/parent+child links).
   queries.js, sort.js, dates.js   read-side helpers: ancestor/descendant walks, collation, tolerant
@@ -122,8 +122,8 @@ src/views/             one file per screen, composed from ui/ + core/ read helpe
                        onboarding.js, people.js, settings.js, transfer.js.
 
 src/vendor/            generated + third-party, never hand-edited.
-  sealer/, treelog/       wasm-bindgen output for openom-sealer / openom-treelog — gitignored,
-                          rebuilt by scripts/build-sealer.mjs / build-treelog.mjs (repo root).
+  sealer/, tree/          wasm-bindgen output for openom-sealer / openom-tree — gitignored,
+                          rebuilt by scripts/build-sealer.mjs / build-tree.mjs (repo root).
   sqlite/                 vendored sqlite-wasm (OPFS-SAHPool) bundle, checked in — the persistent
                           browser-SQLite spike (apps/e2e/sqlite*.e2e.ts exercises it).
   comlink.js, fluent.js   vendored third-party libraries (worker RPC, Fluent i18n runtime).

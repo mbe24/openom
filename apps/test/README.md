@@ -13,8 +13,9 @@ host's pnpm) — no local vitest install needed, just Docker.
 
 ## What it covers
 Core client modules: the sealed/sync store stack, `SealerSession` + `invokeSealer`, keyring
-sync and entry verification, watermarks, replica identity, the treelog/FamilyTreeEngine swap,
-and the JSON-Schema model. Two files are **seeded-chaos** integration tests, driven by
+sync and entry verification, watermarks, replica identity, the claim engine (convergence,
+shadow parity, per-surface round-trips), and the JSON-Schema model. Two files are **seeded-chaos**
+integration tests, driven by
 `fast-check` + a seeded PRNG so a failing run replays deterministically from its seed:
 - `crashRetry.chaos.int.ts` — crashes the process at arbitrary seams in the write path and
   rebuilds over the surviving durable stores; asserts no committed edit is ever lost and no
