@@ -780,6 +780,16 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
     Ok(epoch_is_attributed(&kr, key_id))
 }
 
+/// The moderator `did:key`s (members currently at Maintainer or above) from a keyring — the set the
+/// claim engine's fold treats as authorized to remove/supersede/revoke any claim. Returns a JS
+/// `string[]`. The caller MUST pass its VERIFIED, watermarked keyring head; feed the result to
+/// `FamilyTree.setModerators` on unlock and on every accepted keyring-head change.
+#[wasm_bindgen(js_name = moderatorsFromKeyring)]
+pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsError> {
+    let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+    Ok(openom_keyring::moderators(&kr).into_iter().collect())
+}
+
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —
 /// the read-side counterpart to the server accepting one. A reset changes the authorized-signer set
 /// WITHOUT the old set's endorsement (the old key is lost), so `verify_walk`/`verify_transition` reject it

@@ -15,6 +15,8 @@ openom-crypto.workspace = true
 openom-roles.workspace = true
 # Ed25519 key types + the verify_strict-only verify (the raw ed25519-dalek edge lives only there).
 openom-sign.workspace = true
+# did:key encoding of a member's public key — for the moderator role feed the claim fold consumes.
+openom-did.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 # Only generate_identity (a random-seed test helper) needs a CSPRNG; gated behind `test-util` so
