@@ -25,6 +25,10 @@ function wrap(inner) {
     remove: (target, createdAt) => inner.remove(target, createdAt),
     revoke: (removalOpId, createdAt) => inner.revoke(removalOpId, createdAt),
 
+    // --- role authority: the did:keys currently at Maintainer+ whose remove/supersede/revoke ops the
+    //     fold honors (a solo tree defaults to its own author) ---
+    setModerators: (dids) => inner.setModerators(dids),
+
     // --- sync / persistence (op-batch + snapshot bytes are opaque to the store) ---
     merge: (bytes) => inner.merge(bytes),
     snapshot: () => inner.snapshot(),

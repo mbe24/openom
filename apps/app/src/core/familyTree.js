@@ -136,6 +136,17 @@ export class FamilyTree {
     return () => this.#deltaListeners.delete(fn);
   }
 
+  /** Set the moderator did:keys (the members currently at Maintainer or above) whose
+   *  remove/supersede/revoke ops the engine honors. Call on unlock and on every governing-keyring
+   *  change; a solo tree can omit this — the engine defaults to its own author (the owner moderates
+   *  their own tree). Re-projects immediately, so a role change resurfaces/hides claims at once. */
+  async setModerators(dids) {
+    const eng = await this.#ensure();
+    eng.setModerators(dids);
+    this.#materialize();
+    this.#bump();
+  }
+
   #bump() {
     this.revision += 1;
     for (const fn of this.#listeners) fn(this.revision);

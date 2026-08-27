@@ -42,9 +42,15 @@ describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
     await createTree({ initInput: treeInit });
   });
 
+  // A shared tree where both authors are Maintainers: the moderator set is the SAME on every replica,
+  // and that shared set is what makes role-gated removes/supersedes converge (see materialize — an op
+  // is honored iff its author is a current moderator). Replicas that disagree on roles would diverge.
+  const MODERATORS = ['did:key:zA', 'did:key:zB'];
+
   async function authored(build) {
     const batches = [];
     const a = new FamilyTree(fakeStore(), 'a', null, 'did:key:zA');
+    await a.setModerators(MODERATORS);
     const off = a.onDelta((d) => batches.push(d));
     await build(a);
     off();
@@ -63,6 +69,7 @@ describe.skipIf(!built)('claim engine — convergence + round-trips', () => {
     const orders = [batches, [...batches].reverse(), rotate(batches, 3), interleave(batches)];
     for (const order of orders) {
       const b = new FamilyTree(fakeStore(), 'b', null, 'did:key:zB');
+      await b.setModerators(MODERATORS);
       for (const d of order) await b.mergeRemote(d);
       expect(strip(b.toJSON())).toEqual(strip(a.toJSON()));
     }
