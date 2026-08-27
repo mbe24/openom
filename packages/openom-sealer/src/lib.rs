@@ -171,17 +171,11 @@ pub struct Sealer {
     tree_id: Vec<u8>,
     key_id: Vec<u8>,
     replica_id: Vec<u8>,
-    author: Option<AuthorIdentity>,
-}
-
-/// A member's author identity for attributing sealed entries on a shared tree (§B3 launch gate). Set on
-/// the sealer at unlock via [`Sealer::with_author`]. `keyring_revision` is the member's watermarked
-/// keyring head at unlock — the revision that governs the entries they seal this session (a keyring
-/// change re-unlocks and refreshes it). `None` → unattributed entries (V1 communal-DEK model).
-pub struct AuthorIdentity {
-    pub signing_key: openom_keyring::SigningKey,
-    pub member_id: String,
-    pub keyring_revision: u32,
+    /// The member's author identity for signing + attributing entries on a shared tree (§B3 launch
+    /// gate), owned for the session and borrowed into each seal. Set at unlock via
+    /// [`Sealer::with_author`]; `keyring_revision` is the member's watermarked keyring head at unlock
+    /// (a keyring change re-unlocks and refreshes it). `None` → unattributed entries (V1 communal-DEK).
+    author: Option<openom_crypto::AuthorIdentity>,
 }
 
 impl Sealer {
@@ -227,7 +221,7 @@ impl Sealer {
         member_id: String,
         keyring_revision: u32,
     ) {
-        self.author = Some(AuthorIdentity {
+        self.author = Some(openom_crypto::AuthorIdentity {
             signing_key,
             member_id,
             keyring_revision,
@@ -286,11 +280,8 @@ impl Sealer {
             covers_through_seq: ctx.covers_through_seq,
             blob_id: &ctx.blob_id,
             // Sign + attribute the entry when this sealer carries an author identity (shared trees).
-            author: self.author.as_ref().map(|a| openom_crypto::AuthorContext {
-                signing_key: &a.signing_key,
-                member_id: &a.member_id,
-                keyring_revision: a.keyring_revision,
-            }),
+            // The sealer owns the identity for the session; SealParams borrows it like every field.
+            author: self.author.as_ref(),
         };
         let envelope = seal_envelope(&self.dek, &params, plaintext)?;
         // seal_envelope always sets ciphertext_hash after sealing; the header is present.

@@ -52,7 +52,7 @@ mod root;
 mod seal;
 mod secret;
 mod wrap;
-pub use envelope::{open_envelope, seal_envelope, AuthorContext, SealParams};
+pub use envelope::{open_envelope, seal_envelope, AuthorIdentity, SealParams};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeKeypair,
     HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,

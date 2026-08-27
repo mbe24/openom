@@ -285,12 +285,16 @@ mod tests {
         // (Lives here, not in openom-crypto, because verify_entry moved out and openom-keyring is the only
         // crate that can depend on both directions.)
         use openom_crypto::{
-            generate_dek, open_envelope, seal_envelope, AuthorContext, SealParams,
+            generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams,
         };
         use openom_protocol::v1::{Aead, Compression, Format};
 
         let dek = generate_dek().unwrap();
-        let author = generate_identity().unwrap();
+        let author = AuthorIdentity {
+            signing_key: generate_identity().unwrap(),
+            member_id: "m1".into(),
+            keyring_revision: 3,
+        };
         let params = SealParams {
             version: VERSION,
             kind: Kind::Delta,
@@ -304,11 +308,7 @@ mod tests {
             prev_ciphertext_hash: b"",
             covers_through_seq: 0,
             blob_id: b"",
-            author: Some(AuthorContext {
-                signing_key: &author,
-                member_id: "m1",
-                keyring_revision: 3,
-            }),
+            author: Some(&author),
         };
         let env = seal_envelope(dek.expose(), &params, b"a change").unwrap();
         let header = env.header.as_ref().unwrap();
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(header.keyring_revision, 3);
 
         // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
-        let kr = governing(vec![member("m1", MemberRole::Admin, &author)]);
+        let kr = governing(vec![member("m1", MemberRole::Admin, &author.signing_key)]);
         let plaintext = open_envelope(dek.expose(), &env).unwrap();
         assert_eq!(
             verify_entry(VERSION, header, &plaintext, &kr),

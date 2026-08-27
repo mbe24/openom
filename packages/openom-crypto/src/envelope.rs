@@ -19,9 +19,9 @@ use crate::{open, seal, CryptoError, KEY_LEN};
 /// Ed25519 author key signs the entry — naming them (`member_id`) and the keyring revision that governs
 /// it — so peers can verify authorship + role via `openom_keyring::verify_entry`. `None` seals an *unattributed*
 /// entry (empty `author_signature`), the V1 communal-DEK model.
-pub struct AuthorContext<'a> {
-    pub signing_key: &'a SigningKey,
-    pub member_id: &'a str,
+pub struct AuthorIdentity {
+    pub signing_key: SigningKey,
+    pub member_id: String,
     pub keyring_revision: u32,
 }
 
@@ -41,8 +41,9 @@ pub struct SealParams<'a> {
     pub covers_through_seq: u64,
     /// KIND_MEDIA only; empty otherwise.
     pub blob_id: &'a [u8],
-    /// Author attribution for a shared tree (§B3). `None` → unattributed (V1).
-    pub author: Option<AuthorContext<'a>>,
+    /// Author attribution for a shared tree (§B3). `None` → unattributed (V1). Borrowed like every
+    /// other field — the caller owns the [`AuthorIdentity`] (e.g. the sealer holds it for the session).
+    pub author: Option<&'a AuthorIdentity>,
 }
 
 fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
