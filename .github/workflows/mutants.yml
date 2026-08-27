@@ -1,0 +1,60 @@
+name: mutants
+
+# Mutation testing (cargo-mutants) for the most security- and correctness-critical crates: it edits the
+# code in small ways (a mutant) and re-runs that crate's tests, checking each break is CAUGHT — surfacing
+# gaps a green suite hides. Manual only: a full run re-runs the suite once per mutant and is slow, so we
+# don't gate every push on it. Dispatch it after a meaningful change to the covered crates, or on a
+# cadence, and read the surviving mutants in the uploaded report.
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Space-separated crates to mutate (all must already have real test coverage)'
+        default: 'openom-sign openom-crdt openom-keyring'
+      timeout:
+        description: 'Per-mutant test timeout, seconds (bounds a mutant that loops forever)'
+        default: '120'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # openom-tauri (in the workspace) pulls WebKitGTK sys-crates; install the system libs so the
+      # baseline workspace build never fails on them, whichever crates we scope to. Mirrors desktop.yml.
+      - name: System libraries (WebKitGTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev libgtk-3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # -p scopes both the mutated files and the build/test to the named crates (+ their deps), so
+      # unrelated crates — including the GTK-heavy openom-tauri — aren't mutated. --in-place mutates the
+      # fresh checkout directly (no per-mutant copy). A mutant that no test kills is a coverage gap.
+      - name: cargo mutants
+        run: |
+          set -euo pipefail
+          pkgs=()
+          for p in ${{ github.event.inputs.packages }}; do pkgs+=("--package" "$p"); done
+          cargo mutants -vV --in-place --timeout "${{ github.event.inputs.timeout }}" "${pkgs[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-out
+          path: mutants.out
