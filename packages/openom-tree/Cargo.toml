@@ -20,7 +20,8 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = []
 # The wasm veneer (WasmTree) + its wasm-bindgen glue — off by default so native builds skip it.
-wasm = ["dep:wasm-bindgen"]
+# js-sys gives the veneer the wall-clock (`Date::now()`) it feeds the engine-owned HLC.
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
 serde_json.workspace = true
@@ -31,4 +32,8 @@ openom-projection.workspace = true
 
 [dependencies.wasm-bindgen]
 version = "0.2"
+optional = true
+
+[dependencies.js-sys]
+version = "0.3"
 optional = true

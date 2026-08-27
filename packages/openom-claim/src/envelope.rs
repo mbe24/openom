@@ -21,7 +21,7 @@ use openom_sign::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ClaimError;
+use crate::{ClaimError, Hlc};
 
 /// Envelope `type` for every Claim (attestations + tombstones included).
 pub const TYPE_CLAIM: &str = "openom.org/core/claim/v1";
@@ -44,7 +44,7 @@ pub struct Anchor {
     pub id: String,
     #[serde(rename = "type")]
     pub type_uri: String,
-    pub created_at: i64,
+    pub created_at: Hlc,
     pub created_by: String,
 }
 
@@ -109,7 +109,7 @@ pub struct Claim {
     pub value: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation: Option<Citations>,
-    pub created_at: i64,
+    pub created_at: Hlc,
     pub created_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
@@ -123,7 +123,7 @@ impl Claim {
         predicate: impl Into<String>,
         value: Value,
         created_by: impl Into<String>,
-        created_at: i64,
+        created_at: Hlc,
     ) -> Self {
         Claim {
             id: String::new(),
@@ -146,7 +146,7 @@ impl Claim {
         verdict: Verdict,
         reason: Option<String>,
         created_by: impl Into<String>,
-        created_at: i64,
+        created_at: Hlc,
     ) -> Self {
         let mut value = serde_json::Map::new();
         value.insert(
@@ -295,14 +295,17 @@ impl Record {
         }
     }
 
-    /// The record's creation timestamp (`createdAt`, epoch ms; provenance only, never a tiebreak).
-    pub fn created_at(&self) -> i64 {
+    /// The record's creation timestamp (`createdAt`; provenance only, never a tiebreak). An
+    /// [`Unknown`](Record::Unknown) record's `createdAt` is parsed from its preserved JSON, falling back
+    /// to the epoch if it is absent or in a form this build doesn't recognize.
+    pub fn created_at(&self) -> Hlc {
         match self {
             Record::Anchor(a) => a.created_at,
             Record::Claim(c) => c.created_at,
             Record::Unknown(v) => v
                 .get("createdAt")
-                .and_then(Value::as_i64)
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok())
                 .unwrap_or_default(),
         }
     }
@@ -377,6 +380,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
+    fn hlc(ms: i64) -> Hlc {
+        Hlc::new(ms, 0)
+    }
+
     fn author() -> (SigningKey, String) {
         let key = SigningKey::from_seed(&[5u8; 32]);
         let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
@@ -391,7 +399,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "parts": { "given": "Ada" } }),
             &did,
-            1771765800000,
+            hlc(1771765800000),
         );
         c.compute_id().unwrap();
 
@@ -411,7 +419,7 @@ mod tests {
             Verdict::Reject,
             Some("1850 census".into()),
             &did,
-            1,
+            hlc(1),
         );
         assert_eq!(att.predicate, PREDICATE_ATTEST);
         assert_eq!(
@@ -430,7 +438,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "x": 1 }),
             &did,
-            1,
+            hlc(1),
         );
         c.compute_id().unwrap();
         let rec = Record::try_from(c.to_value()).unwrap();
@@ -440,7 +448,7 @@ mod tests {
         // …a person anchor parses as Record::Anchor…
         let anchor = json!({
             "id": "b3d3f6b0-0000-4000-8000-000000000002",
-            "type": TYPE_PERSON, "createdAt": 1, "createdBy": did,
+            "type": TYPE_PERSON, "createdAt": hlc(1).to_string(), "createdBy": did,
         });
         assert!(matches!(
             Record::try_from(anchor).unwrap(),
@@ -483,14 +491,14 @@ mod tests {
         // would drop (`tonnage`), so nothing is lost when an older client carries it forward.
         let vessel = json!({
             "id": "vessel-uuid", "type": "openom.org/core/vessel/v1",
-            "createdAt": 7, "createdBy": did, "tonnage": 200,
+            "createdAt": hlc(7).to_string(), "createdBy": did, "tonnage": 200,
         });
         let rec = Record::try_from(vessel.clone()).unwrap();
         assert!(matches!(rec, Record::Unknown(_)));
         assert_eq!(rec.id(), "vessel-uuid");
         assert_eq!(rec.type_uri(), "openom.org/core/vessel/v1");
         assert_eq!(rec.created_by(), did);
-        assert_eq!(rec.created_at(), 7);
+        assert_eq!(rec.created_at(), hlc(7), "createdAt parsed from the preserved JSON string");
         assert_eq!(rec.to_value(), vessel);
 
         // Deserialize (the embedded-in-an-operation path) routes through the same boundary.
@@ -520,7 +528,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "given": "Ada" }),
             &did,
-            1,
+            hlc(1),
         );
         c.compute_id().unwrap();
         let rec = Record::Claim(c);
@@ -544,7 +552,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "x": 1 }),
             &did,
-            1,
+            hlc(1),
         );
         c.compute_id().unwrap();
         let id_before = c.id.clone();
@@ -563,7 +571,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "x": 1 }),
             &did,
-            1,
+            hlc(1),
         );
         c.compute_id().unwrap();
         assert_eq!(c.verify(), crate::Authorship::Unsigned, "unsigned");
@@ -587,14 +595,14 @@ mod tests {
     fn citation_accepts_one_or_many() {
         let one: Claim = serde_json::from_value(json!({
             "id": "sha256:x", "type": TYPE_CLAIM, "targetId": "t", "predicate": "openom.org/core/name/v1",
-            "value": {}, "citation": { "sourceId": "s" }, "createdAt": 1, "createdBy": "did:key:z6MkX"
+            "value": {}, "citation": { "sourceId": "s" }, "createdAt": hlc(1).to_string(), "createdBy": "did:key:z6MkX"
         }))
         .unwrap();
         assert!(matches!(one.citation, Some(Citations::One(_))));
 
         let many: Claim = serde_json::from_value(json!({
             "id": "sha256:x", "type": TYPE_CLAIM, "targetId": "t", "predicate": "openom.org/core/name/v1",
-            "value": {}, "citation": [{ "sourceId": "s1" }, { "sourceId": "s2" }], "createdAt": 1, "createdBy": "did:key:z6MkX"
+            "value": {}, "citation": [{ "sourceId": "s1" }, { "sourceId": "s2" }], "createdAt": hlc(1).to_string(), "createdBy": "did:key:z6MkX"
         }))
         .unwrap();
         assert!(matches!(many.citation, Some(Citations::Many(v)) if v.len() == 2));

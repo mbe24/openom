@@ -47,17 +47,20 @@ WSL2/Docker).
 
 ```rust
 use openom_claim::envelope::{Claim, Record};
+use openom_claim::Hlc;
 use openom_projection::{project, Policy};
 use serde_json::json;
 
 // Anchor ids are opaque (a Person/Event/Place UUID) — `Record::try_from` doesn't hash-verify them, only
-// a Claim's content-hash id.
+// a Claim's content-hash id. `createdAt` is a canonical HLC string (see `openom_claim::Hlc`).
 let pa = Record::try_from(json!({
-    "id": "pA", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA"
+    "id": "pA", "type": "openom.org/core/person/v1",
+    "createdAt": Hlc::new(1, 0).to_string(), "createdBy": "did:key:z6MkA"
 }))
 .unwrap();
 let pb = Record::try_from(json!({
-    "id": "pB", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA"
+    "id": "pB", "type": "openom.org/core/person/v1",
+    "createdAt": Hlc::new(1, 0).to_string(), "createdBy": "did:key:z6MkA"
 }))
 .unwrap();
 
@@ -68,7 +71,7 @@ let mut same_as = Claim::new(
     "openom.org/core/same_as/v1",
     json!({ "pair": ["pA", "pB"] }),
     "did:key:z6MkA",
-    1,
+    Hlc::new(1, 0),
 );
 same_as.compute_id().unwrap();
 

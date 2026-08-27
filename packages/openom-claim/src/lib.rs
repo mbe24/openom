@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 pub mod envelope;
 #[cfg(feature = "validation")]
 pub mod schema;
+pub mod time;
+
+pub use time::Hlc;
 
 /// Envelope field names — the frozen set the schema freeze (OPE-170) will type.
 pub const F_ID: &str = "id";
@@ -194,21 +197,21 @@ mod proptests {
         fn sign_verify_and_tamper(seed in any::<[u8; 32]>(), value in arb_obj()) {
             let key = SigningKey::from_seed(&seed);
             let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
-            let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, 1);
+            let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, Hlc::new(1, 0));
             c.compute_id().unwrap();
             let v = c.to_value();
             let sig = sign(&v, &key).unwrap();
             prop_assert_eq!(verify(&v, &sig).unwrap(), SigCheck::Valid);
 
             let mut tampered = c.clone();
-            tampered.created_at = c.created_at.wrapping_add(1);
+            tampered.created_at = Hlc::new(2, 0);
             prop_assert_eq!(verify(&tampered.to_value(), &sig).unwrap(), SigCheck::Bad);
         }
 
         // id and fingerprint are pure functions of the envelope.
         #[test]
         fn id_and_fingerprint_deterministic(value in arb_obj()) {
-            let v = envelope::Claim::new("t", "openom.org/core/name/v1", value, "did:key:z6MkX", 1).to_value();
+            let v = envelope::Claim::new("t", "openom.org/core/name/v1", value, "did:key:z6MkX", Hlc::new(1, 0)).to_value();
             prop_assert_eq!(claim_id(&v).unwrap(), claim_id(&v).unwrap());
             prop_assert_eq!(fingerprint(&v).unwrap(), fingerprint(&v).unwrap());
         }
@@ -256,7 +259,7 @@ mod tests {
             "predicate": "openom.org/core/name/v1",
             "value": { "parts": { "given": "Ada", "family": "Lovelace" } },
             "citation": { "sourceId": "src_hash", "locator": {}, "extract": "…" },
-            "createdAt": 1771765800000_i64,
+            "createdAt": "2026-02-22T13:10:00.000000Z",
             "createdBy": author_did,
         })
     }
@@ -370,7 +373,7 @@ mod tests {
         };
         assert!(moved(&|m| m["predicate"] = json!("openom.org/core/sex/v1")));
         assert!(moved(&|m| m["targetId"] = json!("per_other")));
-        assert!(moved(&|m| m["createdAt"] = json!(1771765800001_i64)));
+        assert!(moved(&|m| m["createdAt"] = json!("2026-02-22T13:10:00.000001Z")));
         assert!(moved(&|m| m["createdBy"] = json!(signer(2).1)));
         assert!(moved(&|m| m["citation"] = json!({ "sourceId": "other" })));
     }

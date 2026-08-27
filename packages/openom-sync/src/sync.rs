@@ -232,6 +232,7 @@ mod tests {
     use journal::memory::MemoryStore;
     use journal::DocStore;
     use openom_claim::envelope::{Claim, Record};
+    use openom_claim::Hlc;
     use openom_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::{generate_dek, Dek};
     use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
@@ -255,10 +256,16 @@ mod tests {
         SyncClient::new(sealer, store, "tree")
     }
 
+    /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
+    fn hlc(ms: i64) -> Hlc {
+        Hlc::new(ms, 0)
+    }
+
     fn person(id: &str, author: &str) -> ChannelItem {
         ChannelItem::Assert(
             Record::try_from(json!({
-                "id": id, "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": author,
+                "id": id, "type": "openom.org/core/person/v1",
+                "createdAt": hlc(1).to_string(), "createdBy": author,
             }))
             .unwrap(),
         )
@@ -270,7 +277,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "given": given }),
             author,
-            at,
+            hlc(at),
         );
         c.compute_id().unwrap();
         ChannelItem::Assert(Record::Claim(c))
@@ -279,7 +286,7 @@ mod tests {
     fn remove(target: &ChannelItem, author: &str) -> ChannelItem {
         ChannelItem::Op(
             Op::new(
-                2,
+                hlc(2),
                 author,
                 OpKind::Remove {
                     target: target.id().to_owned(),

@@ -17,14 +17,15 @@ const ensureInit = (initInput) => (ready ??= init(initInput));
 function wrap(inner) {
   return {
     // --- edits: mints accumulate in the engine (see flush below); the return is unused except for
-    //     `remove`, which hands back the Remove op's id so an anchor removal can later be revoked ---
-    assertAnchor: (id, typeUri, createdAt) => inner.assertAnchor(id, typeUri, createdAt),
-    assertClaim: (target, predicate, value, createdAt) =>
-      inner.assertClaim(target, predicate, JSON.stringify(value), createdAt),
-    supersedeClaim: (prior, target, predicate, value, createdAt) =>
-      inner.supersedeClaim(prior, target, predicate, JSON.stringify(value), createdAt),
-    remove: (target, createdAt) => inner.remove(target, createdAt),
-    revoke: (removalOpId, createdAt) => inner.revoke(removalOpId, createdAt),
+    //     `remove`, which hands back the Remove op's id so an anchor removal can later be revoked.
+    //     No timestamp is passed — the engine owns a monotonic clock and stamps `createdAt` itself. ---
+    assertAnchor: (id, typeUri) => inner.assertAnchor(id, typeUri),
+    assertClaim: (target, predicate, value) =>
+      inner.assertClaim(target, predicate, JSON.stringify(value)),
+    supersedeClaim: (prior, target, predicate, value) =>
+      inner.supersedeClaim(prior, target, predicate, JSON.stringify(value)),
+    remove: (target) => inner.remove(target),
+    revoke: (removalOpId) => inner.revoke(removalOpId),
     // Encode everything minted since the last flush as ONE op-batch (empty if nothing) — one settled
     // intention = one sealed store entry. The mint methods above now accumulate; flush produces the batch.
     flush: () => inner.flush(),

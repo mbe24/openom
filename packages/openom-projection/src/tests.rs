@@ -9,7 +9,7 @@ use serde_json::json;
 fn person(id: &str) -> Record {
     Record::Anchor(
         serde_json::from_value(
-            json!({ "id": id, "type": TYPE_PERSON, "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+            json!({ "id": id, "type": TYPE_PERSON, "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": "did:key:z6MkA" }),
         )
         .unwrap(),
     )
@@ -17,7 +17,7 @@ fn person(id: &str) -> Record {
 fn claim(id: &str, pred: &str, target: &str, value: Value, author: &str) -> Record {
     Record::Claim(
         serde_json::from_value(json!({ "id": id, "type": TYPE_CLAIM, "targetId": target,
-                "predicate": pred, "value": value, "createdAt": 1, "createdBy": author }))
+                "predicate": pred, "value": value, "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": author }))
         .unwrap(),
     )
 }
@@ -80,7 +80,7 @@ fn source(id: &str, title: &str, repository: &str, author: &str) -> Record {
         serde_json::from_value(json!({ "id": id, "type": TYPE_CLAIM, "targetId": id,
                 "predicate": P_SOURCE,
                 "value": { "title": title, "repository": repository, "quality": "original" },
-                "createdAt": 1, "createdBy": author }))
+                "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": author }))
         .unwrap(),
     )
 }
@@ -144,7 +144,7 @@ fn partnership(id: &str, a: &str, b: &str, role: &str, author: &str) -> Record {
 fn event(id: &str) -> Record {
     Record::Anchor(
         serde_json::from_value(
-            json!({ "id": id, "type": TYPE_EVENT, "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+            json!({ "id": id, "type": TYPE_EVENT, "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": "did:key:z6MkA" }),
         )
         .unwrap(),
     )
@@ -167,7 +167,7 @@ fn participant(id: &str, evt: &str, person: &str, role: &str, author: &str) -> R
 fn place(id: &str) -> Record {
     Record::Anchor(
         serde_json::from_value(
-            json!({ "id": id, "type": "openom.org/core/place/v1", "createdAt": 1, "createdBy": "did:key:z6MkA" }),
+            json!({ "id": id, "type": "openom.org/core/place/v1", "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": "did:key:z6MkA" }),
         )
         .unwrap(),
     )

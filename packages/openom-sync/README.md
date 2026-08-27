@@ -70,7 +70,8 @@ let sealer_b = Sealer::from_unwrapped(
 let mut b = SyncClient::new(sealer_b, store.clone(), "tree");
 
 let person = ChannelItem::Assert(Record::try_from(json!({
-    "id": "pA", "type": "openom.org/core/person/v1", "createdAt": 1, "createdBy": "did:key:z6MkA",
+    "id": "pA", "type": "openom.org/core/person/v1",
+    "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": "did:key:z6MkA",
 })).unwrap());
 
 a.push_claims(&[person]).unwrap(); // sealed + pushed to the shared log

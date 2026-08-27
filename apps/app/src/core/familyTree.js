@@ -8,7 +8,6 @@
 // shapes the UI reads) + load/merge/snapshot; the write surface (create/update/delete/marriage/child/
 // media/undo/redo/seed) lands in stage 2 and currently throws.
 import { createTree } from './tree/index.js';
-import { Clock } from './clock.js';
 import { compareSiblings } from './sort.js';
 import { profile } from './profile.js';
 import { makeName, definePersonViews, mergeFamilyFields, defineFamilyViews } from './model.js';
@@ -111,12 +110,6 @@ export class FamilyTree {
     this.#schema = schema;
     this.#author = createdBy ?? DEFAULT_AUTHOR;
     this.#ready = createTree({ createdBy: this.#author });
-  }
-
-  #clock = new Clock();
-  /** The next op's `created_at` — a strictly-monotonic HLC timestamp (see clock.js). */
-  #at() {
-    return this.#clock.now();
   }
 
   async #ensure() {
@@ -462,8 +455,8 @@ export class FamilyTree {
     }
     const prior = mine[0];
     out.push(prior
-      ? this.#engine.supersedeClaim(prior.id, target, predicate, value, this.#at())
-      : this.#engine.assertClaim(target, predicate, value, this.#at()));
+      ? this.#engine.supersedeClaim(prior.id, target, predicate, value)
+      : this.#engine.assertClaim(target, predicate, value));
   }
 
   /** Merge a name patch (given/surname) into this replica's name claim, preserving its other parts. */
@@ -476,8 +469,8 @@ export class FamilyTree {
     if ('given' in patch) cur.parts.given = String(patch.given ?? '');
     if ('surname' in patch) cur.parts.family = String(patch.surname ?? '');
     out.push(prior
-      ? this.#engine.supersedeClaim(prior.id, pid, V.P_NAME, cur, this.#at())
-      : this.#engine.assertClaim(pid, V.P_NAME, cur, this.#at()));
+      ? this.#engine.supersedeClaim(prior.id, pid, V.P_NAME, cur)
+      : this.#engine.assertClaim(pid, V.P_NAME, cur));
   }
 
   /** The person's event anchor of `type` (birth/death), minting it (+ its type + principal participant)
@@ -488,9 +481,9 @@ export class FamilyTree {
     const existing = this.#eventOf.get(key);
     if (existing) { cache.set(key, existing); return existing; }
     const eid = uuid();
-    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
-    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type }, this.#at()));
-    out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: pid, role: ROLE_PRINCIPAL }, this.#at()));
+    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT));
+    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type }));
+    out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: pid, role: ROLE_PRINCIPAL }));
     cache.set(key, eid);
     return eid;
   }
@@ -501,7 +494,7 @@ export class FamilyTree {
     if (!place) { this.#setSingle(eid, V.P_EVENT_PLACE, null, out); return; }
     const placeId = 'place:' + place;
     if (!this.#liveMine(placeId, V.P_PLACE_NAME).some((c) => c.value?.name === place)) {
-      out.push(this.#engine.assertClaim(placeId, V.P_PLACE_NAME, { name: place }, this.#at()));
+      out.push(this.#engine.assertClaim(placeId, V.P_PLACE_NAME, { name: place }));
     }
     this.#setSingle(eid, V.P_EVENT_PLACE, { placeId }, out);
   }
@@ -516,8 +509,8 @@ export class FamilyTree {
     const value = { fieldId: k, value: isBool ? String(v === true || v === 'true') : String(v) };
     const prior = mine[0];
     out.push(prior
-      ? this.#engine.supersedeClaim(prior.id, pid, V.P_CUSTOM_VALUE, value, this.#at())
-      : this.#engine.assertClaim(pid, V.P_CUSTOM_VALUE, value, this.#at()));
+      ? this.#engine.supersedeClaim(prior.id, pid, V.P_CUSTOM_VALUE, value)
+      : this.#engine.assertClaim(pid, V.P_CUSTOM_VALUE, value));
   }
 
   /** Translate an editor patch on person `pid` into engine ops. */
@@ -551,7 +544,7 @@ export class FamilyTree {
    *  later be revoked — a claim revives by re-assertion (fresh content-hash id), but an anchor's id is
    *  fixed, so its removal must be undone by revoke, not a re-assert the tombstone still suppresses. */
   #remove(recordId, _out) {
-    const opId = this.#engine.remove(recordId, this.#at());
+    const opId = this.#engine.remove(recordId);
     if (opId) this.#removeOpId.set(recordId, opId);
   }
 
@@ -573,8 +566,8 @@ export class FamilyTree {
     for (const id of frame.added) this.#remove(id, out);
     for (const r of frame.removed) {
       const opId = this.#removeOpId.get(r.id);
-      if (opId) out.push(this.#engine.revoke(opId, this.#at()));
-      else out.push(this.#engine.assertClaim(r.targetId, r.predicate, r.value, this.#at()));
+      if (opId) out.push(this.#engine.revoke(opId));
+      else out.push(this.#engine.assertClaim(r.targetId, r.predicate, r.value));
     }
   }
 
@@ -651,7 +644,7 @@ export class FamilyTree {
     const before = this.#snapshotMine();
     const pid = uuid();
     const out = [], cache = new Map();
-    out.push(e.assertAnchor(pid, V.TYPE_PERSON, this.#at()));
+    out.push(e.assertAnchor(pid, V.TYPE_PERSON));
     this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, out, cache);
     await this.#commit(out, before);
     return this.person(pid);
@@ -705,7 +698,7 @@ export class FamilyTree {
   /** Mint a fresh person anchor and apply an initial patch, into `out`. Returns the new id. */
   #newPerson(fields, out, cache) {
     const pid = uuid();
-    out.push(this.#engine.assertAnchor(pid, V.TYPE_PERSON, this.#at()));
+    out.push(this.#engine.assertAnchor(pid, V.TYPE_PERSON));
     this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, out, cache);
     return pid;
   }
@@ -715,10 +708,10 @@ export class FamilyTree {
     const existing = this.#marriageEventOf.get(fam.id);
     if (existing) return existing;
     const eid = uuid();
-    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
-    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
+    out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT));
+    out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }));
     for (const parent of fam.spouses) {
-      out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: parent, role: 'spouse' }, this.#at()));
+      out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: parent, role: 'spouse' }));
     }
     return eid;
   }
@@ -750,12 +743,12 @@ export class FamilyTree {
     const out = [], cache = new Map();
     const bId = typeof bFieldsOrId === 'string' ? bFieldsOrId : this.#newPerson(bFieldsOrId, out, cache);
     const pair = [aId, bId].sort();
-    out.push(this.#engine.assertClaim(aId, V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+    out.push(this.#engine.assertClaim(aId, V.P_PARTNERSHIP, { pair, role: 'spouse' }));
     if ('marriage' in facts || 'place' in facts) {
       const eid = uuid();
-      out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
-      out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
-      for (const p of pair) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: p, role: 'spouse' }, this.#at()));
+      out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT));
+      out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }));
+      for (const p of pair) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: p, role: 'spouse' }));
       if ('marriage' in facts) this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null, out);
       if ('place' in facts) this.#setEventPlace(eid, facts.place, out);
     }
@@ -771,7 +764,7 @@ export class FamilyTree {
     const out = [], cache = new Map();
     const pid = typeof fieldsOrId === 'string' ? fieldsOrId : this.#newPerson(fieldsOrId, out, cache);
     for (const parent of parents) {
-      out.push(this.#engine.assertClaim(pid, V.P_PARENT, { parentPersonId: parent, kind: 'biological' }, this.#at()));
+      out.push(this.#engine.assertClaim(pid, V.P_PARENT, { parentPersonId: parent, kind: 'biological' }));
     }
     await this.#commit(out, before);
     return this.person(pid);
@@ -786,7 +779,7 @@ export class FamilyTree {
       if (!val) continue;
       const pid = typeof val === 'string' ? val : this.#newPerson({ sex: role, ...val }, out, cache);
       parentIds.push(pid);
-      out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: pid, kind: 'biological' }, this.#at()));
+      out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: pid, kind: 'biological' }));
     }
     await this.#commit(out, before);
     const canonical = parentIds.map((p) => this.resolveId(p) ?? p).sort();
@@ -855,10 +848,10 @@ export class FamilyTree {
     const other = (fam?.spouses ?? [])[0];
     if (other) {
       const pair = [other, personId].sort();
-      out.push(this.#engine.assertClaim(other, V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+      out.push(this.#engine.assertClaim(other, V.P_PARTNERSHIP, { pair, role: 'spouse' }));
       // Keep the union addressable by the same children: link the new spouse to its children too.
       for (const childId of fam.children) {
-        out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: personId, kind: 'biological' }, this.#at()));
+        out.push(this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: personId, kind: 'biological' }));
       }
     }
     await this.#commit(out, before);
@@ -885,7 +878,7 @@ export class FamilyTree {
     if (hh) value.height = Number(hh);
     if (caption) value.caption = caption;
     if (crop) value.crop = crop;
-    out.push(this.#engine.assertClaim(subjectId, V.P_MEDIA_LINK, value, this.#at()));
+    out.push(this.#engine.assertClaim(subjectId, V.P_MEDIA_LINK, value));
     await this.#commit(out, before);
     const link = this.#liveMine(subjectId, V.P_MEDIA_LINK).find((c) => c.value?.mediaHash === hash);
     return { mediaId: hash, linkId: link?.id };
@@ -898,9 +891,9 @@ export class FamilyTree {
     for (const c of this.#liveMine(subjectId, V.P_MEDIA_LINK)) {
       const role = c.value?.role;
       if (c.id === linkId && role !== 'portrait') {
-        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'portrait' }, this.#at()));
+        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'portrait' }));
       } else if (c.id !== linkId && role === 'portrait') {
-        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'document' }, this.#at()));
+        out.push(this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'document' }));
       }
     }
     await this.#commit(out, before);
@@ -922,7 +915,7 @@ export class FamilyTree {
     if (!link) return;
     await this.#ensure();
     const mine = this.#liveMine(link.subjectId, V.P_MEDIA_LINK).find((c) => c.id === linkId);
-    if (mine) await this.#commit([this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop }, this.#at())]);
+    if (mine) await this.#commit([this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop })]);
   }
   // ------------------------------------------------------------------ seed / compact / reset
   /** Translate legacy v2 seed ops (upsertPerson / upsertFamily, from seed.js) into claim/anchor ops.
@@ -934,27 +927,27 @@ export class FamilyTree {
     const out = [], cache = new Map();
     for (const o of ops) {
       if (o.type === 'upsertPerson') {
-        out.push(this.#engine.assertAnchor(o.id, V.TYPE_PERSON, this.#at()));
+        out.push(this.#engine.assertAnchor(o.id, V.TYPE_PERSON));
         this.#applyPatch(o.id, { ...NEW_PERSON, ...o.fields }, out, cache);
       } else if (o.type === 'upsertFamily') {
         const spouses = o.fields.spouses ?? [];
         const children = o.fields.children ?? [];
         if (spouses.length >= 2) {
           const pair = [spouses[0], spouses[1]].sort();
-          out.push(this.#engine.assertClaim(spouses[0], V.P_PARTNERSHIP, { pair, role: 'spouse' }, this.#at()));
+          out.push(this.#engine.assertClaim(spouses[0], V.P_PARTNERSHIP, { pair, role: 'spouse' }));
         }
         for (const c of children) {
           for (const s of spouses) {
-            out.push(this.#engine.assertClaim(c, V.P_PARENT, { parentPersonId: s, kind: 'biological' }, this.#at()));
+            out.push(this.#engine.assertClaim(c, V.P_PARENT, { parentPersonId: s, kind: 'biological' }));
           }
         }
         const facts = o.fields.facts ?? {};
         if (facts.marriage || facts.place) {
           const eid = uuid();
-          out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT, this.#at()));
-          out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }, this.#at()));
-          for (const s of spouses) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: s, role: 'spouse' }, this.#at()));
-          if (facts.marriage) out.push(this.#engine.assertClaim(eid, V.P_DATE, { edtf: String(facts.marriage) }, this.#at()));
+          out.push(this.#engine.assertAnchor(eid, V.TYPE_EVENT));
+          out.push(this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' }));
+          for (const s of spouses) out.push(this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: s, role: 'spouse' }));
+          if (facts.marriage) out.push(this.#engine.assertClaim(eid, V.P_DATE, { edtf: String(facts.marriage) }));
           if (facts.place) this.#setEventPlace(eid, facts.place, out);
         }
       }

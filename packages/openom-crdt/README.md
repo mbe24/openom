@@ -64,6 +64,7 @@ WSL2/Docker).
 ```rust
 use std::collections::BTreeSet;
 use openom_claim::envelope::{Claim, Record};
+use openom_claim::Hlc;
 use openom_crdt::{materialize, ChannelItem, Op, OpKind};
 
 let author = "did:key:z6MkA";
@@ -71,16 +72,16 @@ let author = "did:key:z6MkA";
 // may remove or supersede. An op by anyone else folds to a no-op.
 let moderators: BTreeSet<String> = [author.to_string()].into_iter().collect();
 
-// Add a name claim (an add IS the record).
-let mut name = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada" }), author, 1);
+// Add a name claim (an add IS the record). createdAt is a Hybrid Logical Clock (see openom_claim::Hlc).
+let mut name = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada" }), author, Hlc::new(1, 0));
 name.compute_id().unwrap();
 let name = Record::Claim(name);
 
 // Later a moderator edits it (supersede: remove prior + assert replacement, atomically).
-let mut better = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada Lovelace" }), author, 2);
+let mut better = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada Lovelace" }), author, Hlc::new(2, 0));
 better.compute_id().unwrap();
 let better_id = better.id.clone();
-let edit = Op::new(2, author, OpKind::Supersede {
+let edit = Op::new(Hlc::new(2, 0), author, OpKind::Supersede {
     prior: name.id().to_owned(),
     replacement: Box::new(Record::Claim(better)),
 }).unwrap();

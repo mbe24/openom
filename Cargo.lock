@@ -3619,6 +3619,7 @@ dependencies = [
 name = "openom-tree"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "openom-claim",
  "openom-crdt",
  "openom-projection",

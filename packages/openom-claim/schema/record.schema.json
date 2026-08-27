@@ -3,7 +3,7 @@
   "$id": "https://openom.dev/schema/record.schema.json",
   "title": "openom claim-model record",
   "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). An attestation IS a Claim, discriminated by `predicate` (there is no targetType); deletion/edit-supersession are operations, NOT claims. Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the core `attest` meta-predicate additionally constrains `value`. camelCase field names match openom-claim's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-claim), not here. Bump x-openom-bounds-version when a bound widens.",
-  "x-openom-bounds-version": 1,
+  "x-openom-bounds-version": 2,
   "oneOf": [
     { "$ref": "#/$defs/anchor" },
     { "$ref": "#/$defs/claim" }
@@ -27,10 +27,11 @@
       "maxLength": 128,
       "$comment": "createdBy: the author's Ed25519 keyring identity as a did:key (base58btc, always z6Mk...)"
     },
-    "epochMs": {
-      "type": "integer",
-      "minimum": 0,
-      "$comment": "createdAt in epoch milliseconds; PROVENANCE only, never a tiebreak (design principle 2)"
+    "hlcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+      "maxLength": 27,
+      "$comment": "createdAt as a canonical RFC 3339 UTC Hybrid-Logical-Clock string: YYYY-MM-DDTHH:MM:SS.mmmcccZ, mmm=millisecond and ccc=logical counter, fixed-width so it sorts lexicographically. PROVENANCE only, never a tiebreak (design principle 2)"
     },
     "predicate": {
       "type": "string",
@@ -83,7 +84,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/uuid" },
         "type": { "$ref": "#/$defs/anchorType" },
-        "createdAt": { "$ref": "#/$defs/epochMs" },
+        "createdAt": { "$ref": "#/$defs/hlcTimestamp" },
         "createdBy": { "$ref": "#/$defs/didKey" }
       }
     },
@@ -102,7 +103,7 @@
         "predicate": { "$ref": "#/$defs/predicate" },
         "value": { "type": "object" },
         "citation": { "$ref": "#/$defs/citations" },
-        "createdAt": { "$ref": "#/$defs/epochMs" },
+        "createdAt": { "$ref": "#/$defs/hlcTimestamp" },
         "createdBy": { "$ref": "#/$defs/didKey" },
         "signature": { "$ref": "#/$defs/signature" }
       },

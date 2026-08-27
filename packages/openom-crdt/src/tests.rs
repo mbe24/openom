@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use openom_claim::envelope::{Claim, Record};
+use openom_claim::Hlc;
 use proptest::prelude::*;
 use serde_json::{json, Value};
 
@@ -8,6 +9,11 @@ use super::*;
 
 fn did(n: u8) -> String {
     format!("did:key:z6Mk{n}")
+}
+
+/// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
+fn hlc(ms: i64) -> Hlc {
+    Hlc::new(ms, 0)
 }
 
 /// A moderator set (did:keys currently at Maintainer or above) from a list of authors.
@@ -19,7 +25,7 @@ fn anchor(id: &str, author: &str) -> Record {
     Record::try_from(json!({
         "id": id,
         "type": "openom.org/core/person/v1",
-        "createdAt": 1,
+        "createdAt": hlc(1).to_string(),
         "createdBy": author,
     }))
     .unwrap()
@@ -31,7 +37,7 @@ fn name_claim(target: &str, given: &str, author: &str, at: i64) -> Record {
         "openom.org/core/name/v1",
         json!({ "given": given }),
         author,
-        at,
+        hlc(at),
     );
     c.compute_id().unwrap();
     Record::Claim(c)
@@ -39,7 +45,7 @@ fn name_claim(target: &str, given: &str, author: &str, at: i64) -> Record {
 
 fn remove(target: &Record, author: &str) -> Op {
     Op::new(
-        2,
+        hlc(2),
         author,
         OpKind::Remove {
             target: target.id().to_owned(),
@@ -50,7 +56,7 @@ fn remove(target: &Record, author: &str) -> Op {
 
 fn supersede(prior: &Record, replacement: Record, author: &str) -> Op {
     Op::new(
-        2,
+        hlc(2),
         author,
         OpKind::Supersede {
             prior: prior.id().to_owned(),
@@ -62,7 +68,7 @@ fn supersede(prior: &Record, replacement: Record, author: &str) -> Op {
 
 fn revoke(remove_op: &Op, author: &str) -> Op {
     Op::new(
-        3,
+        hlc(3),
         author,
         OpKind::Revoke {
             removal: remove_op.id.clone(),
@@ -143,7 +149,7 @@ fn demotion_resurfaces_a_moderators_removal() {
 fn remove_of_an_unknown_target_is_a_noop() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let orphan = Op::new(
-        2,
+        hlc(2),
         did(1),
         OpKind::Remove {
             target: "sha256:does-not-exist".to_owned(),
@@ -265,7 +271,7 @@ fn a_non_moderator_revoke_does_not_restore() {
 fn revoke_of_an_unknown_or_non_remove_op_is_ignored() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let stray = Op::new(
-        3,
+        hlc(3),
         did(1),
         OpKind::Revoke {
             removal: "sha256:not-a-real-op".to_owned(),
@@ -302,7 +308,7 @@ fn op_id_is_stable_when_the_embedded_replacement_is_signed() {
     signed_value["signature"] = json!("sig-placeholder");
     let signed_replacement: Record = serde_json::from_value(signed_value).unwrap();
     let signed = Op::new(
-        2,
+        hlc(2),
         did(1),
         OpKind::Supersede {
             prior: old.id().to_owned(),
@@ -427,7 +433,7 @@ fn unknown(id: &str, type_uri: &str, author: &str) -> Record {
     Record::try_from(json!({
         "id": id,
         "type": type_uri,
-        "createdAt": 9,
+        "createdAt": hlc(9).to_string(),
         "createdBy": author,
         "note": "opaque payload",
     }))
@@ -508,7 +514,7 @@ fn a_batch_with_novel_items_round_trips_through_the_codec_untouched() {
                 "deep": [1, 2, { "k": true }],
             }),
             &did(1),
-            1,
+            hlc(1),
         );
         c.compute_id().unwrap();
         Record::Claim(c)
@@ -547,7 +553,7 @@ proptest! {
         value in arb_value(),
         remove_it in any::<bool>(),
     ) {
-        let mut c = Claim::new("pA", &pred, value, &did(1), 1);
+        let mut c = Claim::new("pA", &pred, value, &did(1), hlc(1));
         c.compute_id().unwrap();
         let rec = Record::Claim(c.clone());
         let assert = ChannelItem::Assert(rec.clone());

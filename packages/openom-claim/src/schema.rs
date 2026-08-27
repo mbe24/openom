@@ -39,12 +39,18 @@ impl Default for RecordSchema {
 mod tests {
     use super::*;
     use crate::envelope::{AttestTarget, Claim, Verdict, TYPE_PERSON};
+    use crate::Hlc;
     use openom_sign::SigningKey;
     use serde_json::json;
 
     fn did() -> String {
         let key = SigningKey::from_seed(&[3u8; 32]);
         openom_did::encode_ed25519(&key.verifying_key().to_bytes())
+    }
+
+    /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
+    fn hlc(ms: i64) -> Hlc {
+        Hlc::new(ms, 0)
     }
 
     #[test]
@@ -57,7 +63,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "parts": { "given": "Ada", "family": "Lovelace" } }),
             &d,
-            1771765800000,
+            hlc(1771765800000),
         );
         c.compute_id().unwrap();
         assert!(s.is_valid(&c.to_value()), "a real name claim must validate");
@@ -65,7 +71,7 @@ mod tests {
         let anchor = json!({
             "id": "b3d3f6b0-0000-4000-8000-000000000002",
             "type": TYPE_PERSON,
-            "createdAt": 1771765800000_i64,
+            "createdAt": hlc(1771765800000).to_string(),
             "createdBy": d,
         });
         assert!(s.is_valid(&anchor), "a person anchor must validate");
@@ -76,7 +82,7 @@ mod tests {
         let s = RecordSchema::new();
         let d = did();
 
-        let mut good = Claim::attestation(&AttestTarget::Claim("sha256:aa".into()), Verdict::Support, None, &d, 1);
+        let mut good = Claim::attestation(&AttestTarget::Claim("sha256:aa".into()), Verdict::Support, None, &d, hlc(1));
         good.compute_id().unwrap();
         assert!(s.is_valid(&good.to_value()));
 
@@ -97,7 +103,7 @@ mod tests {
         assert!(!s.is_valid(&json!({})));
 
         // A claim with a non-sha256 id fails the pattern.
-        let mut c = Claim::new("t", "openom.org/core/name/v1", json!({}), &d, 1);
+        let mut c = Claim::new("t", "openom.org/core/name/v1", json!({}), &d, hlc(1));
         c.compute_id().unwrap();
         let mut bad_id = c.to_value();
         bad_id["id"] = json!("not-a-hash");
@@ -115,7 +121,7 @@ mod tests {
 
         // An anchor with a malformed uuid id fails (pattern enforced, not just the `format` annotation).
         assert!(!s.is_valid(&json!({
-            "id": "not-a-uuid", "type": TYPE_PERSON, "createdAt": 1, "createdBy": d
+            "id": "not-a-uuid", "type": TYPE_PERSON, "createdAt": hlc(1).to_string(), "createdBy": d
         })));
 
         // A claim with a non-hex signature fails the signature pattern.

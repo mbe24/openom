@@ -39,37 +39,32 @@ impl WasmTree {
     }
 
     /// Assert a claim (`value_json` = the claim value as JSON). Returns op-batch bytes to seal.
+    /// `createdAt` is stamped by the engine's own monotonic clock — the caller supplies no timestamp.
     #[wasm_bindgen(js_name = assertClaim)]
     pub fn assert_claim(
         &mut self,
         target: &str,
         predicate: &str,
         value_json: &str,
-        created_at: f64,
     ) -> Result<Vec<u8>, JsError> {
         let value = serde_json::from_str(value_json).map_err(to_js)?;
         self.inner
-            .assert_claim(target, predicate, value, created_at as i64)
+            .assert_claim(target, predicate, value, now_millis())
             .map_err(to_js)
     }
 
     /// Assert an identity anchor (Person/Event/Place/Tree). Returns op-batch bytes to seal.
     #[wasm_bindgen(js_name = assertAnchor)]
-    pub fn assert_anchor(
-        &mut self,
-        id: &str,
-        type_uri: &str,
-        created_at: f64,
-    ) -> Result<Vec<u8>, JsError> {
+    pub fn assert_anchor(&mut self, id: &str, type_uri: &str) -> Result<Vec<u8>, JsError> {
         self.inner
-            .assert_anchor(id, type_uri, created_at as i64)
+            .assert_anchor(id, type_uri, now_millis())
             .map_err(to_js)
     }
 
     /// Remove one of this author's own records by id. Returns the Remove op's id (for a later revoke);
     /// the op itself is carried out on the next `flush`.
-    pub fn remove(&mut self, target: &str, created_at: f64) -> Result<String, JsError> {
-        self.inner.remove(target, created_at as i64).map_err(to_js)
+    pub fn remove(&mut self, target: &str) -> Result<String, JsError> {
+        self.inner.remove(target, now_millis()).map_err(to_js)
     }
 
     /// Edit: supersede `prior` with a fresh claim value (`value_json`).
@@ -80,19 +75,16 @@ impl WasmTree {
         target: &str,
         predicate: &str,
         value_json: &str,
-        created_at: f64,
     ) -> Result<Vec<u8>, JsError> {
         let value = serde_json::from_str(value_json).map_err(to_js)?;
         self.inner
-            .supersede_claim(prior, target, predicate, value, created_at as i64)
+            .supersede_claim(prior, target, predicate, value, now_millis())
             .map_err(to_js)
     }
 
     /// Undo a same-author `Remove` by its operation id.
-    pub fn revoke(&mut self, removal_op_id: &str, created_at: f64) -> Result<Vec<u8>, JsError> {
-        self.inner
-            .revoke(removal_op_id, created_at as i64)
-            .map_err(to_js)
+    pub fn revoke(&mut self, removal_op_id: &str) -> Result<Vec<u8>, JsError> {
+        self.inner.revoke(removal_op_id, now_millis()).map_err(to_js)
     }
 
     /// Merge a peer's (or replayed) op batch into the set. Returns the number of items ingested.
@@ -144,4 +136,10 @@ impl WasmTree {
 
 fn to_js<E: std::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// The physical wall-clock reading (epoch ms) fed to the engine's monotonic clock. The engine
+/// sanitizes it — a backwards or stalled `Date::now()` still yields a strictly increasing `createdAt`.
+fn now_millis() -> i64 {
+    js_sys::Date::now() as i64
 }

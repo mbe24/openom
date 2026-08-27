@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openom_claim::envelope::Record;
-use openom_claim::{ClaimError, ContentAddressed};
+use openom_claim::{ClaimError, ContentAddressed, Hlc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -83,10 +83,10 @@ pub struct Op {
     /// Always [`OP_TYPE`].
     #[serde(rename = "type")]
     pub type_uri: String,
-    /// Advisory timestamp (epoch ms). Provenance only — never a convergence tiebreak. Per-device
-    /// monotonic, so a byte-identical resend of the same logical op collapses by id (see the
-    /// revoke/re-remove note on [`OpKind::Revoke`]).
-    pub created_at: i64,
+    /// Advisory timestamp (a Hybrid Logical Clock — see [`Hlc`]). Provenance only — never a convergence
+    /// tiebreak. Per-device monotonic, so a byte-identical resend of the same logical op collapses by id
+    /// (see the revoke/re-remove note on [`OpKind::Revoke`]).
+    pub created_at: Hlc,
     /// The operation's author. Must equal the transport-authenticated entry author, and — for a
     /// [`Supersede`](OpKind::Supersede) — the replacement record's author.
     pub created_by: String,
@@ -135,7 +135,7 @@ impl Op {
     /// Build an operation, computing its content-hash id. `signature` starts empty — signing is a
     /// separate, deferred step (see the module docs).
     pub fn new(
-        created_at: i64,
+        created_at: Hlc,
         created_by: impl Into<String>,
         kind: OpKind,
     ) -> Result<Self, CrdtError> {
@@ -188,7 +188,7 @@ impl TryFrom<Value> for Op {
             id: String,
             #[serde(rename = "type")]
             type_uri: String,
-            created_at: i64,
+            created_at: Hlc,
             created_by: String,
             #[serde(default)]
             signature: Option<String>,

@@ -3,9 +3,45 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use openom_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
+use openom_claim::Hlc;
 use openom_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_projection::{project, Policy, Projection};
 use serde_json::Value;
+
+/// Logical ticks per physical millisecond before the counter carries into the next millisecond —
+/// matches the wire form's three-digit logical field (see [`Hlc`]).
+const LOGICAL_PER_MILLI: u32 = 1000;
+
+/// The engine-owned Hybrid Logical Clock. Every mint stamps `created_at` through [`next`](HlcClock::next),
+/// so no caller can supply a non-monotonic or colliding timestamp — the id-collision bug where a fast
+/// create→undo→redo reproduced a still-tombstoned id is structurally impossible. The caller passes only a
+/// physical wall-clock reading (`Date::now()` on the web); the clock sanitizes it into a strictly
+/// increasing `(millis, logical)`.
+#[derive(Default)]
+struct HlcClock {
+    last_millis: i64,
+    logical: u32,
+}
+
+impl HlcClock {
+    /// The next strictly-greater timestamp given a physical reading. If the wall clock advanced, take it
+    /// with a reset logical counter; otherwise (a tie or a backwards reading) bump the logical counter,
+    /// carrying into `millis` if it would exceed the three-digit field — so the result is always both
+    /// strictly monotonic and canonically representable.
+    fn next(&mut self, now_millis: i64) -> Hlc {
+        if now_millis > self.last_millis {
+            self.last_millis = now_millis;
+            self.logical = 0;
+        } else {
+            self.logical += 1;
+            while self.logical >= LOGICAL_PER_MILLI {
+                self.last_millis += 1;
+                self.logical -= LOGICAL_PER_MILLI;
+            }
+        }
+        Hlc::new(self.last_millis, self.logical)
+    }
+}
 
 /// An edit or ingest failed.
 #[derive(Debug, thiserror::Error)]
@@ -40,6 +76,8 @@ pub struct Tree {
     /// op-batch by [`flush`](Tree::flush): one settled edit = one sealed entry, so a peer never sees a
     /// half-formed record set (e.g. an event anchor with no type). Applied to `items` immediately.
     pending: Vec<ChannelItem>,
+    /// The engine-owned monotonic clock that stamps `created_at` on every mint (see [`HlcClock`]).
+    clock: HlcClock,
 }
 
 impl Tree {
@@ -51,6 +89,7 @@ impl Tree {
             created_by,
             items: BTreeMap::new(),
             pending: Vec::new(),
+            clock: HlcClock::default(),
         }
     }
 
@@ -68,21 +107,17 @@ impl Tree {
 
     // --- edits: mint an op, apply it optimistically, return the batch bytes to seal --------------
 
-    /// Assert a new claim about `target`, authored by this replica.
+    /// Assert a new claim about `target`, authored by this replica. `now_millis` is a physical
+    /// wall-clock reading (epoch ms); the engine-owned clock turns it into the monotonic `createdAt`.
     pub fn assert_claim(
         &mut self,
         target: &str,
         predicate: &str,
         value: Value,
-        created_at: i64,
+        now_millis: i64,
     ) -> Result<Vec<u8>, TreeError> {
-        let mut c = Claim::new(
-            target,
-            predicate,
-            value,
-            self.created_by.as_str(),
-            created_at,
-        );
+        let at = self.clock.next(now_millis);
+        let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
         c.compute_id()?;
         self.emit(vec![ChannelItem::Assert(Record::Claim(c))])
     }
@@ -93,18 +128,23 @@ impl Tree {
     /// The anchor is born with its **existence claim** (`PREDICATE_EXISTENCE`, value `{}`) in the same
     /// batch — the single root proposition "this individual is real". It is the citation host for
     /// evidence of existence and the target other authors `attest`/refute; they never mint a second
-    /// existence claim. Deriving it from the anchor's own fields (no fresh randomness) keeps a
-    /// crash-retry idempotent: re-asserting the same anchor re-mints the identical claim id.
+    /// existence claim. The anchor and its existence claim share this call's one clock tick.
+    ///
+    /// Crash-retry idempotency is a **byte-replay** property, not a re-mint one: the engine's clock
+    /// always advances, so calling `assert_anchor` again would mint a *different* `createdAt` (hence a
+    /// different existence-claim id). A retry instead replays the persisted op-batch bytes through
+    /// [`merge`](Tree::merge), which re-inserts by id — idempotent by construction.
     pub fn assert_anchor(
         &mut self,
         id: &str,
         type_uri: &str,
-        created_at: i64,
+        now_millis: i64,
     ) -> Result<Vec<u8>, TreeError> {
+        let at = self.clock.next(now_millis);
         let anchor = Anchor {
             id: id.to_owned(),
             type_uri: type_uri.to_owned(),
-            created_at,
+            created_at: at,
             created_by: self.created_by.clone(),
         };
         let mut existence = Claim::new(
@@ -112,7 +152,7 @@ impl Tree {
             PREDICATE_EXISTENCE,
             Value::Object(serde_json::Map::new()),
             self.created_by.as_str(),
-            created_at,
+            at,
         );
         existence.compute_id()?;
         self.emit(vec![
@@ -125,9 +165,9 @@ impl Tree {
     /// [`revoke`](Tree::revoke) up to the compaction (GC) horizon. Returns the Remove op's own id so
     /// the caller can later revoke it — the minted op only reaches the store on the next [`flush`], but
     /// its content id is known now.
-    pub fn remove(&mut self, target: &str, created_at: i64) -> Result<String, TreeError> {
+    pub fn remove(&mut self, target: &str, now_millis: i64) -> Result<String, TreeError> {
         let op = Op::new(
-            created_at,
+            self.clock.next(now_millis),
             self.created_by.as_str(),
             OpKind::Remove {
                 target: target.to_owned(),
@@ -147,18 +187,14 @@ impl Tree {
         target: &str,
         predicate: &str,
         value: Value,
-        created_at: i64,
+        now_millis: i64,
     ) -> Result<Vec<u8>, TreeError> {
-        let mut c = Claim::new(
-            target,
-            predicate,
-            value,
-            self.created_by.as_str(),
-            created_at,
-        );
+        // The replacement claim and the enclosing op are one atomic edit — they share one clock tick.
+        let at = self.clock.next(now_millis);
+        let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
         c.compute_id()?;
         let op = Op::new(
-            created_at,
+            at,
             self.created_by.as_str(),
             OpKind::Supersede {
                 prior: prior.to_owned(),
@@ -170,9 +206,9 @@ impl Tree {
 
     /// Undo a same-author `Remove` by its operation id — restores the original record (before the GC
     /// horizon).
-    pub fn revoke(&mut self, removal_op_id: &str, created_at: i64) -> Result<Vec<u8>, TreeError> {
+    pub fn revoke(&mut self, removal_op_id: &str, now_millis: i64) -> Result<Vec<u8>, TreeError> {
         let op = Op::new(
-            created_at,
+            self.clock.next(now_millis),
             self.created_by.as_str(),
             OpKind::Revoke {
                 removal: removal_op_id.to_owned(),

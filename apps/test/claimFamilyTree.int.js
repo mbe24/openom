@@ -32,10 +32,9 @@ function fakeStore() {
 async function fixtureBatches() {
   const eng = await createTree({ initInput, createdBy: 'did:key:zAuthor' });
   const out = [];
-  let clock = 1_700_000_000_000;
-  const at = () => clock++;
-  const anchor = (id, type) => out.push(eng.assertAnchor(id, type, at()));
-  const claim = (target, pred, value) => out.push(eng.assertClaim(target, pred, value, at()));
+  // The engine stamps createdAt itself (its own monotonic clock) — no timestamp is passed in.
+  const anchor = (id, type) => out.push(eng.assertAnchor(id, type));
+  const claim = (target, pred, value) => out.push(eng.assertClaim(target, pred, value));
 
   // Ada Lovelace — a person with a name, sex, and a birth event; her name claim carries a citation.
   anchor('per_ada', V.TYPE_PERSON);

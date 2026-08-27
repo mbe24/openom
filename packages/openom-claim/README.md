@@ -61,7 +61,7 @@ let claim = json!({
     "targetId": "per_uuid",
     "predicate": "openom.org/core/name/v1",
     "value": { "parts": { "given": "Ada", "family": "Lovelace" } },
-    "createdAt": 1771765800000_i64,
+    "createdAt": "2026-02-22T13:10:00.000000Z",
     "createdBy": did,
 });
 
