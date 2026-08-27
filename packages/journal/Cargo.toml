@@ -14,4 +14,11 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-rusqlite.workspace = true
+# The SQLite backend is optional so a MemoryStore-only consumer (and any wasm target of the
+# backend-agnostic contract) doesn't compile the bundled C SQLite. Off by default; the native
+# durable path (Tauri) turns it on.
+rusqlite = { workspace = true, optional = true }
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]

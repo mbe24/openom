@@ -2,6 +2,7 @@
 //! Genau das macht den späteren Wechsel auf Datei, Server oder S3 sicher.
 
 use super::memory::MemoryStore;
+#[cfg(feature = "sqlite")]
 use super::sqlite::SqliteStore;
 use super::*;
 
@@ -59,11 +60,13 @@ fn memory_store_conforms() {
     suite(&MemoryStore::new());
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_store_conforms() {
     suite(&SqliteStore::in_memory().unwrap());
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_open_survives_a_reopen() {
     // A durable, file-backed store must return committed data after being dropped and reopened —
@@ -90,6 +93,7 @@ fn sqlite_open_survives_a_reopen() {
     }
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn stores_agree_on_conflict_semantics() {
     let mem = MemoryStore::new();

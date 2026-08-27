@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod memory;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 #[cfg(test)]
 mod tests;
