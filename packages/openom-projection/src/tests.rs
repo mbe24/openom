@@ -868,6 +868,78 @@ fn union_groups_children_and_attaches_marriage() {
 }
 
 #[test]
+fn marriage_event_requires_a_marriage_type_not_just_matching_participants() {
+    // A union pA+pB with a NON-marriage event whose participants are exactly {pA, pB}. Matching
+    // participants alone must NOT make it the union's marriage_event — the event type gates it too
+    // (kills the `matches!(type, marriage|divorce) && participants == want` → `||` mutant).
+    let recs = vec![
+        person("pA"),
+        person("pB"),
+        person("pC1"),
+        parent("r1", "pC1", "pA", "biological", "did:key:z6MkA"),
+        parent("r2", "pC1", "pB", "biological", "did:key:z6MkA"),
+        event("e1"),
+        event_type("t1", "e1", "residence", "did:key:z6MkA"), // not marriage/divorce
+        participant("pt1", "e1", "pA", "principal", "did:key:z6MkA"),
+        participant("pt2", "e1", "pB", "principal", "did:key:z6MkA"),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.unions.len(), 1);
+    assert_eq!(
+        p.unions[0].marriage_event, None,
+        "a non-marriage event with matching participants is not the union's marriage"
+    );
+}
+
+#[test]
+fn an_existence_claim_is_consumed_not_surfaced_as_unknown() {
+    // The existence claim asserts no structured fact — it must be consumed, never surfaced on the
+    // person as an unknown/"other" claim (kills deleting the P_EXISTENCE match arm, which would route
+    // it — target = a person anchor — into Person.other).
+    let recs = vec![
+        person("pA"),
+        name("n1", "pA", "Ada"),
+        claim(
+            "x1",
+            "openom.org/core/existence/v1",
+            "pA",
+            json!({}),
+            "did:key:z6MkA",
+        ),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert_eq!(p.people.len(), 1);
+    assert!(
+        p.people[0].other.is_empty(),
+        "the existence claim must be consumed, not in Person.other"
+    );
+    assert!(p.unclassified.is_empty());
+}
+
+#[test]
+fn a_part_of_claim_is_consumed_not_left_unclassified() {
+    // A place-nesting (part_of) claim must be consumed into the place hierarchy, never surfaced as an
+    // unknown claim (kills deleting the P_PART_OF match arm, which would route it — target = a place,
+    // not a person — into Projection.unclassified).
+    let recs = vec![
+        place("plc_child"),
+        place("plc_parent"),
+        claim(
+            "pf1",
+            "openom.org/core/part_of/v1",
+            "plc_child",
+            json!({ "parentPlaceId": "plc_parent" }),
+            "did:key:z6MkA",
+        ),
+    ];
+    let p = project(&recs, &Policy::default());
+    assert!(
+        p.unclassified.is_empty(),
+        "part_of must be consumed, not left unclassified"
+    );
+}
+
+#[test]
 fn half_siblings_are_separate_unions() {
     // pC1 has parents A+B; pC2 has parents A+C → two unions sharing only A.
     let recs = vec![
