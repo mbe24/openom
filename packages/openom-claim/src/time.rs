@@ -195,17 +195,19 @@ mod verification {
     #[kani::proof]
     fn civil_from_days_is_the_inverse_of_days_from_civil() {
         let days: i64 = kani::any();
-        // ~year -200 .. 9999 — the representable 4-digit-year domain. The functions are branch-free
-        // (no loops), so this bound only scopes the integer range, it doesn't unwind anything.
-        kani::assume((-100_000..3_000_000).contains(&days));
+        // Cover the parser's FULL domain — 4-digit years 0000..=9999. Day 0 is 1970-01-01; 0000-01-01
+        // is ≈ -719_528 days and 9999-12-31 is ≈ 2_932_896, so [-720_000, 3_000_000) spans every date
+        // FromStr accepts (its calendar-validity guard runs this exact pair down to year 0000). The
+        // functions are branch-free (no loops), so this only scopes the integer range.
+        kani::assume((-720_000..3_000_000).contains(&days));
         let (y, m, d) = civil_from_days(days);
         assert_eq!(days_from_civil(y, m, d), days);
     }
 
     /// `Hlc::new` canonicalizes: the logical counter always lands in `0..1000` (overflow carries into
-    /// `millis`), and re-normalizing an already-canonical value is a fixpoint — so two structurally
-    /// different inputs for the same instant collapse to one representation (the other half of the
-    /// "one canonical form" guarantee). Also proves the carry arithmetic never overflows in-range.
+    /// `millis`), re-normalizing an already-canonical value is a fixpoint, and the carry arithmetic
+    /// never overflows in-range. (The *collapsing* half of the canonical-form guarantee is a separate
+    /// harness below — this one only proves the invariant + idempotence.)
     #[kani::proof]
     fn hlc_new_canonicalizes_the_logical_carry() {
         let millis: i64 = kani::any();
@@ -215,6 +217,27 @@ mod verification {
         let h = Hlc::new(millis, logical);
         assert!(h.logical() < 1000);
         assert_eq!(Hlc::new(h.millis(), h.logical()), h);
+    }
+
+    /// The collapsing half of the "one canonical form" guarantee: two *structurally different* inputs
+    /// that denote the SAME instant canonicalize to the identical `Hlc`. `(millis, logical)` counts
+    /// `millis * 1000 + logical` sub-millisecond units, so equal totals must map to one representation —
+    /// else the same instant could hash two ways. (Non-vacuous: e.g. `(1, 1000)` and `(2, 0)` — this
+    /// bound spans the carry boundary, which is where a split differs.)
+    ///
+    /// `logical` is bounded to `< 2000` (real callers only ever pass `< 1000`; `2000` still crosses one
+    /// carry) and `millis` to a modest range: `Hlc::new`'s `logical/1000` / `%1000` is a wide-symbolic
+    /// division that CBMC bit-blasts expensively, so keeping the operands small is what makes this
+    /// tractable — the same lesson as the base58 exclusion.
+    #[kani::proof]
+    fn hlc_new_collapses_equivalent_inputs_to_one_form() {
+        let (m1, m2): (i64, i64) = (kani::any(), kani::any());
+        let (l1, l2): (u32, u32) = (kani::any(), kani::any());
+        kani::assume((0..1_000_000_000).contains(&m1) && l1 < 2000);
+        kani::assume((0..1_000_000_000).contains(&m2) && l2 < 2000);
+        // Same instant — small enough that `m*1000` stays well inside i64.
+        kani::assume(m1 * 1000 + l1 as i64 == m2 * 1000 + l2 as i64);
+        assert_eq!(Hlc::new(m1, l1), Hlc::new(m2, l2));
     }
 }
 

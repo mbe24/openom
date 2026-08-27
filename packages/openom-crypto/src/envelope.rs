@@ -80,6 +80,11 @@ pub fn seal_envelope_with_nonce(
     params: &SealParams,
     plaintext: &[u8],
 ) -> Result<Envelope, CryptoError> {
+    // Enforce the nonce-length contract at the API edge (the AEAD would also reject it, but failing
+    // here keeps the contract explicit for the test/harness callers this entry point exists for).
+    if nonce.len() != nonce_len(params.aead)? {
+        return Err(CryptoError::NonceLength);
+    }
     let mut header = Header {
         kind: params.kind as i32,
         format: params.format as i32,

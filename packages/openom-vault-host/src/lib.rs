@@ -283,8 +283,8 @@ impl Registry {
 
 /// Source of the host's 128-bit random ids — the per-unlock replica id and the sealer-registry
 /// handle. [`OsEntropy`] (the OS/browser CSPRNG) is the source for real data in dev AND prod; tests
-/// inject [`SeededEntropy`] for determinism. Entropy is a security property, not a dev/prod toggle —
-/// mirrors [`openom_model::id::IdSource`]. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
+/// inject a seeded `SeededEntropy` (test-only) for determinism. Entropy is a security property, not a
+/// dev/prod toggle — mirrors `openom_model::id::IdSource`. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
 /// interior mutability), so the host's methods stay `&self`.
 pub trait HostEntropy: Send + Sync {
     /// 128 fresh random bits. Errs only if the OS/browser entropy source fails.
@@ -305,11 +305,18 @@ impl HostEntropy for OsEntropy {
 /// cryptographic). A xorshift64\* stream, so the whole [`VaultHost`] state machine (revision
 /// monotonicity, replica-id freshness, chain self-check, rollback refusal) can be exercised
 /// reproducibly. Interior-mutable so it satisfies `&self` + `Send + Sync`.
+///
+/// Gated behind `#[cfg(test)]` — not merely documented as test-only — so a production dependency graph
+/// physically cannot name it (replica-id freshness is the anti-fork property, so a seeded source
+/// reaching real data would be a security bug, not just a mistake). Promote to a non-default
+/// `test-entropy` feature only if a cross-crate test ever needs it.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct SeededEntropy {
     state: Mutex<u64>,
 }
 
+#[cfg(test)]
 impl SeededEntropy {
     /// Seed the stream (a zero seed is remapped so the generator never sticks at 0).
     pub fn new(seed: u64) -> Self {
@@ -319,6 +326,7 @@ impl SeededEntropy {
     }
 }
 
+#[cfg(test)]
 impl HostEntropy for SeededEntropy {
     fn random_id(&self) -> Result<[u8; SALT_LEN]> {
         let mut s = self.state.lock().expect("seeded-entropy lock");
@@ -352,8 +360,8 @@ impl<S: VaultStore> VaultHost<S, OsEntropy> {
 }
 
 impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
-    /// A host with an injected entropy source — tests pass [`SeededEntropy`] for a deterministic,
-    /// replayable state machine; real callers use [`new`](VaultHost::new).
+    /// A host with an injected entropy source — tests pass a seeded `SeededEntropy` (test-only) for a
+    /// deterministic, replayable state machine; real callers use [`new`](VaultHost::new).
     pub fn with_entropy(store: S, entropy: E) -> Self {
         VaultHost {
             store,

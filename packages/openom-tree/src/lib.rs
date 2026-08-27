@@ -77,8 +77,10 @@ mod clock_verification {
         let logical: u32 = kani::any();
         kani::assume(logical < LOGICAL_PER_MILLI); // the invariant next/observe maintain
         kani::assume((0..MAX_MILLIS).contains(&last_millis));
+        // ANY physical reading — including a backwards or garbage value from the JS boundary; the clock
+        // must sanitize it. (No upper bound needed: the advance branch only assigns it, and the else
+        // branch ignores it, so no arithmetic on now_millis can overflow.)
         let now_millis: i64 = kani::any();
-        kani::assume((0..MAX_MILLIS).contains(&now_millis));
 
         let mut clock = HlcClock { last_millis, logical };
         let before = (last_millis, logical);
@@ -87,6 +89,11 @@ mod clock_verification {
         assert_eq!((out.millis(), out.logical()), (clock.last_millis, clock.logical));
         assert!((clock.last_millis, clock.logical) > before, "strictly increasing");
         assert!(clock.logical < LOGICAL_PER_MILLI, "invariant preserved");
+        if now_millis > last_millis {
+            // Fidelity on the advance branch: a forward wall reading is taken verbatim (a `next` that
+            // ignored it and only bumped logical would still be monotonic but would fail this).
+            assert_eq!((out.millis(), out.logical()), (now_millis, 0));
+        }
     }
 
     /// `observe` never regresses: after observing any timestamp the clock is at least as high as both
@@ -107,8 +114,10 @@ mod clock_verification {
         let at = Hlc::new(at_millis, at_logical);
         clock.observe(at);
 
-        assert!((clock.last_millis, clock.logical) >= before);
-        assert!((clock.last_millis, clock.logical) >= (at.millis(), at.logical()));
+        // observe advances to EXACTLY the max of its prior state and the observed timestamp — never
+        // more (a jump-ahead bug would slip past a bare `>=`), never less (a regression).
+        let expected = before.max((at.millis(), at.logical()));
+        assert_eq!((clock.last_millis, clock.logical), expected);
     }
 }
 
