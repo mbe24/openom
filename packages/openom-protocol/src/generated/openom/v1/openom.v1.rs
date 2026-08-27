@@ -303,13 +303,10 @@ pub enum Format {
     Unspecified = 0,
     /// V1: the full tree as openom JSON (snapshot only).
     OpenomJson = 1,
-    /// The JSON op-log entries (delta). Distinct from the commute encoding below.
+    /// A claim-model op batch (JSON) — the delta and snapshot payload the claim engine seals.
     OpenomOps = 2,
     /// Opaque bytes — a media blob (image, etc.). The server never interprets it.
     RawBytes = 4,
-    /// The commute op-based CRDT encoding (canonical, deterministic) — carries a
-    /// snapshot, a delta, or a proposal's op bundle; `kind` disambiguates which.
-    OpenomTreelog = 5,
 }
 impl Format {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -322,7 +319,6 @@ impl Format {
             Self::OpenomJson => "FORMAT_OPENOM_JSON",
             Self::OpenomOps => "FORMAT_OPENOM_OPS",
             Self::RawBytes => "FORMAT_RAW_BYTES",
-            Self::OpenomTreelog => "FORMAT_OPENOM_TREELOG",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -332,7 +328,6 @@ impl Format {
             "FORMAT_OPENOM_JSON" => Some(Self::OpenomJson),
             "FORMAT_OPENOM_OPS" => Some(Self::OpenomOps),
             "FORMAT_RAW_BYTES" => Some(Self::RawBytes),
-            "FORMAT_OPENOM_TREELOG" => Some(Self::OpenomTreelog),
             _ => None,
         }
     }

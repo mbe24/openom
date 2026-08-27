@@ -469,26 +469,26 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_a_treelog_delta_and_a_proposal() {
-        // The commute op-based encoding flows through the header as a delta and as a proposal —
-        // the seal path for the treelog engine's sync + proposal bundles.
+    fn round_trips_a_delta_and_a_proposal() {
+        // An op-based payload flows through the header as a delta and as a proposal — the seal path
+        // for the engine's sync deltas + proposal bundles.
         let s = sealer();
         let delta = SealContext {
             kind: EntryKind::Delta,
-            format: Format::OpenomTreelog,
+            format: Format::OpenomOps,
             ..SealContext::snapshot(1, Vec::new(), 0)
         };
-        let out = s.seal_entry(&delta, b"commute-delta-bytes").unwrap();
+        let out = s.seal_entry(&delta, b"op-delta-bytes").unwrap();
         let env = Envelope::decode(out.envelope.as_slice()).unwrap();
-        assert_eq!(env.header.unwrap().format, Format::OpenomTreelog as i32);
+        assert_eq!(env.header.unwrap().format, Format::OpenomOps as i32);
         assert_eq!(
             s.open_entry(EntryKind::Delta, &out.envelope).unwrap(),
-            b"commute-delta-bytes"
+            b"op-delta-bytes"
         );
 
         let proposal = SealContext {
             kind: EntryKind::Proposal,
-            format: Format::OpenomTreelog,
+            format: Format::OpenomOps,
             ..SealContext::snapshot(2, out.ciphertext_hash.clone(), 0)
         };
         let pout = s.seal_entry(&proposal, b"proposal-op-bundle").unwrap();
@@ -509,7 +509,7 @@ mod tests {
         let s = sealer().with_author(author, "m1".into(), 3);
         let delta = SealContext {
             kind: EntryKind::Delta,
-            format: Format::OpenomTreelog,
+            format: Format::OpenomOps,
             ..SealContext::snapshot(1, Vec::new(), 0)
         };
         let out = s.seal_entry(&delta, b"a change").unwrap();

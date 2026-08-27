@@ -27,12 +27,13 @@ The Rust workspace lives in `packages/`, the server in `openom/`, and the shells
 | `openom-sealer` | the client seal/open session (WebAssembly on web, native in Tauri) |
 | `openom-vault-host` | the native key-custody host — the data key stays in Rust |
 | `openom-sync` | the client sync loop — seal local deltas, merge peers' deltas back |
-| `openom-treelog` | the family-tree domain layer, over the `commute` CRDT |
-| `commute` | a generic operation-based CRDT (no domain knowledge) |
-| `commute-format` | a generic format bridge (JSON ⇄ mergeable cells) |
+| `openom-claim` | the claim envelope — content-hash id, dedup fingerprint, domain-separated sign/verify |
+| `openom-crdt` | the claim model's set-union operation CRDT (`materialize` fold; no storage) |
+| `openom-tree` | the claim-model family-tree engine — composes `openom-crdt` + `openom-projection` |
+| `openom-projection` | the read-time projection — the live claim set → a materialized read model |
 | `journal` | a generic sync-backend store — snapshot + append-only log + compare-and-swap |
 
-`commute` and `commute-format` carry no `openom-` prefix on purpose — they are domain-agnostic and reusable.
+`journal` carries no `openom-` prefix on purpose — it is domain-agnostic and reusable.
 
 The shells are `apps/app` (the buildless web app, also served inside the Tauri webview) and `apps/src-tauri`
 (the desktop and mobile shell — window, native SQLite, key custody). The server crate `openom` is Axum on

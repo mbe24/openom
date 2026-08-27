@@ -94,15 +94,12 @@ enum Format {
   FORMAT_UNSPECIFIED = 0;
   // V1: the full tree as openom JSON (snapshot only).
   FORMAT_OPENOM_JSON = 1;
-  // The JSON op-log entries (delta). Distinct from the commute encoding below.
+  // A claim-model op batch (JSON) — the delta and snapshot payload the claim engine seals.
   FORMAT_OPENOM_OPS = 2;
   // Tag 3 was YRS_UPDATE; a concrete CRDT format value is added when deltas ship.
   reserved 3;
   // Opaque bytes — a media blob (image, etc.). The server never interprets it.
   FORMAT_RAW_BYTES = 4;
-  // The commute op-based CRDT encoding (canonical, deterministic) — carries a
-  // snapshot, a delta, or a proposal's op bundle; `kind` disambiguates which.
-  FORMAT_OPENOM_TREELOG = 5;
 }
 
 // AEAD construction.

@@ -16,9 +16,9 @@ do (`remote`, `conditional_writes`, `durable`, `max_blob_bytes`) instead of hard
 backend. Two backends ship today — `MemoryStore` (volatile; tests and in-process use) and `SqliteStore`
 (WAL-backed when opened on a file) — and both pass the exact same conformance suite, so a third backend
 (a future file store, S3, or a zero-knowledge server) only has to pass that suite to be a safe drop-in.
-This is deliberately the generic storage/transport substrate underneath sync: today `openom-treelog`'s
-sealed deltas ride it, and the claim model's future operations channel + snapshot will ride exactly
-this same contract, unchanged — `journal` doesn't know or care which.
+This is deliberately the generic storage/transport substrate underneath sync: the claim engine's
+sealed op deltas + snapshots ride it, and any future channel rides exactly this same contract,
+unchanged — `journal` doesn't know or care which.
 
 It is **not** domain- or crypto-aware: `Update` is `Vec<u8>` and `Snapshot::bytes` is `Vec<u8>` —
 opaque blobs the caller seals and interprets. Metadata a caller might want (device id, Lamport clock,
@@ -85,5 +85,5 @@ Entry points: `DocStore` — the trait every backend implements (`list`, `read_s
 The storage/sync layer: generic and content-agnostic, sitting below `openom-sync` (the client sync
 loop that seals deltas into `Update`s and merges peers' deltas back) and below any concrete remote
 implementation of this contract (today the JS `RemoteStore`; a possible future native `openom-store`).
-It carries today's `openom-treelog` deltas, and the claim model's future operations channel + snapshot
-will ride it unchanged. Full dependency graph: see `packages/README.md`.
+It carries the claim engine's op deltas + snapshots, opaque to it. Full dependency graph: see
+`packages/README.md`.

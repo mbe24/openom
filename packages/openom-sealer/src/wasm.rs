@@ -162,7 +162,6 @@ fn parse_format(s: &str) -> Result<Format, JsError> {
     match s {
         "openom-json" => Ok(Format::OpenomJson),
         "openom-ops" => Ok(Format::OpenomOps),
-        "openom-treelog" => Ok(Format::OpenomTreelog),
         "raw-bytes" => Ok(Format::RawBytes),
         other => Err(JsError::new(&format!("unknown format: {other}"))),
     }

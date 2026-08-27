@@ -18,10 +18,10 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **Substrate vs. domain.** The foundations (`openom-jcs`, `openom-did`, `openom-edtf`,
   `openom-crypto`, `openom-protocol`) know nothing about family trees and must never gain a domain
   dependency. Dependencies point **downward** only.
-- **In flight (pre-release, zero users).** The app currently runs on **`openom-treelog`** (over
-  `commute`); it is being swapped to the **claim model** (`openom-claim` / `openom-projection` + an
-  operations channel). During the transition `openom-model` (the older flat model) and
-  `commute` / `openom-treelog` are **legacy** — expect them to shrink or retire. A crate's `Status`
+- **The engine (pre-release, zero users).** The app runs on the **claim model**: `openom-claim` /
+  `openom-projection` (data) + `openom-crdt` / `openom-tree` (operations + engine) over an operations
+  channel. The former treelog engine (`openom-treelog`) and its op-CRDT (`commute` / `commute-format`)
+  have been **removed**. `openom-model` (the older flat model) remains as legacy. A crate's `Status`
   line says where it stands.
 
 ## The crates, by layer
@@ -39,11 +39,8 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-model** — the older canonical flat id-keyed model + JSON-Schema validator. *(legacy — superseded by the claim model)*
 
 **Operations / CRDT** (how changes converge)
-- **commute** — a small op-based CRDT: Lamport-ordered ops → convergent cells (LWW / OR-set / tombstones).
-- **commute-format** — bridge: JSON documents ⇄ mergeable commute cells.
-- **openom-treelog** — the family-tree domain over `commute` — *the current engine, being replaced by the claim model.*
-- **openom-crdt** — the claim model's convergent operation layer (a CRDT): the operation types + their set-union merge (`materialize`) folding a set of ops into the live record set (add / remove / supersede / revoke, same-author observed-remove). Not a log — owns no storage. Domain-agnostic, clock-free. *(claim model — replaces `commute`'s merge)*
-- **openom-tree** — the claim-model family-tree **engine**: composes `openom-crdt` (the fold) + `openom-projection` (the read model) into the app's read+write surface; owns the record set + author id, mints op batches for the transport to seal, and projects the read model. Key-less. *(claim model — replaces `openom-treelog`'s engine role; wasm veneer = increment B)*
+- **openom-crdt** — the claim model's convergent operation layer (a CRDT): the operation types + their set-union merge (`materialize`) folding a set of ops into the live record set (add / remove / supersede / revoke, same-author observed-remove). Not a log — owns no storage. Domain-agnostic, clock-free. *(claim model)*
+- **openom-tree** — the claim-model family-tree **engine**: composes `openom-crdt` (the fold) + `openom-projection` (the read model) into the app's read+write surface; owns the record set + author id, mints op batches for the transport to seal, and projects the read model. Key-less. *(claim model — the app's only family-tree engine; wasm veneer built)*
 
 **Storage / sync** (transport; opaque bytes)
 - **journal** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.

@@ -294,7 +294,7 @@ mod tests {
         let params = SealParams {
             version: VERSION,
             kind: Kind::Delta,
-            format: Format::OpenomTreelog,
+            format: Format::OpenomOps,
             aead: Aead::Xchacha20Poly1305,
             compression: Compression::None,
             key_id: KID,

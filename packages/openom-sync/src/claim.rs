@@ -6,9 +6,8 @@
 //! (from `openom-crdt`); inbound, they accumulate into a set that [`materialize`] folds into the live
 //! record set — the snapshot the projection reads.
 //!
-//! **Single-engine-per-app-instance:** the whole app runs either treelog or claims, so this client's
-//! log carries only claim entries. There is no mixed-kind routing, and the replica dot never collides
-//! with a treelog channel (there isn't one). The compaction fold + a real `covers_through_seq` are a
+//! **Single-engine-per-app-instance:** the whole app runs the claim engine, so this client's log
+//! carries only claim entries — there is no mixed-kind routing. The compaction fold + a real `covers_through_seq` are a
 //! later slice (OPE-176 tail / OPE-179); for now a fresh client replays the whole log — trivial before
 //! compaction exists.
 
