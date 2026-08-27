@@ -56,6 +56,9 @@ fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
 
 /// Seal `plaintext` under `dek` into a complete [`Envelope`]: mint a fresh nonce,
 /// build the header, seal (binding the whole header as AAD), and set `ciphertext_hash`.
+///
+/// This is the thin CSPRNG shim over [`seal_envelope_with_nonce`]: it mints the fresh per-AEAD nonce
+/// and delegates the deterministic work.
 pub fn seal_envelope(
     dek: &[u8; KEY_LEN],
     params: &SealParams,
@@ -63,7 +66,20 @@ pub fn seal_envelope(
 ) -> Result<Envelope, CryptoError> {
     let mut nonce = vec![0u8; nonce_len(params.aead)?];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    seal_envelope_with_nonce(nonce, dek, params, plaintext)
+}
 
+/// The deterministic core of [`seal_envelope`], with the `nonce` supplied by the caller: build the
+/// header, sign the attribution (§B3) into the AAD, seal, and set `ciphertext_hash`. Same inputs →
+/// same [`Envelope`] byte-for-byte, so the header/AAD/author-signing-binding logic is testable and
+/// Kani-verifiable without the RNG. **Contract:** `nonce` must be unique per (key, message) and the
+/// right length for `params.aead` (24 XChaCha20 / 12 AES-GCM) — [`seal_envelope`] guarantees both.
+pub fn seal_envelope_with_nonce(
+    nonce: Vec<u8>,
+    dek: &[u8; KEY_LEN],
+    params: &SealParams,
+    plaintext: &[u8],
+) -> Result<Envelope, CryptoError> {
     let mut header = Header {
         kind: params.kind as i32,
         format: params.format as i32,
@@ -192,6 +208,22 @@ mod tests {
                 && h.author_member_id.is_empty()
                 && h.keyring_revision == 0
         );
+    }
+
+    #[test]
+    fn with_nonce_is_deterministic() {
+        // The extracted pure core: same (nonce, dek, params, plaintext) → byte-identical envelope. This
+        // is the property the RNG in seal_envelope otherwise hides — and what makes the header/AAD/seal
+        // logic verifiable without entropy.
+        let dek = generate_dek().unwrap();
+        let nonce = vec![7u8; 24];
+        let a =
+            seal_envelope_with_nonce(nonce.clone(), dek.expose(), &params(Aead::Xchacha20Poly1305), b"x")
+                .unwrap();
+        let b = seal_envelope_with_nonce(nonce, dek.expose(), &params(Aead::Xchacha20Poly1305), b"x")
+            .unwrap();
+        assert_eq!(a, b, "the nonce is the only entropy; fixing it makes seal deterministic");
+        assert_eq!(open_envelope(dek.expose(), &a).unwrap(), b"x");
     }
 
     #[test]

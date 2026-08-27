@@ -103,22 +103,35 @@ pub fn generate_hpke_keypair() -> Result<HpkeKeypair, CryptoError> {
 }
 
 /// Seal `dek` to a member's X25519 public key, binding `info` (the wrap context tuple) so
-/// the wrap can't be replayed for another member/epoch/tree.
+/// the wrap can't be replayed for another member/epoch/tree. Draws HPKE's ephemeral key from the
+/// OS/browser CSPRNG; delegates to [`hpke_wrap_dek_with_rng`].
 pub fn hpke_wrap_dek(
+    recipient_public: &[u8],
+    dek: &Dek,
+    info: &[u8],
+) -> Result<HpkeWrap, CryptoError> {
+    hpke_wrap_dek_with_rng(&mut OsCsprng, recipient_public, dek, info)
+}
+
+/// The RNG-parameterized core of [`hpke_wrap_dek`]: with a seeded `rng` the wrap is reproducible, so
+/// the context-binding + round-trip properties are testable/fuzzable without touching OS entropy.
+/// (HPKE's KEM/AEAD internals stay external-crate logic; this seam is for deterministic testing, not
+/// for Kani reaching inside the cipher.)
+pub fn hpke_wrap_dek_with_rng<R: rand_core::RngCore + rand_core::CryptoRng>(
+    rng: &mut R,
     recipient_public: &[u8],
     dek: &Dek,
     info: &[u8],
 ) -> Result<HpkeWrap, CryptoError> {
     let pk = <KemImpl as KemTrait>::PublicKey::from_bytes(recipient_public)
         .map_err(|_| CryptoError::Hpke)?;
-    let mut rng = OsCsprng;
     let (encapped, ciphertext) = single_shot_seal::<AeadImpl, KdfImpl, KemImpl, _>(
         &OpModeS::Base,
         &pk,
         info,
         dek.expose(),
         &[],
-        &mut rng,
+        rng,
     )
     .map_err(|_| CryptoError::Hpke)?;
     Ok(HpkeWrap {

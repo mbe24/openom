@@ -31,10 +31,23 @@ pub struct WrappedDek {
     pub wrapped_dek: Vec<u8>,
 }
 
-/// Wrap `dek` under `kek`, bound to `ctx`. Generates a fresh nonce.
+/// Wrap `dek` under `kek`, bound to `ctx`. Generates a fresh nonce, then delegates to the pure
+/// [`wrap_dek_with_nonce`].
 pub fn wrap_dek(kek: &Kek, dek: &Dek, ctx: &WrapContext) -> Result<WrappedDek, CryptoError> {
     let mut nonce = [0u8; WRAP_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    wrap_dek_with_nonce(nonce, kek, dek, ctx)
+}
+
+/// The deterministic core of [`wrap_dek`], with the `nonce` supplied by the caller: build the wrap
+/// AAD from `ctx` and seal. Same inputs → same wrap, so the context-binding property is testable and
+/// Kani-verifiable without the RNG. **Contract:** `nonce` must be a fresh, unique 24-byte value.
+pub fn wrap_dek_with_nonce(
+    nonce: [u8; WRAP_NONCE_LEN],
+    kek: &Kek,
+    dek: &Dek,
+    ctx: &WrapContext,
+) -> Result<WrappedDek, CryptoError> {
     let aad = wrap_aad(
         ctx.tree_id,
         ctx.key_id,
@@ -85,6 +98,19 @@ pub fn wrap_rrk_secret(
 ) -> Result<WrappedDek, CryptoError> {
     let mut nonce = [0u8; WRAP_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
+    wrap_rrk_secret_with_nonce(nonce, kek, secret, tree_id, member_id, wrap_method)
+}
+
+/// The deterministic core of [`wrap_rrk_secret`], with the `nonce` supplied by the caller. Same
+/// inputs → same wrap. **Contract:** `nonce` must be a fresh, unique 24-byte value.
+pub fn wrap_rrk_secret_with_nonce(
+    nonce: [u8; WRAP_NONCE_LEN],
+    kek: &Kek,
+    secret: &RrkSecret,
+    tree_id: &[u8],
+    member_id: &str,
+    wrap_method: i32,
+) -> Result<WrappedDek, CryptoError> {
     let aad = rrk_wrap_aad(tree_id, member_id, wrap_method);
     let wrapped_dek = xchacha_seal(kek.expose(), &nonce, &aad, secret.expose())?;
     Ok(WrappedDek {
