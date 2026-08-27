@@ -327,3 +327,98 @@ describe.skipIf(!built)('FamilyTree read adapter (projection → v2 views)', () 
     expect(strip(restored.toJSON())).toEqual(before);
   });
 });
+
+// Coverage the retired treelog suites (familyTreeEngine.int.js) uniquely had, reproduced on the claim
+// engine (OPE-240): typed custom booleans, cross-session field clearing, compaction-with-tail hydrate,
+// and deterministic resolution of a concurrent same-author edit to one field.
+describe.skipIf(!built)('FamilyTree — custom fields, clearing, compaction, concurrent edits', () => {
+  beforeAll(async () => { await createTree({ initInput }); });
+
+  // A minimal schema that declares one field's type, so #coerceCustom can read it back typed.
+  const boolSchema = { field: (id) => (id === 'living' ? { type: 'boolean' } : undefined) };
+
+  it('stores a custom boolean as an explicit value and reads it back typed (false is a value, not a clear)', async () => {
+    const store = fakeStore();
+    const cft = new FamilyTree(store, 'tree-cb', boolSchema, 'did:key:zLocal');
+    const p = await cft.createPerson({ given: 'Ada' });
+
+    await cft.updatePerson(p.id, { custom: { living: true } });
+    expect(cft.person(p.id).custom.living).toBe(true); // typed boolean, not the string 'true'
+
+    // `false` is an explicit stored value — it must NOT be treated as clearing the field.
+    await cft.updatePerson(p.id, { custom: { living: false } });
+    expect(cft.person(p.id).custom.living).toBe(false);
+
+    // …and it survives a reload with its type intact (needs the same schema on the fresh instance).
+    const restored = new FamilyTree(store, 'tree-cb', boolSchema, 'did:key:zLocal');
+    await restored.hydrate();
+    expect(restored.person(p.id).custom.living).toBe(false);
+  });
+
+  it('clears a field set in a PREVIOUS session, and it stays cleared across a further reload', async () => {
+    const store = fakeStore();
+    const a = new FamilyTree(store, 'tree-clr', null, 'did:key:zLocal');
+    const p = await a.createPerson({ given: 'Ada', note: 'a note' });
+
+    // A fresh session reloads, then clears the value that a prior session minted (same author, so the
+    // retract legitimately supersedes the earlier-session claim).
+    const b = new FamilyTree(store, 'tree-clr', null, 'did:key:zLocal');
+    await b.hydrate();
+    expect(b.person(p.id).note).toBe('a note');
+    await b.updatePerson(p.id, { note: '' });
+    expect(b.person(p.id).note).toBe('');
+
+    // The clear is durable: another reload still sees it gone (no resurrection of the prior claim).
+    const c = new FamilyTree(store, 'tree-clr', null, 'did:key:zLocal');
+    await c.hydrate();
+    expect(c.person(p.id).note).toBe('');
+  });
+
+  it('hydrate loads a snapshot plus only the tail appended after it (compaction)', async () => {
+    const store = fakeStore();
+    const a = new FamilyTree(store, 'tree-cmp', null, 'did:key:zLocal');
+    const p1 = await a.createPerson({ given: 'Ada' });
+    await a.compact();                                   // snapshot covers p1
+    const p2 = await a.createPerson({ given: 'Grace' }); // a tail op after the snapshot
+
+    const b = new FamilyTree(store, 'tree-cmp', null, 'did:key:zLocal');
+    await b.hydrate();                                   // snapshot (p1) + only the tail (p2)
+    expect(b.person(p1.id)?.given).toBe('Ada');
+    expect(b.person(p2.id)?.given).toBe('Grace');
+    expect(b.allPeople().length).toBe(2);
+  });
+
+  it('a concurrent same-author edit to the SAME field converges to one deterministic value on both replicas', async () => {
+    // Both replicas start from the same person, then each supersedes `note` differently and concurrently.
+    // Same-author supersede forks into two live claims under one (target, predicate); the projection must
+    // resolve to ONE value, and both replicas must agree (deterministic, order-independent) — the property
+    // that keeps two devices of one user from diverging.
+    const seedStore = fakeStore();
+    const a = new FamilyTree(seedStore, 'doc', null, 'did:key:zLocal');
+    const seed = [];
+    let off = a.onDelta((d) => seed.push(d));
+    const p = await a.createPerson({ given: 'Ada', note: 'original' });
+    off();
+
+    const b = new FamilyTree(fakeStore(), 'doc', null, 'did:key:zLocal');
+    for (const d of seed) await b.mergeRemote(d);
+    expect(b.person(p.id).note).toBe('original');
+
+    const da = [];
+    off = a.onDelta((d) => da.push(d));
+    await a.updatePerson(p.id, { note: 'from A' });
+    off();
+    const db = [];
+    off = b.onDelta((d) => db.push(d));
+    await b.updatePerson(p.id, { note: 'from B' });
+    off();
+
+    for (const d of db) await a.mergeRemote(d);
+    for (const d of da) await b.mergeRemote(d);
+
+    // Convergence is the invariant — both replicas show the same resolved note (which of the two wins is
+    // the projection's deterministic tiebreak, not asserted here).
+    expect(a.person(p.id).note).toBe(b.person(p.id).note);
+    expect(['from A', 'from B']).toContain(a.person(p.id).note);
+  });
+});
