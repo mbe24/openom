@@ -154,6 +154,7 @@ where
             &self.graph,
             &self.ops,
             &self.access,
+            &self.genesis,
         )
         .map_err(|e| Error::InvalidAction(format!("resolver: {:?}", e)))?;
         self.rebuild_state()?;

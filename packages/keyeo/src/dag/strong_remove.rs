@@ -28,7 +28,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::access::AccessControl;
 use crate::dag::graph::Graph;
-use crate::dag::resolver::{MembershipAction, OpId, Resolver, SignedOp};
+use crate::dag::lamport::apply_action;
+use crate::dag::resolver::{GroupState, MembershipAction, OpId, Resolver, SignedOp};
 use crate::roles::Role;
 use crate::signature::SignatureScheme;
 
@@ -63,22 +64,42 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         mut state: Self::State,
         graph: &Graph<OId>,
         ops: &HashMap<OId, Op>,
-        _ac: &impl AccessControl<Op::MemberId, R, S>,
+        ac: &impl AccessControl<Op::MemberId, R, S>,
+        genesis_state: &GroupState<Op::MemberId, R, S>,
     ) -> Result<Self::State, Self::Error> {
         let depth = compute_depths(ops);
         let genesis = genesis_members(ops);
 
-        // Removes ordered by the deterministic tiebreak (rule 2), stable across replicas.
+        // Authorization at each op's CAUSAL POSITION: fold the op's authorized ancestors onto the base
+        // state and ask `AccessControl`. Well-founded over the ancestor DAG — it does NOT depend on the
+        // concurrent strong-remove fixpoint below (a concurrent remove is not in an op's causal past, so
+        // it can't retroactively unauthorize), which is what keeps this non-circular. An unauthorized op
+        // is decided once here and then neither applies nor exerts invalidation.
+        let authorized = authorized_map(genesis_state, graph, ops, ac, &depth);
+
+        // Removes ordered by the deterministic tiebreak (rule 2), stable across replicas — but ONLY
+        // authorized removes carry invalidation power. An unauthorized `Remove` (author lacks the role)
+        // must not suppress the removee's concurrent, authorized ops (the authority-blind hole, OPE-258).
         let mut removes: Vec<(OId, Op::MemberId)> = ops
             .iter()
             .filter_map(|(id, op)| match op.action() {
-                MembershipAction::Remove { member } => Some((*id, member.clone())),
+                MembershipAction::Remove { member }
+                    if authorized.get(id).copied().unwrap_or(false) =>
+                {
+                    Some((*id, member.clone()))
+                }
                 _ => None,
             })
             .collect();
         removes.sort_by_key(|(id, _)| (*depth.get(id).unwrap_or(&0), *id));
 
-        let mut invalid: HashSet<OId> = HashSet::new();
+        // Seed the ignore set with every unauthorized op: it neither applies nor invalidates, and (via
+        // rule 3, which skips ignored Add/Remove events) it establishes no presence for its members.
+        let mut invalid: HashSet<OId> = ops
+            .keys()
+            .copied()
+            .filter(|id| !authorized.get(id).copied().unwrap_or(false))
+            .collect();
         loop {
             // Inner fixpoint: rules 1+2+3 iterated until stable (all monotone — the ignore set only
             // grows — so this converges). Any rule-4 suppressions from a previous outer pass are
@@ -164,6 +185,79 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
     fn ignored(state: &Self::State) -> HashSet<OId> {
         state.ignore.clone()
     }
+}
+
+/// Authorization at every op's causal position, keyed on op id. `authorized[o]` = whether `o`'s author
+/// was permitted (by `AccessControl`) to perform `o`'s action given the state resolved from `o`'s causal
+/// PAST — its authorized ancestors folded onto `genesis`. Well-founded over the ancestor DAG and
+/// independent of the concurrent strong-remove fixpoint, so it is computed once, up front.
+fn authorized_map<OId, R, S, Op>(
+    genesis: &GroupState<Op::MemberId, R, S>,
+    graph: &Graph<OId>,
+    ops: &HashMap<OId, Op>,
+    ac: &impl AccessControl<Op::MemberId, R, S>,
+    depth: &HashMap<OId, usize>,
+) -> HashMap<OId, bool>
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    let mut memo: HashMap<OId, bool> = HashMap::new();
+    let mut on_stack: HashSet<OId> = HashSet::new();
+    for &id in ops.keys() {
+        authorized_at(id, genesis, graph, ops, ac, depth, &mut memo, &mut on_stack);
+    }
+    memo
+}
+
+/// Memoized: is `id`'s author authorized at `id`'s causal position? Folds `id`'s authorized ancestors
+/// (topological, by `(depth, id)`) onto `genesis`, then asks `AccessControl`. Recurses only into strict
+/// ancestors, so it terminates on any DAG (the `on_stack` guard degrades a stray cycle to `false`).
+#[allow(clippy::too_many_arguments)]
+fn authorized_at<OId, R, S, Op>(
+    id: OId,
+    genesis: &GroupState<Op::MemberId, R, S>,
+    graph: &Graph<OId>,
+    ops: &HashMap<OId, Op>,
+    ac: &impl AccessControl<Op::MemberId, R, S>,
+    depth: &HashMap<OId, usize>,
+    memo: &mut HashMap<OId, bool>,
+    on_stack: &mut HashSet<OId>,
+) -> bool
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    if let Some(&a) = memo.get(&id) {
+        return a;
+    }
+    if !on_stack.insert(id) {
+        return false; // cycle guard (never in a DAG)
+    }
+    // Fold the authorized ancestors of `id` in topological order to reconstruct the state `id` saw.
+    let mut ancestors: Vec<OId> = ops
+        .keys()
+        .copied()
+        .filter(|&a| graph.has_path(a, id))
+        .collect();
+    ancestors.sort_by_key(|a| (*depth.get(a).unwrap_or(&0), *a));
+    let mut state = genesis.clone();
+    for a in ancestors {
+        if authorized_at(a, genesis, graph, ops, ac, depth, memo, on_stack) {
+            if let Ok((next, _)) = apply_action(state.clone(), ops[&a].action()) {
+                state = next;
+            }
+        }
+    }
+    let op = &ops[&id];
+    let result = ac.is_authorized(&state, op.author(), op.action());
+    on_stack.remove(&id);
+    memo.insert(id, result);
+    result
 }
 
 /// Lamport depth of every op: 0 at a root, else 1 + max parent depth. Used only as a deterministic

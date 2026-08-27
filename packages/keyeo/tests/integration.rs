@@ -3,6 +3,7 @@ use keyeo::{
     membership_commitment, ApplyOutcome, DefaultAccessControl, Ed25519, Epoch, Error, GroupState,
     Keyeo, MemberInit, MembershipAction, Op, Role,
 };
+use proptest::prelude::*;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, serde::Serialize)]
 enum TestRole {
@@ -98,7 +99,6 @@ fn is_member(k: &TestEngine, id: &[u8; 32]) -> bool {
 // invalidation (rule 1) and suppress the victim's concurrent, *authorized* ops — even though the
 // unauthorized remove itself never takes effect.
 #[test]
-#[ignore = "RED until OPE-258: keyeo resolver is authority-blind (StrongRemove ignores AccessControl)"]
 fn an_unauthorized_remove_must_not_invalidate_the_victims_concurrent_ops() {
     let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
     // Admin-only administration; bob is an Editor — NOT authorized to remove.
@@ -140,6 +140,58 @@ fn an_unauthorized_remove_must_not_invalidate_the_victims_concurrent_ops() {
         is_member(&k, &carol),
         "alice's authorized Add(carol) must survive an unauthorized concurrent Remove(alice)"
     );
+}
+
+fn dave_pk() -> [u8; 32] {
+    make_keypair(&[4u8; 32]).verifying_key().to_bytes()
+}
+
+proptest! {
+    /// OPE-258 invariant: an op authored by an UNAUTHORIZED member never changes the resolved
+    /// membership — it neither applies nor invalidates concurrent authorized ops. Resolve a fixed
+    /// authorized baseline (admin alice creates {alice,bob,carol}, then concurrently adds dave and
+    /// removes carol), then splice in an ARBITRARY op authored by bob (an Editor, where Admin is
+    /// required) at an arbitrary existing parent, and assert the active membership is unchanged.
+    #[test]
+    fn an_unauthorized_op_never_changes_resolved_membership(
+        kind in 0u8..4,
+        target in 0usize..4,
+        parent in 0usize..3,
+    ) {
+        use std::collections::BTreeSet;
+        let (alice, bob, carol, dave) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+
+        let mut k = strong_remove_engine(&[
+            minit(alice, TestRole::Admin, [0xaa; 32]),
+            minit(bob, TestRole::Editor, [0xbb; 32]),
+            minit(carol, TestRole::Editor, [0xcc; 32]),
+        ]);
+        k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Add {
+            member: dave, role: TestRole::Editor, author_public_key: dave,
+            hpke_public_key: [0xdd; 32], member_proof: None,
+        })).unwrap();
+        k.apply(make_op(3, vec![1], &[1u8; 32], MembershipAction::Remove { member: carol })).unwrap();
+        let baseline: BTreeSet<[u8; 32]> =
+            k.state().active_members().into_iter().map(|(m, _)| m).collect();
+
+        // Adversarial: bob (Editor, unauthorized) authors an arbitrary membership op at an arbitrary
+        // existing parent (parent 1 makes it concurrent with the add/remove above — the invalidation-
+        // relevant case).
+        let tgt = [alice, dave, carol, bob][target];
+        let action = match kind {
+            0 => MembershipAction::Add { member: tgt, role: TestRole::Admin, author_public_key: tgt,
+                                         hpke_public_key: [0xee; 32], member_proof: None },
+            1 => MembershipAction::Remove { member: tgt },
+            2 => MembershipAction::ChangeRole { member: tgt, new_role: TestRole::Admin },
+            _ => MembershipAction::Remove { member: alice },
+        };
+        let p = [1u64, 2, 3][parent];
+        k.apply(make_op(100, vec![p], &[2u8; 32], action)).unwrap(); // seed [2;32] == bob
+
+        let after: BTreeSet<[u8; 32]> =
+            k.state().active_members().into_iter().map(|(m, _)| m).collect();
+        prop_assert_eq!(baseline, after, "an unauthorized op must not change resolved membership");
+    }
 }
 
 // ── Basic operations ──

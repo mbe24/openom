@@ -210,6 +210,9 @@ pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureS
         graph: &Graph<OId>,
         ops: &HashMap<OId, Op>,
         ac: &impl crate::access::AccessControl<Op::MemberId, R, S>,
+        // The base state a causal replay starts from (the engine's construction genesis). An
+        // authority-aware resolver needs it to compute each op's authorization at its causal position.
+        genesis: &GroupState<Op::MemberId, R, S>,
     ) -> Result<Self::State, Self::Error>;
 
     /// Return the set of op IDs that should be ignored (filtered out) during state rebuild.

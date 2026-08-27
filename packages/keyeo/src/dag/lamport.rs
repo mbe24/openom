@@ -27,6 +27,7 @@ impl<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> Resolve
         _graph: &Graph<OId>,
         _ops: &HashMap<OId, Op>,
         _ac: &impl AccessControl<Op::MemberId, R, S>,
+        _genesis: &GroupState<Op::MemberId, R, S>,
     ) -> Result<Self::State, Self::Error> {
         Ok(state)
     }
