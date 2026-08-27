@@ -523,6 +523,88 @@ mod structure_verification {
     }
 }
 
+/// Kani proofs for `verify_transition`'s revision-ordering gates — OPE-238 Step A (Fable+Sonnet
+/// design-reviewed). See `plan/kani.md` for the scope reasoning. The endorsement block's ACCEPTANCE
+/// arm is PERMANENTLY out of Kani scope: it runs real Ed25519 (`verify_keyring*`) and the success path
+/// hashes (`keyring_hash`), neither of which Kani can model — that arm belongs to the differential
+/// proptest oracle + cargo-mutants. Only the rejection gates that fire BEFORE the first crypto
+/// (`signer_keys`, line ~208) are reachable here.
+///
+/// These harnesses use `#[kani::stub]`, an UNSTABLE Kani feature — run with `-Z stubbing`:
+///   `node scripts/kani.mjs -p openom-keyring -Z stubbing`
+#[cfg(kani)]
+mod transition_verification {
+    use super::*;
+
+    /// Models "the candidate is structurally valid." SOUND not because Step B proved `check_structure`
+    /// (it proved only one sub-gate), but because the gates proven here read ONLY `candidate.revision` /
+    /// `prev_keyring_hash` and the prior — nothing `check_structure` validates — and forcing `Ok`
+    /// over-approximates the real program (which rejects some of these candidates earlier, still
+    /// rejecting). NOTE: with a fixed-`Ok` stub, nothing here proves `verify_transition` even *calls*
+    /// `check_structure` (delete that line and these still pass) — Step B's harness + the unit tests own
+    /// that composition fact.
+    fn structure_ok(_k: &Keyring) -> Result<(), ChainError> {
+        Ok(())
+    }
+
+    /// Prior anchor + candidate keyring, everything empty/concrete except the two revisions. Built
+    /// FIELD-WISE — never `KeyringAnchor::from_keyring` (it would call `keyring_hash` = SHA-256). Empty
+    /// rosters + signatures so a mutated gate falls through to a crypto-free error, never an
+    /// unmodellable `VerifyingKey`. No `.to_vec()`/non-empty Vec anywhere → no loops on these paths.
+    fn prior_and_candidate(prior_rev: u32, cand_rev: u32) -> (KeyringAnchor, Keyring) {
+        let prior = KeyringAnchor {
+            tree_id: Vec::new(),
+            revision: prior_rev,
+            keyring_hash: [0u8; 32],
+            trusted_signers: Vec::new(),
+        };
+        let candidate = Keyring {
+            tree_id: Vec::new(), // == prior.tree_id (concrete-equal → past the tree check, no byte loop)
+            revision: cand_rev,
+            layout_version: KEYRING_LAYOUT_VERSION,
+            prev_keyring_hash: Vec::new(),
+            authorized_signers: Vec::new(),
+            members: Vec::new(),
+            signatures: Vec::new(),
+            recovery_keys: Vec::new(),
+            epochs: Vec::new(),
+        };
+        (prior, candidate)
+    }
+
+    /// At the maximum revision, NO candidate is accepted: `prior.revision.checked_add(1)` overflows to
+    /// `RevisionOverflow`, so a low-revision candidate can't splice onto a `u32::MAX` anchor. The one
+    /// gate of the three with no existing test. Diagnostic: mutate `checked_add` to `wrapping_add` and
+    /// `expected` wraps to 0, letting a revision-0 candidate through — this proof then fails.
+    #[kani::proof]
+    #[kani::stub(check_structure, structure_ok)]
+    fn at_max_revision_every_candidate_overflows() {
+        let cand_rev: u32 = kani::any();
+        let (prior, candidate) = prior_and_candidate(u32::MAX, cand_rev);
+        assert_eq!(
+            verify_transition(&prior, &candidate),
+            Err(ChainError::RevisionOverflow),
+        );
+    }
+
+    /// A candidate that does not advance the revision by exactly one is rejected as `NonSequential`
+    /// (never `>=`, so a withheld hop can't hide a set change). `prior.revision < u32::MAX` so
+    /// `checked_add` succeeds and execution reaches the sequential check.
+    #[kani::proof]
+    #[kani::stub(check_structure, structure_ok)]
+    fn a_non_sequential_revision_is_rejected() {
+        let prior_rev: u32 = kani::any();
+        let cand_rev: u32 = kani::any();
+        kani::assume(prior_rev < u32::MAX); // else RevisionOverflow fires first
+        kani::assume(cand_rev != prior_rev + 1); // not exactly one past
+        let (prior, candidate) = prior_and_candidate(prior_rev, cand_rev);
+        assert_eq!(
+            verify_transition(&prior, &candidate),
+            Err(ChainError::NonSequential),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
