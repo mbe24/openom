@@ -466,6 +466,63 @@ fn signer_keys(signers: &[AuthorizedSigner]) -> Vec<VerifyingKey> {
     out
 }
 
+/// Kani proof harnesses for the keyring's structural gate — compiled only under `cargo kani`
+/// (`--cfg kani`), never the normal build. Run: `node scripts/kani.mjs -p openom-keyring`. These are
+/// OPE-238 Step B: `check_structure`'s crypto-FREE checks, proven exhaustively. The one crypto call in
+/// `check_structure` is `signer_key` (an Ed25519 point-decode Kani can't model) inside the per-signer
+/// loop; the checks proven here (`list too large`, `exactly one founder`) all run BEFORE that loop, so
+/// they need no crypto stub. The signer-loop checks (dup detection, signer-is-member) are Step A — they
+/// require stubbing `signer_key`, which is blocked on constructing a `VerifyingKey` symbolically.
+#[cfg(kani)]
+mod structure_verification {
+    use super::*;
+
+    /// A minimal keyring with two signers carrying the given roles. Every list is empty: the
+    /// founder-count gate returns before the per-signer loop ever reads a signer's key/id, so their
+    /// contents are irrelevant — which also keeps the only unrolled loop the two-element founder filter.
+    fn two_signers(r0: i32, r1: i32) -> Keyring {
+        let sig = |role: i32| AuthorizedSigner {
+            public_key: Vec::new(),
+            member_id: String::new(),
+            role,
+        };
+        Keyring {
+            tree_id: Vec::new(),
+            revision: 1,
+            layout_version: KEYRING_LAYOUT_VERSION,
+            prev_keyring_hash: Vec::new(),
+            authorized_signers: vec![sig(r0), sig(r1)],
+            members: Vec::new(),
+            signatures: Vec::new(),
+            recovery_keys: Vec::new(),
+            epochs: Vec::new(),
+        }
+    }
+
+    /// Soundness of the "exactly one founder" structural gate: a two-signer set whose founder count is
+    /// not exactly one is rejected with THAT specific reason. Pinning the exact `BadStructure` message —
+    /// not a wildcard — is what gives this teeth: the founder gate runs *before* the per-signer key
+    /// checks, so if it were weakened or deleted, execution would fall through and reject with a
+    /// DIFFERENT message ("signer key malformed", from the empty public keys here), failing this
+    /// assertion. Reaches only the size + founder checks (no crypto), hardening the OPE-228 founder
+    /// mutant with a proof. (Scope: the two-signer case — founder counts 0 and 2; larger and empty
+    /// sets are left to the test suite.)
+    #[kani::proof]
+    // Longest loop is the assert_eq!'s byte comparison of the 29-char BadStructure message (str::eq);
+    // the founder filter is only 2. Bound clears both (+1 for the termination check).
+    #[kani::unwind(32)]
+    fn a_two_signer_set_without_exactly_one_founder_is_rejected_by_the_founder_gate() {
+        let r0: i32 = kani::any();
+        let r1: i32 = kani::any();
+        let founders = (r0 == FOUNDER) as u32 + (r1 == FOUNDER) as u32;
+        kani::assume(founders != 1);
+        assert_eq!(
+            check_structure(&two_signers(r0, r1)),
+            Err(ChainError::BadStructure("must have exactly one founder")),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
