@@ -38,7 +38,7 @@ impl Default for RecordSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{Claim, Verdict, TYPE_PERSON};
+    use crate::envelope::{AttestTarget, Claim, Verdict, TYPE_PERSON};
     use openom_sign::SigningKey;
     use serde_json::json;
 
@@ -76,7 +76,7 @@ mod tests {
         let s = RecordSchema::new();
         let d = did();
 
-        let mut good = Claim::attestation("sha256:aa", Verdict::Support, None, &d, 1);
+        let mut good = Claim::attestation(&AttestTarget::Claim("sha256:aa".into()), Verdict::Support, None, &d, 1);
         good.compute_id().unwrap();
         assert!(s.is_valid(&good.to_value()));
 
