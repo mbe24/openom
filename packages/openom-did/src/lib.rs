@@ -278,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn didkey_string_accessors_and_display_round_trip() {
+        let did = DidKey::from_public_key(&[7u8; 32]);
+        let s = did.as_str().to_string();
+        assert!(s.starts_with("did:key:z6Mk"));
+        assert_eq!(format!("{did}"), s); // kills Display::fmt -> Ok(default) (writes nothing)
+        assert_eq!(did.into_string(), s); // kills into_string -> ""/"xyzzy"
+    }
+
+    #[test]
+    fn decode_length_cap_rejects_only_beyond_max() {
+        // A base58 body of EXACTLY MAX_B58_LEN (128) must NOT trip the length guard — it fails later at
+        // the multicodec check. Kills `>` -> `>=`, which would reject at the cap itself as BadLength.
+        let at_cap = format!("did:key:z{}", "1".repeat(128));
+        assert_eq!(decode_ed25519(&at_cap), Err(DidError::UnsupportedMulticodec));
+        // One past the cap is a length error (true under both `>` and `>=`, documents the boundary).
+        let over_cap = format!("did:key:z{}", "1".repeat(129));
+        assert_eq!(decode_ed25519(&over_cap), Err(DidError::BadLength));
+    }
+
+    #[test]
     fn base58_roundtrips_arbitrary_bytes() {
         let samples: &[&[u8]] = &[
             &[0],

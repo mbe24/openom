@@ -459,6 +459,50 @@ mod tests {
     }
 
     #[test]
+    fn rrk_wrap_aad_binds_each_input() {
+        // The rrk wrap AAD must bind (tree_id, member_id, wrap_method) so a wrap can't be transplanted.
+        // Kills a constant/empty rrk_wrap_aad: non-empty, and every input moves the bytes.
+        let base = rrk_wrap_aad(b"tree-16-byte-abc", "member", 1);
+        assert!(!base.is_empty());
+        assert_ne!(base, rrk_wrap_aad(b"other-16byte-abc", "member", 1), "tree_id is bound");
+        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "other", 1), "member_id is bound");
+        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "member", 2), "wrap_method is bound");
+    }
+
+    #[test]
+    fn keyring_signing_bytes_binds_each_wrap_field() {
+        use crate::v1::{KeyEpoch, KeyWrap};
+        // put_wrap encodes each KeyWrap field into the signed bytes; a changed wrap field must change
+        // them (kills put_wrap being stubbed to a no-op, which would leave every wrap unbound).
+        let kr = |member: &str, nonce: Vec<u8>, method: i32| Keyring {
+            tree_id: vec![],
+            revision: 1,
+            layout_version: 1,
+            prev_keyring_hash: vec![],
+            authorized_signers: vec![],
+            members: vec![],
+            signatures: vec![],
+            recovery_keys: vec![],
+            epochs: vec![KeyEpoch {
+                key_id: vec![],
+                epoch: 0,
+                wraps: vec![KeyWrap {
+                    member_id: member.into(),
+                    wrap_method: method,
+                    nonce,
+                    wrapped_dek: vec![9; 48],
+                    kdf_params: None,
+                    ephemeral_public_key: vec![],
+                }],
+            }],
+        };
+        let base = keyring_signing_bytes(&kr("acct", vec![7; 24], 1));
+        assert_ne!(base, keyring_signing_bytes(&kr("other", vec![7; 24], 1)), "wrap member_id bound");
+        assert_ne!(base, keyring_signing_bytes(&kr("acct", vec![8; 24], 1)), "wrap nonce bound");
+        assert_ne!(base, keyring_signing_bytes(&kr("acct", vec![7; 24], 2)), "wrap method bound");
+    }
+
+    #[test]
     fn keyring_signing_bytes_covers_and_ignores_signatures() {
         use crate::v1::{AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, KeyringSignature, Member};
         let mut kr = Keyring {

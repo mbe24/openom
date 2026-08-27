@@ -376,12 +376,14 @@ fn channel_item_accessors_report_the_real_id_and_author() {
     let assert = ChannelItem::Assert(claim.clone());
     assert_eq!(assert.id(), claim.id());
     assert_eq!(assert.created_by(), did(1));
+    assert_eq!(assert.created_at(), hlc(1)); // the HLC receive rule reads this — a constant would break it
 
     let op = remove(&claim, &did(2));
     let op_id = op.id.clone();
     let as_op = ChannelItem::Op(op);
     assert_eq!(as_op.id(), op_id);
     assert_eq!(as_op.created_by(), did(2));
+    assert_eq!(as_op.created_at(), hlc(2)); // remove() stamps hlc(2)
     // The two items are distinct records/ops → distinct ids (a constant id() would make these equal).
     assert_ne!(assert.id(), as_op.id());
 }

@@ -98,6 +98,11 @@ mod tests {
 
         let r = ReplicaId::new(&b"replica-0"[..]);
         assert_eq!(r.as_bytes(), b"replica-0");
+        assert_eq!(r.into_bytes(), b"replica-0".to_vec());
+
+        let k = KeyId::new(vec![7u8; 8]);
+        assert_eq!(k.as_bytes(), &[7u8; 8]);
+        assert_eq!(k.into_bytes(), vec![7u8; 8]);
 
         let m = MemberId::new("acct-123");
         assert_eq!(m.as_str(), "acct-123");
