@@ -94,13 +94,30 @@ pub fn sign(envelope: &Value, key: &SigningKey) -> Result<[u8; 64], ClaimError> 
     Ok(key.sign(&signing_message(&ch)).to_bytes())
 }
 
-/// The outcome of a signature check.
+/// The outcome of a low-level signature check (see [`verify`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SigCheck {
     /// Valid for this content under the key behind `createdBy`.
     Valid,
     /// Does not verify — tampered content, wrong key, or a malformed signature.
     Bad,
+}
+
+/// The authorship judgment for a claim's embedded signature ([`envelope::Claim::verify`]).
+///
+/// Unlike a `bool` or `Result<Option<_>>`, this makes the dangerous case a variant the caller MUST
+/// match: there is no `is_ok()` / `is_some()` that silently accepts a bad signature. It is
+/// **fail-closed** — anything that is not a present, valid signature over this content under
+/// `createdBy` is [`Forged`](Authorship::Forged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    /// No signature is present — authorship is not asserted (the V1 communal-DEK model).
+    Unsigned,
+    /// A signature is present and verifies for this content under `createdBy`.
+    Verified,
+    /// A signature is present but does NOT verify — tampered content, wrong key, a malformed
+    /// signature string, or an undecodable `createdBy`. Never trust the claim's authorship.
+    Forged,
 }
 
 /// Verify `sig` against the envelope's content and the public key behind its `createdBy` `did:key`.
@@ -202,6 +219,33 @@ mod proptests {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // The registry of per-purpose Ed25519 signing-domain tags across the crates. Every signed message is
+    // prefixed with one so a signature in one context can never verify in another. `SIGN_DOMAIN` is this
+    // crate's real constant; the rest are the literals used at their signing sites (openom-protocol's
+    // author_signing_bytes, the openom-keyring chain) — keep this list in sync when adding a signed
+    // message type. No tag may equal or be a prefix of another (a prefix would let a longer domain's
+    // signature be truncated-replayed against the shorter one).
+    #[test]
+    fn ed25519_signing_domains_are_pairwise_distinct_and_non_prefixing() {
+        let domains: &[&[u8]] = &[
+            SIGN_DOMAIN,         // openom-claim: claim signatures ("openom-claim-v1")
+            b"openom:author:v1", // openom-protocol::aad::author_signing_bytes (shared-tree entries)
+            b"openom:keyring",   // openom-keyring: keyring-chain signatures
+        ];
+        for (i, a) in domains.iter().enumerate() {
+            for (j, b) in domains.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_ne!(a, b, "signing-domain tags must be distinct");
+                assert!(
+                    !b.starts_with(a),
+                    "no signing-domain tag may prefix another: {a:?} prefixes {b:?}",
+                );
+            }
+        }
+    }
 
     // A representative name claim on a person, authored by `author`'s did:key.
     fn claim(author_did: &str) -> Value {

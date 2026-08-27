@@ -191,15 +191,24 @@ impl Claim {
         Ok(())
     }
 
-    /// Verify the embedded `signature` against this claim's content and `createdBy` key. `Ok(None)`
-    /// when unsigned; a malformed signature string is `Ok(Some(SigCheck::Bad))`.
-    pub fn verify(&self) -> Result<Option<crate::SigCheck>, ClaimError> {
+    /// The authorship judgment for the embedded `signature` against this claim's content and
+    /// `createdBy` key. **Fail-closed**: an unsigned claim is [`Unsigned`](crate::Authorship::Unsigned);
+    /// a present signature that verifies is [`Verified`](crate::Authorship::Verified); anything else — a
+    /// bad signature, a malformed signature string, or an undecodable `createdBy`/content — is
+    /// [`Forged`](crate::Authorship::Forged). There is no error or `Option` for a caller to unwrap past
+    /// a forgery.
+    pub fn verify(&self) -> crate::Authorship {
+        use crate::Authorship;
         let Some(sig_hex) = &self.signature else {
-            return Ok(None);
+            return Authorship::Unsigned;
         };
         match hex_decode_64(sig_hex) {
-            Some(sig) => Ok(Some(crate::verify(&self.to_value(), &sig)?)),
-            None => Ok(Some(crate::SigCheck::Bad)),
+            // A verify error (undecodable key, unhashable content) folds to Forged — never trust it.
+            Some(sig) => match crate::verify(&self.to_value(), &sig) {
+                Ok(crate::SigCheck::Valid) => Authorship::Verified,
+                _ => Authorship::Forged,
+            },
+            None => Authorship::Forged,
         }
     }
 
@@ -557,21 +566,21 @@ mod tests {
             1,
         );
         c.compute_id().unwrap();
-        assert!(c.verify().unwrap().is_none(), "unsigned → None");
+        assert_eq!(c.verify(), crate::Authorship::Unsigned, "unsigned");
         assert!(c.id_is_current().unwrap());
 
         c.sign_with(&key).unwrap();
-        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Valid));
+        assert_eq!(c.verify(), crate::Authorship::Verified);
         assert!(c.id_is_current().unwrap(), "signing must not move the id");
 
         // Mutating content after computing the id/signature invalidates both — detectably.
         c.value = json!({ "x": 2 });
         assert!(!c.id_is_current().unwrap());
-        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Bad));
+        assert_eq!(c.verify(), crate::Authorship::Forged);
 
-        // A malformed signature string is Bad, not an error.
+        // A malformed signature string is Forged (fail-closed), not an error.
         c.signature = Some("zz".into());
-        assert_eq!(c.verify().unwrap(), Some(crate::SigCheck::Bad));
+        assert_eq!(c.verify(), crate::Authorship::Forged);
     }
 
     #[test]
