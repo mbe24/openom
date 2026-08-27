@@ -361,6 +361,25 @@ fn channel_item_dispatches_on_type() {
     assert!(matches!(as_op, ChannelItem::Op(_)));
 }
 
+#[test]
+fn channel_item_accessors_report_the_real_id_and_author() {
+    // id() and created_by() are load-bearing for the transport: id is the dedup/idempotency key, and
+    // created_by is what the fold's moderator check reads. A stub returning a constant ("" would collapse
+    // every item to one dedup key; a constant author would defeat the authority gate) must be caught.
+    let claim = name_claim("pA", "Ada", &did(1), 1);
+    let assert = ChannelItem::Assert(claim.clone());
+    assert_eq!(assert.id(), claim.id());
+    assert_eq!(assert.created_by(), did(1));
+
+    let op = remove(&claim, &did(2));
+    let op_id = op.id.clone();
+    let as_op = ChannelItem::Op(op);
+    assert_eq!(as_op.id(), op_id);
+    assert_eq!(as_op.created_by(), did(2));
+    // The two items are distinct records/ops → distinct ids (a constant id() would make these equal).
+    assert_ne!(assert.id(), as_op.id());
+}
+
 // --- convergence -----------------------------------------------------------------------------
 
 /// A representative channel: asserts, a remove, a superseded chain, a fork, and a revoke — all by two

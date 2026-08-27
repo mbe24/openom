@@ -148,6 +148,22 @@ mod tests {
     }
 
     #[test]
+    fn signing_key_debug_redacts_the_seed() {
+        // The hand-written Debug must print a fixed redaction marker and NEVER the seed — a struct that
+        // embeds a SigningKey derives Debug and would otherwise leak it. Pins the exact output so a
+        // no-op fmt (which would print nothing) is caught.
+        let key = SigningKey::from_seed(&[7u8; 32]);
+        assert_eq!(format!("{key:?}"), "SigningKey(..)");
+    }
+
+    #[test]
+    fn signature_debug_is_redacted() {
+        // Opaque bytes stay opaque in Debug; the exact marker guards against a no-op fmt.
+        let sig = Signature::from_bytes(&[9u8; 64]);
+        assert_eq!(format!("{sig:?}"), "Signature(..)");
+    }
+
+    #[test]
     fn a_tampered_message_is_rejected() {
         let key = SigningKey::from_seed(&[7u8; 32]);
         let vk = key.verifying_key();

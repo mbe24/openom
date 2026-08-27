@@ -572,6 +572,162 @@ mod tests {
         KeyringAnchor::from_keyring(k)
     }
 
+    // ---- boundary/negative coverage for the chain-verification predicates (mutation hardening) ----
+
+    #[test]
+    fn a_signer_whose_member_key_mismatches_is_rejected() {
+        // check_structure's guard: a signer must be a member whose author key IS the signer key. If that
+        // guard always matched, a signer could claim a member_id whose real key differs — impersonation.
+        let f = key();
+        let g = genesis(&f, &[], &[]);
+        let a = anchor(&g);
+        let bad = next(
+            &g,
+            |k| {
+                let owner = k.members.iter_mut().find(|m| m.member_id == "owner").unwrap();
+                owner.author_public_key = vec![8; 32]; // != the founder signer's key
+            },
+            &[&f],
+        );
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(ChainError::BadStructure(_))
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_signer_member_id_is_rejected() {
+        // Duplicate detection is member_id OR public_key; an AND would miss a second signer reusing a
+        // member_id under a different key.
+        let f = key();
+        let x = key();
+        let g = genesis(&f, &[], &[]);
+        let a = anchor(&g);
+        let bad = next(
+            &g,
+            |k| k.authorized_signers.push(signer(&x, "owner", CO_OWNER)),
+            &[&f],
+        );
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(ChainError::BadStructure(_))
+        ));
+    }
+
+    #[test]
+    fn bootstrap_from_genesis_requires_revision_1_and_empty_prev_hash() {
+        // The guard is (revision != 1 OR prev_hash non-empty); an AND would accept a non-genesis
+        // revision as long as its prev_hash happened to be empty.
+        let f = key();
+        let mut g = genesis(&f, &[], &[]);
+        g.revision = 2; // not a genesis revision, though prev_hash is still empty
+        g.signatures.clear();
+        sign_keyring(&mut g, &f);
+        assert_eq!(
+            bootstrap_from_genesis(&g, &f.verifying_key()),
+            Err(ChainError::BadBootstrap)
+        );
+    }
+
+    #[test]
+    fn a_layout_version_ahead_is_rejected_on_both_paths() {
+        // `layout_version > KEYRING_LAYOUT_VERSION` rejects a future layout; flipping the comparison
+        // would let an ahead layout through (and spuriously reject the current one).
+        let f = key();
+        let g = genesis(&f, &[], &[]);
+        let a = anchor(&g);
+        let ahead = next(&g, |k| k.layout_version = KEYRING_LAYOUT_VERSION + 1, &[&f]);
+        assert_eq!(verify_transition(&a, &ahead), Err(ChainError::LayoutAhead));
+
+        let mut reset = genesis(&f, &[], &[]);
+        reset.layout_version = KEYRING_LAYOUT_VERSION + 1;
+        reset.signatures.clear();
+        sign_keyring(&mut reset, &f);
+        assert_eq!(verify_reset(&reset), Err(ChainError::LayoutAhead));
+    }
+
+    #[test]
+    fn wrap_complete_requires_each_members_own_wrap_not_just_any_hpke_wrap() {
+        // A member is covered only by a wrap matching (their member_id AND HPKE); an OR would let a
+        // stray HPKE wrap for someone else satisfy a member who has no wrap — a silent lock-out.
+        let f = key();
+        let g = genesis(&f, &[], &["bob"]); // bob has his own HPKE wrap
+        let a = anchor(&g);
+        let bad = next(
+            &g,
+            |k| {
+                // Reassign bob's wrap to a non-member: bob now has no wrap of his own, but an HPKE wrap
+                // is still present in the epoch.
+                let w = k.epochs[0]
+                    .wraps
+                    .iter_mut()
+                    .find(|w| w.member_id == "bob")
+                    .unwrap();
+                w.member_id = "carol".into();
+            },
+            &[&f],
+        );
+        assert_eq!(verify_transition(&a, &bad), Err(ChainError::WrapIncomplete));
+    }
+
+    #[test]
+    fn signer_set_differs_detects_a_role_flip_of_the_same_length() {
+        // same_signer compares role, so a role escalation (same id+key) is a set change — flipping the
+        // ORs to ANDs would classify it as an ordinary change (any single signer could sign it).
+        let k1 = key();
+        let prior = vec![signer(&k1, "m", CO_OWNER)];
+        let candidate = vec![signer(&k1, "m", FOUNDER)];
+        assert!(signer_set_differs(&prior, &candidate));
+    }
+
+    #[test]
+    fn an_oversized_signer_list_is_rejected() {
+        // The size caps are a three-way OR (signers/members/epochs); an AND would need all three over
+        // the cap, and `>` must be `>` (not `==`/`>=`). One over-cap list alone must be rejected.
+        let f = key();
+        let mut k = genesis(&f, &[], &[]);
+        let dummy = AuthorizedSigner {
+            public_key: vec![1; 32],
+            member_id: "x".into(),
+            role: CO_OWNER,
+        };
+        while k.authorized_signers.len() <= MAX_SIGNERS {
+            k.authorized_signers.push(dummy.clone());
+        }
+        assert_eq!(
+            verify_reset(&k),
+            Err(ChainError::BadStructure("list too large"))
+        );
+    }
+
+    #[test]
+    fn an_oversized_member_list_is_rejected() {
+        let f = key();
+        let mut k = genesis(&f, &[], &[]);
+        let d = dummy_member("x");
+        while k.members.len() <= MAX_MEMBERS {
+            k.members.push(d.clone());
+        }
+        assert_eq!(
+            verify_reset(&k),
+            Err(ChainError::BadStructure("list too large"))
+        );
+    }
+
+    #[test]
+    fn an_oversized_epoch_list_is_rejected() {
+        let f = key();
+        let mut k = genesis(&f, &[], &[]);
+        let e = k.epochs[0].clone();
+        while k.epochs.len() <= MAX_EPOCHS {
+            k.epochs.push(e.clone());
+        }
+        assert_eq!(
+            verify_reset(&k),
+            Err(ChainError::BadStructure("list too large"))
+        );
+    }
+
     #[test]
     fn ordinary_change_by_a_prior_signer_is_accepted_by_a_stranger_rejected() {
         let f = key();
