@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use openom_crypto::{Passphrase, RecoveryCode};
+use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
 use openom_keyring::{verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
@@ -279,18 +279,86 @@ impl Registry {
     }
 }
 
-// ---------------------------------------------------------------- the host
+// ---------------------------------------------------------------- entropy seam
 
-pub struct VaultHost<S: VaultStore> {
-    store: S,
-    registry: Registry,
+/// Source of the host's 128-bit random ids — the per-unlock replica id and the sealer-registry
+/// handle. [`OsEntropy`] (the OS/browser CSPRNG) is the source for real data in dev AND prod; tests
+/// inject [`SeededEntropy`] for determinism. Entropy is a security property, not a dev/prod toggle —
+/// mirrors [`openom_model::id::IdSource`]. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
+/// interior mutability), so the host's methods stay `&self`.
+pub trait HostEntropy: Send + Sync {
+    /// 128 fresh random bits. Errs only if the OS/browser entropy source fails.
+    fn random_id(&self) -> Result<[u8; SALT_LEN]>;
 }
 
-impl<S: VaultStore> VaultHost<S> {
+/// The only entropy source for real data (dev + prod): the OS/browser CSPRNG.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OsEntropy;
+
+impl HostEntropy for OsEntropy {
+    fn random_id(&self) -> Result<[u8; SALT_LEN]> {
+        Ok(openom_crypto::generate_salt().map_err(SealerError::from)?)
+    }
+}
+
+/// A **deterministic** entropy source for TESTS ONLY — never for real data (its output is not
+/// cryptographic). A xorshift64\* stream, so the whole [`VaultHost`] state machine (revision
+/// monotonicity, replica-id freshness, chain self-check, rollback refusal) can be exercised
+/// reproducibly. Interior-mutable so it satisfies `&self` + `Send + Sync`.
+#[derive(Debug)]
+pub struct SeededEntropy {
+    state: Mutex<u64>,
+}
+
+impl SeededEntropy {
+    /// Seed the stream (a zero seed is remapped so the generator never sticks at 0).
+    pub fn new(seed: u64) -> Self {
+        SeededEntropy {
+            state: Mutex::new(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed }),
+        }
+    }
+}
+
+impl HostEntropy for SeededEntropy {
+    fn random_id(&self) -> Result<[u8; SALT_LEN]> {
+        let mut s = self.state.lock().expect("seeded-entropy lock");
+        let mut out = [0u8; SALT_LEN];
+        for chunk in out.chunks_mut(8) {
+            let mut x = *s;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            *s = x;
+            let bytes = x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------- the host
+
+pub struct VaultHost<S: VaultStore, E: HostEntropy = OsEntropy> {
+    store: S,
+    registry: Registry,
+    entropy: E,
+}
+
+impl<S: VaultStore> VaultHost<S, OsEntropy> {
+    /// A host for real data: replica ids + sealer handles come from the OS/browser CSPRNG.
     pub fn new(store: S) -> Self {
+        Self::with_entropy(store, OsEntropy)
+    }
+}
+
+impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
+    /// A host with an injected entropy source — tests pass [`SeededEntropy`] for a deterministic,
+    /// replayable state machine; real callers use [`new`](VaultHost::new).
+    pub fn with_entropy(store: S, entropy: E) -> Self {
         VaultHost {
             store,
             registry: Registry::default(),
+            entropy,
         }
     }
 
@@ -312,7 +380,7 @@ impl<S: VaultStore> VaultHost<S> {
         passphrase: String,
         member_id: &str,
     ) -> Result<Provisioned> {
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let p = vault::provision(
             &Passphrase::new(passphrase.into_bytes()),
             &TreeId::new(tree_id),
@@ -344,7 +412,7 @@ impl<S: VaultStore> VaultHost<S> {
             .store
             .keyring_watermark(tree_key)
             .map_err(VaultError::storage)?;
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let u = vault::unlock(
             &keyring,
             &Passphrase::new(passphrase.into_bytes()),
@@ -389,7 +457,7 @@ impl<S: VaultStore> VaultHost<S> {
             .store
             .keyring_watermark(tree_key)
             .map_err(VaultError::storage)?;
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let r = vault::recover(
             &keyring,
             &RecoveryCode::new(recovery_code),
@@ -511,7 +579,7 @@ impl<S: VaultStore> VaultHost<S> {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let u = vault::unlock_as_member(
             &keyring,
             &Passphrase::new(passphrase.into_bytes()),
@@ -550,7 +618,7 @@ impl<S: VaultStore> VaultHost<S> {
             .store
             .keyring_watermark(tree_key)
             .map_err(VaultError::storage)?;
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let r = vault::remove_member(
             &keyring,
             &Passphrase::new(owner_passphrase.into_bytes()),
@@ -632,7 +700,7 @@ impl<S: VaultStore> VaultHost<S> {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let r = vault::remove_member_as_co_owner(
             &keyring,
             &Passphrase::new(passphrase.into_bytes()),
@@ -766,7 +834,7 @@ impl<S: VaultStore> VaultHost<S> {
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
     /// well-known key — no keyring, no unlock.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
-        let replica = fresh_replica()?;
+        let replica = self.fresh_replica()?;
         let id = self.register(SealerSet::single(Sealer::dev(
             TreeId::new(tree_id),
             ReplicaId::new(replica),
@@ -882,9 +950,16 @@ impl<S: VaultStore> VaultHost<S> {
     fn register(&self, sealer: SealerSet) -> Result<String> {
         // 128 random bits, hex. Same trust domain as the web worker's sequential ids (any caller
         // able to invoke can call provision itself), just without a shared counter.
-        let id = hex(&openom_crypto::generate_salt().map_err(SealerError::from)?);
+        let id = hex(&self.entropy.random_id()?);
         self.registry.insert(id.clone(), sealer);
         Ok(id)
+    }
+
+    /// A fresh replica id per unlock, from the injected entropy source. Persisting it would let
+    /// lock→re-unlock reuse `(replica_id, counter=0)` and fork the chain — so it is minted here,
+    /// never stored.
+    fn fresh_replica(&self) -> Result<Vec<u8>> {
+        Ok(self.entropy.random_id()?.to_vec())
     }
 }
 
@@ -929,14 +1004,6 @@ fn remote_chain_err(e: ChainError) -> VaultError {
         }
     };
     VaultError::new(code, e.to_string())
-}
-
-fn fresh_replica() -> Result<Vec<u8>> {
-    // A fresh replica id per unlock (CSPRNG). Persisting it would let lock→re-unlock reuse
-    // (replica_id, counter=0) and fork the chain — so it is minted here, never stored.
-    Ok(openom_crypto::generate_salt()
-        .map_err(SealerError::from)?
-        .to_vec())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1096,6 +1163,21 @@ mod tests {
         )
         .unwrap()
         .envelope
+    }
+
+    #[test]
+    fn the_entropy_seam_makes_host_minted_ids_deterministic() {
+        // With a seeded entropy source the host's own minted ids (the sealer-registry handle here) are
+        // reproducible — the property that lets the vault-host state machine be tested deterministically.
+        // (The sealer's key-minting CSPRNG stays random; injecting that is the deferred OPE-248.)
+        let provision = |seed: u64| {
+            VaultHost::with_entropy(MemStore::default(), SeededEntropy::new(seed))
+                .provision(KEY, TREE, "correct horse".into(), MEMBER)
+                .unwrap()
+                .sealer_id
+        };
+        assert_eq!(provision(42), provision(42), "same seed → same host-minted id");
+        assert_ne!(provision(42), provision(7), "different seed → different id");
     }
 
     #[test]
