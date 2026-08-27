@@ -497,4 +497,42 @@ mod tests {
         assert!(matches!(parse("2001-21-05"), Err(EdtfError::Malformed(_)))); // season + day
         assert!(matches!(parse("2001/2000"), Err(EdtfError::Malformed(_)))); // reversed interval
     }
+
+    #[test]
+    fn boundary_and_arithmetic_edges() {
+        // 75: a single-day interval (start.min == end.max) is valid — kills `>` -> `>=` in the
+        // interval order check (which would reject an instant).
+        assert!(parse("2000-06-15/2000-06-15").is_ok());
+        // 92: an approximate marker on ONE interval side propagates — kills `sa || ea` -> `&&`
+        // (the existing interval test only checks `uncertain`, i.e. the `||` on the line above).
+        assert!(parse("1984~/1990").unwrap().approximate);
+        // 145: a 4-component date is malformed — kills `is_empty() || len > 3` -> `&&` (is_empty is
+        // never true for a split, so `&&` would let >3 parts through).
+        assert!(parse("2000-01-01-01").is_err());
+        // 189 / 216: a wildcard month/day whose whole range is out of bounds is malformed — kills the
+        // `lo > hi` guards' `>` -> `==` (which would admit lo > hi and build a bogus month/day).
+        assert!(parse("2000-5X").is_err()); // month 50..59
+        assert!(parse("2000-01-5X").is_err()); // day 50..59
+        // 280: winter's max uses the FOLLOWING year for its February length — kills `year_max + 1`
+        // -> `year_max * 1`. 2003 -> 2004 (leap), so the correct end is 29 Feb 2004, not 28.
+        assert_eq!(parse("2003-24").unwrap().max, d(2004, 2, 29));
+    }
+
+    #[test]
+    fn all_four_seasons_and_the_century_leap_rules() {
+        // 276 / 277: Summer and Autumn are their own arms, not folded into winter's `_`.
+        assert_eq!(
+            (parse("2000-22").unwrap().min, parse("2000-22").unwrap().max),
+            (d(2000, 6, 1), d(2000, 8, 31))
+        );
+        assert_eq!(
+            (parse("2000-23").unwrap().min, parse("2000-23").unwrap().max),
+            (d(2000, 9, 1), d(2000, 11, 30))
+        );
+        // 291: the century exceptions in is_leap — 1900 is NOT leap (div 100, not div 400), 2000 IS
+        // (div 400). (1984 div 4 and 1983 not-div-4 are covered in year_month_day_bounds.) Kills the
+        // `%` -> `/`/`+` mutants that the div-4-only cases can't reach.
+        assert_eq!(parse("1900-02").unwrap().max, d(1900, 2, 28));
+        assert_eq!(parse("2000-02").unwrap().max, d(2000, 2, 29));
+    }
 }
