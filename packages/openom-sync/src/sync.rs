@@ -11,7 +11,7 @@
 //! later slice (OPE-176 tail / OPE-179); for now a fresh client replays the whole log — trivial before
 //! compaction exists.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use journal::DocStore;
 use openom_claim::envelope::Record;
@@ -52,6 +52,10 @@ pub struct SyncClient<S: DocStore> {
     // CAS token for this tree's single snapshot slot — the version from the last put/read, passed to
     // the next put_snapshot so a concurrent writer can't silently clobber it.
     snapshot_version: Option<String>,
+    // The did:keys currently at Maintainer+ — the authors whose Remove/Supersede/Revoke ops the fold
+    // honors (role-based authority). Set from the governing keyring; empty until then, so a fresh
+    // client folds only asserts (no removes applied) until it learns the roles.
+    moderators: BTreeSet<String>,
 }
 
 impl<S: DocStore> SyncClient<S> {
@@ -67,14 +71,21 @@ impl<S: DocStore> SyncClient<S> {
             pending: Vec::new(),
             items: BTreeMap::new(),
             snapshot_version: None,
+            moderators: BTreeSet::new(),
         }
+    }
+
+    /// Set the moderator `did:key`s (the members currently at Maintainer or above) whose
+    /// Remove/Supersede/Revoke ops the fold honors — from the governing keyring.
+    pub fn set_moderators(&mut self, moderators: BTreeSet<String>) {
+        self.moderators = moderators;
     }
 
     /// The live record set — [`materialize`] over the accumulated ops. This is the snapshot the
     /// projection reads. (Clones the set once per call; the read-model rebuild, not a hot path.)
     pub fn materialize(&self) -> Vec<Record> {
         let items: Vec<ChannelItem> = self.items.values().cloned().collect();
-        materialize(&items)
+        materialize(&items, &self.moderators)
     }
 
     /// The accumulated channel items (borrowed), for a caller that folds them itself.
@@ -325,11 +336,14 @@ mod tests {
     }
 
     #[test]
-    fn a_same_author_remove_syncs_and_drops_the_record() {
+    fn a_moderator_remove_syncs_and_drops_the_record() {
         let store = Arc::new(MemoryStore::new());
         let dek = generate_dek().unwrap();
         let mut a = client(b"replica-a", dek.clone(), store.clone());
         let mut b = client(b"replica-b", dek, store.clone());
+        let mods = BTreeSet::from(["did:key:z6MkA".to_string()]);
+        a.set_moderators(mods.clone());
+        b.set_moderators(mods);
 
         let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
         a.push_claims(&[na.clone()]).unwrap();
@@ -428,11 +442,13 @@ mod tests {
 
     #[test]
     fn compaction_folds_out_removed_records() {
-        // The snapshot is the live set: a same-author-removed record is folded out and never reaches
-        // a bootstrapping client (the structural GC horizon), while a live record survives.
+        // The snapshot is the live set: a moderator-removed record is folded out and never reaches a
+        // bootstrapping client (the structural GC horizon — the compaction horizon the owner accepted),
+        // while a live record survives.
         let store = Arc::new(MemoryStore::new());
         let dek = generate_dek().unwrap();
         let mut a = client(b"replica-a", dek.clone(), store.clone());
+        a.set_moderators(BTreeSet::from(["did:key:z6MkA".to_string()]));
         let keep = name_claim("pA", "Ada", "did:key:z6MkA", 1);
         let gone = name_claim("pB", "Zzz", "did:key:z6MkA", 1);
         a.push_claims(&[keep.clone(), gone.clone()]).unwrap();

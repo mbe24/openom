@@ -10,6 +10,11 @@ fn did(n: u8) -> String {
     format!("did:key:z6Mk{n}")
 }
 
+/// A moderator set (did:keys currently at Maintainer or above) from a list of authors.
+fn mods(authors: &[&str]) -> BTreeSet<String> {
+    authors.iter().map(|a| a.to_string()).collect()
+}
+
 fn anchor(id: &str, author: &str) -> Record {
     Record::try_from(json!({
         "id": id,
@@ -66,8 +71,8 @@ fn revoke(remove_op: &Op, author: &str) -> Op {
     .unwrap()
 }
 
-fn live(items: &[ChannelItem]) -> BTreeSet<String> {
-    materialize(items)
+fn live(items: &[ChannelItem], moderators: &BTreeSet<String>) -> BTreeSet<String> {
+    materialize(items, moderators)
         .into_iter()
         .map(|r| r.id().to_owned())
         .collect()
@@ -85,28 +90,53 @@ fn asserts_materialize_as_live_records() {
         ChannelItem::Assert(a.clone()),
         ChannelItem::Assert(n.clone()),
     ];
-    assert_eq!(live(&items), ids([&a, &n]));
+    assert_eq!(live(&items, &mods(&[])), ids([&a, &n]));
 }
 
 #[test]
-fn same_author_remove_drops_the_record() {
+fn a_moderator_remove_drops_the_record() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let items = vec![
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(1))),
     ];
-    assert!(materialize(&items).is_empty());
+    assert!(materialize(&items, &mods(&[&did(1)])).is_empty());
 }
 
 #[test]
-fn other_author_remove_is_a_noop() {
-    // Censorship resistance: you cannot delete a record you did not author.
+fn a_non_moderator_remove_is_a_noop() {
+    // Authority is role-based: a member without Maintainer+ authority cannot delete a record — not even
+    // their own. (In a shared tree they can't even append the op; this is the fold's defense-in-depth.)
+    let n = name_claim("pA", "Ada", &did(1), 1);
+    let items = vec![
+        ChannelItem::Assert(n.clone()),
+        ChannelItem::Op(remove(&n, &did(1))),
+    ];
+    assert_eq!(live(&items, &mods(&[])), ids([&n])); // did(1) is not a moderator here
+}
+
+#[test]
+fn a_moderator_removes_anothers_record() {
+    // The role capability: a moderator (did(2)) may delete a record authored by someone else (did(1)).
     let n = name_claim("pA", "Ada", &did(1), 1);
     let items = vec![
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(remove(&n, &did(2))),
     ];
-    assert_eq!(live(&items), ids([&n]));
+    assert!(materialize(&items, &mods(&[&did(2)])).is_empty());
+}
+
+#[test]
+fn demotion_resurfaces_a_moderators_removal() {
+    // Current-keyring authority, retroactively: the SAME item set, folded with the remover as a
+    // moderator, hides the record; folded again after they are no longer a moderator, it resurfaces.
+    let n = name_claim("pA", "Ada", &did(1), 1);
+    let items = vec![
+        ChannelItem::Assert(n.clone()),
+        ChannelItem::Op(remove(&n, &did(2))),
+    ];
+    assert!(materialize(&items, &mods(&[&did(2)])).is_empty(), "removed while did(2) moderates");
+    assert_eq!(live(&items, &mods(&[])), ids([&n]), "did(2) demoted → the removal no longer applies");
 }
 
 #[test]
@@ -121,31 +151,47 @@ fn remove_of_an_unknown_target_is_a_noop() {
     )
     .unwrap();
     let items = vec![ChannelItem::Assert(n.clone()), ChannelItem::Op(orphan)];
-    assert_eq!(live(&items), ids([&n]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&n]));
 }
 
 #[test]
-fn same_author_supersede_replaces_the_record() {
+fn a_moderator_supersede_replaces_the_record() {
     let old = name_claim("pA", "Ada", &did(1), 1);
     let new = name_claim("pA", "Ada Lovelace", &did(1), 2);
     let items = vec![
         ChannelItem::Assert(old.clone()),
         ChannelItem::Op(supersede(&old, new.clone(), &did(1))),
     ];
-    assert_eq!(live(&items), ids([&new]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&new]));
 }
 
 #[test]
-fn other_author_supersede_neither_removes_nor_injects() {
-    // did(2) cannot remove did(1)'s prior; and a replacement authored by did(2) but attributed to
-    // did(1) is a forgery, so it is dropped rather than injected as a fake corroboration.
+fn a_moderator_supersedes_anothers_record() {
+    // did(2) (a moderator) corrects did(1)'s claim: the prior dies, and the replacement — authored in
+    // did(2)'s OWN name — becomes live. Authority overrules; it never forges in the original's name.
+    let old = name_claim("pA", "Ada", &did(1), 1);
+    let fix = name_claim("pA", "Ada Lovelace", &did(2), 2);
+    let items = vec![
+        ChannelItem::Assert(old.clone()),
+        ChannelItem::Op(supersede(&old, fix.clone(), &did(2))),
+    ];
+    assert_eq!(live(&items, &mods(&[&did(2)])), ids([&fix]));
+}
+
+#[test]
+fn a_supersede_replacement_attributed_to_another_is_a_forgery() {
+    // Even a moderator (did(2)) cannot inject a replacement stamped as did(1): authority is a licence to
+    // overrule, not to impersonate. The forged replacement is dropped; with did(2) moderating, the prior
+    // is still killed — so the field is simply emptied, never populated with a fake corroboration.
     let old = name_claim("pA", "Ada", &did(1), 1);
     let forged = name_claim("pA", "Mallory", &did(1), 2); // attributed to did(1)...
     let items = vec![
         ChannelItem::Assert(old.clone()),
         ChannelItem::Op(supersede(&old, forged.clone(), &did(2))), // ...but written by did(2)
     ];
-    assert_eq!(live(&items), ids([&old])); // prior survives, forged replacement dropped
+    assert!(materialize(&items, &mods(&[&did(2)])).is_empty()); // prior killed, forgery dropped
+    // And when did(2) is NOT a moderator, neither the kill nor the injection happens — the prior stands.
+    assert_eq!(live(&items, &mods(&[])), ids([&old]));
 }
 
 #[test]
@@ -158,12 +204,12 @@ fn supersede_chain_keeps_only_the_last() {
         ChannelItem::Op(supersede(&a, b.clone(), &did(1))),
         ChannelItem::Op(supersede(&b, c.clone(), &did(1))),
     ];
-    assert_eq!(live(&items), ids([&c]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&c]));
 }
 
 #[test]
 fn concurrent_supersede_of_one_prior_forks_into_two_live() {
-    // Two devices, same author, edit the same record concurrently. Set-union keeps both replacements
+    // Two devices of one moderator edit the same record concurrently. Set-union keeps both replacements
     // (the prior dies once) — a documented, deterministic fork the UI can offer to collapse. Not LWW.
     let old = name_claim("pA", "Ada", &did(1), 1);
     let ondevice_a = name_claim("pA", "Ada L.", &did(1), 2);
@@ -173,11 +219,11 @@ fn concurrent_supersede_of_one_prior_forks_into_two_live() {
         ChannelItem::Op(supersede(&old, ondevice_a.clone(), &did(1))),
         ChannelItem::Op(supersede(&old, ondevice_b.clone(), &did(1))),
     ];
-    assert_eq!(live(&items), ids([&ondevice_a, &ondevice_b]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&ondevice_a, &ondevice_b]));
 }
 
 #[test]
-fn same_author_revoke_restores_a_removed_record() {
+fn a_moderator_revoke_restores_a_removed_record() {
     let n = name_claim("pA", "Ada", &did(1), 1);
     let r = remove(&n, &did(1));
     let items = vec![
@@ -187,19 +233,32 @@ fn same_author_revoke_restores_a_removed_record() {
     ];
     // Non-monotone liveness (dead → live again), still order-independent, and the *original* id is
     // restored — so anything bound to it survives the undo.
-    assert_eq!(live(&items), ids([&n]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&n]));
 }
 
 #[test]
-fn other_author_revoke_does_not_restore() {
+fn a_moderator_revokes_anothers_removal() {
+    // A moderator may undo any removal, not only their own — undoing a wrongful deletion by a peer.
     let n = name_claim("pA", "Ada", &did(1), 1);
     let r = remove(&n, &did(1));
     let items = vec![
         ChannelItem::Assert(n.clone()),
         ChannelItem::Op(r.clone()),
-        ChannelItem::Op(revoke(&r, &did(2))), // not the remove's author
+        ChannelItem::Op(revoke(&r, &did(2))), // a different moderator undoes did(1)'s remove
     ];
-    assert!(materialize(&items).is_empty());
+    assert_eq!(live(&items, &mods(&[&did(1), &did(2)])), ids([&n]));
+}
+
+#[test]
+fn a_non_moderator_revoke_does_not_restore() {
+    let n = name_claim("pA", "Ada", &did(1), 1);
+    let r = remove(&n, &did(1));
+    let items = vec![
+        ChannelItem::Assert(n.clone()),
+        ChannelItem::Op(r.clone()),
+        ChannelItem::Op(revoke(&r, &did(2))), // did(2) has no authority
+    ];
+    assert!(materialize(&items, &mods(&[&did(1)])).is_empty());
 }
 
 #[test]
@@ -214,7 +273,7 @@ fn revoke_of_an_unknown_or_non_remove_op_is_ignored() {
     )
     .unwrap();
     let items = vec![ChannelItem::Assert(n.clone()), ChannelItem::Op(stray)];
-    assert_eq!(live(&items), ids([&n]));
+    assert_eq!(live(&items, &mods(&[&did(1)])), ids([&n]));
 }
 
 #[test]
@@ -225,7 +284,7 @@ fn duplicate_items_are_idempotent() {
         ChannelItem::Assert(n.clone()),
         ChannelItem::Assert(n.clone()),
     ];
-    assert_eq!(materialize(&once), materialize(&twice));
+    assert_eq!(materialize(&once, &mods(&[])), materialize(&twice, &mods(&[])));
 }
 
 // --- content addressing & ingest -------------------------------------------------------------
@@ -304,7 +363,8 @@ fn channel_item_dispatches_on_type() {
 
 // --- convergence -----------------------------------------------------------------------------
 
-/// A representative channel: asserts, a remove, a superseded chain, a fork, and a revoke.
+/// A representative channel: asserts, a remove, a superseded chain, a fork, and a revoke — all by two
+/// moderators (did(1), did(2)) over their own records.
 fn scenario() -> Vec<ChannelItem> {
     let keep = name_claim("pA", "keep", &did(1), 1);
     let deleted = name_claim("pA", "deleted", &did(1), 1);
@@ -326,11 +386,13 @@ fn scenario() -> Vec<ChannelItem> {
 }
 
 proptest! {
-    /// The fold depends only on the *set* of items — not their delivery order. This is the
-    /// convergence guarantee: replicas that have seen the same operations agree without a shared clock.
+    /// The fold depends only on the *set* of items (for a fixed moderator set) — not their delivery
+    /// order. This is the convergence guarantee: replicas that have seen the same operations and agree
+    /// on the current roles agree on the read model, without a shared clock.
     #[test]
     fn materialize_is_order_independent(shuffled in Just(scenario()).prop_shuffle()) {
-        prop_assert_eq!(materialize(&shuffled), materialize(&scenario()));
+        let m = mods(&[&did(1), &did(2)]);
+        prop_assert_eq!(materialize(&shuffled, &m), materialize(&scenario(), &m));
     }
 }
 
@@ -372,10 +434,13 @@ fn a_novel_type_is_preserved_through_the_fold() {
     assert!(matches!(vessel, Record::Unknown(_)));
     let known = name_claim("pA", "Ada", &did(1), 1);
 
-    let live = materialize(&[
-        ChannelItem::Assert(vessel.clone()),
-        ChannelItem::Assert(known.clone()),
-    ]);
+    let live = materialize(
+        &[
+            ChannelItem::Assert(vessel.clone()),
+            ChannelItem::Assert(known.clone()),
+        ],
+        &mods(&[]),
+    );
     assert_eq!(live.len(), 2, "the unknown record folds in like any other");
     let got = live.iter().find(|r| r.id() == "vessel-1").unwrap();
     assert_eq!(
@@ -387,19 +452,25 @@ fn a_novel_type_is_preserved_through_the_fold() {
 
 #[test]
 fn an_unknown_record_obeys_the_same_ops_as_any_record() {
-    // Same-author remove kills it; other-author remove is a no-op — createdBy is read from the
+    // A moderator remove kills it; a non-moderator remove is a no-op — createdBy is read from the
     // preserved JSON, so op semantics apply to an unknown type exactly as to a known one.
     let vessel = unknown("vessel-1", "openom.org/core/vessel/v1", &did(1));
-    assert!(materialize(&[
-        ChannelItem::Assert(vessel.clone()),
-        ChannelItem::Op(remove(&vessel, &did(1))),
-    ])
+    assert!(materialize(
+        &[
+            ChannelItem::Assert(vessel.clone()),
+            ChannelItem::Op(remove(&vessel, &did(1))),
+        ],
+        &mods(&[&did(1)]),
+    )
     .is_empty());
     assert_eq!(
-        live(&[
-            ChannelItem::Assert(vessel.clone()),
-            ChannelItem::Op(remove(&vessel, &did(2))),
-        ]),
+        live(
+            &[
+                ChannelItem::Assert(vessel.clone()),
+                ChannelItem::Op(remove(&vessel, &did(2))),
+            ],
+            &mods(&[]), // did(2) is not a moderator
+        ),
         ids([&vessel])
     );
 }
@@ -464,9 +535,9 @@ proptest! {
 
         if remove_it {
             let rm = ChannelItem::Op(remove(&rec, &did(1)));
-            prop_assert!(materialize(&[assert, rm]).is_empty());
+            prop_assert!(materialize(&[assert, rm], &mods(&[&did(1)])).is_empty());
         } else {
-            let mat = materialize(&[assert]);
+            let mat = materialize(&[assert], &mods(&[]));
             prop_assert_eq!(mat.len(), 1);
             prop_assert!(matches!(&mat[0], Record::Claim(lc) if lc.id_is_current().unwrap()));
             prop_assert_eq!(mat[0].to_value(), c.to_value());

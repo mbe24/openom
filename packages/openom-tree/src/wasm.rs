@@ -24,6 +24,14 @@ impl WasmTree {
         }
     }
 
+    /// Set the moderator `did:key`s (the members currently at Maintainer or above). Call on unlock and
+    /// on every governing-keyring change; the next read re-folds against the new roles (a demotion
+    /// resurfaces what the demoted member hid). A solo tree may omit this — it defaults to its own did.
+    #[wasm_bindgen(js_name = setModerators)]
+    pub fn set_moderators(&mut self, dids: Vec<String>) {
+        self.inner.set_moderators(dids.into_iter().collect());
+    }
+
     /// Assert a claim (`value_json` = the claim value as JSON). Returns op-batch bytes to seal.
     #[wasm_bindgen(js_name = assertClaim)]
     pub fn assert_claim(

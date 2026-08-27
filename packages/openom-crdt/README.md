@@ -62,17 +62,21 @@ WSL2/Docker).
 ## Usage
 
 ```rust
+use std::collections::BTreeSet;
 use openom_claim::envelope::{Claim, Record};
 use openom_crdt::{materialize, ChannelItem, Op, OpKind};
 
 let author = "did:key:z6MkA";
+// Authority is role-based: only did:keys currently at Maintainer+ (a solo tree passes its own did)
+// may remove or supersede. An op by anyone else folds to a no-op.
+let moderators: BTreeSet<String> = [author.to_string()].into_iter().collect();
 
 // Add a name claim (an add IS the record).
 let mut name = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada" }), author, 1);
 name.compute_id().unwrap();
 let name = Record::Claim(name);
 
-// Later, the same author edits it (supersede: remove prior + assert replacement, atomically).
+// Later a moderator edits it (supersede: remove prior + assert replacement, atomically).
 let mut better = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada Lovelace" }), author, 2);
 better.compute_id().unwrap();
 let better_id = better.id.clone();
@@ -81,14 +85,14 @@ let edit = Op::new(2, author, OpKind::Supersede {
     replacement: Box::new(Record::Claim(better)),
 }).unwrap();
 
-let live = materialize(&[ChannelItem::Assert(name), ChannelItem::Op(edit)]);
+let live = materialize(&[ChannelItem::Assert(name), ChannelItem::Op(edit)], &moderators);
 assert_eq!(live.len(), 1);
 assert_eq!(live[0].id(), better_id); // the edited record won; the prior is gone
 ```
 
-Entry points: `materialize(items: &[ChannelItem]) -> Vec<Record>` (the fold that produces the
-snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types); `ContentAddressed` (re-used from
-`openom-claim`) for the op id.
+Entry points: `materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record>` (the
+role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types);
+`ContentAddressed` (re-used from `openom-claim`) for the op id.
 
 ## Deferred (tracked elsewhere, deliberately not here)
 

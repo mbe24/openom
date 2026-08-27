@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use openom_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
 use openom_crdt::{codec, materialize, ChannelItem, Op, OpKind};
@@ -31,13 +31,20 @@ pub struct Tree {
     /// The accumulated op set, keyed by content id (idempotent under re-delivery). The durable log
     /// lives in the transport; this is rebuilt by [`merge`](Tree::merge)-ing it back.
     items: BTreeMap<String, ChannelItem>,
+    /// The `did:key`s CURRENTLY authorized to moderate (Maintainer or above) — the only authors whose
+    /// Remove/Supersede/Revoke ops the fold honors. Defaults to `{ created_by }`: a solo tree's owner
+    /// moderates their own tree. A shared tree calls [`set_moderators`](Tree::set_moderators) with the
+    /// keyring's Maintainer+ set on unlock and on every keyring-head change (so a role change re-folds).
+    moderators: BTreeSet<String>,
 }
 
 impl Tree {
     /// A fresh engine for author `created_by` (the vault-derived `did:key`).
     pub fn new(created_by: impl Into<String>) -> Self {
+        let created_by = created_by.into();
         Tree {
-            created_by: created_by.into(),
+            moderators: BTreeSet::from([created_by.clone()]),
+            created_by,
             items: BTreeMap::new(),
         }
     }
@@ -45,6 +52,13 @@ impl Tree {
     /// The author this replica stamps on its ops.
     pub fn author(&self) -> &str {
         &self.created_by
+    }
+
+    /// Replace the moderator set (the `did:key`s currently at Maintainer+). Call on unlock and whenever
+    /// the governing keyring changes — the very next read re-folds against the new roles, so a demotion
+    /// resurfaces what the demoted member's ops had hidden and a promotion applies their authority.
+    pub fn set_moderators(&mut self, moderators: BTreeSet<String>) {
+        self.moderators = moderators;
     }
 
     // --- edits: mint an op, apply it optimistically, return the batch bytes to seal --------------
@@ -264,7 +278,7 @@ impl Tree {
     /// The live record set — the `openom-crdt` fold over the accumulated ops.
     fn materialized(&self) -> Vec<Record> {
         let items: Vec<ChannelItem> = self.items.values().cloned().collect();
-        materialize(&items)
+        materialize(&items, &self.moderators)
     }
 }
 

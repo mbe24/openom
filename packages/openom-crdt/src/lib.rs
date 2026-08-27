@@ -238,72 +238,71 @@ pub enum CrdtError {
 /// Materialize the live record set from an operations-channel item set — the fold that produces the
 /// snapshot `openom-projection` reads.
 ///
-/// `live = (asserted ∪ superseded-replacements) − { ids named by a valid, un-revoked Remove or
-/// Supersede }`, where "valid" means same-author as the target. Every step is set membership over the
-/// *set* of items, so the result is independent of order and duplication — the convergence guarantee.
+/// Authority is **role-based**: a Remove/Supersede/Revoke governs its target only when its author is in
+/// `moderators` — the did:keys currently at Maintainer or above (derived from the latest keyring; a
+/// solo tree passes its own did, so the owner moderates their own tree). An op by a non-moderator (for
+/// example a since-demoted member's stale op) is a deterministic no-op, so demoting a member and
+/// re-folding the SAME item set resurfaces whatever their ops had hidden — authority is always judged
+/// against the *current* roles, never as-of-authoring. A Supersede's replacement must still be authored
+/// in the acting author's own name (an impersonating replacement is a forgery, dropped) — a moderator
+/// may overrule another's claim, never forge one in their name.
 ///
-/// The returned records are cloned once here (this is the compaction/snapshot fold, not the read hot
-/// path; the projection then borrows the snapshot). Output is ordered by id.
-pub fn materialize(items: &[ChannelItem]) -> Vec<Record> {
-    // 1. Every asserted record by id (bare Asserts + Supersede replacements); first writer of an id
-    //    wins — a collision is a byte-identical duplicate, so idempotent. Also index each Remove op's
-    //    author, since only Removes can be revoked.
+/// `live = (asserted ∪ authorized-supersede-replacements) − { ids named by an authorized, un-revoked
+/// Remove or Supersede }`. Every step is set membership over the *set* of items for a FIXED
+/// `moderators`, so the result is independent of order and duplication — the convergence guarantee (a
+/// set CRDT parameterized by the convergent, hash-chained keyring register).
+///
+/// The returned records are cloned once here (the compaction/snapshot fold, not the read hot path).
+/// Output is ordered by id.
+pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record> {
+    // 1. Every asserted record by id (bare Asserts + Supersede replacements in the acting author's own
+    //    name — a replacement attributed to someone else is a forgery, dropped, else the projection
+    //    would tally a corroborating author out of thin air). First writer of an id wins (a collision
+    //    is a byte-identical duplicate, so idempotent).
     let mut records: BTreeMap<&str, &Record> = BTreeMap::new();
-    let mut remove_author: BTreeMap<&str, &str> = BTreeMap::new();
     for item in items {
         match item {
             ChannelItem::Assert(r) => {
                 records.entry(r.id()).or_insert(r);
             }
-            ChannelItem::Op(op) => match &op.kind {
-                // The replacement is an assert *by the op's author*; a replacement claiming a
-                // different author is a forgery (the projection would tally a corroborating author out
-                // of thin air), so it is dropped. A bare Assert needs no such check — the record is
-                // its own envelope, and transport binds the writer to its `createdBy`.
-                OpKind::Supersede { replacement, .. }
-                    if op.created_by == replacement.created_by() =>
-                {
-                    records
-                        .entry(replacement.id())
-                        .or_insert(replacement.as_ref());
+            ChannelItem::Op(op) => {
+                if let OpKind::Supersede { replacement, .. } = &op.kind {
+                    if op.created_by == replacement.created_by() {
+                        records
+                            .entry(replacement.id())
+                            .or_insert(replacement.as_ref());
+                    }
                 }
-                OpKind::Supersede { .. } => {}
-                OpKind::Remove { .. } => {
-                    remove_author.insert(op.id.as_str(), op.created_by.as_str());
-                }
-                OpKind::Revoke { .. } => {}
-            },
+            }
         }
     }
 
-    // 2. Remove ops suppressed by a same-author Revoke.
+    // 2. Remove ops suppressed by a Revoke from a moderator (a role holder may undo any removal).
     let mut revoked: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         if let ChannelItem::Op(op) = item {
             if let OpKind::Revoke { removal } = &op.kind {
-                if remove_author.get(removal.as_str()).copied() == Some(op.created_by.as_str()) {
+                if moderators.contains(op.created_by.as_str()) {
                     revoked.insert(removal.as_str());
                 }
             }
         }
     }
 
-    // 3. Dead record ids: a same-author Remove (not revoked) or Supersede naming a record kills it.
-    //    An op naming an unknown or other-author record is a deterministic no-op on every replica.
+    // 3. Dead record ids: an un-revoked Remove or a Supersede BY A MODERATOR kills its named target. An
+    //    op by a non-moderator is skipped entirely — a deterministic no-op on every replica.
     let mut dead: BTreeSet<&str> = BTreeSet::new();
     for item in items {
         let ChannelItem::Op(op) = item else { continue };
+        if !moderators.contains(op.created_by.as_str()) {
+            continue;
+        }
         let target = match &op.kind {
             OpKind::Remove { target } if !revoked.contains(op.id.as_str()) => target.as_str(),
             OpKind::Supersede { prior, .. } => prior.as_str(),
             OpKind::Remove { .. } | OpKind::Revoke { .. } => continue,
         };
-        if records
-            .get(target)
-            .is_some_and(|r| r.created_by() == op.created_by)
-        {
-            dead.insert(target);
-        }
+        dead.insert(target);
     }
 
     // 4. Live = asserted records whose id is not dead.
