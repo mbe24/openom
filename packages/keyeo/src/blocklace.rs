@@ -6,14 +6,28 @@
 //! hash can't close a cycle). keyeo's [`SignedOp`] *is* a blocklace block — `id + parents + author +
 //! action + signature` — and [`Graph`] is the induced hash-pointer DAG over block ids.
 //!
-//! Vocabulary (from the paper) and where it lives here:
-//! - **observe** (`b ⪰ b'`): there is a path of pointers from `b` to `b'` — [`Graph::has_path`]. "Observe"
-//!   is the causal-ancestry / happens-before relation the resolver reasons over.
-//! - **tip**: a block no other block observes (no successor) — [`Graph::heads`].
-//! - **concurrent**: two blocks with no path either way — [`Graph::is_concurrent`].
-//! - **equivocation**: a *concurrent pair by the same author* — a Byzantine block-pair that observes
-//!   neither the other. Author identity isn't part of the topology, so equivocation is judged one layer
-//!   up, where blocks carry authors (see `StrongRemove`); the topology only supplies "concurrent".
+//! Vocabulary (Cordial Miners §4.1) and where it lives here. **Mind the edge direction:** [`Graph`]
+//! stores `parent → child` edges, so `has_path(a, b)` means *a is a causal ancestor of b* — i.e. **b
+//! observes a**. The paper's pointers run the other way (a block points back to what it acknowledges),
+//! so the paper's `b ⪰ b'` ("b observes b'") is our `has_path(b', b)`.
+//! - **block**: a signed payload + hash pointers to prior blocks — keyeo's [`SignedOp`]. Its *payload*
+//!   is the block's `action`.
+//! - **acknowledge**: a block's *direct* pointer to another — one edge in [`Graph`] (a `parents` entry).
+//! - **observe** (`b ⪰ b'`): the transitive closure of acknowledge — a path exists ([`Graph::has_path`],
+//!   per the direction note). The causal happens-before the resolver reasons over.
+//! - **initial** block: one with no pointers — the genesis `Create`.
+//! - **tip**: a block nothing else observes — [`Graph::heads`] (the frontier).
+//! - **closure** `[b]`: the set of all blocks `b` observes (its causal past); computed on demand
+//!   (reverse reachability), not stored.
+//! - **depth / round**: the longest pointer-path from a block — its topological rank (the engine's Kahn
+//!   order uses it implicitly for the concurrent-op tiebreak).
+//! - **concurrent**: two blocks, neither observing the other — [`Graph::is_concurrent`]. A maximal set of
+//!   mutually-concurrent blocks is a *bubble* ([`Graph::concurrent_bubbles`]) — a term inherited from the
+//!   p2panda-auth graph this is adapted from; the paper has no "bubble".
+//! - **equivocation**: a concurrent pair *by the same author* — a Byzantine fork that observes neither
+//!   half. Author identity isn't in the topology, so equivocation is judged one layer up (see
+//!   `StrongRemove`); a *closed* blocklace (no dangling pointers — the engine buffers such ops as
+//!   `pending`) is the precondition for judging it.
 //!
 //! keyeo departs from Cordial Miners on one axis **on purpose**: it does not run the consensus ordering
 //! (the τ function / waves / leader blocks / supermajority ratification that totally-orders the
@@ -66,8 +80,10 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         heads
     }
 
-    /// Whether `from` **observes** `to` (`from ⪰ to`): a path of pointers exists from `from` to `to`.
-    /// This is the causal-ancestry relation the resolver reasons over.
+    /// Whether `from` is a causal **ancestor** of `to` — a directed path `from → … → to` exists over the
+    /// `parent → child` edges. In blocklace terms `to` **observes** `from` (`to ⪰ from`); note the edges
+    /// run the reverse of the paper's pointers (see the module docs). The happens-before the resolver
+    /// reasons over.
     pub fn has_path(&self, from: Op, to: Op) -> bool {
         from != to && petgraph::algo::has_path_connecting(&self.inner, from, to, None)
     }
