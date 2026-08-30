@@ -231,8 +231,63 @@ where
     /// conflict (or a resolver bug), never something to silently drop.
     fn rebuild_state(&mut self) -> Result<(), Error<Op::MemberId>> {
         let ignored = RS::ignored(&self.resolver_state);
+        let order = self.topo_order()?;
 
-        // Kahn's topological sort over all ops; ready set ordered by OpId.
+        // Replay non-ignored ops in causal order, re-authorizing each at its causal position: the
+        // state built so far IS the resolved state the op depends on, so authority is checked here
+        // (not only at local apply time, where a concurrently-invalidated grant could still be seen).
+        // An op the resolver dropped can leave a later op inconsistent (e.g. removing a member whose
+        // add was ignored); in resolved causal order that is benign, so skip it rather than fail.
+        let mut new_state = self.genesis.clone();
+        for op_id in &order {
+            if ignored.contains(op_id) {
+                continue;
+            }
+            let Some(op) = self.ops.get(op_id) else {
+                continue;
+            };
+            // A Commit doesn't apply *itself* — it applies its proposal's TARGET, at this position, iff
+            // the committer is authorized AND quorum has been met (Individual governance never meets
+            // quorum, so this is inert by default). See `quorum_target`.
+            if let MembershipAction::Commit { proposal_id } = op.action() {
+                let pid = *proposal_id;
+                if self
+                    .access
+                    .is_authorized(&new_state, op.author(), op.action())
+                {
+                    let mut visiting = HashSet::new();
+                    visiting.insert(*op_id);
+                    if let Some(target) = self.quorum_target(*op_id, &pid, &ignored, &mut visiting) {
+                        if let Ok((s, _events)) = apply_action(new_state.clone(), &target) {
+                            new_state = s;
+                        }
+                    }
+                }
+                continue;
+            }
+            if !self
+                .access
+                .is_authorized(&new_state, op.author(), op.action())
+            {
+                continue;
+            }
+            if let Ok((s, _events)) = apply_action(new_state.clone(), op.action()) {
+                new_state = s;
+            }
+        }
+        // Rotate (or stabilize) the epoch for the resolved membership: derive its commitment, and
+        // either reuse the cached epoch (stable membership -> no churn) or mint a fresh one (the
+        // membership changed -> rotate the DEK to the new active set). Wired into the DAG's rebuild
+        // path, so the epoch the group settles on is a function of the resolved membership, and a
+        // peer that resolves the same membership converges to the same commitment.
+        self.state = self.forge_epoch(&new_state)?;
+        Ok(())
+    }
+
+    /// Kahn's topological sort over all admitted ops, with `OpId` as a deterministic tiebreak among
+    /// concurrent ops — a real topo sort, NOT a plain OpId sort (which misorders whenever OpIds aren't
+    /// causally monotonic, e.g. content-hash ids). Errors as `DagCycle` if the ops don't form a DAG.
+    fn topo_order(&self) -> Result<Vec<Op::OpId>, Error<Op::MemberId>> {
         let mut indegree: HashMap<Op::OpId, usize> = HashMap::new();
         let mut children: HashMap<Op::OpId, Vec<Op::OpId>> = HashMap::new();
         for (id, op) in &self.ops {
@@ -267,61 +322,68 @@ where
         if order.len() != self.ops.len() {
             return Err(Error::DagCycle);
         }
+        Ok(order)
+    }
 
-        // Replay non-ignored ops in causal order, re-authorizing each at its causal position: the
-        // state built so far IS the resolved state the op depends on, so authority is checked here
-        // (not only at local apply time, where a concurrently-invalidated grant could still be seen).
-        // An op the resolver dropped can leave a later op inconsistent (e.g. removing a member whose
-        // add was ignored); in resolved causal order that is benign, so skip it rather than fail.
-        let mut new_state = self.genesis.clone();
+    /// The resolved membership of every surviving op that is **not causally after** `pivot` — the pivot's
+    /// causal past PLUS everything concurrent with it. Folded in topological order, resolving any `Commit`
+    /// in that set via [`Self::quorum_target`]. `visiting` guards cyclic concurrent commits: a re-entered
+    /// commit is treated as not-yet-applied (fail-closed, so a pathological cycle can't inflate authority).
+    ///
+    /// This is the state a proposal's *denominator* is measured against: because inclusion is a **causal**
+    /// test (`has_path`), not a topo-order position, a signer added concurrently with the proposal still
+    /// counts — the proposal can't be backdated onto a branch where the signer set was smaller.
+    fn resolved_state_excluding_after(
+        &self,
+        pivot: Op::OpId,
+        ignored: &HashSet<Op::OpId>,
+        visiting: &mut HashSet<Op::OpId>,
+    ) -> GroupState<Op::MemberId, Op::R, Op::S> {
+        let Ok(order) = self.topo_order() else {
+            return self.genesis.clone();
+        };
+        let mut state = self.genesis.clone();
         for op_id in &order {
-            if ignored.contains(op_id) {
-                continue;
+            if ignored.contains(op_id) || self.graph.has_path(pivot, *op_id) {
+                continue; // ignored, or causally AFTER the pivot -> not part of its denominator
             }
             let Some(op) = self.ops.get(op_id) else {
                 continue;
             };
-            // A Commit doesn't apply *itself* — it applies its proposal's TARGET, at this position, iff
-            // the committer is authorized AND quorum has been met (Individual governance never meets
-            // quorum, so this is inert by default). See `quorum_target`.
             if let MembershipAction::Commit { proposal_id } = op.action() {
                 let pid = *proposal_id;
-                if self
-                    .access
-                    .is_authorized(&new_state, op.author(), op.action())
+                if self.access.is_authorized(&state, op.author(), op.action())
+                    && visiting.insert(*op_id)
                 {
-                    if let Some(target) = self.quorum_target(*op_id, &pid, &new_state, &ignored) {
-                        if let Ok((s, _events)) = apply_action(new_state.clone(), &target) {
-                            new_state = s;
+                    if let Some(target) = self.quorum_target(*op_id, &pid, ignored, visiting) {
+                        if let Ok((s, _)) = apply_action(state.clone(), &target) {
+                            state = s;
                         }
                     }
+                    visiting.remove(op_id);
                 }
                 continue;
             }
-            if !self
-                .access
-                .is_authorized(&new_state, op.author(), op.action())
-            {
+            if !self.access.is_authorized(&state, op.author(), op.action()) {
                 continue;
             }
-            if let Ok((s, _events)) = apply_action(new_state.clone(), op.action()) {
-                new_state = s;
+            if let Ok((s, _)) = apply_action(state.clone(), op.action()) {
+                state = s;
             }
         }
-        // Rotate (or stabilize) the epoch for the resolved membership: derive its commitment, and
-        // either reuse the cached epoch (stable membership -> no churn) or mint a fresh one (the
-        // membership changed -> rotate the DEK to the new active set). Wired into the DAG's rebuild
-        // path, so the epoch the group settles on is a function of the resolved membership, and a
-        // peer that resolves the same membership converges to the same commitment.
-        self.state = self.forge_epoch(&new_state)?;
-        Ok(())
+        state
     }
 
     /// For a `Commit` at `commit_id` referencing `proposal_id`, return the proposal's target action iff
     /// quorum is met. Finds the surviving `Propose` for that id in the Commit's causal past, asks the
-    /// [`QuorumPolicy`] who's eligible + what's required (against `state`), tallies the DISTINCT eligible
-    /// approvers (the proposer approves implicitly + every surviving `Approve` in the Commit's ancestry),
-    /// and checks the requirement — fail-closed.
+    /// [`QuorumPolicy`] who's eligible + what's required, tallies the DISTINCT eligible approvers (the
+    /// proposer approves implicitly + every surviving `Approve` in the Commit's ancestry), and checks the
+    /// requirement — fail-closed.
+    ///
+    /// The **denominator** (eligible set + requirement) is measured at the *Propose's* causal position via
+    /// [`Self::resolved_state_excluding_after`], NOT the Commit's — so it's tiebreak-independent and a
+    /// concurrently-added signer can't be excluded by DAG-shape/OpId grinding (the backdating defence). The
+    /// **numerator** (approvals) is measured in the Commit's causal past, where the approvals actually are.
     ///
     /// Coupling note (for the unified-engine question): this is generic over `State` — it reads only the
     /// op DAG (`ops`/`graph`) and delegates every membership judgement to `self.quorum`. It never reads
@@ -331,8 +393,8 @@ where
         &self,
         commit_id: Op::OpId,
         proposal_id: &[u8; 32],
-        state: &GroupState<Op::MemberId, Op::R, Op::S>,
         ignored: &HashSet<Op::OpId>,
+        visiting: &mut HashSet<Op::OpId>,
     ) -> Option<MembershipAction<Op::MemberId, Op::R, Op::S>> {
         // The surviving Propose for this id, causally before the Commit.
         let (propose_id, target) = self.ops.iter().find_map(|(id, op)| match op.action() {
@@ -345,12 +407,16 @@ where
         })?;
         let proposer = self.ops.get(&propose_id)?.author().clone();
 
-        let eligible = self.quorum.eligible(state, &target);
+        // Denominator at the Propose's causal position (see the doc comment): who is a signer, and what
+        // quorum is required, as of everything not causally after the proposal.
+        let state = self.resolved_state_excluding_after(propose_id, ignored, visiting);
+
+        let eligible = self.quorum.eligible(&state, &target);
         // A proposal by a non-eligible member is void (only a signer may propose).
         if !eligible.contains(&proposer) {
             return None;
         }
-        let requirement = self.quorum.requirement(state, &target);
+        let requirement = self.quorum.requirement(&state, &target);
 
         // Distinct eligible approvers: the proposer approves implicitly + every surviving `Approve` for
         // this proposal in the Commit's causal past.

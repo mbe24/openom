@@ -1856,3 +1856,35 @@ fn quorum_a_concurrent_signer_add_joins_the_denominator() {
         "carol (concurrently added) is in the denominator; alice+bob alone is not unanimity"
     );
 }
+
+#[test]
+fn quorum_backdating_across_a_deep_concurrent_signer_add_still_fails() {
+    // The exotic shape the shallow test couldn't reach: carol is added as a 3rd Admin via a DEEP
+    // concurrent chain (depth 3) whose OpId (22) sorts AFTER the attacker's Commit (12). Under the old
+    // Commit-position/topo-order denominator, carol's add is emitted after the Commit, so she'd be absent
+    // from the denominator and alice+bob alone would pass — a backdating win. The causal (has_path)
+    // denominator includes her regardless of OpId/DAG shape, so unanimity still requires carol.
+    let (alice, bob, carol, mallory) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = quorum_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+    ]);
+    let pid = [7u8; 32];
+    // Attacker chain (alice+bob), rooted at the Create, adds mallory without carol.
+    k.apply(make_op(10, vec![1], &[1u8; 32], MembershipAction::Propose {
+        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
+    })).unwrap();
+    k.apply(make_op(11, vec![10], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(12, vec![11], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    // Concurrent deep chain (also rooted at the Create) that adds carol at depth 3, ids > 12.
+    k.apply(make_op(20, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Admin })).unwrap();
+    k.apply(make_op(21, vec![20], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Admin })).unwrap();
+    k.apply(make_op(22, vec![21], &[1u8; 32], MembershipAction::Add {
+        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
+    })).unwrap();
+    assert!(qmember(&k, &carol), "sanity: carol was added");
+    assert!(
+        !qmember(&k, &mallory),
+        "carol is a concurrent signer in the denominator; alice+bob is not unanimity of {{alice,bob,carol}}"
+    );
+}
