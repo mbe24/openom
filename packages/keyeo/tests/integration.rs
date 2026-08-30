@@ -1645,3 +1645,92 @@ fn readd_c4_plain_add_onboards() {
     assert!(is_member(&k, &b), "a plain add onboards");
     assert!(is_member(&k, &a));
 }
+
+// ── Differential oracle vs p2panda-auth (round-2 R6) ──
+// keyeo's StrongRemove is adapted from p2panda-auth. These transcribe p2panda's own mutual-remove
+// test cases and RECORD keyeo's actual resolution — settling the R6 finding empirically (keyeo uses a
+// pairwise tiebreak → one survivor; p2panda uses AuthorityGraphs+Tarjan-SCC → the whole cycle removed).
+
+fn erin_pk() -> [u8; 32] {
+    make_keypair(&[5u8; 32]).verifying_key().to_bytes()
+}
+
+#[test]
+fn two_party_mutual_remove_leaves_one_survivor() {
+    // alice and bob are both Admins; alice removes bob while bob concurrently removes alice.
+    // keyeo: the lower-op-id remove (alice's) stands → alice survives, bob removed.
+    // p2panda-auth: mutual destruction — BOTH removed, only claire remains (documented divergence).
+    let (alice, bob, claire) = (alice_pk(), bob_pk(), cpk());
+    let mut k = strong_remove_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+        minit(claire, TestRole::Editor, [0xcc; 32]),
+    ]);
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: bob })).unwrap(); // alice → bob
+    k.apply(make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: alice })).unwrap(); // bob → alice
+    assert!(is_member(&k, &alice), "keyeo: lower-id remover (alice) survives");
+    assert!(!is_member(&k, &bob), "keyeo: bob removed by alice's surviving remove");
+    assert!(is_member(&k, &claire));
+}
+
+#[test]
+fn three_way_remove_cycle_resolves_to_one_removal() {
+    // A→B, B→C, C→A, all concurrent, all Admins. keyeo resolves to a SINGLE removal; p2panda-auth
+    // empties the whole 3-cycle (only D remains). Records keyeo's actual one-removal outcome.
+    let (a, b, c, d) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = strong_remove_engine(&[
+        minit(a, TestRole::Admin, [0xaa; 32]),
+        minit(b, TestRole::Admin, [0xbb; 32]),
+        minit(c, TestRole::Admin, [0xcc; 32]),
+        minit(d, TestRole::Editor, [0xdd; 32]),
+    ]);
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: b })).unwrap(); // A → B
+    k.apply(make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: c })).unwrap(); // B → C
+    k.apply(make_op(4, vec![1], &[3u8; 32], MembershipAction::Remove { member: a })).unwrap(); // C → A
+    let survivors: std::collections::BTreeSet<[u8; 32]> =
+        k.state().active_members().into_iter().map(|(m, _)| m).collect();
+    assert_eq!(survivors.len(), 3, "keyeo one-removal semantics (p2panda would leave 1)");
+    assert!(survivors.contains(&d));
+}
+
+fn convergence_ops() -> Vec<Op<u64, [u8; 32], TestRole, Ed25519>> {
+    let (bob, carol, dave, erin) = (bob_pk(), cpk(), dave_pk(), erin_pk());
+    vec![
+        make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: bob }), // alice → bob
+        make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: carol }), // bob → carol (concurrent)
+        make_op(4, vec![1], &[3u8; 32], MembershipAction::Add {
+            member: dave, role: TestRole::Editor, author_public_key: dave, hpke_public_key: [0xd0; 32], member_proof: None,
+        }), // carol adds dave (concurrent)
+        make_op(5, vec![2], &[1u8; 32], MembershipAction::Add {
+            member: erin, role: TestRole::Editor, author_public_key: erin, hpke_public_key: [0xe0; 32], member_proof: None,
+        }), // alice adds erin (after op2)
+    ]
+}
+
+fn resolve_convergence(order: &[usize]) -> std::collections::BTreeSet<[u8; 32]> {
+    let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
+    let mut k = strong_remove_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+        minit(carol, TestRole::Admin, [0xcc; 32]),
+    ]);
+    let ops = convergence_ops();
+    for &i in order {
+        let _ = k.apply(ops[i].clone());
+    }
+    let _ = k.flush();
+    k.state().active_members().into_iter().map(|(m, _)| m).collect()
+}
+
+proptest! {
+    // BEC convergence: the resolved membership is independent of the order ops are delivered/applied
+    // (out-of-order ops buffer, then flush). Any permutation must match the canonical in-order result.
+    #[test]
+    fn resolution_is_order_independent(
+        order in Just((0..4usize).collect::<Vec<usize>>()).prop_shuffle()
+    ) {
+        let canonical = resolve_convergence(&[0, 1, 2, 3]);
+        let shuffled = resolve_convergence(&order);
+        prop_assert_eq!(canonical, shuffled, "resolved membership must not depend on application order");
+    }
+}

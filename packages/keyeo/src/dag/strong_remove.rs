@@ -23,6 +23,27 @@
 //! resolved survivor set and re-runs the inner fixpoint (a suppressed re-add can't re-establish its
 //! member), all iterated to an outer fixpoint. Rule 4 gates on a *surviving* remove precisely so a
 //! remove that rules 1-3 dropped cannot suppress anything.
+//!
+//! ## Design notes (validated against p2panda-auth, the upstream this is adapted from)
+//!
+//! **Mutual-remove semantics — ONE survivor, by design.** Rule 2's pairwise `(lamport_depth, op_id)`
+//! tiebreak generalises to N-way cycles as **exactly one removal, not the whole cycle**: for a concurrent
+//! `A→B, B→C, C→A`, keyeo removes a single member (the target of the surviving remove) and keeps the
+//! rest. Upstream p2panda-auth instead removes *everyone* in the cycle (`AuthorityGraphs` + Tarjan SCC =
+//! mutual destruction). We deliberately keep the one-survivor tiebreak: it's deterministic, convergent,
+//! and strictly less destructive (a mutual-remove never empties a group). This divergence is verified
+//! empirically by `two_party_mutual_remove_leaves_one_survivor` and
+//! `three_way_remove_cycle_resolves_to_one_removal` (see `tests/integration.rs`). NOTE for the openom
+//! consumer: mutual-remove cycles are *unreachable* under its signer-gate anyway (signer changes need
+//! Owner/quorum; non-signers can't author removes), so the choice is moot there. `graph.rs`'s
+//! `AuthorityGraphs`/SCC helpers are present (ported from upstream) but intentionally UNUSED here —
+//! reserved for v2 delegation-aware quorum-conflict detection, or to be deleted.
+//!
+//! **Iterated fixpoint over single-pass-per-bubble.** Upstream (and localfirst/auth) resolve each
+//! concurrency bubble in a single topological pass; keyeo iterates the rules to a monotone least
+//! fixpoint over the whole op set. The fixpoint is chosen for verifiability: the ignore set only grows,
+//! so the result is well-defined and **order-independent by construction** (proven by the BEC-convergence
+//! proptest `resolution_is_order_independent`). At family-tree scale the extra iterations are free.
 
 use std::collections::{HashMap, HashSet};
 
