@@ -17,12 +17,32 @@ use blobstore::{BlobError, BlobStore, Etag, Precondition};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 
-use crate::{keyring_hash, verify_reset, verify_walk, ChainError, KeyringAnchor};
+use crate::{
+    keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, ChainError,
+    KeyringAnchor, SigningKey,
+};
 
 const HEAD: &str = "keyring/head";
+const DRAFT_PREFIX: &str = "keyring/drafts/";
 
 fn rev_key(n: u32) -> String {
     format!("keyring/rev/{n}")
+}
+
+fn draft_key(id: &str) -> String {
+    format!("{DRAFT_PREFIX}{id}")
+}
+
+/// The outcome of trying to promote a draft candidate to the head.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Promotion {
+    /// The draft met the governance rule and advanced the head.
+    Promoted,
+    /// A valid candidate, but it doesn't yet carry enough signatures for the rule.
+    NotReady,
+    /// The head moved out from under it (a competing revision) — the draft no longer chains, so it must
+    /// be rebuilt on the new head and re-signed. A *safe* re-propose, never a corruption.
+    Stale,
 }
 
 /// A transport failure (as opposed to a governance decision — see [`PullError`]).
@@ -204,6 +224,88 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         self.anchor = Some(verify_reset(&keyring).map_err(chain_err)?);
         self.head_etag = Some(etag);
         Ok(bytes)
+    }
+
+    // ---- multi-signer draft exchange (blob-only, cross-backend) ----
+
+    /// Open a draft: publish a candidate keyring (built on the current head, signed by >= 1 signer) under
+    /// `proposal_id` for co-owners to countersign. Create-once (a proposal id is claimed once).
+    pub fn propose(&self, proposal_id: &str, candidate_bytes: &[u8]) -> Result<(), SyncError> {
+        decode(candidate_bytes)?; // must be a decodable keyring
+        match self.store.put(&draft_key(proposal_id), candidate_bytes, Precondition::IfAbsent) {
+            Ok(_) => Ok(()),
+            Err(BlobError::PreconditionFailed) => Err(SyncError::Conflict), // that proposal id is taken
+            Err(e) => Err(SyncError::Store(e)),
+        }
+    }
+
+    /// The candidate bytes of a draft, if it exists.
+    pub fn get_draft(&self, proposal_id: &str) -> Result<Option<Vec<u8>>, SyncError> {
+        Ok(self.store.get(&draft_key(proposal_id))?.map(|(b, _)| b))
+    }
+
+    /// Add this signer's approval to a draft — a read / append-signature / CAS-write, retried if another
+    /// co-owner's countersignature landed first. Signatures are excluded from the signed bytes, so every
+    /// co-owner signs identical content.
+    pub fn countersign(&self, proposal_id: &str, key: &SigningKey) -> Result<(), SyncError> {
+        let dkey = draft_key(proposal_id);
+        loop {
+            let (bytes, etag) = self
+                .store
+                .get(&dkey)?
+                .ok_or(SyncError::Malformed("no such draft"))?;
+            let mut candidate = decode(&bytes)?;
+            sign_keyring(&mut candidate, key);
+            match self
+                .store
+                .put(&dkey, &candidate.encode_to_vec(), Precondition::IfMatch(etag))
+            {
+                Ok(_) => return Ok(()),
+                Err(BlobError::PreconditionFailed) => continue, // concurrent countersign — refetch + retry
+                Err(e) => return Err(SyncError::Store(e)),
+            }
+        }
+    }
+
+    /// Try to promote a draft to the head: verify it satisfies the governance rule AND chains onto the
+    /// head we currently trust (`verify_transition`), then CAS-advance the head. Call [`pull`](Self::pull)
+    /// first for freshness. Returns [`Promotion`] — promoted, not-ready (needs more signatures), or stale
+    /// (the head moved → rebuild + re-propose; a safe re-propose, never corruption).
+    pub fn promote(&mut self, proposal_id: &str) -> Result<Promotion, SyncError> {
+        let Some(anchor) = self.anchor.clone() else {
+            return Err(SyncError::Malformed("not bootstrapped"));
+        };
+        let dkey = draft_key(proposal_id);
+        let Some((bytes, _)) = self.store.get(&dkey)? else {
+            return Err(SyncError::Malformed("no such draft"));
+        };
+        let draft = decode(&bytes)?;
+        match verify_transition(&anchor, &draft) {
+            Ok(new_anchor) => {
+                let pre = match &self.head_etag {
+                    Some(e) => Precondition::IfMatch(e.clone()),
+                    None => Precondition::IfAbsent,
+                };
+                match self.store.put(HEAD, &bytes, pre) {
+                    Ok(etag) => {
+                        let _ = self.store.put(&rev_key(draft.revision), &bytes, Precondition::IfAbsent);
+                        let _ = self.store.delete(&dkey, Precondition::Any); // best-effort cleanup
+                        self.head_etag = Some(etag);
+                        self.anchor = Some(new_anchor);
+                        Ok(Promotion::Promoted)
+                    }
+                    Err(BlobError::PreconditionFailed) => Ok(Promotion::Stale), // head advanced under us
+                    Err(e) => Err(SyncError::Store(e)),
+                }
+            }
+            // The draft no longer chains onto the head we trust — it moved; rebuild + re-propose.
+            Err(ChainError::Fork) | Err(ChainError::NonSequential) => Ok(Promotion::Stale),
+            // A structurally-valid candidate that just lacks the quorum yet.
+            Err(ChainError::UnendorsedSetChange) | Err(ChainError::UnendorsedOrdinaryChange) => {
+                Ok(Promotion::NotReady)
+            }
+            Err(e) => Err(SyncError::Chain(format!("{e:?}"))),
+        }
     }
 }
 

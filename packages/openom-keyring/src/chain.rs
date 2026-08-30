@@ -859,6 +859,65 @@ mod tests {
     }
 
     #[test]
+    fn draft_exchange_collects_signatures_then_promotes() {
+        use crate::blob_sync::{KeyringChainBlobSync, Promotion};
+        use blobstore::MemoryBlob;
+        use openom_protocol::Message;
+        use std::sync::Arc;
+
+        let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+
+        let store = Arc::new(MemoryBlob::new());
+        let mut owner = KeyringChainBlobSync::new(store.clone());
+        owner.publish(&g.encode_to_vec()).unwrap();
+        owner.publish(&ruled.encode_to_vec()).unwrap(); // head = founder-or-threshold(2), rev 2
+
+        // Co-owner "a" proposes adding co-owner "d" and signs it (1 of 2).
+        let candidate = next(&ruled, add_coowner(&d), &[&a]);
+        owner.propose("p1", &candidate.encode_to_vec()).unwrap();
+
+        // A promoter bootstraps to the head and finds the draft not yet ready (1 < 2).
+        let mut promoter = KeyringChainBlobSync::new(store.clone());
+        promoter.bootstrap().unwrap();
+        assert_eq!(promoter.promote("p1").unwrap(), Promotion::NotReady);
+
+        // Co-owner "b" countersigns → 2 of 2 → the draft promotes and the head advances.
+        owner.countersign("p1", &b).unwrap();
+        assert_eq!(promoter.promote("p1").unwrap(), Promotion::Promoted);
+        assert_eq!(promoter.revision(), Some(candidate.revision));
+        assert!(promoter.get_draft("p1").unwrap().is_none(), "the promoted draft is cleaned up");
+    }
+
+    #[test]
+    fn a_stale_draft_is_detected_not_corrupting() {
+        use crate::blob_sync::{KeyringChainBlobSync, Promotion};
+        use blobstore::MemoryBlob;
+        use openom_protocol::Message;
+        use std::sync::Arc;
+
+        let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let store = Arc::new(MemoryBlob::new());
+        let mut owner = KeyringChainBlobSync::new(store.clone());
+        owner.publish(&g.encode_to_vec()).unwrap();
+        owner.publish(&ruled.encode_to_vec()).unwrap();
+
+        // A fully-signed draft (a + b), built on rev 2.
+        let candidate = next(&ruled, add_coowner(&d), &[&a, &b]);
+        owner.propose("p1", &candidate.encode_to_vec()).unwrap();
+
+        // Meanwhile a COMPETING revision advances the head to a different rev 3.
+        let competing = next(&ruled, |k| k.members[1].role = EDITOR, &[&founder]);
+        owner.publish(&competing.encode_to_vec()).unwrap();
+
+        // The draft chained onto rev 2, but the head is now a different rev 3 → stale, not corrupting.
+        assert_eq!(owner.promote("p1").unwrap(), Promotion::Stale);
+    }
+
+    #[test]
     fn a_non_curve_point_signer_key_is_rejected_as_malformed() {
         // A 32-byte public key that isn't a valid Ed25519 point must be rejected AS malformed — kills
         // check_structure's `len != 32 || signer_key.is_none()` -> `&&` (which would let a 32-byte
