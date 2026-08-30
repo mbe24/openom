@@ -321,7 +321,7 @@ mod tests {
         let nb = name_claim("pA", "Ada Lovelace", "did:key:z6MkB", 2);
 
         a.push_claims(&[pa.clone(), na.clone()]).unwrap();
-        b.push_claims(&[nb.clone()]).unwrap();
+        b.push_claims(std::slice::from_ref(&nb)).unwrap();
         a.pull_claims().unwrap();
         b.pull_claims().unwrap();
 
@@ -355,7 +355,7 @@ mod tests {
         b.set_moderators(mods);
 
         let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        a.push_claims(&[na.clone()]).unwrap();
+        a.push_claims(std::slice::from_ref(&na)).unwrap();
         b.pull_claims().unwrap();
         assert_eq!(live(&b), set(&[&na]));
 
@@ -387,7 +387,7 @@ mod tests {
         let dek = generate_dek().unwrap();
         let mut a = client(b"replica-a", dek.clone(), store.clone());
         let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        a.push_claims(&[na.clone()]).unwrap();
+        a.push_claims(std::slice::from_ref(&na)).unwrap();
         // A lost-ack retry lands the same sealed entry twice.
         let (updates, _) = store.read_updates("tree", None).unwrap();
         store.append("tree", &updates).unwrap();
@@ -428,7 +428,7 @@ mod tests {
         a.push_claims(&[pa.clone(), pb.clone()]).unwrap();
         a.compact_claims().unwrap(); // snapshot covers the two people
         let na = name_claim("pA", "Ada", "did:key:z6MkA", 2); // a tail op after the snapshot
-        a.push_claims(&[na.clone()]).unwrap();
+        a.push_claims(std::slice::from_ref(&na)).unwrap();
 
         let mut c = client(b"replica-c", dek, store.clone());
         c.bootstrap_claims().unwrap(); // snapshot (two people) + only the tail (the name)
@@ -442,7 +442,7 @@ mod tests {
         let dek = generate_dek().unwrap();
         let mut a = client(b"replica-a", dek.clone(), store.clone());
         let pa = person("pA", "did:key:z6MkA");
-        a.push_claims(&[pa.clone()]).unwrap();
+        a.push_claims(std::slice::from_ref(&pa)).unwrap();
 
         let mut c = client(b"replica-c", dek, store.clone());
         c.bootstrap_claims().unwrap(); // no snapshot → full log replay
