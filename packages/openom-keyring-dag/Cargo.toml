@@ -13,6 +13,10 @@ openom-sign.workspace = true
 openom-roles.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Recovery-key derivation (RVK from the RRK secret): HKDF-SHA256 under a domain-separated label.
+hkdf.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 # The differential-oracle test drives the legacy CAS keyring (chain.rs) alongside the DAG one and
