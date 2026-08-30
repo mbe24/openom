@@ -13,8 +13,8 @@ pub use chain::{
 pub use entry::{epoch_is_attributed, verify_entry, EntryError};
 pub use roles::moderators;
 pub use keyring::{
-    keyring_hash, sign_keyring, verify_keyring, verify_keyring_all, verify_keyring_any, Signature,
-    SigningKey, VerifyingKey,
+    keyring_hash, sign_keyring, verify_keyring, verify_keyring_all, verify_keyring_any,
+    verify_keyring_threshold, Signature, SigningKey, VerifyingKey,
 };
 // A random-identity test helper (see keyring::generate_identity); off in production.
 #[cfg(any(test, feature = "test-util"))]

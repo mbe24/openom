@@ -111,6 +111,38 @@ pub fn verify_keyring_all(keyring: &Keyring, required: &[VerifyingKey]) -> Resul
     Ok(())
 }
 
+/// Verify the keyring carries valid signatures from at least `m` **distinct** keys in `required` — a
+/// configurable M-of-N quorum. [`verify_keyring_any`] is the `m == 1` case and [`verify_keyring_all`] the
+/// `m == required.len()` case; this is the general rule a per-keyring governance policy selects. Dedupes
+/// `required` (a repeated key counts once) so a corrupted signer set can't game the threshold, and counts
+/// each distinct key at most once no matter how many signatures match it. `m == 0` is vacuously satisfied
+/// (callers should never gate on zero). Fails as [`CryptoError::Signature`] if fewer than `m` match.
+pub fn verify_keyring_threshold(
+    keyring: &Keyring,
+    required: &[VerifyingKey],
+    m: usize,
+) -> Result<(), CryptoError> {
+    if m == 0 {
+        return Ok(());
+    }
+    let mut seen: Vec<[u8; 32]> = Vec::new();
+    let mut valid = 0usize;
+    for key in required {
+        let kb = key.to_bytes();
+        if seen.contains(&kb) {
+            continue; // dedupe the required set — a repeated key is one requirement, not two
+        }
+        seen.push(kb);
+        if verify_keyring(keyring, key).is_ok() {
+            valid += 1;
+            if valid >= m {
+                return Ok(());
+            }
+        }
+    }
+    Err(CryptoError::Signature)
+}
+
 /// SHA-256 of a keyring's canonical signing bytes — the value the *next* revision
 /// records as its `prev_keyring_hash`, chaining the revision history (§4). Hashing the
 /// signing bytes (not the non-canonical protobuf) keeps the chain reproducible.
@@ -180,6 +212,48 @@ mod tests {
             verify_keyring(&kr, &other.verifying_key()),
             Err(CryptoError::Signature)
         ));
+    }
+
+    #[test]
+    fn threshold_needs_m_distinct_signers() {
+        let (a, b, c) = (
+            generate_identity().unwrap(),
+            generate_identity().unwrap(),
+            generate_identity().unwrap(),
+        );
+        let trusted = [a.verifying_key(), b.verifying_key(), c.verifying_key()];
+
+        // signed by a + b (2 of 3)
+        let mut kr = sample_keyring();
+        sign_keyring(&mut kr, &a);
+        sign_keyring(&mut kr, &b);
+        assert!(verify_keyring_threshold(&kr, &trusted, 1).is_ok(), "2 signers meets 1-of-3");
+        assert!(verify_keyring_threshold(&kr, &trusted, 2).is_ok(), "2 signers meets 2-of-3");
+        assert!(
+            matches!(verify_keyring_threshold(&kr, &trusted, 3).unwrap_err(), CryptoError::Signature),
+            "2 signers does NOT meet 3-of-3"
+        );
+
+        // all three = the unanimity endpoint (m == n)
+        let mut kr_all = sample_keyring();
+        for id in [&a, &b, &c] {
+            sign_keyring(&mut kr_all, id);
+        }
+        assert!(verify_keyring_threshold(&kr_all, &trusted, 3).is_ok(), "all three meets 3-of-3");
+    }
+
+    #[test]
+    fn threshold_dedupes_a_repeated_required_key() {
+        let (a, b) = (generate_identity().unwrap(), generate_identity().unwrap());
+        // `a` is listed twice but only `a` signed — a duplicated required key must NOT satisfy 2-of-N.
+        let trusted = [a.verifying_key(), a.verifying_key(), b.verifying_key()];
+        let mut kr = sample_keyring();
+        sign_keyring(&mut kr, &a);
+        assert!(
+            matches!(verify_keyring_threshold(&kr, &trusted, 2).unwrap_err(), CryptoError::Signature),
+            "a repeated signer counts once, so one real signer is not 2-of-N"
+        );
+        assert!(verify_keyring_threshold(&kr, &trusted, 1).is_ok());
     }
 
     #[test]
