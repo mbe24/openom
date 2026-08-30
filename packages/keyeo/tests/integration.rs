@@ -1888,3 +1888,33 @@ fn quorum_backdating_across_a_deep_concurrent_signer_add_still_fails() {
         "carol is a concurrent signer in the denominator; alice+bob is not unanimity of {{alice,bob,carol}}"
     );
 }
+
+#[test]
+fn quorum_a_signer_added_after_the_proposal_does_not_raise_the_bar() {
+    // The freeze, in the other direction: the denominator is exactly the signer set as of the proposal's
+    // causal position. carol is added AFTER the proposal, so she is NOT required — alice+bob (the signers
+    // at proposal time) are unanimity and the change commits. (Old Commit-position code would have pulled
+    // carol into the denominator and wrongly blocked it — a signer-add can't retroactively veto in-flight
+    // proposals, which would otherwise be a liveness attack.)
+    let (alice, bob, carol, mallory) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = quorum_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+    ]);
+    let pid = [7u8; 32];
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
+        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
+    })).unwrap();
+    // carol is added as a 3rd Admin strictly AFTER the proposal ...
+    k.apply(make_op(3, vec![2], &[1u8; 32], MembershipAction::Add {
+        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
+    })).unwrap();
+    // ... bob (a proposal-time signer) approves, alice commits.
+    k.apply(make_op(4, vec![3], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    assert!(qmember(&k, &carol), "sanity: carol was added");
+    assert!(
+        qmember(&k, &mallory),
+        "carol was added after the proposal, so she is not in its denominator; alice+bob is unanimity"
+    );
+}
