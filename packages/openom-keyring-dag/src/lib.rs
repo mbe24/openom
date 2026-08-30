@@ -14,6 +14,8 @@
 use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role, SigError, SignatureScheme};
 use std::collections::HashSet;
 
+pub mod blob_sync;
+
 /// openom's Ed25519 plugged into keyeo's `SignatureScheme` seam, so the engine verifies with
 /// openom-sign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
 /// rather than keyeo's built-in dalek path.
@@ -33,7 +35,7 @@ impl SignatureScheme for OpenomSign {
 /// A keyring role, power-descending (**lower is stronger**): `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
 /// matching openom's `MemberRole` access axis (openom-roles). Wraps the `i16` so a role can be a signed,
 /// content-addressed op field (keyeo requires `Role: Serialize`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct KeyringRole(pub i16);
 
 impl KeyringRole {

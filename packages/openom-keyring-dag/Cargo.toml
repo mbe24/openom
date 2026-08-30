@@ -8,9 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 keyeo.workspace = true
+blobstore.workspace = true
 openom-sign.workspace = true
 openom-roles.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # The differential-oracle test drives the legacy CAS keyring (chain.rs) alongside the DAG one and
@@ -18,3 +20,4 @@ serde.workspace = true
 openom-keyring.workspace = true
 openom-protocol.workspace = true
 proptest.workspace = true
+tempfile = "3"

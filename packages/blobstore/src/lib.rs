@@ -72,6 +72,23 @@ pub trait BlobStore: Send + Sync {
     fn delete(&self, key: &str, pre: Precondition) -> Result<()>;
 }
 
+/// Share one store across clients: `Arc<S>` is a `BlobStore` that delegates. (Two replicas syncing the
+/// same document each hold an `Arc` of the same backend.)
+impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
+    fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>> {
+        (**self).get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8], pre: Precondition) -> Result<Etag> {
+        (**self).put(key, bytes, pre)
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<(String, Etag)>> {
+        (**self).list(prefix)
+    }
+    fn delete(&self, key: &str, pre: Precondition) -> Result<()> {
+        (**self).delete(key, pre)
+    }
+}
+
 /// The content-hash etag the reference impls use — `hex(sha256(bytes))`. Opaque to callers.
 pub(crate) fn etag_of(bytes: &[u8]) -> Etag {
     use sha2::{Digest, Sha256};

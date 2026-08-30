@@ -55,6 +55,7 @@ openom-projection = { path = "packages/openom-projection" }
 openom-crdt = { path = "packages/openom-crdt" }
 openom-tree = { path = "packages/openom-tree" }
 journal = { path = "packages/journal" }
+blobstore = { path = "packages/blobstore" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
 # roles/signing/keys onto keyeo's seams in openom-keyring-dag; keyeo itself never gains an openom dep.
 keyeo = { path = "packages/keyeo" }
