@@ -35,9 +35,10 @@
 //! empirically by `two_party_mutual_remove_leaves_one_survivor` and
 //! `three_way_remove_cycle_resolves_to_one_removal` (see `tests/integration.rs`). NOTE for the openom
 //! consumer: mutual-remove cycles are *unreachable* under its signer-gate anyway (signer changes need
-//! Owner/quorum; non-signers can't author removes), so the choice is moot there. `graph.rs`'s
-//! `AuthorityGraphs`/SCC helpers are present (ported from upstream) but intentionally UNUSED here —
-//! reserved for v2 delegation-aware quorum-conflict detection, or to be deleted.
+//! Owner/quorum; non-signers can't author removes), so the choice is moot there. p2panda's
+//! `AuthorityGraphs`/Tarjan-SCC cycle-detection approach was deliberately NOT ported — if a
+//! future consumer needs mutual-destruction (or delegation-aware quorum-conflict detection), it can
+//! be added then.
 //!
 //! **Iterated fixpoint over single-pass-per-bubble.** Upstream (and localfirst/auth) resolve each
 //! concurrency bubble in a single topological pass; keyeo iterates the rules to a monotone least

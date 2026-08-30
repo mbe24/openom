@@ -141,63 +141,6 @@ impl<Op: Ord + std::hash::Hash + Copy> Default for Graph<Op> {
     }
 }
 
-/// Authority graphs for detecting mutual remove cycles.
-/// Adapted from p2panda-auth's AuthorityGraphs.
-#[derive(Clone, Debug)]
-pub struct AuthorityGraphs<Id: Ord + std::hash::Hash + Eq, Op: Ord + std::hash::Hash + Copy> {
-    /// A graph tracking who removed whom.
-    removal_graph: DiGraphMap<Id, ()>,
-    /// A graph tracking who delegated authority to whom.
-    delegation_graph: DiGraphMap<Id, ()>,
-    /// Map from operation IDs to (remover, removed) pairs.
-    removals: Vec<(Op, Id, Id)>,
-    /// Map from operation IDs to (delegator, delegatee) pairs.
-    delegations: Vec<(Op, Id, Id)>,
-}
-
-impl<Id: Ord + std::hash::Hash + Copy + Eq, Op: Ord + std::hash::Hash + Copy>
-    AuthorityGraphs<Id, Op>
-{
-    pub fn new() -> Self {
-        Self {
-            removal_graph: DiGraphMap::new(),
-            delegation_graph: DiGraphMap::new(),
-            removals: Vec::new(),
-            delegations: Vec::new(),
-        }
-    }
-
-    /// Record that `remover` removed `removed` in operation `op`.
-    pub fn add_removal(&mut self, _group_id: Id, remover: Id, removed: Id, op: Op) {
-        self.removal_graph.add_edge(remover, removed, ());
-        self.removals.push((op, remover, removed));
-    }
-
-    /// Record that `delegator` delegated authority to `delegatee` in operation `op`.
-    pub fn add_delegation(&mut self, _group_id: Id, delegator: Id, delegatee: Id, op: Op) {
-        self.delegation_graph.add_edge(delegator, delegatee, ());
-        self.delegations.push((op, delegator, delegatee));
-    }
-
-    /// Check if the removal relationships contain a cycle (e.g. a mutual remove:
-    /// A removes B, B removes A).
-    ///
-    /// Uses a real directed-cycle check — not `has_path_connecting(node, node)`,
-    /// which is trivially true for every node (the zero-length path) and would
-    /// report a cycle whenever any removal edge exists.
-    pub fn is_cycle(&self, _group_id: &Id, _op: &Op) -> bool {
-        petgraph::algo::is_cyclic_directed(&self.removal_graph)
-    }
-}
-
-impl<Id: Ord + std::hash::Hash + Copy + Eq, Op: Ord + std::hash::Hash + Copy> Default
-    for AuthorityGraphs<Id, Op>
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,23 +178,5 @@ mod tests {
         assert!(!g.is_concurrent(1, 2));
         assert!(g.has_path(1, 4));
         assert!(!g.has_path(4, 1));
-    }
-
-    #[test]
-    fn test_authority_graph_cycle() {
-        let mut ag = AuthorityGraphs::new();
-        // A removes B, B removes A -> cycle
-        ag.add_removal("group1", "alice", "bob", 1);
-        ag.add_removal("group1", "bob", "alice", 2);
-        assert!(ag.is_cycle(&"group1", &1));
-    }
-
-    #[test]
-    fn test_authority_graph_no_cycle() {
-        let mut ag = AuthorityGraphs::new();
-        // A removes B, A removes C -> no cycle
-        ag.add_removal("group1", "alice", "bob", 1);
-        ag.add_removal("group1", "alice", "charlie", 2);
-        assert!(!ag.is_cycle(&"group1", &1));
     }
 }
