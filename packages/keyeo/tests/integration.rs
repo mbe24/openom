@@ -1734,3 +1734,98 @@ proptest! {
         prop_assert_eq!(canonical, shuffled, "resolved membership must not depend on application order");
     }
 }
+
+// ── v2 multi-signer quorum ──
+// A test QuorumPolicy: eligible = the active Admins; requirement = unanimity of them. So a Commit's
+// target takes effect only when every Admin (the proposer implicitly + the approvers) has approved.
+struct AllAdmins;
+impl keyeo::QuorumPolicy<[u8; 32], TestRole, Ed25519> for AllAdmins {
+    fn eligible(
+        &self,
+        state: &GroupState<[u8; 32], TestRole, Ed25519>,
+        _target: &MembershipAction<[u8; 32], TestRole, Ed25519>,
+    ) -> std::collections::HashSet<[u8; 32]> {
+        state
+            .active_members()
+            .into_iter()
+            .filter(|(_, r)| *r == TestRole::Admin)
+            .map(|(id, _)| id)
+            .collect()
+    }
+    fn requirement(
+        &self,
+        state: &GroupState<[u8; 32], TestRole, Ed25519>,
+        target: &MembershipAction<[u8; 32], TestRole, Ed25519>,
+    ) -> keyeo::Requirement<[u8; 32]> {
+        keyeo::Requirement::All(self.eligible(state, target))
+    }
+}
+
+type QuorumEngine =
+    Keyeo<Op<u64, [u8; 32], TestRole, Ed25519>, DefaultAccessControl<TestRole>, StrongRemove, AllAdmins>;
+
+fn quorum_engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>]) -> QuorumEngine {
+    let mut k = Keyeo::with_quorum(
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        AllAdmins,
+    );
+    k.apply(make_op(1, vec![], &[1u8; 32], MembershipAction::Create {
+        initial_members: genesis.to_vec(),
+    }))
+    .unwrap();
+    k
+}
+
+fn add_editor(member: [u8; 32], seed: u8) -> MembershipAction<[u8; 32], TestRole, Ed25519> {
+    MembershipAction::Add {
+        member,
+        role: TestRole::Editor,
+        author_public_key: member,
+        hpke_public_key: [seed; 32],
+        member_proof: None,
+    }
+}
+fn qmember(k: &QuorumEngine, id: &[u8; 32]) -> bool {
+    k.state().active_members().iter().any(|(m, _)| m == id)
+}
+
+#[test]
+fn quorum_unanimity_applies_the_target() {
+    let (alice, bob, carol, dave) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = quorum_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+        minit(carol, TestRole::Admin, [0xcc; 32]),
+    ]);
+    let pid = [7u8; 32];
+    // alice proposes to add dave; bob and carol approve; alice commits — all three Admins → quorum met.
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
+        proposal_id: pid,
+        target: Box::new(add_editor(dave, 0xd0)),
+    })).unwrap();
+    k.apply(make_op(3, vec![2], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(4, vec![3], &[3u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    assert!(qmember(&k, &dave), "unanimity of Admins committed → target applied");
+}
+
+#[test]
+fn quorum_one_short_does_not_apply() {
+    let (alice, bob, carol, dave) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = quorum_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+        minit(carol, TestRole::Admin, [0xcc; 32]),
+    ]);
+    let pid = [7u8; 32];
+    // alice proposes (implicit approval) + bob approves, then alice commits — carol never approved.
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Propose {
+        proposal_id: pid,
+        target: Box::new(add_editor(dave, 0xd0)),
+    })).unwrap();
+    k.apply(make_op(3, vec![2], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(4, vec![3], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    assert!(!qmember(&k, &dave), "only 2 of 3 Admins approved → quorum not met → target NOT applied");
+}

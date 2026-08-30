@@ -8,9 +8,10 @@ use crate::dag::resolver::{
     SignedOp,
 };
 use crate::epoch::{membership_commitment, reconcile_epochs, Epoch};
+use crate::quorum::{Individual, QuorumPolicy};
 use crate::roles::Role;
 use crate::signature::SignatureScheme;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type ApplyResult<Op> = Result<
     ApplyOutcome<
@@ -29,11 +30,12 @@ type ForgeResult<Op> = Result<
     Error<<Op as crate::dag::resolver::SignedOp>::MemberId>,
 >;
 
-pub struct Keyeo<Op, AC, RS>
+pub struct Keyeo<Op, AC, RS, QP = Individual>
 where
     Op: SignedOp,
     AC: AccessControl<Op::MemberId, Op::R, Op::S>,
     RS: Resolver<Op::OpId, Op::R, Op, Op::S>,
+    QP: QuorumPolicy<Op::MemberId, Op::R, Op::S>,
 {
     state: GroupState<Op::MemberId, Op::R, Op::S>,
     /// The base the causal rebuild replays onto — the state the engine was constructed with. A
@@ -54,15 +56,36 @@ where
     /// winning epoch, whose wraps are attached to the group state.
     replica_epochs: Vec<Epoch<Op::OpId, Op::MemberId, Op::S>>,
     genesis_epoch: u64,
+    /// The multi-signer quorum policy (v2). `Individual` (the default) means no change needs quorum.
+    quorum: QP,
 }
 
-impl<Op, AC, RS> Keyeo<Op, AC, RS>
+impl<Op, AC, RS> Keyeo<Op, AC, RS, Individual>
 where
     Op: SignedOp,
     AC: AccessControl<Op::MemberId, Op::R, Op::S>,
     RS: Resolver<Op::OpId, Op::R, Op, Op::S>,
 {
+    /// Construct with **Individual** governance — a single authorized action stands on its own, no quorum.
     pub fn new(state: GroupState<Op::MemberId, Op::R, Op::S>, access: AC, resolver: RS) -> Self {
+        Self::with_quorum(state, access, resolver, Individual)
+    }
+}
+
+impl<Op, AC, RS, QP> Keyeo<Op, AC, RS, QP>
+where
+    Op: SignedOp,
+    AC: AccessControl<Op::MemberId, Op::R, Op::S>,
+    RS: Resolver<Op::OpId, Op::R, Op, Op::S>,
+    QP: QuorumPolicy<Op::MemberId, Op::R, Op::S>,
+{
+    /// Construct with a custom [`QuorumPolicy`] — v2 multi-signer (founder-or-unanimity) governance.
+    pub fn with_quorum(
+        state: GroupState<Op::MemberId, Op::R, Op::S>,
+        access: AC,
+        resolver: RS,
+        quorum: QP,
+    ) -> Self {
         Self {
             genesis: state.clone(),
             state,
@@ -76,6 +99,7 @@ where
             max_pending: 1024,
             replica_epochs: Vec::new(),
             genesis_epoch: 0,
+            quorum,
         }
     }
 
@@ -254,16 +278,34 @@ where
             if ignored.contains(op_id) {
                 continue;
             }
-            if let Some(op) = self.ops.get(op_id) {
-                if !self
+            let Some(op) = self.ops.get(op_id) else {
+                continue;
+            };
+            // A Commit doesn't apply *itself* — it applies its proposal's TARGET, at this position, iff
+            // the committer is authorized AND quorum has been met (Individual governance never meets
+            // quorum, so this is inert by default). See `quorum_target`.
+            if let MembershipAction::Commit { proposal_id } = op.action() {
+                let pid = *proposal_id;
+                if self
                     .access
                     .is_authorized(&new_state, op.author(), op.action())
                 {
-                    continue;
+                    if let Some(target) = self.quorum_target(*op_id, &pid, &new_state, &ignored) {
+                        if let Ok((s, _events)) = apply_action(new_state.clone(), &target) {
+                            new_state = s;
+                        }
+                    }
                 }
-                if let Ok((s, _events)) = apply_action(new_state.clone(), op.action()) {
-                    new_state = s;
-                }
+                continue;
+            }
+            if !self
+                .access
+                .is_authorized(&new_state, op.author(), op.action())
+            {
+                continue;
+            }
+            if let Ok((s, _events)) = apply_action(new_state.clone(), op.action()) {
+                new_state = s;
             }
         }
         // Rotate (or stabilize) the epoch for the resolved membership: derive its commitment, and
@@ -273,6 +315,59 @@ where
         // peer that resolves the same membership converges to the same commitment.
         self.state = self.forge_epoch(&new_state)?;
         Ok(())
+    }
+
+    /// For a `Commit` at `commit_id` referencing `proposal_id`, return the proposal's target action iff
+    /// quorum is met. Finds the surviving `Propose` for that id in the Commit's causal past, asks the
+    /// [`QuorumPolicy`] who's eligible + what's required (against `state`), tallies the DISTINCT eligible
+    /// approvers (the proposer approves implicitly + every surviving `Approve` in the Commit's ancestry),
+    /// and checks the requirement — fail-closed.
+    ///
+    /// Coupling note (for the unified-engine question): this is generic over `State` — it reads only the
+    /// op DAG (`ops`/`graph`) and delegates every membership judgement to `self.quorum`. It never reads
+    /// roles. Its one coupling is matching the `MembershipAction::{Propose,Approve,Commit}` variants,
+    /// which on a generalized engine become a `QuorumOp` trait — an op-type coupling, not a state leak.
+    fn quorum_target(
+        &self,
+        commit_id: Op::OpId,
+        proposal_id: &[u8; 32],
+        state: &GroupState<Op::MemberId, Op::R, Op::S>,
+        ignored: &HashSet<Op::OpId>,
+    ) -> Option<MembershipAction<Op::MemberId, Op::R, Op::S>> {
+        // The surviving Propose for this id, causally before the Commit.
+        let (propose_id, target) = self.ops.iter().find_map(|(id, op)| match op.action() {
+            MembershipAction::Propose { proposal_id: pid, target }
+                if pid == proposal_id && !ignored.contains(id) && self.graph.has_path(*id, commit_id) =>
+            {
+                Some((*id, (**target).clone()))
+            }
+            _ => None,
+        })?;
+        let proposer = self.ops.get(&propose_id)?.author().clone();
+
+        let eligible = self.quorum.eligible(state, &target);
+        // A proposal by a non-eligible member is void (only a signer may propose).
+        if !eligible.contains(&proposer) {
+            return None;
+        }
+        let requirement = self.quorum.requirement(state, &target);
+
+        // Distinct eligible approvers: the proposer approves implicitly + every surviving `Approve` for
+        // this proposal in the Commit's causal past.
+        let mut approvers: HashSet<Op::MemberId> = HashSet::new();
+        approvers.insert(proposer);
+        for (id, op) in &self.ops {
+            if let MembershipAction::Approve { proposal_id: pid } = op.action() {
+                if pid == proposal_id && !ignored.contains(id) && self.graph.has_path(*id, commit_id) {
+                    let a = op.author().clone();
+                    if eligible.contains(&a) {
+                        approvers.insert(a);
+                    }
+                }
+            }
+        }
+
+        requirement.satisfied_by(&approvers).then_some(target)
     }
 
     /// Attach the correct epoch key material to a resolved state. The commitment is derived from the
