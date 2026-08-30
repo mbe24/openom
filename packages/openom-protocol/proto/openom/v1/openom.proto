@@ -157,6 +157,12 @@ message Keyring {
   // unwrapping ONE recovery-key private key (held only under the founder's passphrase and
   // recovery code, never shared with members). V1: exactly one, the founder's.
   repeated RecoveryKey recovery_keys = 11;
+  // Governance: the quorum to change the authorized-signer set (and to change this rule itself).
+  // governance_kind: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
+  // 3 = threshold. governance_threshold is the m for the threshold kinds. Part of the signed bytes
+  // (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
+  uint32 governance_kind = 12;
+  uint32 governance_threshold = 13;
 }
 
 // The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by

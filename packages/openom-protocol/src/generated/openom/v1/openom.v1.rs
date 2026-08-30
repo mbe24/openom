@@ -135,6 +135,14 @@ pub struct Keyring {
     /// recovery code, never shared with members). V1: exactly one, the founder's.
     #[prost(message, repeated, tag="11")]
     pub recovery_keys: ::prost::alloc::vec::Vec<RecoveryKey>,
+    /// Governance: the quorum to change the authorized-signer set (and this rule itself).
+    /// `governance_kind`: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
+    /// 3 = threshold. `governance_threshold` is the m for the threshold kinds. Part of the signed bytes
+    /// (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
+    #[prost(uint32, tag="12")]
+    pub governance_kind: u32,
+    #[prost(uint32, tag="13")]
+    pub governance_threshold: u32,
 }
 /// The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
 /// construction: the private key exists only under the two founder-credential wraps in

@@ -28,7 +28,10 @@ use openom_roles::{
     MEMBER_OWNER as OWNER_MEMBER, SIGNER_CO_OWNER as CO_OWNER, SIGNER_FOUNDER as FOUNDER,
 };
 
-use crate::{keyring_hash, verify_keyring, verify_keyring_all, verify_keyring_any, VerifyingKey};
+use crate::{
+    keyring_hash, verify_keyring, verify_keyring_all, verify_keyring_any, verify_keyring_threshold,
+    VerifyingKey,
+};
 
 const HPKE: i32 = WrapMethod::X25519Hpke as i32;
 const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
@@ -48,6 +51,11 @@ pub struct KeyringAnchor {
     pub revision: u32,
     pub keyring_hash: [u8; 32],
     pub trusted_signers: Vec<AuthorizedSigner>,
+    /// The governance rule this keyring pins (see `Keyring.governance_kind`): 0 = founder-or-unanimity
+    /// (default), 1 = founder-only, 2 = founder-or-threshold, 3 = threshold. The PRIOR anchor's rule
+    /// authorizes the NEXT privileged change (anti-downgrade).
+    pub governance_kind: u32,
+    pub governance_threshold: u32,
 }
 
 impl KeyringAnchor {
@@ -61,6 +69,8 @@ impl KeyringAnchor {
             revision: keyring.revision,
             keyring_hash: keyring_hash(keyring),
             trusted_signers: keyring.authorized_signers.clone(),
+            governance_kind: keyring.governance_kind,
+            governance_threshold: keyring.governance_threshold,
         }
     }
 
@@ -206,19 +216,20 @@ pub fn verify_transition(
 
     // Signature policy — always against the PRIOR trusted set, never the candidate's own.
     let prior_keys = signer_keys(&prior.trusted_signers);
-    if signer_set_differs(&prior.trusted_signers, &candidate.authorized_signers) {
-        let founder_signed = prior
-            .founder()
-            .and_then(signer_key)
-            .map(|k| verify_keyring(candidate, &k).is_ok())
-            .unwrap_or(false);
-        let unanimous = verify_keyring_all(candidate, &prior_keys).is_ok();
-        let self_removal = is_self_removal(
-            &prior.trusted_signers,
-            &candidate.authorized_signers,
-            candidate,
-        );
-        if !(founder_signed || unanimous || self_removal) {
+    let signer_change = signer_set_differs(&prior.trusted_signers, &candidate.authorized_signers);
+    // Changing the governance rule ITSELF is a privileged change too — so weakening it (e.g. 3-of-4 ->
+    // 1-of-4) must still satisfy the CURRENT (prior) rule. Anti-downgrade.
+    let governance_change = candidate.governance_kind != prior.governance_kind
+        || candidate.governance_threshold != prior.governance_threshold;
+    if signer_change || governance_change {
+        let self_removal = signer_change
+            && is_self_removal(&prior.trusted_signers, &candidate.authorized_signers, candidate);
+        if !(self_removal || prior_governance_met(prior, candidate, &prior_keys)) {
+            return Err(ChainError::UnendorsedSetChange);
+        }
+        // Lockout guard: the candidate's own signer set must be able to satisfy its own rule, or
+        // governance is permanently bricked (no future privileged change could ever pass).
+        if !rule_is_satisfiable(candidate) {
             return Err(ChainError::UnendorsedSetChange);
         }
     } else {
@@ -235,6 +246,8 @@ pub fn verify_transition(
         revision: candidate.revision,
         keyring_hash: keyring_hash(candidate),
         trusted_signers: candidate.authorized_signers.clone(),
+        governance_kind: candidate.governance_kind,
+        governance_threshold: candidate.governance_threshold,
     })
 }
 
@@ -464,6 +477,55 @@ fn signer_keys(signers: &[AuthorizedSigner]) -> Vec<VerifyingKey> {
         }
     }
     out
+}
+
+/// Does the candidate meet the **PRIOR** keyring's governance rule for a privileged change? Every check is
+/// against the PRIOR trusted set (never the candidate's own claim), and both the rule kind and the
+/// threshold are read from the prior anchor — that's the anti-downgrade discipline. A signer this
+/// candidate is REMOVING is excluded from the threshold denominator (target-exclusion: you don't need a
+/// member's consent to evict them).
+fn prior_governance_met(prior: &KeyringAnchor, candidate: &Keyring, prior_keys: &[VerifyingKey]) -> bool {
+    let founder_key = prior.founder().and_then(signer_key);
+    let founder_signed = founder_key
+        .as_ref()
+        .map(|k| verify_keyring(candidate, k).is_ok())
+        .unwrap_or(false);
+    // The co-owner denominator for a threshold: prior signers, minus the founder, minus any signer this
+    // candidate removes.
+    let departing: Vec<[u8; 32]> = prior
+        .trusted_signers
+        .iter()
+        .filter(|p| !candidate.authorized_signers.iter().any(|c| same_signer(p, c)))
+        .filter_map(|p| signer_key(p).map(|k| k.to_bytes()))
+        .collect();
+    let is_founder = |k: &VerifyingKey| {
+        founder_key.as_ref().map(|f| f.to_bytes() == k.to_bytes()).unwrap_or(false)
+    };
+    let co_owner_keys: Vec<VerifyingKey> = prior_keys
+        .iter()
+        .filter(|k| !is_founder(k) && !departing.contains(&k.to_bytes()))
+        .cloned()
+        .collect();
+    let m = prior.governance_threshold as usize;
+    match prior.governance_kind {
+        1 => founder_signed, // founder-only
+        2 => founder_signed || verify_keyring_threshold(candidate, &co_owner_keys, m).is_ok(), // founder-or-threshold(m)
+        3 => verify_keyring_threshold(candidate, prior_keys, m).is_ok(), // threshold(m), no founder path
+        _ => founder_signed || verify_keyring_all(candidate, prior_keys).is_ok(), // 0/unknown = founder-or-unanimity
+    }
+}
+
+/// Can this keyring's own signer set ever satisfy its own governance rule? A rule no set can meet bricks
+/// governance forever. Founder-or-* kinds are always satisfiable (a founder exists per `check_structure`
+/// and can act alone); a pure threshold(m) needs at least m signers.
+fn rule_is_satisfiable(k: &Keyring) -> bool {
+    let signers = k.authorized_signers.len();
+    let m = k.governance_threshold as usize;
+    match k.governance_kind {
+        0..=2 => true,
+        3 => m > 0 && signers >= m,
+        _ => false, // unknown kind: fail-closed
+    }
 }
 
 /// Kani proof harnesses for the keyring's structural gate — compiled only under `cargo kani`
@@ -715,9 +777,85 @@ mod tests {
                 epoch: 0,
                 wraps,
             }],
+            ..Default::default()
         };
         sign_keyring(&mut k, founder);
         k
+    }
+
+    /// A mutation adding co-owner "d" (signer + member + epoch wrap) — a signer-set change.
+    fn add_coowner(dk: &SigningKey) -> impl FnOnce(&mut Keyring) + '_ {
+        move |k: &mut Keyring| {
+            k.authorized_signers.push(signer(dk, "d", CO_OWNER));
+            k.members.push(keyed_member(dk, "d", CO_OWNER_MEMBER));
+            k.epochs[0].wraps.push(wrap("d", HPKE));
+        }
+    }
+
+    #[test]
+    fn governance_founder_or_threshold_gates_a_signer_change() {
+        let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let anchor0 = KeyringAnchor::from_keyring(&g);
+
+        // The founder sets founder-or-threshold(2) — itself a privileged change, authorized under the
+        // prior (default founder-or-unanimity) rule by the founder.
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let anchor = verify_transition(&anchor0, &ruled).expect("founder may set the rule");
+        assert_eq!((anchor.governance_kind, anchor.governance_threshold), (2, 2));
+
+        // Adding a co-owner now needs 2 co-owners OR the founder.
+        assert!(verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&a, &b])).is_ok(), "2 co-owners meet 2-of");
+        assert!(verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&founder])).is_ok(), "the founder alone still works");
+        assert!(
+            matches!(
+                verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&a])),
+                Err(ChainError::UnendorsedSetChange)
+            ),
+            "1 co-owner is not 2-of, and the founder didn't sign"
+        );
+    }
+
+    #[test]
+    fn governance_change_is_anti_downgrade() {
+        let (founder, a, b, c) = (key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let anchor = verify_transition(&KeyringAnchor::from_keyring(&g), &ruled).unwrap();
+
+        // Weakening the rule (2-of -> founder-or-unanimity) is itself gated by the CURRENT (2-of) rule.
+        assert!(
+            matches!(
+                verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a])),
+                Err(ChainError::UnendorsedSetChange)
+            ),
+            "1 co-owner cannot weaken a 2-of rule"
+        );
+        assert!(
+            verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a, &b])).is_ok(),
+            "2 co-owners may change the rule"
+        );
+    }
+
+    #[test]
+    fn governance_lockout_is_refused() {
+        let (founder, a, b, c) = (key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let anchor = verify_transition(&KeyringAnchor::from_keyring(&g), &ruled).unwrap();
+
+        // threshold(5) with only 4 signers can never be satisfied → the lockout guard refuses it, even
+        // though 2 co-owners authorized the change under the current rule.
+        assert!(
+            matches!(
+                verify_transition(
+                    &anchor,
+                    &next(&ruled, |k| { k.governance_kind = 3; k.governance_threshold = 5; }, &[&a, &b]),
+                ),
+                Err(ChainError::UnendorsedSetChange)
+            ),
+            "a rule the candidate's own signer set can't satisfy is rejected (lockout)"
+        );
     }
 
     #[test]
@@ -756,6 +894,7 @@ mod tests {
             signatures: vec![],
             recovery_keys: vec![],
             epochs: vec![],
+            ..Default::default()
         };
         assert_ne!(
             check_structure(&k),
@@ -1261,6 +1400,7 @@ mod tests {
                 epoch: 0,
                 wraps,
             }],
+            ..Default::default()
         };
         sign_keyring(&mut k, &f);
         k

@@ -165,6 +165,7 @@ mod tests {
                 epoch: 0,
                 wraps: vec![],
             }],
+            ..Default::default()
         })
     }
 
@@ -361,6 +362,7 @@ mod tests {
                 epoch: 0,
                 wraps,
             }],
+            ..Default::default()
         };
         // Solo owner: the epoch's DEK is wrapped only to the founder → unattributed (V1 history stays valid).
         assert!(!epoch_is_attributed(&mk(vec![wrap("owner")]), KID));

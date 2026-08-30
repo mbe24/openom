@@ -176,6 +176,9 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
             put_wrap(&mut out, w);
         }
     }
+    // Governance rule — signed, so it's tamper-evident and a change to it is authorized like a set change.
+    put_u32(&mut out, keyring.governance_kind);
+    put_u32(&mut out, keyring.governance_threshold);
     out
 }
 
@@ -495,6 +498,7 @@ mod tests {
                     ephemeral_public_key: vec![],
                 }],
             }],
+            ..Default::default()
         };
         let base = keyring_signing_bytes(&kr("acct", vec![7; 24], 1));
         assert_ne!(base, keyring_signing_bytes(&kr("other", vec![7; 24], 1)), "wrap member_id bound");
@@ -544,6 +548,7 @@ mod tests {
                     ephemeral_public_key: vec![],
                 }],
             }],
+            ..Default::default()
         };
         let a = keyring_signing_bytes(&kr);
         kr.signatures[0].signature = vec![0x00; 64];

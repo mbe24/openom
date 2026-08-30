@@ -188,6 +188,7 @@ mod tests {
                     ephemeral_public_key: vec![],
                 }],
             }],
+            ..Default::default()
         }
     }
 

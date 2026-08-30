@@ -321,6 +321,7 @@ fn build_keyring(
             epoch: 0,
             wraps,
         }],
+        ..Default::default()
     };
     sign_keyring(&mut k, founder);
     k

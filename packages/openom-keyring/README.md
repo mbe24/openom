@@ -89,6 +89,7 @@ let mut genesis = Keyring {
         epoch: 0,
         wraps: vec![wrap("owner", WrapMethod::RrkHpke)],
     }],
+    ..Default::default()
 };
 sign_keyring(&mut genesis, &founder);
 

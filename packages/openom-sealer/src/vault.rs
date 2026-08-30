@@ -160,6 +160,8 @@ pub fn provision(
         signatures: Vec::new(),
         recovery_keys: vec![recovery_key],
         epochs: vec![epoch0],
+        // Governance defaults to founder-or-unanimity (kind 0) at genesis; a later revision may set it.
+        ..Default::default()
     };
     sign_keyring(&mut keyring, &secrets.root.identity);
 
