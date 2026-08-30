@@ -138,12 +138,21 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
         author: &String,
         action: &KeyringAction,
     ) -> bool {
-        // Genesis Create: the author must be a listed initial member, and there must be EXACTLY ONE
-        // Owner (the founder). This seeds the "exactly one Owner" invariant; no later op can add, remove,
-        // or demote an Owner, so it holds for the keyring's whole life.
+        // Genesis Create: authorized ONLY at an unestablished causal position (no members yet), with the
+        // author a listed initial member and EXACTLY ONE Owner (the founder). The empty-state gate is the
+        // OPE-271 hardening: keyeo's `apply_action` applies a `Create` by *replacing* the whole
+        // `GroupState`, and a `Create` is self-certifying (the engine authenticates it against its OWN
+        // `initial_members`, not the resolved state), so absent this gate a second, attacker-signed
+        // `Create{owner: self}` folded at any populated position would WIPE the resolved roster and
+        // re-found the group under the attacker. Gating on `is_empty()` means a `Create` can only ever
+        // seed an unestablished group and can never re-found an established one. In openom's
+        // out-of-band-seeded construction the genesis membership is the engine's trusted base, so every
+        // in-DAG `Create` is a no-op and no `Create` can reset the roster.
         if let MembershipAction::Create { initial_members } = action {
             let owners = initial_members.iter().filter(|m| m.role.is_owner()).count();
-            return owners == 1 && initial_members.iter().any(|m| &m.id == author);
+            return state.members.is_empty()
+                && owners == 1
+                && initial_members.iter().any(|m| &m.id == author);
         }
         // Every other change requires an active member author.
         let author_role = match state.members.get(author) {
@@ -492,6 +501,59 @@ mod tests {
             members(&k),
             vec![("founder".to_string(), KeyringRole::OWNER)],
             "the Owner remains, alone and unchanged"
+        );
+    }
+
+    #[test]
+    fn a_second_create_cannot_re_found_and_wipe_the_roster() {
+        // OPE-271: keyeo's `apply_action` applies a Create by REPLACING GroupState, and a Create is
+        // self-certifying (the engine authenticates it against its own initial_members), so both attack
+        // shapes below are admitted with a valid signature. Without the empty-state gate on Create, either
+        // would wipe the resolved roster and install mallory as sole Owner. The gate makes any Create at a
+        // populated causal position a no-op, so the real roster survives untouched.
+        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![minit("founder", KeyringRole::OWNER, 1)],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
+            .unwrap();
+
+        // Attack A — a second genesis childed on the real chain (sorts AFTER it in topo order: the classic
+        // "later Create replaces the accumulated state" wipe).
+        let re_found = |id: u8, parents: Vec<[u8; 32]>| {
+            sign_op(
+                [id; 32],
+                parents,
+                "mallory",
+                MembershipAction::Create {
+                    initial_members: vec![minit("mallory", KeyringRole::OWNER, 9)],
+                },
+                &sk(9),
+            )
+        };
+        k.apply(re_found(9, vec![[2; 32]])).unwrap(); // admitted (self-certifying), folded as a no-op
+        // Attack B — a CONCURRENT second genesis (no parents) whose OpId [0;32] sorts BEFORE the real
+        // genesis [1;32], so it is folded FIRST — defeating any naive "first Create wins" rule.
+        k.apply(re_found(0, vec![])).unwrap();
+
+        assert_eq!(
+            members(&k),
+            vec![
+                ("bob".to_string(), KeyringRole::CO_OWNER),
+                ("founder".to_string(), KeyringRole::OWNER),
+            ],
+            "neither a later nor an OpId-grinding concurrent Create may re-found the group"
+        );
+        assert!(
+            !k.state().members.contains_key("mallory"),
+            "the attacker's self-signed re-genesis has no effect"
         );
     }
 
