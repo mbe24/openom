@@ -7,6 +7,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The generic push/pull/compact/bootstrap loop; openom-sync is now the claim-model adapter on top of it.
+docsync = { path = "../docsync" }
 openom-sealer = { path = "../openom-sealer" }
 journal = { path = "../journal" }
 openom-protocol = { path = "../openom-protocol" }
@@ -14,7 +16,6 @@ openom-protocol = { path = "../openom-protocol" }
 openom-crdt = { path = "../openom-crdt" }
 openom-claim = { path = "../openom-claim" }
 serde_json.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 openom-crypto = { path = "../openom-crypto" }
