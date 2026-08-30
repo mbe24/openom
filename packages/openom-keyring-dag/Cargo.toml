@@ -11,3 +11,10 @@ keyeo.workspace = true
 openom-sign.workspace = true
 openom-roles.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+# The differential-oracle test drives the legacy CAS keyring (chain.rs) alongside the DAG one and
+# asserts they agree ("CAS = degenerate DAG"). Test-only — keyeo and the keyring layer stay clean.
+openom-keyring.workspace = true
+openom-protocol.workspace = true
+proptest.workspace = true

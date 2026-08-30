@@ -3632,8 +3632,11 @@ name = "openom-keyring-dag"
 version = "0.1.0"
 dependencies = [
  "keyeo",
+ "openom-keyring",
+ "openom-protocol",
  "openom-roles",
  "openom-sign",
+ "proptest",
  "serde",
 ]
 
