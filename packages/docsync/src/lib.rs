@@ -63,6 +63,45 @@ pub trait Sealer {
     fn covers_through_seq(&self, snapshot_envelope: &[u8]) -> u64;
 }
 
+/// What a [`SnapshotPolicy`] consults to decide whether to compact now. Compaction *timing* is a
+/// sync-layer concern (this crate); *what is safe to discard* stays with the caller's engine.
+pub struct CompactionState {
+    /// Log entries appended since this client's last snapshot (0 if it has never snapshotted).
+    pub updates_since_snapshot: u64,
+    /// Whether a snapshot exists for this document yet.
+    pub has_snapshot: bool,
+    // Future: a per-member seen-frontier, so a channel can gate compaction on "≥ X% of members have
+    // seen the entries being folded away" — needed for the auth/keyring channel, not the data channel.
+    // That requires watermark plumbing this client doesn't yet carry.
+}
+
+/// The compaction-trigger seam: given the current [`CompactionState`], should the client compact now?
+/// Different channels plug in different cadences — a data channel compacts aggressively (short window),
+/// an auth channel conservatively (long window, and eventually a %-seen safety gate).
+pub trait SnapshotPolicy {
+    fn should_compact(&self, state: &CompactionState) -> bool;
+}
+
+/// Compact once at least `n` log entries have accrued since the last snapshot. A simple length trigger.
+#[derive(Debug, Clone, Copy)]
+pub struct EveryNUpdates(pub u64);
+
+impl SnapshotPolicy for EveryNUpdates {
+    fn should_compact(&self, state: &CompactionState) -> bool {
+        state.updates_since_snapshot >= self.0
+    }
+}
+
+/// Never auto-compact — the caller drives [`SyncClient::compact`] explicitly. The conservative default.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NeverCompact;
+
+impl SnapshotPolicy for NeverCompact {
+    fn should_compact(&self, _state: &CompactionState) -> bool {
+        false
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error(transparent)]
@@ -84,6 +123,8 @@ pub struct SyncClient<E: Engine, K: Sealer, S: DocStore> {
     prev_hash: Vec<u8>,
     pull_cursor: Option<u64>,
     snapshot_version: Option<String>,
+    /// The log seq this client's last snapshot covered — for [`SnapshotPolicy`] length triggers.
+    snapshot_covered: Option<u64>,
     /// Sealed-but-not-yet-appended envelopes (write-ahead queue): sealed once, re-appended on retry
     /// (idempotent on peers).
     pending: Vec<Vec<u8>>,
@@ -100,6 +141,7 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
             prev_hash: Vec::new(),
             pull_cursor: None,
             snapshot_version: None,
+            snapshot_covered: None,
             pending: Vec::new(),
         }
     }
@@ -191,9 +233,29 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
             self.store
                 .put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
         self.snapshot_version = Some(version);
+        self.snapshot_covered = Some(covered);
         self.next_counter += 1;
         self.prev_hash = out.ciphertext_hash;
         Ok(covered)
+    }
+
+    /// Compact iff the [`SnapshotPolicy`] says so, given how much log has accrued since the last
+    /// snapshot. Returns the covered seq if it compacted. The length estimate uses the pull cursor, so
+    /// call after [`pull`](Self::pull) for an up-to-date view.
+    pub fn maybe_compact(
+        &mut self,
+        policy: &impl SnapshotPolicy,
+    ) -> Result<Option<u64>, SyncError> {
+        let head = self.pull_cursor.unwrap_or(0);
+        let state = CompactionState {
+            updates_since_snapshot: head.saturating_sub(self.snapshot_covered.unwrap_or(0)),
+            has_snapshot: self.snapshot_version.is_some(),
+        };
+        if policy.should_compact(&state) {
+            Ok(Some(self.compact()?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Bring a fresh client current: load the snapshot (if any), then pull only the tail after the seq it

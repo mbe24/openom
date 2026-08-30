@@ -84,3 +84,26 @@ fn two_replicas_converge_and_a_third_bootstraps() {
     assert!(a.engine().lines.contains("delta"));
     let _ = n;
 }
+
+#[test]
+fn snapshot_policy_triggers_compaction_by_length() {
+    let store = Arc::new(MemoryStore::new());
+    let mut a = client(store.clone());
+    a.apply("one".into()).unwrap();
+    a.apply("two".into()).unwrap();
+    a.apply("three".into()).unwrap();
+    a.pull().unwrap(); // advance the length view to 3
+
+    // Below threshold: 3 >= 4 is false → no compaction.
+    assert_eq!(a.maybe_compact(&EveryNUpdates(4)).unwrap(), None);
+    // At threshold: compacts, covering seq 3.
+    assert_eq!(a.maybe_compact(&EveryNUpdates(3)).unwrap(), Some(3));
+    // Nothing new accrued since → no second compaction.
+    assert_eq!(a.maybe_compact(&EveryNUpdates(3)).unwrap(), None);
+
+    // A fresh replica bootstraps from the policy-made snapshot.
+    let mut c = client(store.clone());
+    c.bootstrap().unwrap();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(c.engine().lines, expected, "bootstrap from the policy-made snapshot");
+}
