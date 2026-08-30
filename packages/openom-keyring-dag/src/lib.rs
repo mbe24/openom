@@ -1,13 +1,18 @@
-//! openom-keyring-dag — the openom-specific adapter over the generic `keyeo` group-membership DAG
-//! (the sequencer-free keyring, OPE-137). keyeo stays domain-free and publishable; every openom
-//! specific — the Ed25519 seam, the role model, and the authority policy — lives here.
+//! openom-keyring-dag — openom's keyring layer over the generic `keyeo` group-membership DAG (the
+//! sequencer-free keyring, OPE-137). keyeo stays domain-free and publishable; every openom specific — the
+//! Ed25519 seam, the role model, the authority policy, and the quorum policy — lives here.
 //!
-//! v1 scope (BYO / sequencer-free): ordinary members + **founder-signed** governance + rotation. The
-//! multi-signer **quorum** ("co-owners collectively", founder-or-unanimity) is v2 — see
-//! `plan/design.keyring-dag.md`. This crate deliberately depends on `openom-sign` (not `ed25519-dalek`)
-//! so keyeo's own dalek edge is replaced by openom's `verify_strict` seam (OPE-215).
+//! - **v1** (BYO / sequencer-free): ordinary members + **founder-signed** governance + rotation, via
+//!   [`KeyringAccess`] (signer-gated authority).
+//! - **v2** multi-signer **quorum** ("co-owners collectively"): [`FounderOrUnanimity`] — a privileged
+//!   change is authorized by the founder alone OR by unanimity of the co-owners, decomposed into
+//!   Propose/Approve/Commit ops that keyeo's quorum resolver tallies at the proposal's causal position.
+//!
+//! This crate deliberately depends on `openom-sign` (not `ed25519-dalek`) so keyeo's own dalek edge is
+//! replaced by openom's `verify_strict` seam (OPE-215).
 
-use keyeo::{AccessControl, GroupState, MembershipAction, Role, SigError, SignatureScheme};
+use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role, SigError, SignatureScheme};
+use std::collections::HashSet;
 
 /// openom's Ed25519 plugged into keyeo's `SignatureScheme` seam, so the engine verifies with
 /// openom-sign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
@@ -63,6 +68,11 @@ pub type KeyringOp = keyeo::Op<[u8; 32], String, KeyringRole, OpenomSign>;
 pub type KeyringState = GroupState<String, KeyringRole, OpenomSign>;
 pub type KeyringMemberInit = keyeo::MemberInit<String, KeyringRole, OpenomSign>;
 pub type KeyringEngine = keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove>;
+/// The v2 keyring engine — same authority + strong-remove, plus [`FounderOrUnanimity`] multi-signer
+/// quorum for privileged changes. Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
+/// FounderOrUnanimity)`.
+pub type KeyringQuorumEngine =
+    keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove, FounderOrUnanimity>;
 
 /// Sign a membership op with an openom-sign key. keyeo's `Op::sign` is dalek-specific; this signs over
 /// keyeo's canonical encoding with the openom-sign seam instead, so the adapter never touches dalek.
@@ -171,6 +181,78 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             | MembershipAction::Approve { .. }
             | MembershipAction::Commit { .. } => author_role.is_signer(),
         }
+    }
+}
+
+/// The member a change *acts on* — the one whose consent shouldn't gate their own removal/demotion.
+/// Excluded from both the eligible set and the unanimity denominator (you don't need a member's
+/// approval to remove or demote them).
+fn target_member(action: &KeyringAction) -> Option<&String> {
+    match action {
+        MembershipAction::Remove { member } | MembershipAction::ChangeRole { member, .. } => {
+            Some(member)
+        }
+        _ => None,
+    }
+}
+
+/// The active Owner (founder), if any. The Owner is unique and immutable in openom, so this is `Some`
+/// for any well-formed keyring; the `None` arm is defensive (fail-closed).
+fn active_owner(state: &KeyringState) -> Option<String> {
+    state
+        .members
+        .iter()
+        .find(|(_, m)| m.is_active() && m.role.is_owner())
+        .map(|(id, _)| id.clone())
+}
+
+/// openom's v2 multi-signer quorum: **founder-or-unanimity**. A privileged change takes effect if the
+/// **founder alone** authorizes it (the `Sole` path) OR **every co-owner** does (the `All` path) — so
+/// the co-owners can collectively exercise founder authority when the founder is offline, and the
+/// founder never needs to wait on them.
+///
+/// The quorum grants **founder-equivalent** authority and no more: [`Self::requirement`] asks
+/// [`KeyringAccess`] whether the *founder* could authorize this target directly, and returns a
+/// fail-closed (empty-`All`) requirement if not. This binds owner-immutability (no removing/demoting the
+/// Owner, no second Owner) to the quorum path too — closing the hole that a Commit applies its target
+/// via `apply_action` without re-checking target-level access. The member being removed/demoted is
+/// excluded from the denominator (their consent isn't needed to evict them).
+pub struct FounderOrUnanimity;
+
+impl QuorumPolicy<String, KeyringRole, OpenomSign> for FounderOrUnanimity {
+    fn eligible(&self, state: &KeyringState, target: &KeyringAction) -> HashSet<String> {
+        let excluded = target_member(target);
+        state
+            .members
+            .iter()
+            .filter(|(id, m)| m.is_active() && m.role.is_signer() && Some(*id) != excluded)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn requirement(&self, state: &KeyringState, target: &KeyringAction) -> Requirement<String> {
+        let Some(founder) = active_owner(state) else {
+            return Requirement::All(HashSet::new()); // fail-closed: no founder, no founder-equivalence
+        };
+        // Founder-equivalent, not founder-exceeding: a quorum can authorize exactly what the founder
+        // could do alone. What even the Owner can't do directly (self-removal, a second Owner, …), no
+        // quorum can do either — so owner-immutability holds on the quorum path.
+        if !KeyringAccess.is_authorized(state, &founder, target) {
+            return Requirement::All(HashSet::new());
+        }
+        let excluded = target_member(target);
+        let co_owners: HashSet<String> = state
+            .members
+            .iter()
+            .filter(|(id, m)| {
+                m.is_active() && m.role == KeyringRole::CO_OWNER && Some(*id) != excluded
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        Requirement::Either(
+            Box::new(Requirement::Sole(founder)),
+            Box::new(Requirement::All(co_owners)),
+        )
     }
 }
 
@@ -412,5 +494,116 @@ mod tests {
         let bad_sig = sk(1).sign(b"not the canonical op bytes").to_bytes();
         let op = keyeo::Op::new([1; 32], vec![], "founder".to_string(), action, bad_sig, vk(1));
         assert!(matches!(k.apply(op).unwrap_err(), keyeo::Error::BadSignature));
+    }
+
+    // ---- v2 multi-signer quorum (FounderOrUnanimity) ----
+
+    fn quorum_engine(members: &[KeyringMemberInit]) -> KeyringQuorumEngine {
+        Keyeo::with_quorum(
+            KeyringState::create(members),
+            KeyringAccess,
+            StrongRemove,
+            FounderOrUnanimity,
+        )
+    }
+    fn genesis(members: &[KeyringMemberInit]) -> KeyringOp {
+        sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: members.to_vec(),
+            },
+            &sk(1),
+        )
+    }
+    fn propose(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8, target: KeyringAction) -> KeyringOp {
+        sign_op(
+            [id; 32],
+            parents,
+            author,
+            MembershipAction::Propose { proposal_id: [7; 32], target: Box::new(target) },
+            &sk(seed),
+        )
+    }
+    fn approve(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8) -> KeyringOp {
+        sign_op([id; 32], parents, author, MembershipAction::Approve { proposal_id: [7; 32] }, &sk(seed))
+    }
+    fn commit(id: u8, parents: Vec<[u8; 32]>, author: &str, seed: u8) -> KeyringOp {
+        sign_op([id; 32], parents, author, MembershipAction::Commit { proposal_id: [7; 32] }, &sk(seed))
+    }
+    fn promote(member: &str, new_role: KeyringRole) -> KeyringAction {
+        MembershipAction::ChangeRole { member: member.to_string(), new_role }
+    }
+    fn q_role_of(k: &KeyringQuorumEngine, member: &str) -> Option<KeyringRole> {
+        k.state().members.get(member).filter(|m| m.is_active()).map(|m| m.role)
+    }
+
+    #[test]
+    fn unanimous_co_owners_promote_a_signer_without_the_founder() {
+        // Promoting an Editor into the signer set normally needs the Owner. Via quorum, unanimity of the
+        // co-owners (bob + carol) authorizes it with no founder approval — the co-owners-collective path.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ];
+        let mut k = quorum_engine(&m);
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::CO_OWNER), "unanimity of co-owners promotes");
+    }
+
+    #[test]
+    fn one_co_owner_short_of_unanimity_does_not_promote() {
+        // Same target, but carol never approves — unanimity is unmet and the founder isn't in the tally,
+        // so ed stays an Editor (fail-closed).
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ];
+        let mut k = quorum_engine(&m);
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        k.apply(commit(3, vec![[2; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::EDITOR), "bob alone is not unanimity");
+    }
+
+    #[test]
+    fn the_founder_alone_promotes_via_the_sole_path() {
+        // The founder needs no co-owner approvals: Sole(founder) is satisfied by the proposer alone.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ];
+        let mut k = quorum_engine(&m);
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "founder", 1, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        k.apply(commit(3, vec![[2; 32]], "founder", 1)).unwrap();
+        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::CO_OWNER), "founder alone suffices");
+    }
+
+    #[test]
+    fn quorum_cannot_remove_the_immutable_owner() {
+        // Owner-immutability binds the quorum path: even unanimity of every co-owner can't evict the
+        // founder, because the founder couldn't do it directly (self-removal is forbidden) and the quorum
+        // is founder-EQUIVALENT, never founder-exceeding. The requirement is fail-closed.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+        ];
+        let mut k = quorum_engine(&m);
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "bob", 2, MembershipAction::Remove { member: "founder".into() })).unwrap();
+        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&k, "founder"), Some(KeyringRole::OWNER), "no quorum can remove the Owner");
     }
 }
