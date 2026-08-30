@@ -1,0 +1,15 @@
+[package]
+name = "blobstore"
+description = "The storage swap seam: a content-addressable blob store with per-object compare-and-swap, below journal::DocStore. Backends (managed R2/Lambda, BYO Google Drive/Dropbox, memory, local-fs) are interchangeable BlobStore impls. Domain- and crypto-agnostic; stores opaque bytes."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sha2.workspace = true
+data-encoding.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
