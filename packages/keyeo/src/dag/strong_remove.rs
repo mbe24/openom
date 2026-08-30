@@ -276,7 +276,11 @@ where
         }
     }
     let op = &ops[&id];
-    let result = ac.is_authorized(&state, op.author(), op.action());
+    // Authority at the causal position = the access-control decision AND that the op's carried author key
+    // is the author's registered key here (D3): admission verified the signature against the carried key,
+    // so this is where a spoofed or since-retargeted key is caught, identically on every replica.
+    let result = ac.is_authorized(&state, op.author(), op.action())
+        && crate::dag::resolver::key_matches_registration(&state, op);
     on_stack.remove(&id);
     memo.insert(id, result);
     result

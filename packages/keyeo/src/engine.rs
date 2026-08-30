@@ -117,14 +117,19 @@ where
             }
             MembershipAction::Add { member, .. } if member == op.author() => op.author_public_key(),
             _ => {
+                // The author must be a known member — but verify against the op's OWN carried key, NOT
+                // the member's currently-registered key (D3, retarget-tolerant authentication). A validly
+                // self-signed op is admitted regardless of any later key retarget; whether the carried key
+                // was the member's REGISTERED key at the op's causal position is decided in resolution
+                // (`key_matches_registration`), so a late op signed under a since-rotated key resolves
+                // identically on every replica instead of being admitted on some and rejected on others.
                 let author = op.author();
-                self.state
-                    .members
-                    .get(author)
-                    .map(|m| &m.author_public_key)
-                    .ok_or_else(|| Error::UnknownAuthor {
+                if !self.state.members.contains_key(author) {
+                    return Err(Error::UnknownAuthor {
                         author: author.clone(),
-                    })?
+                    });
+                }
+                op.author_public_key()
             }
         };
         // Recompute the canonical encoding from the op's OWN fields and verify the

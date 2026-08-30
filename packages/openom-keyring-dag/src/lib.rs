@@ -558,6 +558,53 @@ mod tests {
     }
 
     #[test]
+    fn an_op_carrying_a_key_that_is_not_the_authors_registered_key_is_ignored() {
+        // D3 (retarget-tolerant authentication): admission verifies an op against its OWN carried key, so
+        // an impostor CAN get a forged op admitted by claiming a member's id and signing with their own
+        // key. Authority is then decided at the op's causal position, where the carried key must equal the
+        // author's REGISTERED key — so the forgery has no effect. (This is also what will let a late op
+        // signed under a since-retargeted key resolve identically on every replica once recovery lands.)
+        let mut k = engine(&[
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+        ]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![
+                    minit("founder", KeyringRole::OWNER, 1),
+                    minit("bob", KeyringRole::CO_OWNER, 2),
+                ],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+
+        // Mallory forges an op AS "bob" (a co-owner who could add an editor) but signs it with HER key
+        // (seed 9), so the op carries vk(9), not bob's registered vk(2).
+        let forged = sign_op([2; 32], vec![[1; 32]], "bob", add("mallory", KeyringRole::EDITOR, 9), &sk(9));
+        let outcome = k.apply(forged).unwrap(); // admitted — the signature matches its own carried key ...
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { events } if events.is_empty()),
+            "the forged op is admitted but resolves to no membership change"
+        );
+        assert!(
+            !members(&k).iter().any(|(m, _)| m == "mallory"),
+            "an op signed under a key that isn't the author's registered key carries no authority"
+        );
+
+        // Control: the REAL bob, signing with his registered key (seed 2), adds an editor as expected.
+        k.apply(sign_op([3; 32], vec![[1; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
+            .unwrap();
+        assert!(
+            members(&k).iter().any(|(m, _)| m == "carol"),
+            "the same action by the author's registered key is authorized — the key identity is the gate"
+        );
+    }
+
+    #[test]
     fn any_non_owner_may_remove_themselves() {
         // The widen decision: any non-Owner may self-remove (a BYO/offline convenience), even an Editor.
         let mut k = engine(&[

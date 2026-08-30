@@ -215,6 +215,38 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     }
 }
 
+/// D3 (retarget-tolerant authentication): the op's carried author public key must equal the author's
+/// **registered** key in `state` — the resolved state at the op's causal position.
+///
+/// Admission ([`crate::engine::Keyeo::authenticate`]) verifies an op's signature against its OWN carried
+/// key, so a validly self-signed op is *always* admitted, even one signed under a key a later op has
+/// since retargeted. This check — run at each op's fixed causal position, identically on every replica —
+/// then decides whether that carried key was the member's registered key, i.e. whether the op carries
+/// real authority. Splitting it this way keeps resolution replica-independent: a late op signed under a
+/// since-rotated key resolves the same everywhere, instead of being admitted where the old key is still
+/// current and rejected where it isn't (a BEC-convergence break).
+///
+/// Bootstrapping actions carry their own key by nature and are exempt: a `Create` (its members' keys ARE
+/// the genesis) and a self-authored `Add` (a member (re)introducing themselves) — their key legitimacy
+/// is judged by the action's own rule in [`crate::access::AccessControl`], not a prior registration.
+pub(crate) fn key_matches_registration<Id, R, S, Op>(state: &GroupState<Id, R, S>, op: &Op) -> bool
+where
+    Id: MemberId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<MemberId = Id, R = R, S = S>,
+{
+    match op.action() {
+        MembershipAction::Create { .. } => true,
+        MembershipAction::Add { member, .. } if member == op.author() => true,
+        _ => state
+            .members
+            .get(op.author())
+            .map(|m| &m.author_public_key == op.author_public_key())
+            .unwrap_or(false),
+    }
+}
+
 use crate::blocklace::Graph;
 
 pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> {
