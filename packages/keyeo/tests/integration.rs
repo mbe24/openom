@@ -1829,3 +1829,30 @@ fn quorum_one_short_does_not_apply() {
     k.apply(make_op(4, vec![3], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
     assert!(!qmember(&k, &dave), "only 2 of 3 Admins approved → quorum not met → target NOT applied");
 }
+
+#[test]
+fn quorum_a_concurrent_signer_add_joins_the_denominator() {
+    // Backdating defense: alice proposes a change CONCURRENT with carol's addition as a 3rd Admin (the
+    // Propose parents [1], not [2]). carol must still count in the denominator, so alice+bob alone can't
+    // push it through without her — the proposal can't be backdated to a smaller signer set.
+    let (alice, bob, carol, mallory) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let mut k = quorum_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+    ]);
+    let pid = [7u8; 32];
+    // carol is added as a 3rd Admin ...
+    k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Add {
+        member: carol, role: TestRole::Admin, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None,
+    })).unwrap();
+    // ... while alice concurrently proposes (parents [1]) + bob approves + alice commits.
+    k.apply(make_op(3, vec![1], &[1u8; 32], MembershipAction::Propose {
+        proposal_id: pid, target: Box::new(add_editor(mallory, 0xee)),
+    })).unwrap();
+    k.apply(make_op(4, vec![3], &[2u8; 32], MembershipAction::Approve { proposal_id: pid })).unwrap();
+    k.apply(make_op(5, vec![4], &[1u8; 32], MembershipAction::Commit { proposal_id: pid })).unwrap();
+    assert!(
+        !qmember(&k, &mallory),
+        "carol (concurrently added) is in the denominator; alice+bob alone is not unanimity"
+    );
+}
