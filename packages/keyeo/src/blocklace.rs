@@ -16,7 +16,9 @@
 //! - **observe** (`b ⪰ b'`): the transitive closure of acknowledge — a path exists ([`Graph::has_path`],
 //!   per the direction note). The causal happens-before the resolver reasons over.
 //! - **initial** block: one with no pointers — the genesis `Create`.
-//! - **tip**: a block nothing else observes — [`Graph::heads`] (the frontier).
+//! - **frontier**: the current maximal blocks — nothing else observes them — [`Graph::frontier`]. The
+//!   paper calls these *tips*; we use *frontier* (the CRDT term) to dodge the blockDAG tip-selection
+//!   connotation. `gc::Frontier` is the related *causal cut* (a frontier used as a prune watermark).
 //! - **closure** `[b]`: the set of all blocks `b` observes (its causal past); computed on demand
 //!   (reverse reachability), not stored.
 //! - **depth / round**: the longest pointer-path from a block — its topological rank (the engine's Kahn
@@ -71,13 +73,15 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         self.inner.nodes().collect()
     }
 
-    /// The **tips** — blocks with no successor (no incoming pointer from a later block).
-    pub fn heads(&self) -> HashSet<Op> {
-        let mut heads: HashSet<Op> = self.inner.nodes().collect();
+    /// The **frontier** — the current maximal blocks, with no successor (nothing else observes them).
+    /// The paper calls these *tips*; we use *frontier* (the CRDT term, cf. Loro `Frontiers`) to avoid the
+    /// blockDAG tip-selection connotation.
+    pub fn frontier(&self) -> HashSet<Op> {
+        let mut frontier: HashSet<Op> = self.inner.nodes().collect();
         for edge in self.inner.all_edges() {
-            heads.remove(&edge.0);
+            frontier.remove(&edge.0);
         }
-        heads
+        frontier
     }
 
     /// Whether `from` is a causal **ancestor** of `to` — a directed path `from → … → to` exists over the

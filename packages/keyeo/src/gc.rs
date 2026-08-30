@@ -24,7 +24,8 @@ use crate::roles::Role;
 /// the local store may prune. Until a sync layer supplies it, callers pass a conservative frontier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frontier<OId: crate::dag::resolver::OpId> {
-    pub heads: Vec<OId>,
+    /// The op-ids at the cut — the frontier below which the local store may prune.
+    pub ops: Vec<OId>,
 }
 
 /// A signed snapshot: the materialized membership (+ epoch wraps) at a frontier, plus a commitment to
@@ -60,7 +61,7 @@ impl<OId: crate::dag::resolver::OpId> RetentionPolicy<OId> for NeverPrune {
     }
     fn prune_horizon(&self, stable: &Frontier<OId>) -> Frontier<OId> {
         let _ = stable; // never prune; keep the stable frontier as-is
-        Frontier { heads: Vec::new() }
+        Frontier { ops: Vec::new() }
     }
 }
 

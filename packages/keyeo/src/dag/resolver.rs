@@ -220,7 +220,7 @@ use crate::blocklace::Graph;
 pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> {
     type State: Default;
     type Error: Debug;
-    fn rebuild_required(state: &Self::State, op: &Op, heads: &HashSet<OId>) -> bool;
+    fn rebuild_required(state: &Self::State, op: &Op, frontier: &HashSet<OId>) -> bool;
     fn process(
         state: Self::State,
         graph: &Graph<OId>,

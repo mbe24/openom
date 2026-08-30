@@ -78,8 +78,8 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
     type State = StrongRemoveState<OId>;
     type Error = String;
 
-    fn rebuild_required(_state: &Self::State, _op: &Op, current_heads: &HashSet<OId>) -> bool {
-        current_heads.len() > 1
+    fn rebuild_required(_state: &Self::State, _op: &Op, current_frontier: &HashSet<OId>) -> bool {
+        current_frontier.len() > 1
     }
 
     fn process(

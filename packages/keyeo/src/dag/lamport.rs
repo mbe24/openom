@@ -18,7 +18,7 @@ impl<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> Resolve
     type State = ();
     type Error = std::convert::Infallible;
 
-    fn rebuild_required(_state: &Self::State, _op: &Op, _heads: &HashSet<OId>) -> bool {
+    fn rebuild_required(_state: &Self::State, _op: &Op, _frontier: &HashSet<OId>) -> bool {
         false
     }
 
