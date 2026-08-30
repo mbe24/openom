@@ -86,6 +86,19 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 Postcard(member).write_canonical(out);
                 Postcard(new_role).write_canonical(out);
             }
+            MembershipAction::Propose { proposal_id, target } => {
+                out.push(4);
+                out.extend_from_slice(proposal_id);
+                target.write_canonical(out); // binds the target into the proposal's signed bytes
+            }
+            MembershipAction::Approve { proposal_id } => {
+                out.push(5);
+                out.extend_from_slice(proposal_id);
+            }
+            MembershipAction::Commit { proposal_id } => {
+                out.push(6);
+                out.extend_from_slice(proposal_id);
+            }
         }
     }
 }

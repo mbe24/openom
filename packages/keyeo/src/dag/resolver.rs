@@ -68,6 +68,22 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
         member: Id,
         new_role: R,
     },
+    /// Propose a privileged change gated by multi-signer quorum (v2). `proposal_id` identifies it
+    /// (Approve/Commit carry the same id); `target` is the wrapped action that takes effect once quorum
+    /// is met. Structurally generic — the quorum machinery never inspects the target's contents.
+    Propose {
+        proposal_id: [u8; 32],
+        target: Box<MembershipAction<Id, R, S>>,
+    },
+    /// A single signer's approval of a proposal — one op per approver (single-author, so strong-remove's
+    /// per-author rules apply to it unchanged).
+    Approve {
+        proposal_id: [u8; 32],
+    },
+    /// Make a proposal's `target` take effect at this op's causal position, if quorum is met by then.
+    Commit {
+        proposal_id: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

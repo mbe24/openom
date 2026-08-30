@@ -165,6 +165,11 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
                 }
                 author_role.grants_at_least(&Self::required_for(current))
             }
+            // Quorum-protocol ops (v2): the author must be a signer to participate; the wrapped target's
+            // authority is decided by the quorum resolver (founder-or-unanimity), not here.
+            MembershipAction::Propose { .. }
+            | MembershipAction::Approve { .. }
+            | MembershipAction::Commit { .. } => author_role.is_signer(),
         }
     }
 }
