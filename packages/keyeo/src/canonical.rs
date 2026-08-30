@@ -118,13 +118,19 @@ impl<Id: MemberId> CanonicalBytes for DekWrap<Id> {
     }
 }
 
-/// Deterministically encode the **signed content** of an op: a version tag followed by the postcard
-/// encoding of `(parents, author, action)`. Excludes the op id (see module docs). Both the signer
-/// ([`crate::op::Op::sign`]) and the verifier (the engine) call this over the op's own fields.
-pub fn canonical_encode<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
+/// Deterministically encode the **signed content** of a block: a version tag followed by the postcard
+/// encoding of `parents` and `author`, then the action's own canonical bytes. Excludes the op id (see
+/// module docs). Both the signer ([`crate::op::Op::sign`]) and the verifier (the engine) call this over
+/// the block's own fields.
+///
+/// Generic over the payload via the [`CanonicalBytes`] seam — the byte layout of a blocklace block is
+/// defined independently of *what* the block carries. keyeo's payload is [`MembershipAction`], but this
+/// function (and hence the block-id / signature machinery) is payload-agnostic and testable with any
+/// `CanonicalBytes` action.
+pub fn canonical_encode<OId: OpId, MId: MemberId, A: CanonicalBytes>(
     parents: &[OId],
     author: &MId,
-    action: &MembershipAction<MId, R, S>,
+    action: &A,
 ) -> Vec<u8> {
     let mut buf = b"keyeo:op:v1".to_vec();
     buf.extend_from_slice(&(parents.len() as u64).to_le_bytes());

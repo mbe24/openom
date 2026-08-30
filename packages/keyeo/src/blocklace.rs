@@ -208,4 +208,23 @@ mod tests {
         assert!(g.has_path(1, 4));
         assert!(!g.has_path(4, 1));
     }
+
+    #[test]
+    fn block_bytes_are_payload_agnostic() {
+        // The block-bytes layer (`canonical_encode`) is generic over the payload via `CanonicalBytes`:
+        // here a toy payload — no MembershipAction, no roles, no keys — proves a blocklace block's signed
+        // bytes are defined independently of what it carries, and testable without membership scaffolding.
+        use crate::canonical::{canonical_encode, CanonicalBytes};
+        struct Payload(u8);
+        impl CanonicalBytes for Payload {
+            fn write_canonical(&self, out: &mut Vec<u8>) {
+                out.push(self.0);
+            }
+        }
+        let (parents, author) = ([1u64, 2u64], [9u8; 32]);
+        let a = canonical_encode(&parents, &author, &Payload(7));
+        assert_eq!(a, canonical_encode(&parents, &author, &Payload(7)), "deterministic");
+        assert_ne!(a, canonical_encode(&parents, &author, &Payload(8)), "the payload binds");
+        assert_ne!(a, canonical_encode(&[1u64], &author, &Payload(7)), "parents bind");
+    }
 }
