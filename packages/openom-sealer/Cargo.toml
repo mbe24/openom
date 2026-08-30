@@ -39,3 +39,6 @@ optional = true
 proptest.workspace = true
 # Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
 openom-keyring = { workspace = true, features = ["test-util"] }
+# The Blob transport lifecycle test drives the vault's keyring output through the keyring/head store.
+blobstore.workspace = true
+tempfile = "3"

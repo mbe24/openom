@@ -1554,6 +1554,82 @@ mod tests {
     }
 
     #[test]
+    fn keyring_lifecycle_rides_the_blob_transport() {
+        // The full chain-keyring lifecycle over the Blob seam (OPE-265): the vault is a pure
+        // bytes -> bytes lifecycle, so every op's output publishes through keyring/head. Two replicas,
+        // one dumb local-FS backend.
+        use blobstore::{BlobStore, FsBlob, Precondition};
+        use openom_keyring::blob_sync::{KeyringChainBlobSync, PullError};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsBlob::new(dir.path()));
+        let mut a = KeyringChainBlobSync::new(store.clone());
+        let mut b = KeyringChainBlobSync::new(store.clone());
+
+        // 1. A provisions the genesis keyring and publishes it.
+        let p = provision(
+            &Passphrase::new(b"old"),
+            &TreeId::new(TREE),
+            &MemberId::new(MEMBER),
+            &ReplicaId::new(b"a"),
+        )
+        .unwrap();
+        a.publish(&p.keyring).unwrap();
+        assert_eq!(a.revision(), Some(1));
+
+        // 2. B, a fresh device, bootstraps trust from the head (verify_reset on the genesis).
+        let got = b.bootstrap().unwrap().expect("head present");
+        assert_eq!(Keyring::decode(got.as_slice()).unwrap().revision, 1);
+        assert_eq!(b.revision(), Some(1));
+
+        // 3. A changes passphrase (an ordinary transition — same identity), publishes; B walks it.
+        let cp = change_passphrase(
+            &p.keyring,
+            &Passphrase::new(b"old"),
+            &Passphrase::new(b"newer"),
+            &TreeId::new(TREE),
+            &MemberId::new(MEMBER),
+            0,
+        )
+        .unwrap();
+        a.publish(&cp.keyring).unwrap();
+        match b.pull() {
+            Ok(Some(_)) => {}                                       // a transition, walked
+            Err(PullError::ResetPending) => b.accept_reset().map(|_| ()).unwrap(), // (a reset, if ever)
+            other => panic!("unexpected pull result: {other:?}"),
+        }
+        assert_eq!(b.revision(), Some(cp.revision));
+
+        // 4. A recovers (a re-founding RESET, new identity) with the rotated code; B pull surfaces
+        //    ResetPending — the out-of-band ceremony — then B confirms via accept_reset.
+        let r = recover(
+            &cp.keyring,
+            &cp.recovery_code,
+            &Passphrase::new(b"recovered"),
+            &TreeId::new(TREE),
+            &MemberId::new(MEMBER),
+            &ReplicaId::new(b"b"),
+            0,
+        )
+        .unwrap();
+        a.publish(&r.keyring).unwrap();
+        assert!(
+            matches!(b.pull(), Err(PullError::ResetPending)),
+            "recovery is a reset, not a transition"
+        );
+        b.accept_reset().unwrap();
+        assert_eq!(b.revision(), Some(r.revision));
+
+        // 5. Rollback: the store serves an OLD keyring at the head. B detects and rejects it.
+        store.put("keyring/head", &p.keyring, Precondition::Any).unwrap();
+        assert!(
+            matches!(b.pull(), Err(PullError::Rollback { .. })),
+            "an older head must be rejected as a rollback"
+        );
+    }
+
+    #[test]
     fn wrong_passphrase_is_rejected() {
         let p = provision(
             &Passphrase::new(b"right"),

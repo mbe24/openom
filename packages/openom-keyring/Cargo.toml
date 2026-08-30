@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 # Wire types (Keyring / Member / Header) + the canonical signing-byte encoders.
 openom-protocol.workspace = true
+# The storage swap seam — the Blob transport for the keyring document (OPE-265).
+blobstore.workspace = true
 # Primitives layer — the shared CryptoError this crate returns (keyring/membership builds on crypto).
 openom-crypto.workspace = true
 # The capability→role policy verify_entry enforces.
