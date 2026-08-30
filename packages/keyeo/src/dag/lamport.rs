@@ -1,7 +1,7 @@
 //! LamportTiebreak resolver — simple deterministic ordering.
 
 use crate::access::AccessControl;
-use crate::dag::graph::Graph;
+use crate::blocklace::Graph;
 use crate::dag::resolver::{
     GroupState, MemberId, MemberState, MembershipAction, MembershipEvent, OpId, Resolver, SignedOp,
 };

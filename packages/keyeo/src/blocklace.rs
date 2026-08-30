@@ -1,13 +1,40 @@
-//! Graph operations for concurrent operation detection.
+//! The **blocklace** — keyeo's authenticated-DAG data structure.
 //!
-//! Adapted from p2panda-auth's graph module (MIT/Apache-2.0).
-//! Provides DFS-based concurrent bubble detection and authority graph cycle detection.
+//! A blocklace (Shapiro; Keidar, Naor, Poupko & Shapiro, *"Cordial Miners"*, DISC 2023) is the
+//! partially-ordered counterpart of a totally-ordered blockchain: each **block** is a signed payload
+//! plus a set of hash pointers to previously-created blocks, so the blocks induce a DAG (a cryptographic
+//! hash can't close a cycle). keyeo's [`SignedOp`] *is* a blocklace block — `id + parents + author +
+//! action + signature` — and [`Graph`] is the induced hash-pointer DAG over block ids.
+//!
+//! Vocabulary (from the paper) and where it lives here:
+//! - **observe** (`b ⪰ b'`): there is a path of pointers from `b` to `b'` — [`Graph::has_path`]. "Observe"
+//!   is the causal-ancestry / happens-before relation the resolver reasons over.
+//! - **tip**: a block no other block observes (no successor) — [`Graph::heads`].
+//! - **concurrent**: two blocks with no path either way — [`Graph::is_concurrent`].
+//! - **equivocation**: a *concurrent pair by the same author* — a Byzantine block-pair that observes
+//!   neither the other. Author identity isn't part of the topology, so equivocation is judged one layer
+//!   up, where blocks carry authors (see `StrongRemove`); the topology only supplies "concurrent".
+//!
+//! keyeo departs from Cordial Miners on one axis **on purpose**: it does not run the consensus ordering
+//! (the τ function / waves / leader blocks / supermajority ratification that totally-orders the
+//! blocklace). openom is convergent *without* consensus — Byzantine eventual consistency — so this
+//! blocklace is resolved by an authority-aware [`crate::Resolver`] to a converged set, never totally
+//! ordered. The shared idea we do take is the structure itself and its equivocation-tolerance: the DAG
+//! may *contain* equivocations; resolution excludes them rather than a reliable-broadcast layer
+//! preventing them.
 
 use petgraph::graphmap::DiGraphMap;
 use petgraph::visit::{Dfs, Reversed};
 use std::collections::HashSet;
 
-/// A directed graph of operations.
+// The block abstraction and its content-addressed id are re-exported into the blocklace namespace so
+// `blocklace::{SignedOp, content_id}` reads coherently; their definitions live with the resolver/content
+// modules they're intertwined with.
+pub use crate::content::{content_id, verify_content_id, ContentId};
+pub use crate::dag::resolver::SignedOp;
+
+/// The hash-pointer DAG induced by a blocklace — vertices are block ids, an edge `parent → child` is a
+/// child's hash pointer to a parent. Generic over the id type (a content hash, in openom's keyring).
 #[derive(Clone, Debug)]
 pub struct Graph<Op: Ord + std::hash::Hash> {
     pub inner: DiGraphMap<Op, ()>,
@@ -20,7 +47,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         }
     }
 
-    /// Add an edge from parent to child.
+    /// Add an edge from parent to child (a child's hash pointer to a parent block).
     pub fn add_edge(&mut self, parent: Op, child: Op) {
         self.inner.add_edge(parent, child, ());
     }
@@ -30,7 +57,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         self.inner.nodes().collect()
     }
 
-    /// Get the heads (nodes with no outgoing edges).
+    /// The **tips** — blocks with no successor (no incoming pointer from a later block).
     pub fn heads(&self) -> HashSet<Op> {
         let mut heads: HashSet<Op> = self.inner.nodes().collect();
         for edge in self.inner.all_edges() {
@@ -39,12 +66,14 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         heads
     }
 
-    /// Check if a path exists from `from` to `to`.
+    /// Whether `from` **observes** `to` (`from ⪰ to`): a path of pointers exists from `from` to `to`.
+    /// This is the causal-ancestry relation the resolver reasons over.
     pub fn has_path(&self, from: Op, to: Op) -> bool {
         from != to && petgraph::algo::has_path_connecting(&self.inner, from, to, None)
     }
 
-    /// Check if two ops are concurrent (no path in either direction).
+    /// Whether two blocks are **concurrent** — neither observes the other. A concurrent pair by the same
+    /// author is an equivocation (author identity is judged one layer up, not in the topology).
     pub fn is_concurrent(&self, a: Op, b: Op) -> bool {
         a != b && !self.has_path(a, b) && !self.has_path(b, a)
     }

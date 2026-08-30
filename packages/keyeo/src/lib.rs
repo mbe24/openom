@@ -7,6 +7,7 @@
 //! ```
 
 pub mod access;
+pub mod blocklace;
 pub mod canonical;
 pub mod content;
 pub mod dag;
@@ -28,7 +29,7 @@ pub mod wrap;
 pub use access::{AccessControl, DefaultAccessControl, DynAccessControl};
 pub use canonical::{canonical_encode, CanonicalBytes};
 pub use content::{content_id, verify_content_id, ContentId};
-pub use dag::graph::Graph;
+pub use blocklace::Graph;
 pub use dag::lamport::LamportTiebreak;
 pub use dag::resolver::{
     ApplyOutcome, DekWrap, Error, GroupState, MemberId, MemberInit, MemberState, MembershipAction,

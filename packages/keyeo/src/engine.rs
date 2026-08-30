@@ -1,7 +1,7 @@
 //! Keyeo engine.
 
 use crate::access::{AccessControl, DefaultAccessControl};
-use crate::dag::graph::Graph;
+use crate::blocklace::Graph;
 use crate::dag::lamport::apply_action;
 use crate::dag::resolver::{
     ApplyOutcome, Error, GroupState, MemberId, MembershipAction, MembershipEvent, Resolver,

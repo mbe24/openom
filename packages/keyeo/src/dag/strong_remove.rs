@@ -49,7 +49,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::access::AccessControl;
-use crate::dag::graph::Graph;
+use crate::blocklace::Graph;
 use crate::dag::lamport::apply_action;
 use crate::dag::resolver::{GroupState, MembershipAction, OpId, Resolver, SignedOp};
 use crate::roles::Role;

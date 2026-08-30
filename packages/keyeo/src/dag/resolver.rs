@@ -215,7 +215,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     }
 }
 
-use crate::dag::graph::Graph;
+use crate::blocklace::Graph;
 
 pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> {
     type State: Default;
