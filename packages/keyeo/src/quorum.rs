@@ -10,6 +10,43 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
+use crate::dag::resolver::{GroupState, MemberId, MembershipAction};
+use crate::roles::Role;
+use crate::signature::SignatureScheme;
+
+/// The domain seam for multi-signer quorum — parallel to `AccessControl`. Given the resolved state at a
+/// proposal's causal position and the proposed `target`, it says **who may approve** and **what quorum is
+/// required**. The quorum resolver never reads roles itself; it asks the policy — so all membership
+/// coupling lives here, not in the engine (the property the unified `Engine<Op, State, Resolver>` needs).
+pub trait QuorumPolicy<Id: MemberId, R: Role, S: SignatureScheme>: Send + Sync {
+    /// The members permitted to approve a proposal of `target`, at the proposal's causal position.
+    fn eligible(&self, state: &GroupState<Id, R, S>, target: &MembershipAction<Id, R, S>) -> HashSet<Id>;
+    /// The quorum a proposal of `target` requires (e.g. `Either(Sole(founder), All(co-owners))`).
+    fn requirement(
+        &self,
+        state: &GroupState<Id, R, S>,
+        target: &MembershipAction<Id, R, S>,
+    ) -> Requirement<Id>;
+}
+
+/// **Individual** governance — a single authorized signer's action stands on its own. The positive dual
+/// of a collective quorum, and the default: no change goes through Propose/Approve/Commit; each op's
+/// authority is decided by `AccessControl` alone. Under this policy a `Commit` never reaches quorum (the
+/// eligible set is empty and the requirement is fail-closed), so the quorum ops are inert — exactly the
+/// pre-v2 behaviour.
+#[derive(Clone, Debug, Default)]
+pub struct Individual;
+
+impl<Id: MemberId, R: Role, S: SignatureScheme> QuorumPolicy<Id, R, S> for Individual {
+    fn eligible(&self, _: &GroupState<Id, R, S>, _: &MembershipAction<Id, R, S>) -> HashSet<Id> {
+        HashSet::new()
+    }
+    fn requirement(&self, _: &GroupState<Id, R, S>, _: &MembershipAction<Id, R, S>) -> Requirement<Id> {
+        // Fail-closed: `All` of the empty set is never satisfied, so no Commit ever takes effect.
+        Requirement::All(HashSet::new())
+    }
+}
+
 /// What a privileged change requires to take effect — a generic M-of-N over member ids.
 #[derive(Clone, Debug)]
 pub enum Requirement<Id> {
@@ -87,6 +124,26 @@ mod tests {
             !req.satisfied_by(&set(&["a", "x", "y", "z"])),
             "approvers outside the set don't count toward the threshold"
         );
+    }
+
+    #[test]
+    fn individual_governance_never_reaches_quorum() {
+        // `Individual`'s requirement is fail-closed for every approver set — so a Commit under it never
+        // takes effect, and the quorum ops are inert (the pre-v2 / default behaviour).
+        use crate::dag::resolver::GroupState;
+        use crate::signature::Ed25519;
+        #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+        struct TRole;
+        impl Role for TRole {
+            fn grants_at_least(&self, _: &Self) -> bool {
+                true
+            }
+        }
+        let state = GroupState::<String, TRole, Ed25519>::new();
+        let target = MembershipAction::<String, TRole, Ed25519>::Remove { member: "x".into() };
+        let req = QuorumPolicy::requirement(&Individual, &state, &target);
+        assert!(!req.satisfied_by(&set(&["anyone", "everyone"])));
+        assert!(QuorumPolicy::eligible(&Individual, &state, &target).is_empty());
     }
 
     #[test]

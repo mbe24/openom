@@ -43,7 +43,7 @@ pub use epoch::{
 pub use gc::{compact, Frontier, RetentionPolicy, Snapshot};
 pub use kdf::{Key32, KEY_LEN, SALT_LEN};
 pub use op::Op;
-pub use quorum::Requirement;
+pub use quorum::{Individual, QuorumPolicy, Requirement};
 pub use roles::Role;
 pub use signature::{Ed25519, SigError, SignatureScheme};
 
