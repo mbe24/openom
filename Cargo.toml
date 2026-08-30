@@ -25,6 +25,7 @@ members = [
     "packages/openom-sync",
     "packages/keyeo",
     "packages/openom-keyring-dag",
+    "packages/docsync",
     "openom",
     "apps/src-tauri",
 ]
