@@ -42,6 +42,11 @@ impl KeyringRole {
     fn is_signer(self) -> bool {
         self.0 <= openom_roles::ROLE_CO_OWNER
     }
+
+    /// The Owner (founder) — the unique keyring root.
+    fn is_owner(self) -> bool {
+        self.0 == openom_roles::ROLE_OWNER
+    }
 }
 
 impl Role for KeyringRole {
@@ -75,25 +80,42 @@ pub fn sign_op(
     keyeo::Op::new(id, parents, author, action, signature, author_public_key)
 }
 
-/// openom keyring authority — v1, founder-signed governance (quorum is v2).
+/// openom keyring authority — v1, founder-signed governance (multi-signer quorum is v2).
 ///
-/// The role a change requires depends on **what it touches**:
-/// - touching a **signer** (`CoOwner` or stronger) requires the **Owner** (founder);
-/// - touching an **ordinary member** (`Maintainer` or weaker) requires **Maintainer+**;
-/// - a member may always **remove themselves**.
+/// Keyring-write authority is **signer-gated**, not role-threshold-based: only a **signer** (Owner or
+/// CoOwner) may author a keyring change. A `MemberRole` below CoOwner (Maintainer / Editor / Viewer)
+/// carries content/moderation authority elsewhere in openom, but grants **no keyring-write authority**
+/// here. Within that gate:
+/// - touching a **signer** (adding/removing/retargeting an Owner or CoOwner) requires the **Owner**;
+/// - touching an **ordinary member** requires any **signer** (CoOwner or Owner);
+/// - the **Owner is unique and immutable** in v1 — no second Owner may be created, and the Owner may not
+///   be removed or demoted (not even by themselves): "the founder can't leave" (transfer is a v2 op);
+/// - any **non-Owner** member may **remove themselves** (a deliberate BYO-offline widening).
 ///
-/// (Authorization is evaluated by the resolver at each op's causal position — see keyeo's
-/// authority-aware `StrongRemove`, OPE-258.)
+/// This mirrors openom's two-axis model as a single-axis re-model under a declared lockstep invariant
+/// (Owner↔Founder-signer, CoOwner-member↔CoOwner-signer). Authorization is evaluated by the resolver at
+/// each op's causal position — see keyeo's authority-aware `StrongRemove` (OPE-258).
 pub struct KeyringAccess;
 
 impl KeyringAccess {
-    /// The weakest role permitted to add/remove/retarget a member whose role is `target`.
+    /// The weakest role permitted to author a change **touching** a member whose role is `target`:
+    /// touching a signer needs the Owner; touching an ordinary member needs any signer (CoOwner+).
     fn required_for(target: KeyringRole) -> KeyringRole {
         if target.is_signer() {
             KeyringRole::OWNER
         } else {
-            KeyringRole::MAINTAINER
+            KeyringRole::CO_OWNER
         }
+    }
+
+    /// The role a member currently holds at this causal position (Viewer if absent — a target that
+    /// isn't a member is "ordinary", never a signer).
+    fn role_of(state: &KeyringState, member: &str) -> KeyringRole {
+        state
+            .members
+            .get(member)
+            .map(|m| m.role)
+            .unwrap_or(KeyringRole::VIEWER)
     }
 }
 
@@ -104,46 +126,43 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
         author: &String,
         action: &KeyringAction,
     ) -> bool {
-        // The author's current role at this causal position; a non-member may only author the genesis
-        // Create (naming themselves an initial member).
+        // Genesis Create: the author must be a listed initial member, and there must be EXACTLY ONE
+        // Owner (the founder). This seeds the "exactly one Owner" invariant; no later op can add, remove,
+        // or demote an Owner, so it holds for the keyring's whole life.
+        if let MembershipAction::Create { initial_members } = action {
+            let owners = initial_members.iter().filter(|m| m.role.is_owner()).count();
+            return owners == 1 && initial_members.iter().any(|m| &m.id == author);
+        }
+        // Every other change requires an active member author.
         let author_role = match state.members.get(author) {
             Some(m) if m.is_active() => m.role,
-            _ => {
-                return matches!(
-                    action,
-                    MembershipAction::Create { initial_members }
-                        if initial_members.iter().any(|m| &m.id == author)
-                );
-            }
+            _ => return false,
         };
         match action {
-            MembershipAction::Create { initial_members } => {
-                initial_members.iter().any(|m| &m.id == author)
-            }
+            MembershipAction::Create { .. } => false, // handled above
             MembershipAction::Add { role, .. } => {
-                author_role.grants_at_least(&Self::required_for(*role))
+                // No second Owner, ever; otherwise the author must out-rank what the target role needs.
+                !role.is_owner() && author_role.grants_at_least(&Self::required_for(*role))
             }
             MembershipAction::ChangeRole { member, new_role } => {
-                // Must be able to manage both the current standing and the target role — so a Maintainer
-                // can't demote an Owner (touching the current role needs Owner) nor promote into the
-                // signer set (touching the target role needs Owner).
-                let current = state
-                    .members
-                    .get(member)
-                    .map(|m| m.role)
-                    .unwrap_or(KeyringRole::VIEWER);
-                author_role.grants_at_least(&Self::required_for(current))
+                let current = Self::role_of(state, member);
+                // The Owner can't be demoted, and no one may be promoted INTO Owner (uniqueness). The
+                // author must out-rank both the current standing and the target role.
+                !current.is_owner()
+                    && !new_role.is_owner()
+                    && author_role.grants_at_least(&Self::required_for(current))
                     && author_role.grants_at_least(&Self::required_for(*new_role))
             }
             MembershipAction::Remove { member } => {
-                if author == member {
-                    return true; // self-removal is always allowed
+                let current = Self::role_of(state, member);
+                // The Owner can never be removed — not even by themselves (the founder can't leave).
+                if current.is_owner() {
+                    return false;
                 }
-                let current = state
-                    .members
-                    .get(member)
-                    .map(|m| m.role)
-                    .unwrap_or(KeyringRole::VIEWER);
+                // Widen: any non-Owner member may remove THEMSELVES.
+                if author == member {
+                    return true;
+                }
                 author_role.grants_at_least(&Self::required_for(current))
             }
         }
@@ -189,8 +208,9 @@ mod tests {
 
     #[test]
     fn founder_signed_governance_resolves_through_keyeo() {
-        // founder (Owner) creates the group, adds bob as Maintainer; bob (Maintainer) then adds an
-        // ordinary Editor. The openom seams (OpenomSign, KeyringRole, KeyringAccess) resolve end to end.
+        // founder (Owner) creates the group and adds bob as a CoOwner (a signer); bob (a signer) then
+        // adds an ordinary Editor. The openom seams (OpenomSign, KeyringRole, KeyringAccess) resolve end
+        // to end.
         let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
             [1; 32],
@@ -202,15 +222,17 @@ mod tests {
             &sk(1),
         ))
         .unwrap();
-        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::MAINTAINER, 2), &sk(1)))
+        // founder adds bob into the signer set (touching a signer → needs Owner ✓)
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
             .unwrap();
+        // bob (a signer) adds carol as an ordinary Editor (touching an ordinary member → needs a signer ✓)
         k.apply(sign_op([3; 32], vec![[2; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2)))
             .unwrap();
 
         assert_eq!(
             members(&k),
             vec![
-                ("bob".to_string(), KeyringRole::MAINTAINER),
+                ("bob".to_string(), KeyringRole::CO_OWNER),
                 ("carol".to_string(), KeyringRole::EDITOR),
                 ("founder".to_string(), KeyringRole::OWNER),
             ]
@@ -218,37 +240,30 @@ mod tests {
     }
 
     #[test]
-    fn a_maintainer_cannot_touch_a_signer() {
-        // bob (Maintainer) removing the founder (Owner = a signer) needs Owner authority. Admit-then-
-        // resolve: the op is admitted (valid signature) but yields no membership change.
+    fn a_maintainer_cannot_write_the_keyring() {
+        // A Maintainer is NOT a signer, so it has NO keyring-write authority — not even to add an
+        // ordinary member. Admit-then-resolve: the op is admitted (valid signature) but has no effect.
         let mut k = engine(&[
             minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::MAINTAINER, 2),
+            minit("dave", KeyringRole::MAINTAINER, 4),
         ]);
         let r = k
-            .apply(sign_op(
-                [1; 32],
-                vec![],
-                "bob",
-                MembershipAction::Remove {
-                    member: "founder".to_string(),
-                },
-                &sk(2),
-            ))
+            .apply(sign_op([1; 32], vec![], "dave", add("mallory", KeyringRole::EDITOR, 9), &sk(4)))
             .unwrap();
         assert!(matches!(r, ApplyOutcome::Applied { events } if events.is_empty()));
         assert!(
-            k.state().active_members().iter().any(|(m, _)| m == "founder"),
-            "founder must survive a Maintainer's unauthorized remove"
+            !members(&k).iter().any(|(m, _)| m == "mallory"),
+            "a Maintainer is not a signer and cannot add a member"
         );
     }
 
     #[test]
-    fn only_the_owner_may_promote_into_the_signer_set() {
-        // bob (Maintainer) cannot promote carol (Editor) to CoOwner — that touches the signer set.
+    fn only_the_owner_may_touch_the_signer_set() {
+        // A CoOwner is a signer, but still cannot promote someone INTO the signer set nor remove another
+        // signer — that requires the Owner (founder-signed governance; unanimity/quorum is v2).
         let mut k = engine(&[
             minit("founder", KeyringRole::OWNER, 1),
-            minit("bob", KeyringRole::MAINTAINER, 2),
+            minit("bob", KeyringRole::CO_OWNER, 2),
             minit("carol", KeyringRole::EDITOR, 3),
         ]);
         k.apply(sign_op(
@@ -264,7 +279,120 @@ mod tests {
         .unwrap();
         assert!(
             members(&k).contains(&("carol".to_string(), KeyringRole::EDITOR)),
-            "carol stays an Editor — a Maintainer can't create a signer"
+            "a CoOwner can't create another signer"
+        );
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "bob",
+            MembershipAction::Remove {
+                member: "founder".to_string(),
+            },
+            &sk(2),
+        ))
+        .unwrap();
+        assert!(
+            members(&k).iter().any(|(m, _)| m == "founder"),
+            "a CoOwner can't remove the Owner"
+        );
+    }
+
+    #[test]
+    fn the_owner_is_unique_and_immutable() {
+        // No second Owner may be created, and the Owner may not be removed or demoted — not even by
+        // themselves ("the founder can't leave"). Each op is admitted but has no effect.
+        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![minit("founder", KeyringRole::OWNER, 1)],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        // a second Owner is forbidden
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("regent", KeyringRole::OWNER, 5), &sk(1)))
+            .unwrap();
+        assert!(!members(&k).iter().any(|(m, _)| m == "regent"), "no second Owner");
+        // the Owner cannot self-remove
+        k.apply(sign_op(
+            [3; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::Remove {
+                member: "founder".to_string(),
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        // ...nor self-demote
+        k.apply(sign_op(
+            [4; 32],
+            vec![[3; 32]],
+            "founder",
+            MembershipAction::ChangeRole {
+                member: "founder".to_string(),
+                new_role: KeyringRole::CO_OWNER,
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        assert_eq!(
+            members(&k),
+            vec![("founder".to_string(), KeyringRole::OWNER)],
+            "the Owner remains, alone and unchanged"
+        );
+    }
+
+    #[test]
+    fn any_non_owner_may_remove_themselves() {
+        // The widen decision: any non-Owner may self-remove (a BYO/offline convenience), even an Editor.
+        let mut k = engine(&[
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "ed",
+            MembershipAction::Remove {
+                member: "ed".to_string(),
+            },
+            &sk(6),
+        ))
+        .unwrap();
+        assert!(
+            !members(&k).iter().any(|(m, _)| m == "ed"),
+            "an Editor may remove themselves"
+        );
+    }
+
+    #[test]
+    fn a_co_owner_manages_ordinary_members() {
+        // A signer (CoOwner) may add and remove ordinary members.
+        let mut k = engine(&[
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::EDITOR, 3),
+        ]);
+        k.apply(sign_op([1; 32], vec![], "bob", add("dave", KeyringRole::EDITOR, 4), &sk(2)))
+            .unwrap();
+        assert!(members(&k).iter().any(|(m, _)| m == "dave"), "a CoOwner may add an ordinary member");
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "bob",
+            MembershipAction::Remove {
+                member: "carol".to_string(),
+            },
+            &sk(2),
+        ))
+        .unwrap();
+        assert!(
+            !members(&k).iter().any(|(m, _)| m == "carol"),
+            "a CoOwner may remove an ordinary member"
         );
     }
 
