@@ -18,6 +18,7 @@ pub mod hpke_wrap;
 pub mod kdf;
 pub mod keyring_mod;
 pub mod op;
+pub mod quorum;
 pub mod recovery;
 pub mod roles;
 pub mod root;
@@ -42,6 +43,7 @@ pub use epoch::{
 pub use gc::{compact, Frontier, RetentionPolicy, Snapshot};
 pub use kdf::{Key32, KEY_LEN, SALT_LEN};
 pub use op::Op;
+pub use quorum::Requirement;
 pub use roles::Role;
 pub use signature::{Ed25519, SigError, SignatureScheme};
 
