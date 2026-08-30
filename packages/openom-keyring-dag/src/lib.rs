@@ -68,11 +68,11 @@ pub type KeyringOp = keyeo::Op<[u8; 32], String, KeyringRole, OpenomSign>;
 pub type KeyringState = GroupState<String, KeyringRole, OpenomSign>;
 pub type KeyringMemberInit = keyeo::MemberInit<String, KeyringRole, OpenomSign>;
 pub type KeyringEngine = keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove>;
-/// The v2 keyring engine — same authority + strong-remove, plus [`FounderOrUnanimity`] multi-signer
-/// quorum for privileged changes. Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
-/// FounderOrUnanimity)`.
+/// The v2 keyring engine — same authority + strong-remove, plus a [`KeyringQuorum`] multi-signer policy
+/// for privileged changes. Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
+/// KeyringQuorum::founder_or_unanimity())` (or any other [`QuorumRule`]).
 pub type KeyringQuorumEngine =
-    keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove, FounderOrUnanimity>;
+    keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove, KeyringQuorum>;
 
 /// Sign a membership op with an openom-sign key. keyeo's `Op::sign` is dalek-specific; this signs over
 /// keyeo's canonical encoding with the openom-sign seam instead, so the adapter never touches dalek.
@@ -206,10 +206,31 @@ fn active_owner(state: &KeyringState) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
-/// openom's v2 multi-signer quorum: **founder-or-unanimity**. A privileged change takes effect if the
-/// **founder alone** authorizes it (the `Sole` path) OR **every co-owner** does (the `All` path) — so
-/// the co-owners can collectively exercise founder authority when the founder is offline, and the
-/// founder never needs to wait on them.
+/// The per-keyring governance rule — so one family tree can be founder-only, another 3-of-4, another
+/// founder-or-unanimity, all from the same [`KeyringQuorum`] policy. The founder (Owner) is always
+/// eligible to propose/approve; the co-owners are the collective body. Every rule is still bounded by
+/// founder-equivalent authority (see [`KeyringQuorum::requirement`]).
+///
+/// Note (not yet wired): the chosen rule must be **authenticated and pinned** per keyring — set at
+/// genesis and replicated — so every replica evaluates the same denominator and an attacker can't
+/// weaken it (e.g. 3-of-4 → 1-of-4). Today it's a construction-time parameter the client is responsible
+/// for keeping consistent across a family's replicas; pinning it into the signed root is a follow-up
+/// (OPE-260 hardening / the unified-substrate governance-config question).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuorumRule {
+    /// The founder alone — co-owners have no governance vote (a single-admin family).
+    FounderOnly,
+    /// The founder alone, OR unanimity of the co-owners.
+    FounderOrUnanimity,
+    /// The founder alone, OR at least `m` of the co-owners.
+    FounderOrThreshold(usize),
+    /// At least `m` of the signers (Owner + co-owners), with no special founder path — a flat M-of-N.
+    Threshold(usize),
+}
+
+/// openom's v2 multi-signer quorum, parameterised by a per-keyring [`QuorumRule`]. A privileged change
+/// takes effect when the rule's requirement is met by the distinct eligible approvers — e.g. the founder
+/// alone, or unanimity of co-owners, or M of N.
 ///
 /// The quorum grants **founder-equivalent** authority and no more: [`Self::requirement`] asks
 /// [`KeyringAccess`] whether the *founder* could authorize this target directly, and returns a
@@ -217,17 +238,53 @@ fn active_owner(state: &KeyringState) -> Option<String> {
 /// Owner, no second Owner) to the quorum path too — closing the hole that a Commit applies its target
 /// via `apply_action` without re-checking target-level access. The member being removed/demoted is
 /// excluded from the denominator (their consent isn't needed to evict them).
-pub struct FounderOrUnanimity;
+#[derive(Clone, Copy, Debug)]
+pub struct KeyringQuorum {
+    rule: QuorumRule,
+}
 
-impl QuorumPolicy<String, KeyringRole, OpenomSign> for FounderOrUnanimity {
-    fn eligible(&self, state: &KeyringState, target: &KeyringAction) -> HashSet<String> {
-        let excluded = target_member(target);
+impl KeyringQuorum {
+    pub fn new(rule: QuorumRule) -> Self {
+        Self { rule }
+    }
+    /// The founder alone governs (single-admin family).
+    pub fn founder_only() -> Self {
+        Self::new(QuorumRule::FounderOnly)
+    }
+    /// The founder alone, OR every co-owner (the collective-when-offline default).
+    pub fn founder_or_unanimity() -> Self {
+        Self::new(QuorumRule::FounderOrUnanimity)
+    }
+    /// The founder alone, OR at least `m` co-owners.
+    pub fn founder_or_threshold(m: usize) -> Self {
+        Self::new(QuorumRule::FounderOrThreshold(m))
+    }
+    /// A flat `m`-of-N over the signers (Owner + co-owners), no special founder path.
+    pub fn threshold(m: usize) -> Self {
+        Self::new(QuorumRule::Threshold(m))
+    }
+}
+
+impl KeyringQuorum {
+    /// Active members matching `pred` (a role test), minus the change's own target member.
+    fn signer_set(
+        state: &KeyringState,
+        excluded: Option<&String>,
+        pred: impl Fn(KeyringRole) -> bool,
+    ) -> HashSet<String> {
         state
             .members
             .iter()
-            .filter(|(id, m)| m.is_active() && m.role.is_signer() && Some(*id) != excluded)
+            .filter(|(id, m)| m.is_active() && pred(m.role) && Some(*id) != excluded)
             .map(|(id, _)| id.clone())
             .collect()
+    }
+}
+
+impl QuorumPolicy<String, KeyringRole, OpenomSign> for KeyringQuorum {
+    fn eligible(&self, state: &KeyringState, target: &KeyringAction) -> HashSet<String> {
+        // Any signer may propose/approve under every rule; the rule only decides how many are required.
+        Self::signer_set(state, target_member(target), KeyringRole::is_signer)
     }
 
     fn requirement(&self, state: &KeyringState, target: &KeyringAction) -> Requirement<String> {
@@ -241,18 +298,21 @@ impl QuorumPolicy<String, KeyringRole, OpenomSign> for FounderOrUnanimity {
             return Requirement::All(HashSet::new());
         }
         let excluded = target_member(target);
-        let co_owners: HashSet<String> = state
-            .members
-            .iter()
-            .filter(|(id, m)| {
-                m.is_active() && m.role == KeyringRole::CO_OWNER && Some(*id) != excluded
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        Requirement::Either(
-            Box::new(Requirement::Sole(founder)),
-            Box::new(Requirement::All(co_owners)),
-        )
+        let co_owners =
+            || Self::signer_set(state, excluded, |r| r == KeyringRole::CO_OWNER);
+        let sole = || Box::new(Requirement::Sole(founder.clone()));
+        match self.rule {
+            QuorumRule::FounderOnly => Requirement::Sole(founder),
+            QuorumRule::FounderOrUnanimity => {
+                Requirement::Either(sole(), Box::new(Requirement::All(co_owners())))
+            }
+            QuorumRule::FounderOrThreshold(m) => {
+                Requirement::Either(sole(), Box::new(Requirement::Threshold(m, co_owners())))
+            }
+            QuorumRule::Threshold(m) => {
+                Requirement::Threshold(m, Self::signer_set(state, excluded, KeyringRole::is_signer))
+            }
+        }
     }
 }
 
@@ -498,13 +558,11 @@ mod tests {
 
     // ---- v2 multi-signer quorum (FounderOrUnanimity) ----
 
+    fn quorum_engine_with(members: &[KeyringMemberInit], quorum: KeyringQuorum) -> KeyringQuorumEngine {
+        Keyeo::with_quorum(KeyringState::create(members), KeyringAccess, StrongRemove, quorum)
+    }
     fn quorum_engine(members: &[KeyringMemberInit]) -> KeyringQuorumEngine {
-        Keyeo::with_quorum(
-            KeyringState::create(members),
-            KeyringAccess,
-            StrongRemove,
-            FounderOrUnanimity,
-        )
+        quorum_engine_with(members, KeyringQuorum::founder_or_unanimity())
     }
     fn genesis(members: &[KeyringMemberInit]) -> KeyringOp {
         sign_op(
@@ -605,5 +663,58 @@ mod tests {
         k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
         k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
         assert_eq!(q_role_of(&k, "founder"), Some(KeyringRole::OWNER), "no quorum can remove the Owner");
+    }
+
+    // ---- dynamic quorum: per-keyring QuorumRule ----
+
+    #[test]
+    fn founder_only_rule_ignores_co_owner_unanimity() {
+        // A single-admin family: even unanimity of every co-owner can't act; only the founder (Sole) can.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ];
+        // co-owners bob + carol try to promote ed -> refused under FounderOnly.
+        let mut k = quorum_engine_with(&m, KeyringQuorum::founder_only());
+        k.apply(genesis(&m)).unwrap();
+        k.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        k.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        k.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&k, "ed"), Some(KeyringRole::EDITOR), "co-owner unanimity is powerless here");
+        // the founder alone still governs.
+        let mut k2 = quorum_engine_with(&m, KeyringQuorum::founder_only());
+        k2.apply(genesis(&m)).unwrap();
+        k2.apply(propose(2, vec![[1; 32]], "founder", 1, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        k2.apply(commit(3, vec![[2; 32]], "founder", 1)).unwrap();
+        assert_eq!(q_role_of(&k2, "ed"), Some(KeyringRole::CO_OWNER), "founder alone governs");
+    }
+
+    #[test]
+    fn threshold_rule_needs_m_of_n_signers() {
+        // A "3 of 4" family: founder + 3 co-owners, any 3 signers suffice, no special founder path.
+        let m = [
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+            minit("carol", KeyringRole::CO_OWNER, 3),
+            minit("dave", KeyringRole::CO_OWNER, 4),
+            minit("ed", KeyringRole::EDITOR, 6),
+        ];
+        // Two signers (bob proposer + carol) is short of 3 -> refused.
+        let mut short = quorum_engine_with(&m, KeyringQuorum::threshold(3));
+        short.apply(genesis(&m)).unwrap();
+        short.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        short.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        short.apply(commit(4, vec![[3; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&short, "ed"), Some(KeyringRole::EDITOR), "2 of 4 is short of the threshold");
+        // Three signers (bob + carol + dave) meet 3-of-4 -> applied, without the founder.
+        let mut ok = quorum_engine_with(&m, KeyringQuorum::threshold(3));
+        ok.apply(genesis(&m)).unwrap();
+        ok.apply(propose(2, vec![[1; 32]], "bob", 2, promote("ed", KeyringRole::CO_OWNER))).unwrap();
+        ok.apply(approve(3, vec![[2; 32]], "carol", 3)).unwrap();
+        ok.apply(approve(4, vec![[3; 32]], "dave", 4)).unwrap();
+        ok.apply(commit(5, vec![[4; 32]], "bob", 2)).unwrap();
+        assert_eq!(q_role_of(&ok, "ed"), Some(KeyringRole::CO_OWNER), "3 of 4 signers meet the threshold");
     }
 }
