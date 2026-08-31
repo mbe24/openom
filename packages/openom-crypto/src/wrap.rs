@@ -1,6 +1,7 @@
 //! DEK wrapping (§4) — seal a per-tree DEK under a per-member KEK, bound to the
-//! `(tree_id, key_id, member_id, wrap_method, epoch)` context so a wrap can't be
-//! transplanted between members, epochs, or trees.
+//! `(tree_id, key_id, member_id, wrap_method)` context so a wrap can't be
+//! transplanted between members, epochs, or trees. `key_id` is a fresh random salt per epoch, so it
+//! *is* the epoch's identity — the AAD needs no separate epoch scalar (OPE-281).
 //!
 //! The wrap AEAD is XChaCha20-Poly1305 (24-byte random nonce). This is the indirection
 //! that lets the passphrase change, and lets a tree be shared, without re-encrypting
@@ -15,14 +16,14 @@ use crate::{CryptoError, Dek, Kek, RrkSecret, KEY_LEN};
 /// XChaCha20-Poly1305 nonce length for a wrap.
 const WRAP_NONCE_LEN: usize = 24;
 
-/// The binding tuple a wrap is authenticated against (§4).
+/// The binding tuple a wrap is authenticated against (§4). No epoch field: `key_id` is a per-epoch random
+/// salt, so it already uniquely identifies the epoch, and the epoch counter is signature-covered upstream.
 pub struct WrapContext<'a> {
     pub tree_id: &'a [u8],
     pub key_id: &'a [u8],
     pub member_id: &'a str,
     /// `WrapMethod` value (e.g. `WRAP_METHOD_PASSPHRASE_ARGON2ID`).
     pub wrap_method: i32,
-    pub epoch: u32,
 }
 
 /// The output of a wrap: the random nonce and the sealed DEK, to store in a `KeyWrap`.
@@ -48,13 +49,7 @@ pub fn wrap_dek_with_nonce(
     dek: &Dek,
     ctx: &WrapContext,
 ) -> Result<WrappedDek, CryptoError> {
-    let aad = wrap_aad(
-        ctx.tree_id,
-        ctx.key_id,
-        ctx.member_id,
-        ctx.wrap_method,
-        ctx.epoch,
-    );
+    let aad = wrap_aad(ctx.tree_id, ctx.key_id, ctx.member_id, ctx.wrap_method);
     let wrapped_dek = xchacha_seal(kek.expose(), &nonce, &aad, dek.expose())?;
     Ok(WrappedDek {
         nonce: nonce.to_vec(),
@@ -71,13 +66,7 @@ pub fn unwrap_dek(
     wrapped_dek: &[u8],
     ctx: &WrapContext,
 ) -> Result<Dek, CryptoError> {
-    let aad = wrap_aad(
-        ctx.tree_id,
-        ctx.key_id,
-        ctx.member_id,
-        ctx.wrap_method,
-        ctx.epoch,
-    );
+    let aad = wrap_aad(ctx.tree_id, ctx.key_id, ctx.member_id, ctx.wrap_method);
     let dek_bytes = Zeroizing::new(xchacha_open(kek.expose(), nonce, &aad, wrapped_dek)?);
     let dek: [u8; KEY_LEN] = dek_bytes
         .as_slice()
@@ -149,7 +138,6 @@ mod tests {
             key_id: b"epoch-0-key",
             member_id: "acct-123",
             wrap_method: 1, // WRAP_METHOD_PASSPHRASE_ARGON2ID
-            epoch: 0,
         }
     }
 
@@ -190,11 +178,11 @@ mod tests {
                 tree_id: b"other-tree-16byt",
                 ..ctx()
             },
+            // A different epoch is a different key_id (a fresh per-epoch salt), which this covers.
             WrapContext {
                 key_id: b"epoch-1-key",
                 ..ctx()
             },
-            WrapContext { epoch: 1, ..ctx() },
             WrapContext {
                 wrap_method: 2,
                 ..ctx()

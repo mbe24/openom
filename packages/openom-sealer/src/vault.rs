@@ -122,7 +122,6 @@ pub fn provision(
             tree_id,
             member_id,
             &key_id,
-            0,
         )?)],
     };
     let recovery_key =
@@ -1166,7 +1165,7 @@ fn do_add_member(
     member_author_public: &[u8],
 ) -> Result<MemberAdded, SealerError> {
     for (key_id, epoch, dek) in deks {
-        let info = wrap_aad(tree_id, key_id, new_member_id, HPKE, *epoch);
+        let info = wrap_aad(tree_id, key_id, new_member_id, HPKE);
         let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
         let ep = keyring
             .epochs
@@ -1231,13 +1230,12 @@ fn do_remove_member(
         tree_id,
         &founder_id,
         &new_key_id,
-        new_epoch,
     )?)];
     for m in &keyring.members {
         if m.member_id == founder_id || m.member_id == remove_member_id {
             continue;
         }
-        let info = wrap_aad(tree_id, &new_key_id, &m.member_id, HPKE, new_epoch);
+        let info = wrap_aad(tree_id, &new_key_id, &m.member_id, HPKE);
         let w = hpke_wrap_dek(&m.hpke_public_key, &new_dek, &info)?;
         wraps.push(KeyWrap {
             member_id: m.member_id.clone(),

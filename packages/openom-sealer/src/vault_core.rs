@@ -269,9 +269,8 @@ pub(crate) fn rrk_wrap_epoch(
     tree_id: &[u8],
     founder_id: &str,
     key_id: &[u8],
-    epoch: u32,
 ) -> Result<CoreWrap, SealerError> {
-    let info = wrap_aad(tree_id, key_id, founder_id, RRK_HPKE, epoch);
+    let info = wrap_aad(tree_id, key_id, founder_id, RRK_HPKE);
     let w = hpke_wrap_dek(rrk_public, dek, &info)?;
     Ok(CoreWrap {
         member_id: founder_id.to_string(),
@@ -291,9 +290,8 @@ pub(crate) fn member_wrap_epoch(
     tree_id: &[u8],
     member_id: &str,
     key_id: &[u8],
-    epoch: u32,
 ) -> Result<CoreWrap, SealerError> {
-    let info = wrap_aad(tree_id, key_id, member_id, HPKE, epoch);
+    let info = wrap_aad(tree_id, key_id, member_id, HPKE);
     let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
     Ok(CoreWrap {
         member_id: member_id.to_string(),
@@ -317,7 +315,7 @@ pub(crate) fn open_epoch_dek(
         .iter()
         .find(|w| w.wrap_method == RRK_HPKE)
         .ok_or_else(|| SealerError::BadKeyring("epoch missing rrk wrap".into()))?;
-    let info = wrap_aad(tree_id, &epoch.key_id, founder_id, RRK_HPKE, epoch.epoch);
+    let info = wrap_aad(tree_id, &epoch.key_id, founder_id, RRK_HPKE);
     Ok(hpke_unwrap_dek(
         rrk_secret.expose(),
         &w.ephemeral_public_key,
@@ -360,8 +358,7 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
         .iter()
         .map(|ep| {
             let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
-            let new_wrap =
-                rrk_wrap_epoch(new_rrk_public, &dek, tree_id, founder_id, &ep.key_id, ep.epoch)?;
+            let new_wrap = rrk_wrap_epoch(new_rrk_public, &dek, tree_id, founder_id, &ep.key_id)?;
             let mut wraps: Vec<CoreWrap> = ep
                 .wraps
                 .iter()
@@ -393,7 +390,7 @@ pub(crate) fn member_epoch_deks(
             .iter()
             .find(|w| w.member_id == member_id && w.wrap_method == HPKE)
         {
-            let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE, ep.epoch);
+            let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE);
             let dek = hpke_unwrap_dek(
                 hpke_secret.expose(),
                 &w.ephemeral_public_key,

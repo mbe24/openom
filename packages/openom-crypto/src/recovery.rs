@@ -155,7 +155,6 @@ mod tests {
             key_id: b"epoch-0-key",
             member_id: "acct-1",
             wrap_method: WrapMethod::RecoveryCodeArgon2id as i32,
-            epoch: 0,
         };
 
         // Wrap under the recovery-code-derived KEK.

@@ -138,23 +138,18 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
 }
 
 /// Domain-separated, length-prefixed AAD binding a DEK wrap to its context (§4):
-/// `(tree_id, key_id, member_id, wrap_method, epoch)`, so a wrap can't be transplanted
-/// between members, epochs, or trees. The leading domain tag makes it byte-disjoint
+/// `(tree_id, key_id, member_id, wrap_method)`, so a wrap can't be transplanted between members,
+/// epochs, or trees. `key_id` is a fresh random per-epoch salt, so it already identifies the epoch — no
+/// epoch scalar is needed here (and the epoch counter is signature-covered upstream: `keyring_signing_bytes`
+/// on the chain, the op signature over `sealing` on the dag). The leading domain tag makes it byte-disjoint
 /// from the header AAD (which starts with a bare version integer).
-pub fn wrap_aad(
-    tree_id: &[u8],
-    key_id: &[u8],
-    member_id: &str,
-    wrap_method: i32,
-    epoch: u32,
-) -> Vec<u8> {
+pub fn wrap_aad(tree_id: &[u8], key_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
-    put_bytes(&mut out, b"openom:wrap:v1");
+    put_bytes(&mut out, b"openom:wrap:v2");
     put_bytes(&mut out, tree_id);
     put_bytes(&mut out, key_id);
     put_bytes(&mut out, member_id.as_bytes());
     put_u32(&mut out, wrap_method as u32);
-    put_u32(&mut out, epoch);
     out
 }
 
@@ -523,20 +518,19 @@ mod tests {
 
     #[test]
     fn wrap_aad_binds_every_context_field() {
-        let base = wrap_aad(b"tree", b"key", "member", 1, 0);
-        assert_eq!(base, wrap_aad(b"tree", b"key", "member", 1, 0)); // deterministic
-        assert_ne!(base, wrap_aad(b"TREE", b"key", "member", 1, 0)); // tree_id
-        assert_ne!(base, wrap_aad(b"tree", b"KEY", "member", 1, 0)); // key_id
-        assert_ne!(base, wrap_aad(b"tree", b"key", "other", 1, 0)); // member_id
-        assert_ne!(base, wrap_aad(b"tree", b"key", "member", 2, 0)); // wrap_method
-        assert_ne!(base, wrap_aad(b"tree", b"key", "member", 1, 1)); // epoch
+        let base = wrap_aad(b"tree", b"key", "member", 1);
+        assert_eq!(base, wrap_aad(b"tree", b"key", "member", 1)); // deterministic
+        assert_ne!(base, wrap_aad(b"TREE", b"key", "member", 1)); // tree_id
+        assert_ne!(base, wrap_aad(b"tree", b"KEY", "member", 1)); // key_id (also the per-epoch identity)
+        assert_ne!(base, wrap_aad(b"tree", b"key", "other", 1)); // member_id
+        assert_ne!(base, wrap_aad(b"tree", b"key", "member", 2)); // wrap_method
     }
 
     #[test]
     fn wrap_aad_is_disjoint_from_header_aad() {
         // The domain tag prevents a header AAD from ever colliding with a wrap AAD.
         assert_ne!(
-            wrap_aad(b"", b"", "", 0, 0),
+            wrap_aad(b"", b"", "", 0),
             header_aad(0, &Header::default())
         );
     }

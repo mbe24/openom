@@ -135,7 +135,7 @@ impl KeyringLifecycle for DagVault {
         let secrets = new_owner_secrets(passphrase.expose())?;
 
         // Epoch 0: the founder reaches the DEK via the RRK wrap (as on the chain).
-        let rrk_wrap = rrk_wrap_epoch(&rrk_public, &dek, tree_id, member_id, &key_id, 0)?;
+        let rrk_wrap = rrk_wrap_epoch(&rrk_public, &dek, tree_id, member_id, &key_id)?;
         let epoch0 = SealedEpoch {
             key_id: key_id.clone(),
             epoch: 0,
@@ -452,8 +452,8 @@ impl DagVault {
         let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
         let added_wraps: Vec<AddedWrap> = deks
             .iter()
-            .map(|(key_id, epoch, dek)| {
-                member_wrap_epoch(&new_member_hpke_public, dek, tree_id, new_member_id, key_id, *epoch)
+            .map(|(key_id, _epoch, dek)| {
+                member_wrap_epoch(&new_member_hpke_public, dek, tree_id, new_member_id, key_id)
                     .map(|wrap| AddedWrap {
                         key_id: key_id.clone(),
                         wrap,
@@ -569,14 +569,17 @@ impl DagVault {
         // Forward-secret re-epoch: a fresh DEK wrapped to the RRK (owner) + each REMAINING ordinary member.
         let new_dek = generate_dek()?;
         let new_key_id = generate_salt()?.to_vec();
-        let new_epoch = epochs.iter().map(|e| e.epoch).max().map_or(0, |m| m + 1);
+        let new_epoch = epochs
+            .iter()
+            .map(|e| e.epoch)
+            .max()
+            .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
         let mut wraps = vec![rrk_wrap_epoch(
             &escrow.public_key,
             &new_dek,
             tree_id,
             owner_id,
             &new_key_id,
-            new_epoch,
         )?];
         for m in &resolved.members.members {
             if m.member_id == remove_member_id || m.member_id == owner_id {
@@ -588,7 +591,6 @@ impl DagVault {
                 tree_id,
                 &m.member_id,
                 &new_key_id,
-                new_epoch,
             )?);
         }
         let sealing = SealingPayload {
