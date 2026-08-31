@@ -116,6 +116,11 @@ where
                 &init.author_public_key
             }
             MembershipAction::Add { member, .. } if member == op.author() => op.author_public_key(),
+            // A ReFound is self-certifying against its carried key (the recovery key), like a Create: the
+            // signer is the recovery authority, not the op's `author` member, so there is no registered
+            // member key to look up. Whether that carried key IS the group's pinned recovery authority is
+            // decided in resolution (`key_matches_registration`), replica-independently.
+            MembershipAction::ReFound { .. } => op.author_public_key(),
             _ => {
                 // The author must be a known member — but verify against the op's OWN carried key, NOT
                 // the member's currently-registered key (D3, retarget-tolerant authentication). A validly

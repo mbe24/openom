@@ -164,6 +164,13 @@ enum ActionDto {
     Commit {
         proposal_id: [u8; 32],
     },
+    ReFound {
+        member: String,
+        new_author_public_key: [u8; 32],
+        new_hpke_public_key: [u8; 32],
+        era: u64,
+        recovery_rewrap: Vec<u8>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -231,6 +238,19 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
         },
         MembershipAction::Approve { proposal_id } => ActionDto::Approve { proposal_id: *proposal_id },
         MembershipAction::Commit { proposal_id } => ActionDto::Commit { proposal_id: *proposal_id },
+        MembershipAction::ReFound {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+            era,
+            recovery_rewrap,
+        } => ActionDto::ReFound {
+            member: member.clone(),
+            new_author_public_key: *new_author_public_key,
+            new_hpke_public_key: *new_hpke_public_key,
+            era: *era,
+            recovery_rewrap: recovery_rewrap.clone(),
+        },
     }
 }
 
@@ -266,6 +286,19 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
         },
         ActionDto::Approve { proposal_id } => MembershipAction::Approve { proposal_id: *proposal_id },
         ActionDto::Commit { proposal_id } => MembershipAction::Commit { proposal_id: *proposal_id },
+        ActionDto::ReFound {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+            era,
+            recovery_rewrap,
+        } => MembershipAction::ReFound {
+            member: member.clone(),
+            new_author_public_key: *new_author_public_key,
+            new_hpke_public_key: *new_hpke_public_key,
+            era: *era,
+            recovery_rewrap: recovery_rewrap.clone(),
+        },
     })
 }
 
@@ -356,6 +389,23 @@ mod tests {
             &sk(1),
         );
         assert_eq!(decode_op(&encode_op(&p)).unwrap().id, p.id);
+        // and a ReFound (retargets keys + an opaque rewrap blob) round-trips field-for-field
+        let rf = sign_op(
+            [4; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::ReFound {
+                member: "founder".into(),
+                new_author_public_key: vk(7),
+                new_hpke_public_key: [7u8; 32],
+                era: 3,
+                recovery_rewrap: vec![1, 2, 3, 4],
+            },
+            &sk(1),
+        );
+        let rf_back = decode_op(&encode_op(&rf)).unwrap();
+        assert_eq!(rf_back.id, rf.id);
+        assert_eq!(rf_back.action, rf.action, "ReFound survives the wire codec field-for-field");
     }
 
     #[test]

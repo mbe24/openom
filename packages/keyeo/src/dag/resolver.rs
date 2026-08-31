@@ -84,6 +84,22 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
     Commit {
         proposal_id: [u8; 32],
     },
+    /// Recovery re-founding (OPE-269): retarget `member`'s (openom: the Owner's) signing + HPKE keys and
+    /// carry re-wrapped recovery material. Authorized NOT by ordinary membership authority but by the
+    /// group's pinned **recovery authority** — the op is signed by the recovery key whose public half is
+    /// [`GroupState::reset_authority`] (see [`key_matches_registration`]) — so a member who lost their
+    /// device can re-establish control without a prior member's cooperation. It removes no one and touches
+    /// no other member: a forward-chained delta, not a re-genesis (contrast `Create`). `era` is a monotone
+    /// re-founding generation (1 + max era in the causal past); `recovery_rewrap` is opaque to keyeo
+    /// (openom's sealer interprets it) but carried in the signed content, so it replicates and is
+    /// tamper-evident.
+    ReFound {
+        member: Id,
+        new_author_public_key: <S as SignatureScheme>::PublicKey,
+        new_hpke_public_key: [u8; 32],
+        era: u64,
+        recovery_rewrap: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +150,12 @@ pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::signatu
     pub history_commitment: [u8; 32],
     /// Per-active-member HPKE wraps of the current epoch DEK (item 3).
     pub dek_wraps: Vec<DekWrap<Id>>,
+    /// The group's **recovery authority**: the public half of the key (openom: the RVK) that alone may
+    /// authorize a [`MembershipAction::ReFound`]. Pinned at genesis (in openom, on the construction base
+    /// via [`Self::with_reset_authority`]) and preserved across every op, so a recovery is verifiable by
+    /// every replica against the authority the group was founded with. `None` = no recovery authority (a
+    /// group that cannot be re-founded).
+    pub reset_authority: Option<<S as SignatureScheme>::PublicKey>,
     _phantom: PhantomData<S>,
 }
 
@@ -144,6 +166,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             epoch: 0,
             history_commitment: [0u8; 32],
             dek_wraps: Vec::new(),
+            reset_authority: None,
             _phantom: PhantomData,
         }
     }
@@ -180,8 +203,17 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             epoch,
             history_commitment: commitment,
             dek_wraps: wraps,
+            reset_authority: self.reset_authority.clone(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Pin the group's [`recovery authority`](Self::reset_authority) — the only key that may authorize a
+    /// `ReFound`. openom sets this on the engine's construction base (the out-of-band-seeded genesis) so
+    /// the RVK is trusted from first sight, exactly as the genesis membership is.
+    pub fn with_reset_authority(mut self, reset_authority: Option<<S as SignatureScheme>::PublicKey>) -> Self {
+        self.reset_authority = reset_authority;
+        self
     }
 
     pub fn active_members(&self) -> Vec<(Id, R)> {
@@ -239,6 +271,14 @@ where
     match op.action() {
         MembershipAction::Create { .. } => true,
         MembershipAction::Add { member, .. } if member == op.author() => true,
+        // A ReFound's authority is the pinned recovery key, not a member registration: it is valid only
+        // when signed by the group's `reset_authority` (openom: the RVK). This is the engine-side half of
+        // the "distinguish a legitimate recovery from a hostile re-founding" gate — a reset branch a
+        // replica can't verify against the founded-with authority is unauthorized, hence ignored, hence
+        // never merged. (The domain shape — that it retargets the Owner, continuity — is AccessControl's.)
+        MembershipAction::ReFound { .. } => {
+            state.reset_authority.as_ref() == Some(op.author_public_key())
+        }
         _ => state
             .members
             .get(op.author())

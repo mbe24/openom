@@ -46,7 +46,12 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
     let mut events = Vec::new();
     match action {
         MembershipAction::Create { initial_members } => {
-            Ok((GroupState::create(initial_members), events))
+            // Preserve any pinned recovery authority across a (re)genesis fold: in openom's seeded
+            // construction the authority lives on the base state and the in-DAG Create is inert, so this
+            // keeps `reset_authority` from being reset to None if a Create is ever folded.
+            let mut created = GroupState::create(initial_members);
+            created.reset_authority = state.reset_authority.clone();
+            Ok((created, events))
         }
         MembershipAction::Add {
             member,
@@ -104,6 +109,27 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
                 });
             } else {
                 return Err(format!("{:?} is not a member", member));
+            }
+            Ok((state, events))
+        }
+        // Recovery re-founding: retarget the member's (the Owner's) signing + HPKE keys in place. The
+        // member stays active and no one else is touched — a minimal forward delta. keeps the opaque
+        // `recovery_rewrap` out of the resolved state (it is carried by the op for openom's sealer). Only
+        // an active member can be re-founded; authority (RVK-signature + Owner-target) is decided by the
+        // caller before this runs (see `key_matches_registration` + `AccessControl`).
+        MembershipAction::ReFound {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+            ..
+        } => {
+            match state.members.get_mut(member) {
+                Some(s) if s.is_active() => {
+                    s.author_public_key = new_author_public_key.clone();
+                    s.hpke_public_key = *new_hpke_public_key;
+                    s.access_counter += 1;
+                }
+                _ => return Err(format!("{:?} is not an active member to re-found", member)),
             }
             Ok((state, events))
         }

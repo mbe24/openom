@@ -99,6 +99,22 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 out.push(6);
                 out.extend_from_slice(proposal_id);
             }
+            MembershipAction::ReFound {
+                member,
+                new_author_public_key,
+                new_hpke_public_key,
+                era,
+                recovery_rewrap,
+            } => {
+                out.push(7);
+                Postcard(member).write_canonical(out);
+                out.extend_from_slice(new_author_public_key.as_ref());
+                out.extend_from_slice(new_hpke_public_key);
+                out.extend_from_slice(&era.to_le_bytes());
+                // Length-prefixed so the opaque rewrap can't be re-partitioned against an adjacent field.
+                out.extend_from_slice(&(recovery_rewrap.len() as u64).to_le_bytes());
+                out.extend_from_slice(recovery_rewrap);
+            }
         }
     }
 }

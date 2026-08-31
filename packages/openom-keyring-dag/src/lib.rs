@@ -192,6 +192,13 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             MembershipAction::Propose { .. }
             | MembershipAction::Approve { .. }
             | MembershipAction::Commit { .. } => author_role.is_signer(),
+            // Recovery re-founding: this is the DOMAIN half of the ReFound gate — a ReFound may retarget
+            // ONLY the Owner (founder), the unique + immutable keyring root, and no one else. The other
+            // half — that the op is signed by the group's pinned recovery authority (RVK) — is enforced by
+            // the engine (`key_matches_registration` → `reset_authority`); the two AND together, so a
+            // ReFound needs BOTH the RVK signature AND an Owner target to take effect. `author_role` above
+            // is unused here (the signer is the RVK, not the member), which is fine.
+            MembershipAction::ReFound { member, .. } => Self::role_of(state, member).is_owner(),
         }
     }
 }
@@ -349,6 +356,22 @@ mod tests {
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
         Keyeo::new(KeyringState::create(members), KeyringAccess, StrongRemove)
+    }
+    fn engine_with_rvk(members: &[KeyringMemberInit], rvk_pub: [u8; 32]) -> KeyringEngine {
+        Keyeo::new(
+            KeyringState::create(members).with_reset_authority(Some(rvk_pub)),
+            KeyringAccess,
+            StrongRemove,
+        )
+    }
+    fn refound(member: &str, new_seed: u8, era: u64) -> KeyringAction {
+        MembershipAction::ReFound {
+            member: member.to_string(),
+            new_author_public_key: vk(new_seed),
+            new_hpke_public_key: [new_seed; 32],
+            era,
+            recovery_rewrap: vec![0xAB; 8],
+        }
     }
     fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {
@@ -602,6 +625,97 @@ mod tests {
         assert!(
             members(&k).iter().any(|(m, _)| m == "carol"),
             "the same action by the author's registered key is authorized — the key identity is the gate"
+        );
+    }
+
+    #[test]
+    fn a_refound_signed_by_the_recovery_authority_retargets_the_owner() {
+        // OPE-269 recovery: a ReFound signed by the group's pinned recovery authority (the RVK) re-founds
+        // the Owner — swapping in a fresh signing + HPKE key — WITHOUT touching anyone else or the Owner's
+        // role. A minimal forward delta: the owner who lost their device regains control, and their new
+        // key is now the registered one for future ops.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk_pub = rvk.verifying_key().to_bytes();
+        let mut k = engine_with_rvk(
+            &[
+                minit("founder", KeyringRole::OWNER, 1),
+                minit("bob", KeyringRole::CO_OWNER, 2),
+            ],
+            rvk_pub,
+        );
+        // A root op so later ops have a parent (the in-DAG Create is inert per OPE-271; membership + the
+        // recovery authority both come from the seeded base).
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![
+                    minit("founder", KeyringRole::OWNER, 1),
+                    minit("bob", KeyringRole::CO_OWNER, 2),
+                ],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(1));
+
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
+            .unwrap();
+        let owner = k.state().members.get("founder").unwrap();
+        assert_eq!(owner.author_public_key, vk(7), "recovery retargets the Owner signing key");
+        assert_eq!(owner.hpke_public_key, [7u8; 32], "and the Owner HPKE key");
+        assert_eq!(owner.role, KeyringRole::OWNER, "owner-hood is preserved — a delta, not a re-genesis");
+        assert_eq!(
+            k.state().members.get("bob").unwrap().author_public_key,
+            vk(2),
+            "no other member is touched by a recovery"
+        );
+    }
+
+    #[test]
+    fn a_refound_is_rejected_without_the_recovery_authority_or_against_a_non_owner() {
+        // Both halves of the ReFound gate. (a) A ReFound signed by a NON-authority key (mallory's own) is
+        // admitted — self-certifying — but carries no authority, so the Owner key is untouched. (b) Even
+        // with the real RVK, a ReFound may retarget ONLY the Owner: aimed at a co-owner it has no effect.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk_pub = rvk.verifying_key().to_bytes();
+        let mut k = engine_with_rvk(
+            &[
+                minit("founder", KeyringRole::OWNER, 1),
+                minit("bob", KeyringRole::CO_OWNER, 2),
+            ],
+            rvk_pub,
+        );
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![
+                    minit("founder", KeyringRole::OWNER, 1),
+                    minit("bob", KeyringRole::CO_OWNER, 2),
+                ],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+
+        // (a) forged by mallory's key (seed 9), not the pinned RVK.
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &sk(9)))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(1),
+            "a ReFound not signed by the pinned recovery authority has no effect"
+        );
+        // (b) the real RVK, but targeting a co-owner instead of the Owner.
+        k.apply(sign_op([3; 32], vec![[1; 32]], "bob", refound("bob", 7, 1), &rvk))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("bob").unwrap().author_public_key,
+            vk(2),
+            "a ReFound may re-found only the Owner, never another member"
         );
     }
 
