@@ -26,8 +26,9 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, member_wrap_epoch, new_owner_secrets, rrk_wrap_epoch,
-    sealer_set_from_deks, validate_kdf, CoreWrap, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
+    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
+    rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap, RecoveryEscrow,
+    SealedEpoch, PASSPHRASE, RECOVERY,
 };
 use crate::SealerError;
 
@@ -458,6 +459,51 @@ impl DagVault {
         )
         .map_err(|e| SealerError::BadKeyring(e.to_string()))
     }
+
+    /// Unlock as an ORDINARY member (not the owner): resolve the keyring, find `ctx.member_id`, derive their
+    /// identity from their passphrase + their account `member_kdf`, check it against their resolved key
+    /// (anti-substitution), and reach the DEKs via their OWN per-epoch HPKE wraps (join-epoch-onward) — not
+    /// the RRK, which only the owner holds. Inherent (the trait `unlock` is the owner/RRK path).
+    pub fn unlock_as_member(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        passphrase: &Passphrase,
+        member_kdf: &CoreKdf,
+    ) -> Result<Unlocked, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let member_id = ctx.member_id.as_str();
+        let replica_id = ctx.replica_id.as_bytes();
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let me = resolved
+            .members
+            .members
+            .iter()
+            .find(|m| m.member_id == member_id)
+            .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
+        let (epochs, _escrow) = fold_sealing(&resolved.sealing)?;
+
+        validate_kdf(member_kdf)?;
+        let root = derive_root(passphrase.expose(), &KdfParams::from(member_kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+
+        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+        let my_key: [u8; 32] = me
+            .author_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| SealerError::BadKeyring("member key is not 32 bytes".into()))?;
+        Ok(Unlocked {
+            sealer,
+            watermark: Vec::new(),
+            did_key: DidKey::from_public_key(&my_key),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -671,6 +717,69 @@ mod tests {
         assert_eq!(
             u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"shared secret"
+        );
+    }
+
+    /// The full shared-tree cycle: the owner adds bob, and bob unlocks with HIS OWN passphrase + account
+    /// KDF (reaching the DEK through his member HPKE wrap, not the RRK) and reads the shared data.
+    #[test]
+    fn dag_added_member_unlocks_with_their_own_account_and_reads() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"owner passphrase");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+        let sealed = p
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"family data")
+            .unwrap()
+            .envelope;
+
+        // bob's account: identity + HPKE + KDF derived from his own passphrase.
+        let bob_pass = Passphrase::new(b"bobs own passphrase");
+        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob_author = bob.root.identity.verifying_key().to_bytes();
+
+        let new_anchor = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                "acct-bob",
+                KeyringRole::EDITOR,
+                bob_author,
+                bob.root.hpke_public,
+            )
+            .unwrap();
+
+        // bob unlocks with his own passphrase + account KDF and reads the shared data.
+        let bob_id = MemberId::new("acct-bob");
+        let u = DagVault
+            .unlock_as_member(
+                &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
+                &new_anchor,
+                &bob_pass,
+                &bob.pass_kdf,
+            )
+            .unwrap();
+        assert_eq!(
+            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
+            b"family data"
+        );
+        assert_eq!(u.did_key, DidKey::from_public_key(&bob_author));
+
+        // A wrong passphrase for bob is rejected (anti-substitution against his resolved key).
+        assert!(
+            DagVault
+                .unlock_as_member(
+                    &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
+                    &new_anchor,
+                    &Passphrase::new(b"not bobs passphrase"),
+                    &bob.pass_kdf,
+                )
+                .is_err()
         );
     }
 
