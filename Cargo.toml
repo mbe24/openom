@@ -47,6 +47,7 @@ openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
+openom-keyring-dag = { path = "packages/openom-keyring-dag" }
 openom-keyring-seam = { path = "packages/openom-keyring-seam" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }

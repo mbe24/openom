@@ -15,12 +15,19 @@ openom-protocol.workspace = true
 openom-crypto.workspace = true
 # The keyring/membership mechanism (chain verify, entry authorship, keyring signing) the vault drives.
 openom-keyring.workspace = true
+# The DAG keyring engine (keyeo membership + recovery). openom-sealer is the both-engines convergence
+# point: chain vault (vault.rs) + dag vault (dag_vault.rs), each behind KeyringLifecycle (OPE-273 gate
+# Q1.3=a). No cycle — the dag crate does not depend on the sealer.
+openom-keyring-dag.workspace = true
 # The single home for the role constants (SIGNER_FOUNDER, MEMBER_OWNER, …) the vault compares against.
 openom-roles.workspace = true
 # did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).
 openom-did.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
+# The sealing core's records serialize into the dag vault's anchor + op sealing payloads.
+serde.workspace = true
+serde_json.workspace = true
 
 [features]
 # The web binding. Off by default so native builds (Tauri, cargo test) never pull the

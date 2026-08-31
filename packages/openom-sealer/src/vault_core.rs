@@ -22,6 +22,7 @@ use openom_crypto::{
 use openom_protocol::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, KeyEpoch, KeyWrap, RecoveryKey, WrapMethod};
+use serde::{Deserialize, Serialize};
 
 use crate::{SealerError, SealerSet};
 
@@ -43,7 +44,7 @@ const MAX_PARALLELISM: u32 = 8;
 // ---- the core's own record types (proto-free API boundary; also the dag's op-payload shape) ----
 
 /// Argon2id parameters for a passphrase/recovery-code wrap.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CoreKdf {
     pub salt: Vec<u8>,
     pub memory_kib: u32,
@@ -54,7 +55,7 @@ pub(crate) struct CoreKdf {
 /// One wrap of a secret (a DEK, or the RRK secret) to a credential: a passphrase/recovery-code KEK
 /// (`kdf` present) or an HPKE public key (`ephemeral_public_key` present). `wrap_method` is a
 /// [`WrapMethod`] discriminant (a plain `i32` so the record stays a dumb data carrier).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CoreWrap {
     pub member_id: String,
     pub wrap_method: i32,
@@ -66,7 +67,7 @@ pub(crate) struct CoreWrap {
 
 /// A DEK epoch: its random `key_id` (also the header's `key_id`), its ordinal, and the wraps that
 /// distribute the DEK to members + the founder's RRK.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SealedEpoch {
     pub key_id: Vec<u8>,
     pub epoch: u32,
@@ -75,7 +76,7 @@ pub(crate) struct SealedEpoch {
 
 /// The founder's recovery escrow: the RRK public key, the two wraps of the RRK secret (under the
 /// passphrase KEK and the recovery-code KEK), and the pinned Ed25519 recovery verifying key (RVK).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RecoveryEscrow {
     pub public_key: Vec<u8>,
     pub member_id: String,

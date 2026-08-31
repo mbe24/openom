@@ -15,6 +15,7 @@ use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requireme
 use std::collections::HashSet;
 
 pub mod blob_sync;
+pub mod client;
 pub mod recovery;
 pub mod verifier;
 

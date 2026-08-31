@@ -71,7 +71,7 @@ impl DagVerifier {
     }
 }
 
-fn view_of(state: &KeyringState, reset_boundary: bool) -> MembershipView {
+pub(crate) fn view_of(state: &KeyringState, reset_boundary: bool) -> MembershipView {
     let members = state
         .members
         .iter()

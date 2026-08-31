@@ -161,6 +161,10 @@ struct OpDto {
     action: ActionDto,
     signature: Vec<u8>, // [u8; 64] — Vec because serde has no [u8; 64] impl
     author_public_key: [u8; 32],
+    /// The op's opaque sealing payload — carried round-trip so the signature (which covers it) still
+    /// verifies after decode. Defaulted so ops that carry none stay compact. (OPE-273.)
+    #[serde(default)]
+    sealing: Vec<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -221,20 +225,23 @@ pub(crate) fn encode_op(op: &KeyringOp) -> Vec<u8> {
         action: action_to_dto(&op.action),
         signature: op.signature.to_vec(),
         author_public_key: op.author_public_key,
+        sealing: op.sealing.clone(),
     };
     serde_json::to_vec(&dto).expect("op DTO serialization is infallible")
 }
 
 pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
     let dto: OpDto = serde_json::from_slice(bytes).map_err(BlobSyncError::Decode)?;
-    Ok(keyeo::Op::new(
+    let mut op = keyeo::Op::new(
         dto.id,
         dto.parents,
         dto.author,
         dto_to_action(&dto.action)?,
         sig64(&dto.signature)?,
         dto.author_public_key,
-    ))
+    );
+    op.sealing = dto.sealing;
+    Ok(op)
 }
 
 fn sig64(v: &[u8]) -> Result<[u8; 64]> {
