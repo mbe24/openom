@@ -8,7 +8,7 @@
 //! op closure — plus the pinned **genesis op id** (the sealing fold's root: the genesis `Create` is
 //! resolver-inert per OPE-271, so it is pinned to always contribute its sealing).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use keyeo::{Keyeo, MembershipAction, StrongRemove};
 use openom_keyring_seam::MembershipView;
@@ -202,21 +202,27 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         .flush()
         .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
     let members = view_of(engine.state(), false);
-    // Pass 2: collect the sealing of the pinned genesis op (always) + every effective op.
-    let mut saw_genesis = false;
+    // Pass 2: fold the sealing of the pinned genesis op (always — it is the resolver-inert root) plus every
+    // op the engine reports as EFFECTIVE, in resolved topological order. Using the engine's own
+    // `effective_ops` (not a re-derived authorization check) means a carve-out-voided op or an unmet quorum
+    // Commit contributes no sealing, and concurrent branches fold in the same order membership resolves.
+    let by_id: HashMap<[u8; 32], &KeyringOp> = ops.iter().map(|o| (o.id, o)).collect();
+    let genesis_op = by_id.get(&anchor.genesis_op_id).ok_or_else(|| {
+        ClientError::Malformed("pinned genesis op not present in the closure".into())
+    })?;
     let mut sealing = Vec::new();
-    for op in &ops {
-        let is_genesis = op.id == anchor.genesis_op_id;
-        saw_genesis |= is_genesis;
-        let effective = is_genesis || engine.authorized_at_position(&op.id) == Some(true);
-        if effective && !op.sealing.is_empty() {
-            sealing.push(op.sealing.clone());
-        }
+    if !genesis_op.sealing.is_empty() {
+        sealing.push(genesis_op.sealing.clone());
     }
-    if !saw_genesis {
-        return Err(ClientError::Malformed(
-            "pinned genesis op not present in the closure".into(),
-        ));
+    for op_id in engine.effective_ops() {
+        if op_id == anchor.genesis_op_id {
+            continue; // the genesis contributes above; it is inert here anyway
+        }
+        if let Some(op) = by_id.get(&op_id) {
+            if !op.sealing.is_empty() {
+                sealing.push(op.sealing.clone());
+            }
+        }
     }
     Ok(Resolved { members, sealing })
 }

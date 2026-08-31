@@ -263,25 +263,26 @@ where
         std::mem::take(&mut self.events)
     }
 
-    /// Rebuild state from scratch by applying all non-ignored ops in causal
-    /// (topological) order, so the resolver's ignore decisions take effect.
+    /// The core resolution walk: apply all non-ignored ops in causal (topological) order, re-authorizing
+    /// each at its causal position, and return BOTH the resolved membership state AND the ids of the ops
+    /// that were **effective** (applied with effect), in topo order. Shared by [`Self::rebuild_state`] and
+    /// [`Self::effective_ops`] so the resolution and the effectiveness report can never diverge.
     ///
-    /// Ordering is a real topological sort over the op DAG (Kahn's algorithm),
-    /// with OpId as a deterministic tiebreak among concurrent ops — NOT a plain
-    /// OpId sort, which would misorder ops whenever OpIds aren't causally
-    /// monotonic (e.g. content-hash or (peer,counter) ids). Apply errors are
-    /// surfaced, not swallowed: in correct causal order an error is a genuine
-    /// conflict (or a resolver bug), never something to silently drop.
-    fn rebuild_state(&mut self) -> Result<(), Error<Op::MemberId>> {
+    /// Ordering is a real topological sort over the op DAG (Kahn's algorithm), with OpId as a deterministic
+    /// tiebreak among concurrent ops — NOT a plain OpId sort, which would misorder ops whenever OpIds
+    /// aren't causally monotonic (e.g. content-hash or (peer,counter) ids). Authority is checked against
+    /// the state built so far (the resolved state the op depends on), not only at local apply time where a
+    /// concurrently-invalidated grant could still be seen. An op the resolver dropped can leave a later op
+    /// inconsistent (e.g. removing a member whose add was ignored); in resolved causal order that is benign,
+    /// so it is skipped (and reported as ineffective), never a failure.
+    #[allow(clippy::type_complexity)]
+    fn resolve_walk(
+        &self,
+    ) -> Result<(GroupState<Op::MemberId, Op::R, Op::S>, Vec<Op::OpId>), Error<Op::MemberId>> {
         let ignored = RS::ignored(&self.resolver_state);
         let order = self.topo_order()?;
-
-        // Replay non-ignored ops in causal order, re-authorizing each at its causal position: the
-        // state built so far IS the resolved state the op depends on, so authority is checked here
-        // (not only at local apply time, where a concurrently-invalidated grant could still be seen).
-        // An op the resolver dropped can leave a later op inconsistent (e.g. removing a member whose
-        // add was ignored); in resolved causal order that is benign, so skip it rather than fail.
         let mut new_state = self.genesis.clone();
+        let mut effective = Vec::new();
         for op_id in &order {
             if ignored.contains(op_id) {
                 continue;
@@ -291,7 +292,8 @@ where
             };
             // A Commit doesn't apply *itself* — it applies its proposal's TARGET, at this position, iff
             // the committer is authorized AND quorum has been met (Individual governance never meets
-            // quorum, so this is inert by default). See `quorum_target`.
+            // quorum, so this is inert by default). See `quorum_target`. It is effective iff its target
+            // applied.
             if let MembershipAction::Commit { proposal_id } = op.action() {
                 let pid = *proposal_id;
                 if self
@@ -303,6 +305,7 @@ where
                     if let Some(target) = self.quorum_target(*op_id, &pid, &ignored, &mut visiting) {
                         if let Ok((s, _events)) = apply_action(new_state.clone(), &target) {
                             new_state = s;
+                            effective.push(*op_id);
                         }
                     }
                 }
@@ -316,15 +319,27 @@ where
             }
             if let Ok((s, _events)) = apply_action(new_state.clone(), op.action()) {
                 new_state = s;
+                effective.push(*op_id);
             }
         }
-        // Rotate (or stabilize) the epoch for the resolved membership: derive its commitment, and
-        // either reuse the cached epoch (stable membership -> no churn) or mint a fresh one (the
-        // membership changed -> rotate the DEK to the new active set). Wired into the DAG's rebuild
-        // path, so the epoch the group settles on is a function of the resolved membership, and a
-        // peer that resolves the same membership converges to the same commitment.
+        Ok((new_state, effective))
+    }
+
+    /// Rebuild state from scratch (via [`Self::resolve_walk`]), then rotate (or stabilize) the epoch for the
+    /// resolved membership — so the epoch the group settles on is a function of the resolved membership and
+    /// a peer that resolves the same membership converges to the same commitment.
+    fn rebuild_state(&mut self) -> Result<(), Error<Op::MemberId>> {
+        let (new_state, _effective) = self.resolve_walk()?;
         self.state = self.forge_epoch(&new_state)?;
         Ok(())
+    }
+
+    /// The op ids that were **effective** — applied with effect in the resolved state (not ignored /
+    /// carve-out-voided, authorized at their causal position, and for a `Commit` its quorum met) — in
+    /// resolved topological order. openom's sealing fold uses this so the sealing of a voided or
+    /// ineffective op never applies, and so it folds in the same order the membership resolves. (OPE-273.)
+    pub fn effective_ops(&self) -> Vec<Op::OpId> {
+        self.resolve_walk().map(|(_, e)| e).unwrap_or_default()
     }
 
     /// Kahn's topological sort over all admitted ops, with `OpId` as a deterministic tiebreak among
