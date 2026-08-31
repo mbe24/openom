@@ -127,11 +127,20 @@ impl KeyringVerifier for DagVerifier {
                 let before = view_of(engine.state(), false).members;
 
                 let op = decode_op(&op_bytes).map_err(|_| VerifyError::Malformed)?;
+                let op_id = op.id();
                 let is_reset = matches!(
                     op.action(),
                     MembershipAction::ReFound { .. } | MembershipAction::RotateRecoveryAuthority { .. }
                 );
                 classify(engine.apply(op))?;
+                // (a) vs (b): an op unauthorized AT ITS CAUSAL POSITION is permanently ineffective on
+                // every branch — refuse it (anti-spam), which is convergence-safe because no honest client
+                // ever gives it effect. An op that merely lost a concurrent race is authorized-at-position
+                // and MUST be kept (it may stand on a branch that hasn't seen the invalidator) — that is
+                // the genuine admit-then-resolve no-op (changed=false), the case the chain can't represent.
+                if engine.authorized_at_position(&op_id) == Some(false) {
+                    return Err(VerifyError::Unauthorized);
+                }
                 engine.flush().map_err(|_| VerifyError::Malformed)?;
 
                 let view = view_of(engine.state(), is_reset);
@@ -229,9 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_but_ineffective_op_reports_changed_false() {
-        // The seam's honest no-op case: dave is a Maintainer (not a signer), so his add is validly
-        // admitted but the resolver gives it no effect — `changed` must be false, not an error.
+    fn a_permanently_unauthorized_op_is_refused_not_admitted() {
+        // dave is a Maintainer (never a signer), so his add is unauthorized AT ITS CAUSAL POSITION —
+        // permanently ineffective on every branch. The verifier REFUSES it (anti-spam), where a naive
+        // admit-then-resolve would keep it as a no-op that just wastes space.
         let v = DagVerifier;
         let gm = vec![
             minit("founder", KeyringRole::OWNER, 1),
@@ -239,11 +249,36 @@ mod tests {
         ];
         let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
         let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
-
         let daves_add = sign_op([2; 32], vec![[1; 32]], "dave", add("mallory", KeyringRole::EDITOR, 9), &sk(4));
-        let out = v.admit(Some(&boot.state), &op_update(&daves_add)).unwrap();
-        assert!(!out.changed, "a validly-signed but ineffective op is admitted with changed=false");
-        assert!(!out.view.members.iter().any(|m| m.member_id == "mallory"));
+        assert_eq!(
+            v.admit(Some(&boot.state), &op_update(&daves_add)).unwrap_err(),
+            VerifyError::Unauthorized,
+            "an op unauthorized at its causal position is refused, not kept as a no-op"
+        );
+    }
+
+    #[test]
+    fn an_op_that_lost_a_concurrent_race_is_admitted_as_a_no_op() {
+        // The genuine admit-then-resolve no-op the chain can't represent. bob (a co-owner) adds carol on
+        // one branch while the founder CONCURRENTLY removes bob on another. bob's add WAS authorized at
+        // its position, so it is kept (changed=false), NOT refused — a replica on the branch that hasn't
+        // seen the removal needs it to converge.
+        let v = DagVerifier;
+        let gm = vec![
+            minit("founder", KeyringRole::OWNER, 1),
+            minit("bob", KeyringRole::CO_OWNER, 2),
+        ];
+        let genesis_op = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let boot = v.admit(None, &bootstrap_update(&gm, None, &genesis_op)).unwrap();
+
+        let remove_bob = sign_op([2; 32], vec![[1; 32]], "founder", MembershipAction::Remove { member: "bob".into() }, &sk(1));
+        let s1 = v.admit(Some(&boot.state), &op_update(&remove_bob)).unwrap();
+
+        // bob's add is a child of genesis — concurrent with his own removal.
+        let bob_adds_carol = sign_op([3; 32], vec![[1; 32]], "bob", add("carol", KeyringRole::EDITOR, 3), &sk(2));
+        let out = v.admit(Some(&s1.state), &op_update(&bob_adds_carol)).unwrap();
+        assert!(!out.changed, "bob's concurrently-invalidated add is admitted as a no-op, not refused");
+        assert!(!out.view.members.iter().any(|m| m.member_id == "carol"), "and carol is not added");
     }
 
     #[test]

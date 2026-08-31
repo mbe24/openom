@@ -565,6 +565,20 @@ where
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
+
+    /// Whether the admitted op `op_id`'s author was authorized at its CAUSAL POSITION — see
+    /// [`crate::dag::strong_remove::op_authorized_at_position`]. `Some(false)` marks a
+    /// permanently-ineffective op a transport may safely refuse (anti-spam); `Some(true)` an op that had
+    /// authority at its position (it may still have lost a concurrent race, and that op must be kept).
+    pub fn authorized_at_position(&self, op_id: &Op::OpId) -> Option<bool> {
+        crate::dag::strong_remove::op_authorized_at_position(
+            &self.genesis,
+            &self.graph,
+            &self.ops,
+            &self.access,
+            op_id,
+        )
+    }
 }
 
 /// Membership events for one `apply` = the diff between the resolved active set before and after.

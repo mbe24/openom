@@ -354,6 +354,40 @@ where
     state
 }
 
+/// Whether `op_id`'s author was authorized at the op's CAUSAL POSITION (AccessControl + key identity),
+/// independent of any concurrent strong-remove invalidation.
+///
+/// - `Some(false)` ⇒ the op is unauthorized on every branch, forever — **permanently ineffective**. Its
+///   authorization is a function of its fixed causal ancestors, so every replica agrees; a transport may
+///   therefore safely REFUSE to store it without affecting convergence (nobody ever gives it effect).
+/// - `Some(true)` ⇒ it had authority at its position. It may still resolve to no effect via a concurrent
+///   strong-remove — but THAT op must be kept (a replica on the losing branch needs it to converge).
+/// - `None` ⇒ `op_id` is not admitted.
+///
+/// This is the signal that lets a transport reject genuinely-unauthorized ops (anti-spam) while leaving
+/// admit-then-resolve intact for concurrency (OPE-277).
+pub(crate) fn op_authorized_at_position<OId, R, S, Op>(
+    genesis: &GroupState<Op::MemberId, R, S>,
+    graph: &Graph<OId>,
+    ops: &HashMap<OId, Op>,
+    ac: &impl AccessControl<Op::MemberId, R, S>,
+    op_id: &OId,
+) -> Option<bool>
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    if !ops.contains_key(op_id) {
+        return None;
+    }
+    let depth = compute_depths(ops);
+    authorized_map(genesis, graph, ops, ac, &depth)
+        .get(op_id)
+        .copied()
+}
+
 /// Lamport depth of every op: 0 at a root, else 1 + max parent depth. Used only as a deterministic
 /// tiebreak, so an unexpected cycle degrading to 0 is harmless.
 fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(

@@ -151,21 +151,22 @@ fn both_engines_resolve_the_same_membership_for_equivalent_authorized_ops() {
 }
 
 #[test]
-fn an_unauthorized_change_has_no_effect_in_both_by_different_mechanisms() {
-    // The documented divergence: an unauthorized party tries to add "carol". Same EFFECT (carol never
-    // joins), different MECHANISM — the chain refuses the candidate (Unauthorized), the dag admits the op
-    // and resolves it to a no-op (changed=false). Both are honest; the seam surfaces both faithfully.
+fn both_engines_refuse_a_permanently_unauthorized_change() {
+    // A KNOWN Maintainer "dave" (a member, never a signer) tries to add carol — unauthorized at its
+    // causal position, so permanently ineffective. Both engines REFUSE it with the same neutral
+    // VerifyError::Unauthorized: the chain rejects the candidate at verify; the dag rejects the op at
+    // admission because it's unauthorized-at-position (the anti-spam refinement). The naive
+    // admit-then-resolve no-op is NOT what happens here — that case is concurrency-only, which the chain
+    // can't represent at all (see verifier.rs::an_op_that_lost_a_concurrent_race_is_admitted_as_a_no_op).
     let (cv, dv) = (ChainVerifier, DagVerifier);
 
-    // Both genesis have Maintainer "dave" — a known member, but NOT a signer — as the unauthorized actor.
-    // chain: a rev-2 adding carol, signed by dave (seed 4) → an unendorsed ordinary change → refused.
+    // chain: a rev-2 adding carol, signed by dave (seed 4) — an unendorsed ordinary change.
     let cg = with_maintainer_dave(chain_genesis());
     let c_boot = cv.admit(None, &cg.encode_to_vec()).unwrap();
     let c_out = cv.admit(Some(&c_boot.state), &chain_add_carol(&cg, 4).encode_to_vec());
-    assert_eq!(c_out.unwrap_err(), VerifyError::Unauthorized, "chain REFUSES an unauthorized change");
+    assert_eq!(c_out.unwrap_err(), VerifyError::Unauthorized, "chain refuses an unauthorized change");
 
-    // dag: dave (a member, not a signer) authors Add(carol) → admitted (dave is known) but resolved to
-    // no effect (dave lacks keyring-write authority).
+    // dag: dave (a member, not a signer) authors Add(carol) — unauthorized at its causal position.
     let gm = vec![
         dag_minit("owner", KeyringRole::OWNER, 1),
         dag_minit("dave", KeyringRole::MAINTAINER, 4),
@@ -173,9 +174,6 @@ fn an_unauthorized_change_has_no_effect_in_both_by_different_mechanisms() {
     let gop = sign_op([1; 32], vec![], "owner", MembershipAction::Create { initial_members: gm.clone() }, &sk(1));
     let d_boot = dv.admit(None, &bootstrap_update(&gm, None, &gop)).unwrap();
     let daves_add = sign_op([2; 32], vec![[1; 32]], "dave", dag_add("carol", KeyringRole::EDITOR, 3), &sk(4));
-    let d_out = dv.admit(Some(&d_boot.state), &op_update(&daves_add)).unwrap();
-    assert!(!d_out.changed, "dag ADMITS the op but resolves it to a no-op (changed=false)");
-
-    // ...and the EFFECT is identical: carol is a member in neither.
-    assert!(!d_out.view.members.iter().any(|m| m.member_id == "carol"));
+    let d_out = dv.admit(Some(&d_boot.state), &op_update(&daves_add));
+    assert_eq!(d_out.unwrap_err(), VerifyError::Unauthorized, "dag refuses the unauthorized-at-position op");
 }
