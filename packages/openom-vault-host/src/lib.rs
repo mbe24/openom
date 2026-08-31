@@ -28,6 +28,9 @@ pub enum VaultErrorCode {
     RevisionRollback,
     /// The next revision would overflow u32 (a poisoned served revision).
     RevisionOverflow,
+    /// The opaque anti-rollback watermark handed to a lifecycle call wasn't a valid encoding for this
+    /// engine — client-local corruption, refused rather than silently dropped.
+    MalformedWatermark,
     /// The keyring is for a different tree than the caller operates on.
     TreeMismatch,
     /// The keyring bytes don't decode / are structurally invalid.
@@ -127,6 +130,7 @@ impl From<SealerError> for VaultError {
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
             E::RevisionOverflow => C::RevisionOverflow,
+            E::MalformedWatermark => C::MalformedWatermark,
         };
         VaultError::new(code, e.to_string())
     }
