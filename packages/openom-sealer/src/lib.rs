@@ -7,6 +7,9 @@ use openom_protocol::Message;
 
 pub mod vault;
 
+pub mod lifecycle;
+pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
