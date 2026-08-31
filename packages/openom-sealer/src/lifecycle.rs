@@ -3,30 +3,36 @@
 //! once, instead of hand-wiring 2 engines × 2 hosts. This is OPE-277 piece #1 of the swap seam
 //! (plan/keyring-dag/design.swap-seam-decision.md).
 //!
-//! **Anchor-in / anchor-out over engine-OPAQUE bytes.** A tree's trust state is an opaque `anchor`: the
-//! chain's is its signed `Keyring`; a future dag anchor is its op closure. The lifecycle takes an anchor
-//! in and hands the new anchor (to publish + persist) back inside its result — no layer between the vault
-//! and the engine interprets those bytes. Secret-holding, client-only, pure bytes→bytes: no I/O, no
-//! network, so local authoring never blocks on the network.
+//! **Anchor-in / anchor-out + watermark, all engine-OPAQUE bytes.** A tree's trust state is an opaque
+//! `anchor` (the chain's is its signed `Keyring`; a future dag anchor is its op closure) and its
+//! anti-rollback cursor is an opaque `watermark`. Guardrail #1 of the gate: the anti-rollback floor lives
+//! INSIDE these opaque bytes, never as a shared scalar — a `u32 revision` would be security-critical for
+//! the chain and meaningless for the dag (structurally monotonic), the textbook model leak. So the seam
+//! carries the floor in and the cursor out as bytes; only the concrete engine reads them.
 //!
-//! **Shared menu only.** Engine-SPECIFIC behaviour (the chain's draft-blob countersign exchange, a dag's
-//! merge horizon) stays as inherent methods on the concrete engine types — never forced through this
-//! trait. Membership authoring (add/remove member, promote/demote) is a second method group added in a
-//! later slice; this slice establishes the four-flow vault spine.
+//! **Shared menu only.** Engine-SPECIFIC behaviour stays as inherent methods on the concrete engine types
+//! — never forced through this trait. That deliberately includes **membership authoring** (add/remove
+//! member, promote/demote) and **endorsement**: the chain authors through two authority models
+//! (owner-via-RRK vs co-owner-via-member-wrap + a pinned trusted-signer set) and its endorse
+//! (`blob_sync::countersign`) is a Blob CAS I/O loop — neither fits a pure, non-leaky shared signature, and
+//! the gate's own guardrail #4 keeps sync engine-owned. The hosts reach authoring behind the engine enum's
+//! own arms; "author/endorse in the menu" is honoured as a capability at the single dispatch site, not as
+//! a trait method. (Gate amendment, recorded in the decision doc; revisit promoting `author` alone once
+//! the dag lifecycle — OPE-273 — exists and its authoring model is concrete.)
 //!
-//! **Why this lives in openom-sealer, not the seam crate.** Every result carries a [`SealerSet`] (the
-//! shared, engine-agnostic DEK sealing layer). `SealerSet` sits *above* `openom-keyring-seam` in the
-//! dependency graph, so the seam crate cannot name it without a cycle — and for uniform enum-dispatch the
-//! results must be *common* types, not per-engine associated types. So the trait lives here with the
-//! sealer; the seam crate keeps the keyless `MembershipView` + `KeyringVerifier` vocabulary. (The
-//! decision doc's "both traits in the seam crate" predates working the layering through; the seam crate's
-//! own module doc already notes the lifecycle trait "lives with the sealer".)
+//! **Why this lives in openom-sealer, not the seam crate.** Every result carries a [`SealerSet`] plus
+//! `RecoveryCode` / `DidKey` (client secret-handling types). The keyless `openom-keyring-seam` is the
+//! *server's* binding surface (roles only today) — putting these there would poison it with client crypto
+//! deps. So the trait lives with the sealer for now; its permanent home is a future `openom-vault` crate
+//! above both engines (OPE-279 extraction, after the dag vault lands — deliberately not now, to avoid
+//! moving the wasm cdylib in front of OPE-273 while the trait shape is still settling).
 
 use openom_crypto::{Passphrase, RecoveryCode};
+use openom_did::DidKey;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
-use crate::vault::{self, Provisioned, Recovered, Rekeyed, Unlocked};
-use crate::SealerError;
+use crate::vault;
+use crate::{SealerError, SealerSet};
 
 /// The tree + member context every lifecycle call needs: which tree is being operated on and who is
 /// acting. These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
@@ -38,11 +44,47 @@ pub struct VaultContext<'a> {
     pub replica_id: &'a ReplicaId,
 }
 
-/// The client keyring lifecycle — the shared menu (see the module docs). `anchor` is engine-opaque trust
-/// state; results carry the new anchor to publish/persist plus the ready sealer material.
+/// Result of [`KeyringLifecycle::provision`]: the initial trust `anchor` to publish + persist, the
+/// one-time recovery code to show ONCE, the ready sealer, and the owner's stable `did:key`.
+pub struct Provisioned {
+    /// The engine-opaque trust state to publish (chain: the signed genesis keyring).
+    pub anchor: Vec<u8>,
+    pub recovery_code: RecoveryCode,
+    pub sealer: SealerSet,
+    pub did_key: DidKey,
+}
+
+/// Result of [`KeyringLifecycle::unlock`]: the sealer plus the opaque anti-rollback `watermark` the caller
+/// must persist (never interpret).
+pub struct Unlocked {
+    pub sealer: SealerSet,
+    /// The engine-opaque anti-rollback cursor to persist (chain: the keyring revision, as bytes).
+    pub watermark: Vec<u8>,
+    pub did_key: DidKey,
+}
+
+/// Result of [`KeyringLifecycle::recover`]: a new `anchor` + a NEW recovery code (both to publish/show),
+/// the sealer, the new watermark, and the new owner's `did:key` (recovery mints a fresh identity).
+pub struct Recovered {
+    pub anchor: Vec<u8>,
+    pub recovery_code: RecoveryCode,
+    pub sealer: SealerSet,
+    pub watermark: Vec<u8>,
+    pub did_key: DidKey,
+}
+
+/// Result of [`KeyringLifecycle::change_passphrase`]: the new `anchor` + a rotated recovery code + the new
+/// watermark. The DEKs are unchanged, so any running sealer keeps working — no re-seal.
+pub struct Rekeyed {
+    pub anchor: Vec<u8>,
+    pub recovery_code: RecoveryCode,
+    pub watermark: Vec<u8>,
+}
+
+/// The client keyring lifecycle — the shared menu (see the module docs). `anchor` and `floor` are
+/// engine-opaque bytes; results carry the new anchor to publish plus the opaque watermark to persist.
 pub trait KeyringLifecycle {
-    /// Create a brand-new encrypted tree. Returns the initial keyring anchor to publish, the one-time
-    /// recovery code to show ONCE, the ready sealer, and the owner's stable `did:key`.
+    /// Create a brand-new encrypted tree.
     fn provision(
         &self,
         ctx: &VaultContext,
@@ -58,34 +100,52 @@ pub trait KeyringLifecycle {
     ) -> Result<Unlocked, SealerError>;
 
     /// Recover with the recovery code, re-establishing owner access under `new_passphrase`, preserving
-    /// members + epochs. `min_revision` is the caller's anti-rollback watermark floor (the served anchor
-    /// is untrusted on recovery — see [`crate::vault::recover`]).
+    /// members + epochs. `floor` is the caller's opaque anti-rollback watermark (the served anchor is
+    /// untrusted on recovery — see [`crate::vault::recover`]).
     fn recover(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
-        min_revision: u32,
+        floor: &[u8],
     ) -> Result<Recovered, SealerError>;
 
     /// Change the passphrase: re-wrap under a new KEK. The DEKs (and any running sealer) are unchanged, so
-    /// the tree is not re-sealed. `min_revision` is the anti-rollback floor.
+    /// the tree is not re-sealed. `floor` is the opaque anti-rollback watermark.
     fn change_passphrase(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
-        min_revision: u32,
+        floor: &[u8],
     ) -> Result<Rekeyed, SealerError>;
 }
 
 /// The linear-chain engine's lifecycle — openom's shipping keyring. Its anchor is the signed `Keyring`
-/// bytes; each flow re-signs a new revision. Zero-sized: the [`crate::vault`] flows are stateless free
-/// functions, so the engine choice is carried by the type, not by held state. (The dag lifecycle impl is
-/// OPE-273.)
+/// bytes and its watermark is the keyring revision; each flow re-signs a new revision. Zero-sized: the
+/// [`crate::vault`] flows are stateless free functions, so the engine choice is carried by the type, not
+/// by held state. (The dag lifecycle impl is OPE-273.)
 pub struct ChainVault;
+
+impl ChainVault {
+    /// Encode the chain's anti-rollback cursor (a keyring revision) as the opaque seam watermark.
+    fn watermark(revision: u32) -> Vec<u8> {
+        revision.to_be_bytes().to_vec()
+    }
+
+    /// Decode an opaque `floor` back to the chain's `min_revision`. Empty ⇒ no floor (0). A non-empty
+    /// value that isn't a 4-byte revision is refused ([`SealerError::MalformedWatermark`]) rather than
+    /// silently treated as 0 — dropping a corrupt floor would drop rollback protection.
+    fn floor(bytes: &[u8]) -> Result<u32, SealerError> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let b: [u8; 4] = bytes.try_into().map_err(|_| SealerError::MalformedWatermark)?;
+        Ok(u32::from_be_bytes(b))
+    }
+}
 
 impl KeyringLifecycle for ChainVault {
     fn provision(
@@ -93,7 +153,13 @@ impl KeyringLifecycle for ChainVault {
         ctx: &VaultContext,
         passphrase: &Passphrase,
     ) -> Result<Provisioned, SealerError> {
-        vault::provision(passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)
+        let p = vault::provision(passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        Ok(Provisioned {
+            anchor: p.keyring,
+            recovery_code: p.recovery_code,
+            sealer: p.sealer,
+            did_key: p.did_key,
+        })
     }
 
     fn unlock(
@@ -102,7 +168,12 @@ impl KeyringLifecycle for ChainVault {
         anchor: &[u8],
         passphrase: &Passphrase,
     ) -> Result<Unlocked, SealerError> {
-        vault::unlock(anchor, passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)
+        let u = vault::unlock(anchor, passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        Ok(Unlocked {
+            sealer: u.sealer,
+            watermark: Self::watermark(u.revision),
+            did_key: u.did_key,
+        })
     }
 
     fn recover(
@@ -111,17 +182,24 @@ impl KeyringLifecycle for ChainVault {
         anchor: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
-        min_revision: u32,
+        floor: &[u8],
     ) -> Result<Recovered, SealerError> {
-        vault::recover(
+        let r = vault::recover(
             anchor,
             recovery_code,
             new_passphrase,
             ctx.tree_id,
             ctx.member_id,
             ctx.replica_id,
-            min_revision,
-        )
+            Self::floor(floor)?,
+        )?;
+        Ok(Recovered {
+            anchor: r.keyring,
+            recovery_code: r.recovery_code,
+            sealer: r.sealer,
+            watermark: Self::watermark(r.revision),
+            did_key: r.did_key,
+        })
     }
 
     fn change_passphrase(
@@ -130,16 +208,21 @@ impl KeyringLifecycle for ChainVault {
         anchor: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
-        min_revision: u32,
+        floor: &[u8],
     ) -> Result<Rekeyed, SealerError> {
-        vault::change_passphrase(
+        let re = vault::change_passphrase(
             anchor,
             old_passphrase,
             new_passphrase,
             ctx.tree_id,
             ctx.member_id,
-            min_revision,
-        )
+            Self::floor(floor)?,
+        )?;
+        Ok(Rekeyed {
+            anchor: re.keyring,
+            recovery_code: re.recovery_code,
+            watermark: Self::watermark(re.revision),
+        })
     }
 }
 
@@ -159,8 +242,9 @@ mod tests {
     }
 
     /// Drive the whole four-flow spine through the trait object (not the free functions) on the chain
-    /// engine: provision → unlock → change_passphrase → unlock-under-new → recover. Proves the anchor-in /
-    /// anchor-out shared menu fits the shipping keyring, which is what the two hosts will dispatch over.
+    /// engine: provision → unlock → change_passphrase → unlock-under-new → recover. Proves the shared menu
+    /// fits the shipping keyring with the anti-rollback floor threaded as OPAQUE bytes (never a scalar) —
+    /// the shape the two hosts will dispatch over.
     #[test]
     fn chain_vault_drives_the_lifecycle_through_the_trait() {
         let engine: &dyn KeyringLifecycle = &ChainVault;
@@ -171,45 +255,59 @@ mod tests {
 
         // provision → the genesis anchor + a ready sealer.
         let p = engine.provision(&ctx(&tree, &member, &replica), &pass).unwrap();
-        assert!(!p.keyring.is_empty());
+        assert!(!p.anchor.is_empty());
 
-        // unlock the genesis anchor.
+        // unlock the genesis anchor → an opaque watermark, not a bare revision.
         let u = engine
-            .unlock(&ctx(&tree, &member, &replica), &p.keyring, &pass)
+            .unlock(&ctx(&tree, &member, &replica), &p.anchor, &pass)
             .unwrap();
-        assert_eq!(u.revision, 1);
+        assert_eq!(u.watermark, ChainVault::watermark(1), "chain watermark = revision 1, as bytes");
         assert_eq!(u.did_key, p.did_key, "same identity across provision + unlock");
 
-        // change_passphrase → a new anchor; the OLD passphrase must no longer unlock it.
+        // change_passphrase → a new anchor; the OLD passphrase must no longer unlock it. The floor is
+        // passed as the opaque watermark from the unlock above.
         let new_pass = Passphrase::new(b"stronger horse battery");
         let re = engine
-            .change_passphrase(&ctx(&tree, &member, &replica), &p.keyring, &pass, &new_pass, u.revision)
+            .change_passphrase(&ctx(&tree, &member, &replica), &p.anchor, &pass, &new_pass, &u.watermark)
             .unwrap();
-        assert!(re.revision > u.revision, "a keyring change advances the revision");
+        assert_ne!(re.watermark, u.watermark, "a keyring change advances the watermark");
         assert!(
             engine
-                .unlock(&ctx(&tree, &member, &replica), &re.keyring, &pass)
+                .unlock(&ctx(&tree, &member, &replica), &re.anchor, &pass)
                 .is_err(),
             "the old passphrase can't open the re-keyed anchor"
         );
         assert!(
             engine
-                .unlock(&ctx(&tree, &member, &replica), &re.keyring, &new_pass)
+                .unlock(&ctx(&tree, &member, &replica), &re.anchor, &new_pass)
                 .is_ok(),
             "the new passphrase opens it"
         );
 
         // recover the re-keyed anchor with the CURRENT recovery code (change_passphrase rotated it — the
-        // old code's wrap was replaced) — re-establishes access under yet another passphrase.
+        // old code's wrap was replaced) — re-establishes access under yet another passphrase. Floor = the
+        // watermark we're at.
         let recovered = engine
             .recover(
                 &ctx(&tree, &member, &replica),
-                &re.keyring,
+                &re.anchor,
                 &re.recovery_code,
                 &Passphrase::new(b"third passphrase"),
-                re.revision,
+                &re.watermark,
             )
             .unwrap();
-        assert!(recovered.revision > re.revision, "recovery advances past the floor");
+        assert_ne!(recovered.watermark, re.watermark, "recovery advances past the floor");
+    }
+
+    /// A non-empty floor that isn't a 4-byte revision is refused, not silently treated as "no floor" —
+    /// dropping a corrupt local cursor would drop rollback protection.
+    #[test]
+    fn a_malformed_floor_is_refused_not_dropped() {
+        assert_eq!(ChainVault::floor(&[]).unwrap(), 0, "empty floor = no floor");
+        assert_eq!(ChainVault::floor(&7u32.to_be_bytes()).unwrap(), 7);
+        assert!(matches!(
+            ChainVault::floor(&[1, 2, 3]),
+            Err(SealerError::MalformedWatermark)
+        ));
     }
 }

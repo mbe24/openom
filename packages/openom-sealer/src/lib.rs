@@ -162,6 +162,12 @@ pub enum SealerError {
     /// The next revision would overflow `u32` (a poisoned/absurd served revision).
     #[error("keyring revision overflow")]
     RevisionOverflow,
+    /// The opaque anti-rollback watermark floor handed to a lifecycle call wasn't a valid encoding for
+    /// this engine (for the chain, a non-empty value that isn't a 4-byte revision). The floor is a
+    /// client-local cursor, so this is local corruption, not an attack — but it's refused rather than
+    /// silently dropped, since dropping the floor would drop rollback protection.
+    #[error("malformed anti-rollback watermark")]
+    MalformedWatermark,
 }
 
 /// A stateful sealing session bound to one `(tree_id, key_id, replica_id)` scope, holding
