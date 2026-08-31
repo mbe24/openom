@@ -8,6 +8,8 @@
 //! op closure — plus the pinned **genesis op id** (the sealing fold's root: the genesis `Create` is
 //! resolver-inert per OPE-271, so it is pinned to always contribute its sealing).
 
+use std::collections::HashSet;
+
 use keyeo::{Keyeo, MembershipAction, StrongRemove};
 use openom_keyring_seam::MembershipView;
 use serde::{Deserialize, Serialize};
@@ -106,12 +108,15 @@ pub struct Resolved {
 }
 
 /// Resolve an anchor: rebuild the engine from the pinned config, replay the op closure, and return the
-/// membership view + the effective ops' sealing.
+/// membership view + the effective ops' sealing (in fold order).
 ///
-/// TODO(OPE-273 multi-op fold): today this contributes only the pinned genesis op's sealing (the
-/// single-owner path — the only ops are the genesis). Once membership authoring lands, non-genesis ops
-/// contribute their sealing iff effective, via the engine's `effective_ops` accessor (design.dag-vault-
-/// anchor.md); the genesis op always contributes (it is resolver-inert per OPE-271 but pinned as the root).
+/// The sealing fold rule (design.dag-vault-anchor.md): the pinned **genesis** op always contributes its
+/// sealing (it is resolver-inert per OPE-271 but is the pinned root); every other op contributes iff it was
+/// **effective** — authorized at its causal position. (This uses the engine's `authorized_at_position`,
+/// which covers the single-writer + recovery flows built so far. The fuller effectiveness — reset-merge
+/// carve-out voiding, quorum-Commit effectiveness, and topo-order iteration for concurrent branches — is a
+/// follow-up when membership-quorum / concurrent recovery land; op order here is the anchor's append order,
+/// which is causal for a single writer.)
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
         serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -123,12 +128,11 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
     let base = KeyringState::create(&genesis).with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
-    let mut genesis_sealing: Option<Vec<u8>> = None;
+    // Pass 1: decode + replay every op (authorization resolves only once the whole closure is applied).
+    let mut ops = Vec::with_capacity(anchor.ops.len());
     for bytes in &anchor.ops {
         let op = decode_op(bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
-        if op.id == anchor.genesis_op_id {
-            genesis_sealing = Some(op.sealing.clone());
-        }
+        ops.push(op.clone());
         engine
             .apply(op)
             .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
@@ -137,8 +141,67 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         .flush()
         .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
     let members = view_of(engine.state(), false);
-    let sealing = genesis_sealing
-        .map(|s| vec![s])
-        .ok_or_else(|| ClientError::Malformed("pinned genesis op not present in the closure".into()))?;
+    // Pass 2: collect the sealing of the pinned genesis op (always) + every effective op.
+    let mut saw_genesis = false;
+    let mut sealing = Vec::new();
+    for op in &ops {
+        let is_genesis = op.id == anchor.genesis_op_id;
+        saw_genesis |= is_genesis;
+        let effective = is_genesis || engine.authorized_at_position(&op.id) == Some(true);
+        if effective && !op.sealing.is_empty() {
+            sealing.push(op.sealing.clone());
+        }
+    }
+    if !saw_genesis {
+        return Err(ClientError::Malformed(
+            "pinned genesis op not present in the closure".into(),
+        ));
+    }
     Ok(Resolved { members, sealing })
+}
+
+/// The DAG frontier: op ids that are no other op's parent (the current tips), sorted for determinism. New
+/// ops parent on this; it is also the anti-rollback watermark (OPE-284).
+fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
+    let parents: HashSet<[u8; 32]> = ops.iter().flat_map(|o| o.parents.iter().copied()).collect();
+    let mut tips: Vec<[u8; 32]> = ops
+        .iter()
+        .map(|o| o.id)
+        .filter(|id| !parents.contains(id))
+        .collect();
+    tips.sort_unstable();
+    tips
+}
+
+/// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
+/// (RVK), carrying the re-escrow in its opaque `sealing`. Parents = the current frontier. Returns the new
+/// anchor bytes. The `recovery_rewrap` action field is left empty (the escrow rides the envelope sealing
+/// now; the field is consolidated away in a later step).
+pub fn append_refound(
+    anchor_bytes: &[u8],
+    owner_id: &str,
+    new_author_public_key: [u8; 32],
+    new_hpke_public_key: [u8; 32],
+    era: u64,
+    sealing: Vec<u8>,
+    rvk_signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let mut anchor: DagAnchor =
+        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let ops: Vec<KeyringOp> = anchor
+        .ops
+        .iter()
+        .map(|b| decode_op(b))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let action = MembershipAction::ReFound {
+        member: owner_id.to_string(),
+        new_author_public_key,
+        new_hpke_public_key,
+        era,
+        recovery_rewrap: Vec::new(),
+    };
+    let op = mint(frontier(&ops), owner_id.to_string(), action, sealing, rvk_signing_key);
+    anchor.ops.push(encode_op(&op));
+    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
 }
