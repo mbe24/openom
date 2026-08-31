@@ -330,7 +330,6 @@ fn recovery_re_establishes_the_owner_in_both_and_preserves_membership() {
             new_author_public_key: pk32(&sk(new_owner)),
             new_hpke_public_key: [new_owner; 32],
             era: 1,
-            recovery_rewrap: vec![],
         },
         &rvk,
     ))
@@ -372,7 +371,6 @@ fn keyeo_reset_requires_the_recovery_authority_where_chain_accepts_a_self_signed
             new_author_public_key: pk32(&sk(new_owner)),
             new_hpke_public_key: [new_owner; 32],
             era: 1,
-            recovery_rewrap: vec![],
         },
         &sk(new_owner), // self-signed by the new key, NOT the RVK
     ))

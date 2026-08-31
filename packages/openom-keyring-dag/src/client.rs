@@ -172,12 +172,9 @@ pub struct Resolved {
 /// membership view + the effective ops' sealing (in fold order).
 ///
 /// The sealing fold rule (design.dag-vault-anchor.md): the pinned **genesis** op always contributes its
-/// sealing (it is resolver-inert per OPE-271 but is the pinned root); every other op contributes iff it was
-/// **effective** — authorized at its causal position. (This uses the engine's `authorized_at_position`,
-/// which covers the single-writer + recovery flows built so far. The fuller effectiveness — reset-merge
-/// carve-out voiding, quorum-Commit effectiveness, and topo-order iteration for concurrent branches — is a
-/// follow-up when membership-quorum / concurrent recovery land; op order here is the anchor's append order,
-/// which is causal for a single writer.)
+/// sealing (it is resolver-inert per OPE-271 but is the pinned root); every other op contributes iff the
+/// engine reports it **effective** ([`Keyeo::effective_ops`]) — not ignored/carve-out-voided, authorized
+/// at its causal position, and for a `Commit` its quorum met — folded in resolved topological order.
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
         serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -241,9 +238,8 @@ fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
 }
 
 /// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
-/// (RVK), carrying the re-escrow in its opaque `sealing`. Parents = the current frontier. Returns the new
-/// anchor bytes. The `recovery_rewrap` action field is left empty (the escrow rides the envelope sealing
-/// now; the field is consolidated away in a later step).
+/// (RVK), carrying the re-escrow in its opaque `sealing` envelope. Parents = the current frontier. Returns
+/// the new anchor bytes.
 pub fn append_refound(
     anchor_bytes: &[u8],
     owner_id: &str,
@@ -258,7 +254,6 @@ pub fn append_refound(
         new_author_public_key,
         new_hpke_public_key,
         era,
-        recovery_rewrap: Vec::new(),
     };
     append(anchor_bytes, owner_id, action, sealing, rvk_signing_key)
 }

@@ -201,11 +201,9 @@ enum ActionDto {
         new_author_public_key: [u8; 32],
         new_hpke_public_key: [u8; 32],
         era: u64,
-        recovery_rewrap: Vec<u8>,
     },
     RotateRecoveryAuthority {
         new_reset_authority: [u8; 32],
-        recovery_rewrap: Vec<u8>,
     },
     Retarget {
         member: String,
@@ -287,20 +285,16 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
             new_author_public_key,
             new_hpke_public_key,
             era,
-            recovery_rewrap,
         } => ActionDto::ReFound {
             member: member.clone(),
             new_author_public_key: *new_author_public_key,
             new_hpke_public_key: *new_hpke_public_key,
             era: *era,
-            recovery_rewrap: recovery_rewrap.clone(),
         },
         MembershipAction::RotateRecoveryAuthority {
             new_reset_authority,
-            recovery_rewrap,
         } => ActionDto::RotateRecoveryAuthority {
             new_reset_authority: *new_reset_authority,
-            recovery_rewrap: recovery_rewrap.clone(),
         },
         MembershipAction::Retarget {
             member,
@@ -351,20 +345,16 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
             new_author_public_key,
             new_hpke_public_key,
             era,
-            recovery_rewrap,
         } => MembershipAction::ReFound {
             member: member.clone(),
             new_author_public_key: *new_author_public_key,
             new_hpke_public_key: *new_hpke_public_key,
             era: *era,
-            recovery_rewrap: recovery_rewrap.clone(),
         },
         ActionDto::RotateRecoveryAuthority {
             new_reset_authority,
-            recovery_rewrap,
         } => MembershipAction::RotateRecoveryAuthority {
             new_reset_authority: *new_reset_authority,
-            recovery_rewrap: recovery_rewrap.clone(),
         },
         ActionDto::Retarget {
             member,
@@ -475,7 +465,6 @@ mod tests {
                 new_author_public_key: vk(7),
                 new_hpke_public_key: [7u8; 32],
                 era: 3,
-                recovery_rewrap: vec![1, 2, 3, 4],
             },
             &sk(1),
         );
@@ -489,7 +478,6 @@ mod tests {
             "founder",
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: vk(8),
-                recovery_rewrap: vec![9, 9, 9],
             },
             &sk(1),
         );

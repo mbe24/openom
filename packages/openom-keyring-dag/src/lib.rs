@@ -408,7 +408,6 @@ mod tests {
             new_author_public_key: vk(new_seed),
             new_hpke_public_key: [new_seed; 32],
             era,
-            recovery_rewrap: vec![0xAB; 8],
         }
     }
     fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
@@ -781,7 +780,6 @@ mod tests {
             "founder",
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: rvk2.verifying_key().to_bytes(),
-                recovery_rewrap: vec![0xCD; 4],
             },
             &rvk1,
         ))
@@ -825,7 +823,6 @@ mod tests {
             "founder",
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: rvk2.verifying_key().to_bytes(),
-                recovery_rewrap: vec![],
             },
             &sk(9), // NOT the current authority
         ))

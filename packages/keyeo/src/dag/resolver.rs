@@ -95,26 +95,24 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
     /// [`GroupState::reset_authority`] (see [`key_matches_registration`]) — so a member who lost their
     /// device can re-establish control without a prior member's cooperation. It removes no one and touches
     /// no other member: a forward-chained delta, not a re-genesis (contrast `Create`). `era` is a monotone
-    /// re-founding generation (1 + max era in the causal past); `recovery_rewrap` is opaque to keyeo
-    /// (openom's sealer interprets it) but carried in the signed content, so it replicates and is
-    /// tamper-evident.
+    /// re-founding generation (1 + max era in the causal past). Any re-wrapped recovery material rides the
+    /// op's opaque `sealing` envelope (which keyeo signs + content-addresses but never reads) — there is no
+    /// per-action rewrap field.
     ReFound {
         member: Id,
         new_author_public_key: <S as SignatureScheme>::PublicKey,
         new_hpke_public_key: [u8; 32],
         era: u64,
-        recovery_rewrap: Vec<u8>,
     },
     /// Rotate the group's recovery authority (OPE-272): replace the pinned [`GroupState::reset_authority`]
     /// with `new_reset_authority`, authorized by the op being signed by the CURRENT recovery authority.
     /// This is the ONLY way to genuinely revoke a prior recovery-key holder: re-wrapping the RRK secret
     /// (change-passphrase) leaves the keypair unchanged, so anyone who ever unwrapped it keeps recovery
     /// power until a rotation mints a fresh keypair. Gating on the OLD authority means an attacker without
-    /// the current secret cannot rotate it out from under the legitimate owner. `recovery_rewrap` is the
-    /// opaque wraps of the new RRK secret (openom's sealer interprets them), carried in the signed content.
+    /// the current secret cannot rotate it out from under the legitimate owner. Any re-wrapped recovery
+    /// material rides the op's opaque `sealing` envelope, not a per-action field.
     RotateRecoveryAuthority {
         new_reset_authority: <S as SignatureScheme>::PublicKey,
-        recovery_rewrap: Vec<u8>,
     },
     /// Voluntary self-rekey (OPE-274): `member` retargets their OWN signing + HPKE keys, authorized by the
     /// op being signed by their CURRENT registered key — ordinary D3 authentication (contrast `ReFound`,

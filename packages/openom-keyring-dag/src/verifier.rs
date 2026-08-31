@@ -300,7 +300,6 @@ mod tests {
                 new_author_public_key: vk(7),
                 new_hpke_public_key: [7; 32],
                 era: 1,
-                recovery_rewrap: vec![],
             },
             &rvk,
         );
