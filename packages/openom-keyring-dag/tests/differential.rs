@@ -8,9 +8,9 @@
 //! *expected* divergences so the oracle stays honest.
 
 use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use openom_keyring::{keyring_hash, sign_keyring, verify_transition, KeyringAnchor};
+use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
 use openom_keyring_dag::{
-    sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
+    recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
 use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
@@ -119,6 +119,28 @@ fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
 
 fn keyeo_has(k: &KeyringEngine, id: &str) -> bool {
     k.state().active_members().iter().any(|(m, _)| m == id)
+}
+
+/// keyeo engine for a cast WITH a pinned recovery authority (RVK) — the recovery differential needs it.
+fn keyeo_engine_with_rvk(cast: &[Cast], rvk_pub: [u8; 32]) -> KeyringEngine {
+    let inits: Vec<KeyringMemberInit> = cast
+        .iter()
+        .map(|c| MemberInit {
+            id: c.id.to_string(),
+            role: KeyringRole(c.member_role as i16),
+            author_public_key: pk32(&sk(c.seed)),
+            hpke_public_key: [c.seed; 32],
+        })
+        .collect();
+    Keyeo::new(
+        KeyringState::create(&inits).with_reset_authority(Some(rvk_pub)),
+        KeyringAccess,
+        StrongRemove,
+    )
+}
+
+fn keyeo_owner_key(k: &KeyringEngine) -> [u8; 32] {
+    k.state().members.get("owner").unwrap().author_public_key
 }
 
 fn founder() -> Cast {
@@ -267,6 +289,99 @@ fn founder_cannot_self_remove_agrees() {
 
     assert!(!chain_ok, "chain.rs rejects removing the sole founder");
     assert!(keyeo_has(&k, "owner"), "keyeo: the Owner cannot self-remove");
+}
+
+// ────────────────────────────── RECOVERY (OPE-269) ──────────────────────────────
+
+#[test]
+fn recovery_re_establishes_the_owner_in_both_and_preserves_membership() {
+    // OUTCOME parity: a recovery re-founds the Owner under a fresh key while keeping every other member.
+    // chain.rs does it with verify_reset (a self-signed re-founding keyring); keyeo with an RVK-signed
+    // ReFound (a minimal delta). Different mechanisms, same result — the Q5 convergence claim.
+    let new_owner = 7u8; // the recovered Owner's fresh identity
+
+    // chain.rs: a reset keyring whose Owner is re-keyed to `new_owner`, self-signed by that new key.
+    let reset_cast = [
+        Cast { seed: new_owner, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER },
+        co_owner(2, "bob"),
+    ];
+    let reset = chain_genesis(&reset_cast); // chain_genesis self-signs with cast[0] = the new Owner key
+    let chain_anchor = verify_reset(&reset).expect("chain.rs accepts a self-signed re-founding");
+    assert_eq!(chain_anchor.revision, 1);
+    let chain_owner_key = reset
+        .members
+        .iter()
+        .find(|m| m.member_id == "owner")
+        .unwrap()
+        .author_public_key
+        .clone();
+    assert_eq!(chain_owner_key, pubv(&sk(new_owner)), "chain: Owner re-keyed");
+    assert!(reset.members.iter().any(|m| m.member_id == "bob"), "chain: bob preserved");
+
+    // keyeo: the same recovery as an RVK-signed ReFound over the original cast.
+    let rvk = recovery::derive_rvk(&[42u8; 32]);
+    let mut k = keyeo_engine_with_rvk(&[founder(), co_owner(2, "bob")], rvk.verifying_key().to_bytes());
+    k.apply(sign_op(
+        [9u8; 32],
+        vec![],
+        "owner",
+        MembershipAction::ReFound {
+            member: "owner".into(),
+            new_author_public_key: pk32(&sk(new_owner)),
+            new_hpke_public_key: [new_owner; 32],
+            era: 1,
+            recovery_rewrap: vec![],
+        },
+        &rvk,
+    ))
+    .unwrap();
+
+    // Parity of outcome: both re-key the Owner to the same fresh identity and keep bob.
+    assert_eq!(keyeo_owner_key(&k), pk32(&sk(new_owner)), "keyeo: Owner re-keyed to the same identity");
+    assert_eq!(keyeo_owner_key(&k).to_vec(), chain_owner_key, "the recovered Owner key agrees across both");
+    assert!(keyeo_has(&k, "bob"), "keyeo: bob preserved");
+}
+
+#[test]
+fn keyeo_reset_requires_the_recovery_authority_where_chain_accepts_a_self_signed_reset() {
+    // The Q5 INTENTIONAL divergence, made concrete. The identical self-signed re-founding shape that
+    // chain.rs verify_reset ACCEPTS (its trust rests on an out-of-band ceremony) is REJECTED by keyeo
+    // unless it carries the pinned recovery authority (RVK) — keyeo's gate is strictly stronger, which is
+    // why, when the chain is retired, verify_reset's callers migrate to the RVK-gated path.
+    let new_owner = 7u8;
+
+    // chain.rs accepts a reset self-signed by the new Owner key (no RVK anywhere).
+    let reset_cast = [
+        Cast { seed: new_owner, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER },
+    ];
+    assert!(
+        verify_reset(&chain_genesis(&reset_cast)).is_ok(),
+        "chain.rs accepts a self-signed reset with no recovery-authority binding"
+    );
+
+    // keyeo: the same shape — a ReFound self-signed by the new Owner key (sk(7)), NOT the RVK — is
+    // admitted but carries no authority, so the Owner is unchanged.
+    let rvk = recovery::derive_rvk(&[42u8; 32]);
+    let mut k = keyeo_engine_with_rvk(&[founder()], rvk.verifying_key().to_bytes());
+    k.apply(sign_op(
+        [9u8; 32],
+        vec![],
+        "owner",
+        MembershipAction::ReFound {
+            member: "owner".into(),
+            new_author_public_key: pk32(&sk(new_owner)),
+            new_hpke_public_key: [new_owner; 32],
+            era: 1,
+            recovery_rewrap: vec![],
+        },
+        &sk(new_owner), // self-signed by the new key, NOT the RVK
+    ))
+    .unwrap();
+    assert_eq!(
+        keyeo_owner_key(&k),
+        pk32(&sk(1)),
+        "keyeo: a reset not signed by the pinned recovery authority has no effect (strictly stronger)"
+    );
 }
 
 // ────────────────────────────── DOCUMENTED DIVERGENCE ──────────────────────────────
