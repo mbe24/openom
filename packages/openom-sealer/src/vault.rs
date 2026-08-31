@@ -1640,6 +1640,18 @@ mod tests {
         // The founder still unlocks the rotated keyring — the epochs were re-wrapped to the new RRK.
         let u = unlock(&rot.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-B")).unwrap();
         assert_eq!(u.revision, 2);
+
+        // Revocation, proven empirically: the PRE-rotation recovery code no longer reaches the recovery
+        // root (its RRK is gone, and every epoch is re-wrapped to the new one) — so recover with the old
+        // code fails, while the NEW code works.
+        assert!(
+            recover(&rot.keyring, &p.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-C"), 0).is_err(),
+            "the pre-rotation recovery code is revoked"
+        );
+        assert!(
+            recover(&rot.keyring, &rot.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-D"), 0).is_ok(),
+            "the freshly-issued recovery code works"
+        );
     }
 
     #[test]
