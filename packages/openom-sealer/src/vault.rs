@@ -391,6 +391,72 @@ pub fn change_passphrase(
     })
 }
 
+/// Rotate the recovery root: mint a FRESH RRK (hence a fresh RVK), re-wrap every epoch's DEK onto it,
+/// and re-issue the recovery code — the new revision authorized by the OLD recovery authority signing it.
+/// This is the only genuine way to revoke a prior recovery-key holder: re-wrapping alone leaves the RRK
+/// keypair, so anyone who ever unwrapped it keeps recovery power. The founder identity is unchanged (the
+/// passphrase doesn't change), so it's an ordinary transition that `verify_transition` accepts because the
+/// OLD RVK co-signs the RVK change. The old recovery code + any prior RRK copy stop reaching the DEKs.
+pub fn rotate_recovery(
+    keyring_bytes: &[u8],
+    passphrase: &Passphrase,
+    tree_id: &TreeId,
+    member_id: &MemberId,
+    min_revision: u32,
+) -> Result<Rekeyed, SealerError> {
+    let passphrase = passphrase.expose();
+    let tree_id = tree_id.as_bytes();
+    let member_id = member_id.as_str();
+    let Opened {
+        rrk_secret: old_rrk,
+        revision,
+        prev_hash,
+        mut keyring,
+        ..
+    } = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
+    let new_revision = min_revision
+        .max(revision)
+        .checked_add(1)
+        .ok_or(SealerError::RevisionOverflow)?;
+
+    // The OLD recovery authority signs the rotation (proof of possession of the current recovery secret).
+    let old_rvk = openom_crypto::derive_rvk(old_rrk.expose());
+
+    // Mint a fresh RRK; `secrets` carry the (unchanged, passphrase-derived) founder identity + KEK + a
+    // fresh recovery code to wrap the new RRK secret under.
+    let HpkeKeypair {
+        secret: new_secret,
+        public: new_rrk_public,
+    } = generate_hpke_keypair()?;
+    let new_rrk = RrkSecret::from(new_secret);
+    // Reuse the CURRENT passphrase KDF (salt) so the founder identity + passphrase KEK are unchanged —
+    // rotation keeps the founder, only the recovery root changes.
+    let current_pass_kdf = recovery_key_for(&keyring, member_id)?
+        .wraps
+        .iter()
+        .find(|w| w.wrap_method == PASSPHRASE)
+        .and_then(|w| w.kdf_params.clone())
+        .ok_or_else(|| SealerError::BadKeyring("recovery key has no passphrase wrap".into()))?;
+    let secrets = owner_secrets_reusing_pass_kdf(passphrase, current_pass_kdf)?;
+
+    // Move the founder's cross-epoch access onto the new RRK, then swap in the new RecoveryKey (new RRK
+    // public + new RVK + freshly-wrapped secret).
+    rewrap_epochs_to_new_rrk(&mut keyring, tree_id, member_id, &old_rrk, &new_rrk_public)?;
+    let new_rk = build_recovery_key(&new_rrk, &new_rrk_public, tree_id, member_id, &secrets)?;
+    replace_recovery_key(&mut keyring, member_id, new_rk);
+
+    keyring.revision = new_revision;
+    keyring.prev_keyring_hash = prev_hash;
+    keyring.signatures.clear();
+    sign_keyring(&mut keyring, &secrets.root.identity); // founder re-signs the ordinary transition
+    sign_keyring(&mut keyring, &old_rvk); // OLD RVK authorizes the recovery-root rotation
+    Ok(Rekeyed {
+        keyring: keyring.encode_to_vec(),
+        recovery_code: secrets.recovery_code,
+        revision: new_revision,
+    })
+}
+
 /// What a joining member provisions from their own passphrase: the KDF params they store
 /// in their account record (to re-derive on any device) and the two **public** keys they
 /// hand a tree owner out-of-band (§4a) — the Ed25519 author key and the X25519 HPKE key.
@@ -1085,6 +1151,28 @@ fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, SealerErr
     })
 }
 
+/// Like [`new_owner_secrets`] but REUSING the existing passphrase KDF params (salt), so the derived root
+/// — the founder identity and passphrase KEK — is UNCHANGED. Only the recovery code (and its KEK/salt) is
+/// fresh. Used by `rotate_recovery`, which keeps the founder + passphrase and changes only the recovery
+/// root, so it must not re-found the founder identity the way a passphrase change does.
+fn owner_secrets_reusing_pass_kdf(
+    passphrase: &[u8],
+    pass_kdf: KdfParams,
+) -> Result<NewOwnerSecrets, SealerError> {
+    let root = derive_root(passphrase, &pass_kdf)?;
+    let recovery_code = generate_recovery_code()?;
+    let entropy = parse_recovery_code(&recovery_code)?;
+    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
+    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
+    Ok(NewOwnerSecrets {
+        root,
+        pass_kdf,
+        recovery_code,
+        recovery_kek,
+        recovery_kdf,
+    })
+}
+
 /// Build the founder's [`RecoveryKey`]: the RRK private key wrapped under the new passphrase
 /// KEK and the new recovery-code KEK (the only two ways to reach it), bound to the tree-
 /// scoped rrk AAD.
@@ -1189,6 +1277,25 @@ fn epoch_deks(
             ))
         })
         .collect()
+}
+
+/// Re-wrap every epoch's DEK from the OLD recovery root to a NEW one (the RRK-HPKE wrap only; each
+/// member's own HPKE wraps are untouched). Used by `rotate_recovery`: mint a fresh RRK, then move the
+/// founder's cross-epoch access onto it so the old recovery secret no longer reaches any DEK.
+fn rewrap_epochs_to_new_rrk(
+    keyring: &mut Keyring,
+    tree_id: &[u8],
+    founder_id: &str,
+    old_rrk: &RrkSecret,
+    new_rrk_public: &[u8],
+) -> Result<(), SealerError> {
+    for ep in &mut keyring.epochs {
+        let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
+        let new_wrap = rrk_wrap_epoch(new_rrk_public, &dek, tree_id, founder_id, &ep.key_id, ep.epoch)?;
+        ep.wraps.retain(|w| w.wrap_method != RRK_HPKE);
+        ep.wraps.push(new_wrap);
+    }
+    Ok(())
 }
 
 /// Every `(key_id, epoch, DEK)` a MEMBER reaches via their per-epoch HPKE wraps (the epochs
@@ -1448,7 +1555,7 @@ mod tests {
     use super::{
         add_co_owner, add_member, add_member_as_co_owner, change_passphrase, provision,
         provision_member, recover, remove_co_owner, remove_member, remove_member_as_co_owner,
-        unlock, unlock_as_member,
+        rotate_recovery, unlock, unlock_as_member,
     };
     use crate::{EntryKind, SealContext, SealerError, SealerSet};
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
@@ -1508,6 +1615,31 @@ mod tests {
             u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"the family tree"
         );
+    }
+
+    #[test]
+    fn rotate_recovery_mints_a_new_authority_authorized_by_the_old() {
+        use openom_keyring::{verify_transition, KeyringAnchor};
+        use openom_protocol::Message;
+        let pass = Passphrase::new(b"correct horse");
+        let p = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-A")).unwrap();
+        let prior = openom_protocol::v1::Keyring::decode(p.keyring.as_slice()).unwrap();
+        let anchor = KeyringAnchor::from_keyring(&prior);
+        assert!(!anchor.recovery_verifying_key.is_empty(), "provision pins an RVK");
+
+        // Rotate the recovery root.
+        let rot = rotate_recovery(&p.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 0).unwrap();
+        let rotated = openom_protocol::v1::Keyring::decode(rot.keyring.as_slice()).unwrap();
+
+        // It's a valid transition, authorized by the OLD recovery authority, and the pinned RVK changed.
+        let new_anchor = verify_transition(&anchor, &rotated).unwrap();
+        assert_ne!(
+            new_anchor.recovery_verifying_key, anchor.recovery_verifying_key,
+            "the recovery authority (RVK) rotated"
+        );
+        // The founder still unlocks the rotated keyring — the epochs were re-wrapped to the new RRK.
+        let u = unlock(&rot.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-B")).unwrap();
+        assert_eq!(u.revision, 2);
     }
 
     #[test]
