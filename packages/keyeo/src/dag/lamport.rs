@@ -136,6 +136,25 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
         // Rotate the recovery authority: replace the pinned key. Membership is untouched — this only
         // changes who may authorize a future recovery. Authority (signed by the CURRENT authority) is
         // decided by the caller before this runs (see `key_matches_registration`).
+        // Voluntary self-rekey: retarget the member's OWN signing + HPKE keys in place — identical
+        // mechanics to a re-founding, but authorized by the member's current key, not the recovery
+        // authority (decided by the caller; see `key_matches_registration` + `AccessControl`). Not a
+        // recovery, so it does not participate in the reset-merge carve-out.
+        MembershipAction::Retarget {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+        } => {
+            match state.members.get_mut(member) {
+                Some(s) if s.is_active() => {
+                    s.author_public_key = new_author_public_key.clone();
+                    s.hpke_public_key = *new_hpke_public_key;
+                    s.access_counter += 1;
+                }
+                _ => return Err(format!("{:?} is not an active member to retarget", member)),
+            }
+            Ok((state, events))
+        }
         MembershipAction::RotateRecoveryAuthority { new_reset_authority, .. } => {
             state.reset_authority = Some(new_reset_authority.clone());
             Ok((state, events))

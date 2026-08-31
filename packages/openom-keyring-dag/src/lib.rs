@@ -207,6 +207,10 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             // the engine; here we bind the domain shape — only the Owner may author a rotation. Revoking a
             // prior recovery-key holder is the Owner's prerogative.
             MembershipAction::RotateRecoveryAuthority { .. } => author_role.is_owner(),
+            // Voluntary self-rekey (change-passphrase): a member retargets their OWN keys. The engine's D3
+            // check ensures the author's CURRENT registered key signs it; the only domain rule is self-only
+            // — you can't rekey another member. Any active member may rekey themselves.
+            MembershipAction::Retarget { member, .. } => member == author,
         }
     }
 
@@ -229,6 +233,9 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             | MembershipAction::Commit { .. }
             | MembershipAction::ReFound { .. }
             | MembershipAction::RotateRecoveryAuthority { .. } => true,
+            // Retargeting a signer's key touches the authority structure (privileged); an ordinary
+            // member's self-rekey does not.
+            MembershipAction::Retarget { member, .. } => Self::role_of(state, member).is_signer(),
             MembershipAction::Create { .. } => false,
         }
     }

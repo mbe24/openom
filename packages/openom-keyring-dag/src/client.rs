@@ -205,3 +205,32 @@ pub fn append_refound(
     anchor.ops.push(encode_op(&op));
     Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
 }
+
+/// Append a voluntary **Retarget** op — `member` rotates their OWN keys, signed by their CURRENT key
+/// (change-passphrase), carrying the re-escrow in its opaque `sealing`. Parents = the current frontier.
+/// Returns the new anchor bytes.
+pub fn append_retarget(
+    anchor_bytes: &[u8],
+    member_id: &str,
+    new_author_public_key: [u8; 32],
+    new_hpke_public_key: [u8; 32],
+    sealing: Vec<u8>,
+    current_signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let mut anchor: DagAnchor =
+        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let ops: Vec<KeyringOp> = anchor
+        .ops
+        .iter()
+        .map(|b| decode_op(b))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let action = MembershipAction::Retarget {
+        member: member_id.to_string(),
+        new_author_public_key,
+        new_hpke_public_key,
+    };
+    let op = mint(frontier(&ops), member_id.to_string(), action, sealing, current_signing_key);
+    anchor.ops.push(encode_op(&op));
+    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
+}

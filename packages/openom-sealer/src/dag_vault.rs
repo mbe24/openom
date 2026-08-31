@@ -7,9 +7,10 @@
 //! signed channel, folded alongside membership). `dag_vault.rs` never touches `keyeo` directly (a one-line
 //! import grep enforces it); it drives the facade.
 //!
-//! STATUS: provision + unlock (the single-owner spine) are built here. recover (ReFound) +
-//! change_passphrase (the new Retarget op) + membership authoring + the multi-op sealing fold land next;
-//! the [`crate::lifecycle::KeyringLifecycle`] trait impl follows once all four flows exist.
+//! STATUS: all four [`KeyringLifecycle`] flows are built — provision, unlock, recover (RVK-authorized
+//! ReFound), change_passphrase (current-key Retarget). Membership authoring (add/remove with member-unlock),
+//! the fuller effective-op fold (reset-merge carve-out / quorum-Commit), and the anti-rollback watermark
+//! (OPE-284) land next; DagVault is now interchangeable with ChainVault behind the trait.
 
 use openom_crypto::{
     derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
@@ -21,7 +22,9 @@ use openom_keyring_dag::client as dag_client;
 use openom_protocol::v1::KdfParams;
 use serde::{Deserialize, Serialize};
 
-use crate::lifecycle::{Provisioned, Recovered, Unlocked, VaultContext};
+use crate::lifecycle::{
+    KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
+};
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, new_owner_secrets, rrk_wrap_epoch, sealer_set_from_deks,
     validate_kdf, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
@@ -61,11 +64,11 @@ fn fold_sealing(sealing: &[Vec<u8>]) -> Result<(Vec<SealedEpoch>, RecoveryEscrow
 /// material through the shared core.
 pub struct DagVault;
 
-impl DagVault {
+impl KeyringLifecycle for DagVault {
     /// Create a brand-new dag-backed tree: mint a fresh DEK (epoch 0), a recovery root key escrowing it,
     /// and a content-addressed genesis op naming the founder as Owner + carrying epoch-0 and the escrow in
     /// its `sealing` payload, with the derived RVK pinned as the recovery authority.
-    pub fn provision(
+    fn provision(
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
@@ -121,7 +124,7 @@ impl DagVault {
 
     /// Re-open a dag-backed tree from its anchor + passphrase: resolve the membership, fold the sealing
     /// state, derive the KEK from the passphrase, unwrap the RRK, and open every epoch's DEK into a sealer.
-    pub fn unlock(
+    fn unlock(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
@@ -190,7 +193,7 @@ impl DagVault {
     /// Owner + carrying the re-escrow. The RRK — and every DEK it reaches — is UNCHANGED (re-wrap, not
     /// rotate), so the RVK is the same and the ReFound is authorized by the pinned recovery authority, and
     /// the returned sealer opens exactly the same data.
-    pub fn recover(
+    fn recover(
         &self,
         ctx: &VaultContext,
         anchor: &[u8],
@@ -263,6 +266,84 @@ impl DagVault {
             sealer,
             watermark: Vec::new(),
             did_key,
+        })
+    }
+
+    /// Change the passphrase: unwrap the RRK via the OLD passphrase, re-establish owner access under
+    /// `new_passphrase` (fresh identity + recovery code) by re-wrapping the SAME RRK, and append an ordinary
+    /// (current-key-signed) `Retarget` op retargeting the Owner to the new identity + carrying the new
+    /// escrow in its sealing. The DEK is unchanged, so any running sealer keeps working — no re-seal, and no
+    /// sealer is returned.
+    fn change_passphrase(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        old_passphrase: &Passphrase,
+        new_passphrase: &Passphrase,
+        _floor: &[u8],
+    ) -> Result<Rekeyed, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let member_id = ctx.member_id.as_str();
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let (_epochs, escrow) = fold_sealing(&resolved.sealing)?;
+
+        // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(SealerError::MissingWrap)?;
+        let old_kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(old_kdf)?;
+        let old_root = derive_root(old_passphrase.expose(), &KdfParams::from(old_kdf))?;
+        if old_root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
+        {
+            return Err(CryptoError::Signature.into());
+        }
+        let rrk_secret = unwrap_rrk_secret(
+            &old_root.kek,
+            &pass_wrap.nonce,
+            &pass_wrap.wrapped_dek,
+            tree_id,
+            member_id,
+            PASSPHRASE,
+        )?;
+
+        // Re-establish under the new passphrase, re-wrapping the SAME RRK (re-wrap, not rotate).
+        let secrets = new_owner_secrets(new_passphrase.expose())?;
+        let new_escrow =
+            build_recovery_escrow(&rrk_secret, &escrow.public_key, tree_id, member_id, &secrets)?;
+        let new_author = secrets.root.identity.verifying_key().to_bytes();
+
+        // Mint the Retarget signed by the OLD (current) owner key, retargeting to the new identity.
+        let sealing = serde_json::to_vec(&SealingPayload {
+            epochs: vec![],
+            escrow: Some(new_escrow),
+        })
+        .expect("SealingPayload serialization is infallible");
+        let new_anchor = dag_client::append_retarget(
+            anchor,
+            member_id,
+            new_author,
+            secrets.root.hpke_public,
+            sealing,
+            &old_root.identity,
+        )
+        .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+
+        Ok(Rekeyed {
+            anchor: new_anchor,
+            recovery_code: secrets.recovery_code,
+            watermark: Vec::new(),
         })
     }
 }
@@ -368,6 +449,66 @@ mod tests {
                 .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r4")), &r.anchor, &old_pass)
                 .is_err(),
             "the pre-recovery passphrase is retired"
+        );
+    }
+
+    /// Change the passphrase (a current-key-signed Retarget), then unlock with the new passphrase and open
+    /// pre-change data; the old passphrase is retired; and recovery still works via the rotated code — the
+    /// three-op fold (genesis → retarget → refound) resolves the current escrow correctly.
+    #[test]
+    fn dag_change_passphrase_then_unlock_and_still_recover() {
+        let tree = TreeId::new(TREE);
+        let member = MemberId::new(MEMBER);
+        let old_pass = Passphrase::new(b"correct horse");
+        let new_pass = Passphrase::new(b"battery staple unicorn");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &old_pass)
+            .unwrap();
+        let sealed = p
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"keepsake")
+            .unwrap()
+            .envelope;
+
+        let re = DagVault
+            .change_passphrase(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &old_pass,
+                &new_pass,
+                &[],
+            )
+            .unwrap();
+
+        // The NEW passphrase opens the rekeyed anchor (DEK unchanged); the OLD one no longer does.
+        let u = DagVault
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r2")), &re.anchor, &new_pass)
+            .unwrap();
+        assert_eq!(
+            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
+            b"keepsake"
+        );
+        assert!(
+            DagVault
+                .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r3")), &re.anchor, &old_pass)
+                .is_err(),
+            "the pre-change passphrase is retired"
+        );
+
+        // Recovery still works, via the recovery code the passphrase change rotated.
+        let r = DagVault
+            .recover(
+                &ctx(&tree, &member, &ReplicaId::new(b"r4")),
+                &re.anchor,
+                &re.recovery_code,
+                &Passphrase::new(b"a third passphrase"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
+            b"keepsake"
         );
     }
 

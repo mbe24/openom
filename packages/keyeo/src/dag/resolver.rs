@@ -116,6 +116,17 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
         new_reset_authority: <S as SignatureScheme>::PublicKey,
         recovery_rewrap: Vec<u8>,
     },
+    /// Voluntary self-rekey (OPE-274): `member` retargets their OWN signing + HPKE keys, authorized by the
+    /// op being signed by their CURRENT registered key — ordinary D3 authentication (contrast `ReFound`,
+    /// which is gated on the recovery authority). openom uses it for change-passphrase, where the new keys
+    /// derive from the new passphrase; the re-escrow rides the op's opaque `sealing` payload, so there is
+    /// no per-action rewrap field. It removes no one and touches no other member — a forward delta, NOT a
+    /// recovery: it does NOT trigger the reset-merge carve-out (it is not a re-founding).
+    Retarget {
+        member: Id,
+        new_author_public_key: <S as SignatureScheme>::PublicKey,
+        new_hpke_public_key: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

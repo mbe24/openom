@@ -207,6 +207,11 @@ enum ActionDto {
         new_reset_authority: [u8; 32],
         recovery_rewrap: Vec<u8>,
     },
+    Retarget {
+        member: String,
+        new_author_public_key: [u8; 32],
+        new_hpke_public_key: [u8; 32],
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,6 +302,15 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
             new_reset_authority: *new_reset_authority,
             recovery_rewrap: recovery_rewrap.clone(),
         },
+        MembershipAction::Retarget {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+        } => ActionDto::Retarget {
+            member: member.clone(),
+            new_author_public_key: *new_author_public_key,
+            new_hpke_public_key: *new_hpke_public_key,
+        },
     }
 }
 
@@ -351,6 +365,15 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
         } => MembershipAction::RotateRecoveryAuthority {
             new_reset_authority: *new_reset_authority,
             recovery_rewrap: recovery_rewrap.clone(),
+        },
+        ActionDto::Retarget {
+            member,
+            new_author_public_key,
+            new_hpke_public_key,
+        } => MembershipAction::Retarget {
+            member: member.clone(),
+            new_author_public_key: *new_author_public_key,
+            new_hpke_public_key: *new_hpke_public_key,
         },
     })
 }
