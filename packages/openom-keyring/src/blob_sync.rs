@@ -154,7 +154,8 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
             return Ok(None);
         };
         let keyring = decode(&bytes)?;
-        self.anchor = Some(verify_reset(&keyring).map_err(chain_err)?);
+        // First sight has no prior recovery authority to check continuity against (OOB trust root).
+        self.anchor = Some(verify_reset(None, &keyring).map_err(chain_err)?);
         self.head_etag = Some(etag);
         Ok(Some(bytes))
     }
@@ -221,7 +222,15 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 return Err(SyncError::Malformed("reset revision is behind the watermark"));
             }
         }
-        self.anchor = Some(verify_reset(&keyring).map_err(chain_err)?);
+        // A reset accepted against an existing anchor must be continuous with — and signed by — the
+        // prior recovery authority (RVK), so a served reset can't re-found the tree under a forged
+        // recovery root. Inactive if the prior pinned no RVK (pre-RVK keyrings).
+        let prior_rvk = self
+            .anchor
+            .as_ref()
+            .map(|a| a.recovery_verifying_key.as_slice())
+            .filter(|rvk| !rvk.is_empty());
+        self.anchor = Some(verify_reset(prior_rvk, &keyring).map_err(chain_err)?);
         self.head_etag = Some(etag);
         Ok(bytes)
     }

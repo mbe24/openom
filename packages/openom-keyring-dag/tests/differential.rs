@@ -306,7 +306,7 @@ fn recovery_re_establishes_the_owner_in_both_and_preserves_membership() {
         co_owner(2, "bob"),
     ];
     let reset = chain_genesis(&reset_cast); // chain_genesis self-signs with cast[0] = the new Owner key
-    let chain_anchor = verify_reset(&reset).expect("chain.rs accepts a self-signed re-founding");
+    let chain_anchor = verify_reset(None, &reset).expect("chain.rs accepts a self-signed re-founding");
     assert_eq!(chain_anchor.revision, 1);
     let chain_owner_key = reset
         .members
@@ -355,7 +355,7 @@ fn keyeo_reset_requires_the_recovery_authority_where_chain_accepts_a_self_signed
         Cast { seed: new_owner, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER },
     ];
     assert!(
-        verify_reset(&chain_genesis(&reset_cast)).is_ok(),
+        verify_reset(None, &chain_genesis(&reset_cast)).is_ok(),
         "chain.rs accepts a self-signed reset with no recovery-authority binding"
     );
 

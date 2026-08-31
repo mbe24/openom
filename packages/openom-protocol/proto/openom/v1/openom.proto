@@ -181,6 +181,13 @@ message RecoveryKey {
   // (WRAP_METHOD_RECOVERY_CODE_ARGON2ID) — exactly two entries in V1, each with its
   // Argon2id kdf_params. AAD is the tree-scoped rrk binding, not the per-epoch tuple.
   repeated KeyWrap wraps = 3;
+  // The Recovery Verification Key: an Ed25519 public key HKDF-derived from the recovery-root
+  // secret (openom_crypto::derive_rvk, domain-separated from public_key's ECDH use). Covered by
+  // the keyring signature, so the untrusted server can't substitute it. A reset/recovery keyring
+  // must carry the SAME recovery_verifying_key as the prior keyring (continuity) and be signed by
+  // it (authorization) — this is what makes a chain reset cryptographically verifiable rather than
+  // OOB-trusted. Empty on pre-RVK keyrings (then verify_reset falls back to the OOB self-check).
+  bytes recovery_verifying_key = 4;
 }
 
 // A member of the authorized-signer set — a founder or co-owner who may administer

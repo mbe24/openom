@@ -105,7 +105,7 @@ pub async fn put_keyring(
                 "first keyring must be revision 1".into(),
             ));
         }
-        (verify_reset(&candidate).map_err(keyring_err)?, false)
+        (verify_reset(None, &candidate).map_err(keyring_err)?, false)
     } else {
         let prior_bytes: Vec<u8> = sqlx::query_scalar(
             "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
@@ -117,7 +117,8 @@ pub async fn put_keyring(
         .map_err(internal)?;
         let prior = Keyring::decode(prior_bytes.as_slice())
             .map_err(|_| ApiError::Internal("stored keyring is corrupt".into()))?;
-        match verify_transition(&KeyringAnchor::from_keyring(&prior), &candidate) {
+        let prior_anchor = KeyringAnchor::from_keyring(&prior);
+        match verify_transition(&prior_anchor, &candidate) {
             Ok(a) => (a, false),
             // A recovery/succession reset: it chains onto our head by hash + revision (so it can't roll
             // back or fork), but changes the authorized-signer set without the old set's endorsement
@@ -131,7 +132,10 @@ pub async fn put_keyring(
                 if candidate.revision == head_rev as u32 + 1
                     && candidate.prev_keyring_hash == keyring_hash(&prior) =>
             {
-                (verify_reset(&candidate).map_err(keyring_err)?, true)
+                // Continuity + RVK-authorization against the prior recovery authority (inert if none).
+                let prior_rvk = (!prior_anchor.recovery_verifying_key.is_empty())
+                    .then_some(prior_anchor.recovery_verifying_key.as_slice());
+                (verify_reset(prior_rvk, &candidate).map_err(keyring_err)?, true)
             }
             Err(e) => return Err(keyring_err(e)),
         }

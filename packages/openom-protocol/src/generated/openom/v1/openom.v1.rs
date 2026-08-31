@@ -164,6 +164,11 @@ pub struct RecoveryKey {
     /// Argon2id kdf_params. AAD is the tree-scoped rrk binding, not the per-epoch tuple.
     #[prost(message, repeated, tag="3")]
     pub wraps: ::prost::alloc::vec::Vec<KeyWrap>,
+    /// The Recovery Verification Key: an Ed25519 public key HKDF-derived from the recovery-root
+    /// secret. Covered by the keyring signature; a reset must carry the same one (continuity) and be
+    /// signed by it (authorization). Empty on pre-RVK keyrings.
+    #[prost(bytes="vec", tag="4")]
+    pub recovery_verifying_key: ::prost::alloc::vec::Vec<u8>,
 }
 /// A member of the authorized-signer set — a founder or co-owner who may administer
 /// the keyring (rotate keys, add/remove members, re-sign).

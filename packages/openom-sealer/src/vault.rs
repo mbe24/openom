@@ -1114,6 +1114,9 @@ fn build_recovery_key(
                 ephemeral_public_key: Vec::new(),
             },
         ],
+        // Pinned in a follow-up (the RVK-mint slice): the Ed25519 recovery verifying key derived from the
+        // RRK secret. Empty here keeps verify_reset's RVK gate inert until vault mints + pins it.
+        recovery_verifying_key: Vec::new(),
     })
 }
 

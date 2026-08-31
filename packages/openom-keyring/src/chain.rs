@@ -56,6 +56,10 @@ pub struct KeyringAnchor {
     /// authorizes the NEXT privileged change (anti-downgrade).
     pub governance_kind: u32,
     pub governance_threshold: u32,
+    /// The recovery verifying key (RVK) pinned in this keyring, or empty if none. Carried on the anchor
+    /// so a caller adopting a reset can pass the PRIOR RVK to [`verify_reset`] for the continuity +
+    /// authorization gate.
+    pub recovery_verifying_key: Vec<u8>,
 }
 
 impl KeyringAnchor {
@@ -71,6 +75,7 @@ impl KeyringAnchor {
             trusted_signers: keyring.authorized_signers.clone(),
             governance_kind: keyring.governance_kind,
             governance_threshold: keyring.governance_threshold,
+            recovery_verifying_key: reset_rvk(keyring).map(<[u8]>::to_vec).unwrap_or_default(),
         }
     }
 
@@ -139,7 +144,10 @@ impl GoverningKeyring {
 
     /// Mint a recovery / succession reset validated on its own terms — see [`verify_reset`].
     pub fn from_reset(keyring: Keyring) -> Result<Self, ChainError> {
-        verify_reset(&keyring)?;
+        // The writer's own self-check has no prior to compare against, so no continuity gate here — the
+        // continuity + RVK-authorization gate runs where a PRIOR is known (a reader adopting a served
+        // reset passes the prior RVK to `verify_reset`).
+        verify_reset(None, &keyring)?;
         Ok(Self { keyring })
     }
 
@@ -241,6 +249,12 @@ pub fn verify_transition(
         return Err(ChainError::WrapIncomplete);
     }
 
+    // The recovery authority (RVK) is immutable across an ordinary transition — changing it is a
+    // privileged recovery-root rotation, not an ordinary re-sign. (Rotation is a dedicated flow.)
+    if reset_rvk(candidate).unwrap_or(&[]) != prior.recovery_verifying_key.as_slice() {
+        return Err(ChainError::UnendorsedSetChange);
+    }
+
     Ok(KeyringAnchor {
         tree_id: candidate.tree_id.clone(),
         revision: candidate.revision,
@@ -248,6 +262,7 @@ pub fn verify_transition(
         trusted_signers: candidate.authorized_signers.clone(),
         governance_kind: candidate.governance_kind,
         governance_threshold: candidate.governance_threshold,
+        recovery_verifying_key: reset_rvk(candidate).map(<[u8]>::to_vec).unwrap_or_default(),
     })
 }
 
@@ -327,7 +342,7 @@ pub fn bootstrap_from_oob(
 /// founder's own passphrase produced it, or a member re-verified it out-of-band — never from a
 /// prior chain link. This is the writer's self-check for the provision and recover flows, whose
 /// output is a valid keyring but (for recover) intentionally not a valid transition.
-pub fn verify_reset(keyring: &Keyring) -> Result<KeyringAnchor, ChainError> {
+pub fn verify_reset(prior_rvk: Option<&[u8]>, keyring: &Keyring) -> Result<KeyringAnchor, ChainError> {
     if keyring.layout_version > KEYRING_LAYOUT_VERSION {
         return Err(ChainError::LayoutAhead);
     }
@@ -338,6 +353,23 @@ pub fn verify_reset(keyring: &Keyring) -> Result<KeyringAnchor, ChainError> {
         .map_err(|_| ChainError::BadBootstrap)?;
     if !wrap_complete(keyring) {
         return Err(ChainError::WrapIncomplete);
+    }
+    // RVK gate — active once the PRIOR keyring pinned a recovery authority. This is what makes a chain
+    // reset cryptographically verifiable rather than OOB-trusted: the reset must carry the SAME recovery
+    // verifying key (continuity — no forged takeover under a fresh recovery root) AND be signed by it
+    // (authorization — the resetter possesses the recovery secret). If the prior pinned no RVK
+    // (pre-RVK / genuine first sight), fall back to the self-signed-by-own-signer check above.
+    if let Some(prior) = prior_rvk {
+        let rvk = reset_rvk(keyring).ok_or(ChainError::UnendorsedSetChange)?;
+        if rvk != prior {
+            return Err(ChainError::UnendorsedSetChange);
+        }
+        let rvk_bytes: [u8; 32] = rvk
+            .try_into()
+            .map_err(|_| ChainError::BadStructure("recovery verifying key length"))?;
+        let rvk_key = VerifyingKey::from_bytes(&rvk_bytes)
+            .map_err(|_| ChainError::BadStructure("recovery verifying key"))?;
+        verify_keyring_any(keyring, &[rvk_key]).map_err(|_| ChainError::UnendorsedSetChange)?;
     }
     Ok(KeyringAnchor::from_keyring(keyring))
 }
@@ -467,6 +499,16 @@ fn signer_key(s: &AuthorizedSigner) -> Option<VerifyingKey> {
 
 /// Parse + **deduplicate** the signer keys (so a corrupted set with a repeated key can't make
 /// unanimity easier to satisfy).
+/// The recovery verifying key (RVK) pinned in the keyring — the first non-empty
+/// `RecoveryKey.recovery_verifying_key` (V1 has one, the founder's). `None` on a pre-RVK keyring.
+fn reset_rvk(keyring: &Keyring) -> Option<&[u8]> {
+    keyring
+        .recovery_keys
+        .iter()
+        .map(|rk| rk.recovery_verifying_key.as_slice())
+        .find(|rvk| !rvk.is_empty())
+}
+
 fn signer_keys(signers: &[AuthorizedSigner]) -> Vec<VerifyingKey> {
     let mut out: Vec<VerifyingKey> = Vec::new();
     for s in signers {
@@ -783,6 +825,54 @@ mod tests {
         k
     }
 
+    #[test]
+    fn verify_reset_rvk_gate_enforces_continuity_and_the_recovery_signature() {
+        use openom_protocol::v1::RecoveryKey;
+        let rvk = openom_crypto::derive_rvk(&[42u8; 32]); // the pinned recovery authority
+        let rvk_pub = rvk.verifying_key().to_bytes().to_vec();
+
+        // A reset keyring under a fresh founder (seed 7), pinning `pinned_rvk`, founder-signed and
+        // optionally RVK-co-signed.
+        let build = |pinned_rvk: Vec<u8>, rvk_co_signs: bool| -> Keyring {
+            let f = sk(7);
+            let mut k = genesis(&f, &[], &[]);
+            k.recovery_keys = vec![RecoveryKey {
+                public_key: vec![5; 32],
+                member_id: "owner".into(),
+                wraps: vec![],
+                recovery_verifying_key: pinned_rvk,
+            }];
+            k.signatures.clear();
+            sign_keyring(&mut k, &f);
+            if rvk_co_signs {
+                sign_keyring(&mut k, &rvk);
+            }
+            k
+        };
+
+        // continuity + RVK-signature both satisfied → accepted.
+        assert!(
+            verify_reset(Some(&rvk_pub), &build(rvk_pub.clone(), true)).is_ok(),
+            "a continuous, RVK-signed reset is accepted"
+        );
+        // signed by the fresh founder but NOT the RVK → rejected (authorization).
+        assert!(
+            verify_reset(Some(&rvk_pub), &build(rvk_pub.clone(), false)).is_err(),
+            "a reset not signed by the pinned recovery authority is rejected"
+        );
+        // a DIFFERENT recovery root pinned — a forged takeover → rejected (continuity), before signatures.
+        let other = openom_crypto::derive_rvk(&[99u8; 32]).verifying_key().to_bytes().to_vec();
+        assert!(
+            verify_reset(Some(&rvk_pub), &build(other, true)).is_err(),
+            "a reset under a fresh recovery root breaks continuity and is rejected"
+        );
+        // with NO prior RVK (pre-RVK keyring), the gate is inert — the self-signed reset is accepted.
+        assert!(
+            verify_reset(None, &build(rvk_pub.clone(), false)).is_ok(),
+            "no prior recovery authority → the gate is inactive (backward-compatible)"
+        );
+    }
+
     /// A mutation adding co-owner "d" (signer + member + epoch wrap) — a signer-set change.
     fn add_coowner(dk: &SigningKey) -> impl FnOnce(&mut Keyring) + '_ {
         move |k: &mut Keyring| {
@@ -1054,7 +1144,7 @@ mod tests {
         reset.layout_version = KEYRING_LAYOUT_VERSION + 1;
         reset.signatures.clear();
         sign_keyring(&mut reset, &f);
-        assert_eq!(verify_reset(&reset), Err(ChainError::LayoutAhead));
+        assert_eq!(verify_reset(None, &reset), Err(ChainError::LayoutAhead));
     }
 
     #[test]
@@ -1106,7 +1196,7 @@ mod tests {
             k.authorized_signers.push(dummy.clone());
         }
         assert_eq!(
-            verify_reset(&k),
+            verify_reset(None, &k),
             Err(ChainError::BadStructure("list too large"))
         );
     }
@@ -1120,7 +1210,7 @@ mod tests {
             k.members.push(d.clone());
         }
         assert_eq!(
-            verify_reset(&k),
+            verify_reset(None, &k),
             Err(ChainError::BadStructure("list too large"))
         );
     }
@@ -1134,7 +1224,7 @@ mod tests {
             k.epochs.push(e.clone());
         }
         assert_eq!(
-            verify_reset(&k),
+            verify_reset(None, &k),
             Err(ChainError::BadStructure("list too large"))
         );
     }
@@ -1370,7 +1460,7 @@ mod tests {
         let f = key();
         let g = genesis(&f, &[], &[]);
         // A genesis validates on its own terms.
-        assert_eq!(verify_reset(&g).unwrap().revision, 1);
+        assert_eq!(verify_reset(None, &g).unwrap().revision, 1);
 
         // A recovery-style reset: a later revision, a fresh (unendorsed) founder identity, self-
         // signed only by that new key — verify_transition would reject it, verify_reset accepts.
@@ -1382,7 +1472,7 @@ mod tests {
         reset.members[0].author_public_key = pubv(&f2);
         reset.signatures.clear();
         sign_keyring(&mut reset, &f2);
-        assert_eq!(verify_reset(&reset).unwrap().revision, 5);
+        assert_eq!(verify_reset(None, &reset).unwrap().revision, 5);
         assert_eq!(
             verify_transition(&anchor(&g), &reset).unwrap_err(),
             ChainError::NonSequential // (and even at the right revision it's an UnendorsedSetChange)
@@ -1392,7 +1482,7 @@ mod tests {
         let mut unsigned = g.clone();
         unsigned.signatures.clear();
         sign_keyring(&mut unsigned, &key());
-        assert_eq!(verify_reset(&unsigned), Err(ChainError::BadBootstrap));
+        assert_eq!(verify_reset(None, &unsigned), Err(ChainError::BadBootstrap));
     }
 
     // --- Differential oracle -------------------------------------------------------------

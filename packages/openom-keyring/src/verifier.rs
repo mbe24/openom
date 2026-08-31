@@ -34,6 +34,12 @@ fn view_of(k: &Keyring, reset_boundary: bool) -> MembershipView {
     MembershipView::new(members, reset_boundary)
 }
 
+/// The prior head's recovery authority (RVK) as an optional slice — `None` (gate inactive) if the head
+/// pinned none (pre-RVK keyring).
+fn prior_rvk(anchor: &KeyringAnchor) -> Option<&[u8]> {
+    (!anchor.recovery_verifying_key.is_empty()).then_some(anchor.recovery_verifying_key.as_slice())
+}
+
 /// Class the chain's error taxonomy into the neutral seam vocabulary.
 fn classify(e: ChainError) -> VerifyError {
     match e {
@@ -88,8 +94,9 @@ impl KeyringVerifier for ChainVerifier {
                         })
                     }
                     // Not a valid ordinary transition — it may be a recovery reset (a fresh, deliberately
-                    // unendorsed founder identity). Try that path before refusing.
-                    Err(transition_err) => match verify_reset(&candidate) {
+                    // unendorsed founder identity). Try that path before refusing, gating on the prior
+                    // head's recovery authority (RVK) for continuity + authorization.
+                    Err(transition_err) => match verify_reset(prior_rvk(&anchor), &candidate) {
                         Ok(_) => Ok(Admitted {
                             state: candidate.encode_to_vec(),
                             view: view_of(&candidate, true),
