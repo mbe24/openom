@@ -18,7 +18,7 @@ use openom_crypto::{
     RrkSecret,
 };
 use openom_did::DidKey;
-use openom_keyring_dag::client as dag_client;
+use openom_keyring_dag::{client as dag_client, KeyringRole};
 use openom_protocol::v1::KdfParams;
 use serde::{Deserialize, Serialize};
 
@@ -26,30 +26,65 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, new_owner_secrets, rrk_wrap_epoch, sealer_set_from_deks,
-    validate_kdf, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
+    build_recovery_escrow, epoch_deks, member_wrap_epoch, new_owner_secrets, rrk_wrap_epoch,
+    sealer_set_from_deks, validate_kdf, CoreWrap, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
 };
 use crate::SealerError;
 
-/// The opaque payload an op carries in its `sealing` field: the DEK epochs it introduces + the recovery
-/// escrow it sets (`None` = unchanged). The genesis op carries epoch-0 + the initial escrow; membership
-/// and recovery ops carry deltas. The vault folds these (in effective-op order) into the current sealing
-/// state. (JSON today, matching the dag op codec; a compact/binary form is a later perf task.)
+/// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
+/// order) into the current sealing state: `new_epochs` are inserted (genesis's epoch-0; a member removal's
+/// forward-secret epoch), `added_wraps` are appended to existing epochs (an add-member's per-epoch wraps
+/// for the joiner), and `escrow` sets the recovery escrow (`None` = unchanged). Deltas — not snapshots —
+/// so it stays CRDT-clean (concurrent additions both survive) and compact. (JSON today, matching the dag
+/// op codec; a compact/binary form is a later perf task.)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SealingPayload {
-    epochs: Vec<SealedEpoch>,
+    new_epochs: Vec<SealedEpoch>,
+    added_wraps: Vec<AddedWrap>,
     escrow: Option<RecoveryEscrow>,
 }
 
-/// Fold the effective ops' sealing payloads (in order) into the current epochs + escrow — epochs
-/// accumulate, the latest escrow wins. Errors if no escrow was ever set.
+/// A wrap added to an EXISTING epoch (identified by `key_id`) — how an add-member gives the joiner access
+/// to an epoch without minting a new one.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AddedWrap {
+    key_id: Vec<u8>,
+    wrap: CoreWrap,
+}
+
+impl SealingPayload {
+    /// A payload that only sets/re-sets the escrow (provision's is built inline; recover / change_passphrase
+    /// re-escrow with no epoch change).
+    fn escrow_only(escrow: RecoveryEscrow) -> Self {
+        SealingPayload {
+            new_epochs: vec![],
+            added_wraps: vec![],
+            escrow: Some(escrow),
+        }
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("SealingPayload serialization is infallible")
+    }
+}
+
+/// Fold the effective ops' sealing deltas (in order) into the current epochs + escrow. `new_epochs` are
+/// inserted (keyed by `key_id`), `added_wraps` are appended to the matching existing epoch (a wrap over an
+/// unknown epoch is skipped — a delta whose epoch this replica hasn't/won't see), and the latest escrow
+/// wins. Errors if no escrow was ever set.
 fn fold_sealing(sealing: &[Vec<u8>]) -> Result<(Vec<SealedEpoch>, RecoveryEscrow), SealerError> {
     let mut epochs: Vec<SealedEpoch> = Vec::new();
     let mut escrow: Option<RecoveryEscrow> = None;
     for bytes in sealing {
         let payload: SealingPayload =
             serde_json::from_slice(bytes).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
-        epochs.extend(payload.epochs);
+        for e in payload.new_epochs {
+            epochs.push(e);
+        }
+        for aw in payload.added_wraps {
+            if let Some(ep) = epochs.iter_mut().find(|e| e.key_id == aw.key_id) {
+                ep.wraps.push(aw.wrap);
+            }
+        }
         if payload.escrow.is_some() {
             escrow = payload.escrow;
         }
@@ -99,11 +134,12 @@ impl KeyringLifecycle for DagVault {
         let did_key = DidKey::from_public_key(&author_public);
         let rvk_public = derive_rvk(rrk_secret.expose()).verifying_key().to_bytes();
 
-        let sealing = serde_json::to_vec(&SealingPayload {
-            epochs: vec![epoch0],
+        let sealing = SealingPayload {
+            new_epochs: vec![epoch0],
+            added_wraps: vec![],
             escrow: Some(escrow),
-        })
-        .expect("SealingPayload serialization is infallible");
+        }
+        .to_bytes();
         let anchor = dag_client::provision_anchor(
             member_id,
             author_public,
@@ -239,11 +275,7 @@ impl KeyringLifecycle for DagVault {
 
         // Mint the RVK-signed ReFound retargeting the Owner, carrying the new escrow in its sealing.
         let rvk = derive_rvk(rrk_secret.expose());
-        let sealing = serde_json::to_vec(&SealingPayload {
-            epochs: vec![],
-            escrow: Some(new_escrow),
-        })
-        .expect("SealingPayload serialization is infallible");
+        let sealing = SealingPayload::escrow_only(new_escrow).to_bytes();
         let new_anchor = dag_client::append_refound(
             anchor,
             member_id,
@@ -325,11 +357,7 @@ impl KeyringLifecycle for DagVault {
         let new_author = secrets.root.identity.verifying_key().to_bytes();
 
         // Mint the Retarget signed by the OLD (current) owner key, retargeting to the new identity.
-        let sealing = serde_json::to_vec(&SealingPayload {
-            epochs: vec![],
-            escrow: Some(new_escrow),
-        })
-        .expect("SealingPayload serialization is infallible");
+        let sealing = SealingPayload::escrow_only(new_escrow).to_bytes();
         let new_anchor = dag_client::append_retarget(
             anchor,
             member_id,
@@ -345,6 +373,90 @@ impl KeyringLifecycle for DagVault {
             recovery_code: secrets.recovery_code,
             watermark: Vec::new(),
         })
+    }
+}
+
+impl DagVault {
+    /// Add `new_member_id` (at `role`, with their OOB-verified keys) to a dag tree. The owner unwraps the
+    /// RRK via their passphrase, reaches every epoch's DEK, wraps each to the new member's HPKE key, and
+    /// appends an `Add` op carrying those per-epoch wraps in its sealing. Returns the new anchor. Inherent,
+    /// not a [`KeyringLifecycle`] flow — membership authoring stays engine-specific (OPE-277 gate, Q2=B).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_member(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        new_member_id: &str,
+        role: KeyringRole,
+        new_member_author_public: [u8; 32],
+        new_member_hpke_public: [u8; 32],
+    ) -> Result<Vec<u8>, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let owner_id = ctx.member_id.as_str();
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+
+        // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(SealerError::MissingWrap)?;
+        let kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+        let rrk_secret = unwrap_rrk_secret(
+            &root.kek,
+            &pass_wrap.nonce,
+            &pass_wrap.wrapped_dek,
+            tree_id,
+            owner_id,
+            PASSPHRASE,
+        )?;
+
+        // Reach every epoch's DEK and wrap each to the new member's HPKE key.
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let added_wraps: Vec<AddedWrap> = deks
+            .iter()
+            .map(|(key_id, epoch, dek)| {
+                member_wrap_epoch(&new_member_hpke_public, dek, tree_id, new_member_id, key_id, *epoch)
+                    .map(|wrap| AddedWrap {
+                        key_id: key_id.clone(),
+                        wrap,
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+
+        let sealing = SealingPayload {
+            new_epochs: vec![],
+            added_wraps,
+            escrow: None,
+        }
+        .to_bytes();
+        dag_client::append_add(
+            anchor,
+            owner_id,
+            new_member_id,
+            role,
+            new_member_author_public,
+            new_member_hpke_public,
+            sealing,
+            &root.identity,
+        )
+        .map_err(|e| SealerError::BadKeyring(e.to_string()))
     }
 }
 
@@ -509,6 +621,56 @@ mod tests {
         assert_eq!(
             r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"keepsake"
+        );
+    }
+
+    /// The owner adds a member: the joiner appears in the resolved keyring, their per-epoch wrap is minted,
+    /// and the owner's own access is unaffected (they still unlock + open the data).
+    #[test]
+    fn dag_add_member_wraps_the_dek_and_the_owner_still_unlocks() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"correct horse");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
+            .unwrap();
+        let sealed = p
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"shared secret")
+            .unwrap()
+            .envelope;
+
+        // bob's OOB-verified keys (a real HPKE public key so the wrap succeeds).
+        let bob_id = "acct-bob";
+        let HpkeKeypair { public: bob_hpke, .. } = generate_hpke_keypair().unwrap();
+
+        let new_anchor = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &pass,
+                bob_id,
+                KeyringRole::EDITOR,
+                [9u8; 32],
+                bob_hpke,
+            )
+            .unwrap();
+
+        // bob is now a member of the resolved keyring.
+        let resolved = dag_client::resolve(&new_anchor).unwrap();
+        assert!(
+            resolved.members.members.iter().any(|m| m.member_id == bob_id),
+            "the added member appears in the resolved keyring"
+        );
+
+        // The owner's own access is unaffected: they still unlock the new anchor and open the data.
+        let u = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &new_anchor, &pass)
+            .unwrap();
+        assert_eq!(
+            u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
+            b"shared secret"
         );
     }
 

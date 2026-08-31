@@ -283,6 +283,28 @@ pub(crate) fn rrk_wrap_epoch(
     })
 }
 
+/// HPKE-wrap an epoch's `dek` to a MEMBER's public key — the per-member wrap giving them access to this
+/// epoch (add-member). Mirror of [`rrk_wrap_epoch`] with the ordinary member HPKE method.
+pub(crate) fn member_wrap_epoch(
+    member_hpke_public: &[u8],
+    dek: &Dek,
+    tree_id: &[u8],
+    member_id: &str,
+    key_id: &[u8],
+    epoch: u32,
+) -> Result<CoreWrap, SealerError> {
+    let info = wrap_aad(tree_id, key_id, member_id, HPKE, epoch);
+    let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
+    Ok(CoreWrap {
+        member_id: member_id.to_string(),
+        wrap_method: HPKE,
+        nonce: Vec::new(),
+        wrapped_dek: w.ciphertext,
+        kdf: None,
+        ephemeral_public_key: w.encapped_key,
+    })
+}
+
 /// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.
 pub(crate) fn open_epoch_dek(
     epoch: &SealedEpoch,

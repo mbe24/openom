@@ -20,6 +20,51 @@ use crate::{
     KeyringAccess, KeyringAction, KeyringMemberInit, KeyringOp, KeyringRole, KeyringState,
 };
 
+/// Mint an op with `action` + `sealing`, parented on the current frontier and signed by `signing_key`,
+/// and append it to the anchor. The shared core of every `append_*` (Add / ReFound / Retarget).
+fn append(
+    anchor_bytes: &[u8],
+    author: &str,
+    action: KeyringAction,
+    sealing: Vec<u8>,
+    signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let mut anchor: DagAnchor =
+        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let ops: Vec<KeyringOp> = anchor
+        .ops
+        .iter()
+        .map(|b| decode_op(b))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let op = mint(frontier(&ops), author.to_string(), action, sealing, signing_key);
+    anchor.ops.push(encode_op(&op));
+    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
+}
+
+/// Append an **Add** op — an authorized signer (`author`) adds `member_id` at `role`, carrying the
+/// joiner's per-epoch DEK wraps in `sealing`. Signed by the author's current key.
+#[allow(clippy::too_many_arguments)]
+pub fn append_add(
+    anchor_bytes: &[u8],
+    author: &str,
+    member_id: &str,
+    role: KeyringRole,
+    new_author_public_key: [u8; 32],
+    new_hpke_public_key: [u8; 32],
+    sealing: Vec<u8>,
+    author_signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let action = MembershipAction::Add {
+        member: member_id.to_string(),
+        role,
+        author_public_key: new_author_public_key,
+        hpke_public_key: new_hpke_public_key,
+        member_proof: None,
+    };
+    append(anchor_bytes, author, action, sealing, author_signing_key)
+}
+
 /// A client-side failure resolving or minting against the dag keyring.
 #[derive(Debug)]
 pub enum ClientError {
@@ -186,14 +231,6 @@ pub fn append_refound(
     sealing: Vec<u8>,
     rvk_signing_key: &openom_sign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
-    let mut anchor: DagAnchor =
-        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let ops: Vec<KeyringOp> = anchor
-        .ops
-        .iter()
-        .map(|b| decode_op(b))
-        .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Malformed(e.to_string()))?;
     let action = MembershipAction::ReFound {
         member: owner_id.to_string(),
         new_author_public_key,
@@ -201,9 +238,7 @@ pub fn append_refound(
         era,
         recovery_rewrap: Vec::new(),
     };
-    let op = mint(frontier(&ops), owner_id.to_string(), action, sealing, rvk_signing_key);
-    anchor.ops.push(encode_op(&op));
-    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
+    append(anchor_bytes, owner_id, action, sealing, rvk_signing_key)
 }
 
 /// Append a voluntary **Retarget** op — `member` rotates their OWN keys, signed by their CURRENT key
@@ -217,20 +252,10 @@ pub fn append_retarget(
     sealing: Vec<u8>,
     current_signing_key: &openom_sign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
-    let mut anchor: DagAnchor =
-        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let ops: Vec<KeyringOp> = anchor
-        .ops
-        .iter()
-        .map(|b| decode_op(b))
-        .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Malformed(e.to_string()))?;
     let action = MembershipAction::Retarget {
         member: member_id.to_string(),
         new_author_public_key,
         new_hpke_public_key,
     };
-    let op = mint(frontier(&ops), member_id.to_string(), action, sealing, current_signing_key);
-    anchor.ops.push(encode_op(&op));
-    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
+    append(anchor_bytes, member_id, action, sealing, current_signing_key)
 }
