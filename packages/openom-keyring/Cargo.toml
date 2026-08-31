@@ -6,6 +6,9 @@ license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # Wire types (Keyring / Member / Header) + the canonical signing-byte encoders.
 openom-protocol.workspace = true

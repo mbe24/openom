@@ -13,6 +13,9 @@ license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 # rlib = native/Tauri + cargo test; cdylib = the wasm-bindgen module for the web app.
 crate-type = ["rlib", "cdylib"]

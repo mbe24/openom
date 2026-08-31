@@ -41,6 +41,12 @@ edition = "2021"
 # dependencies rather than downgrading them.
 rust-version = "1.85"
 
+[workspace.lints.rust]
+# The kani proof harnesses are gated on `#[cfg(kani)]` — a cfg the kani driver sets, not cargo — so a
+# normal build would warn "unexpected cfg". Declare it known (still checking every other cfg name). Crates
+# with harnesses opt in via `[lints] workspace = true`. See scripts/kani.mjs and docker/kani.Dockerfile.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [workspace.dependencies]
 # Internal crates (path relative to this root manifest).
 openom-protocol = { path = "packages/openom-protocol" }
