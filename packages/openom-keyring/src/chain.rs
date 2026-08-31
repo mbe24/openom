@@ -224,12 +224,18 @@ pub fn verify_transition(
 
     // Signature policy — always against the PRIOR trusted set, never the candidate's own.
     let prior_keys = signer_keys(&prior.trusted_signers);
+    let new_rvk = reset_rvk(candidate).unwrap_or(&[]);
+    let old_rvk = prior.recovery_verifying_key.as_slice();
+    // Establishing a recovery authority where there was none plants a standing bearer-credential for
+    // future resets — a PRIVILEGED change, gated like a signer-set/governance change (not the ordinary
+    // any-of path), so a lone co-owner can't seize the recovery path on a pre-RVK keyring (OPE-277 review).
+    let rvk_establishment = old_rvk.is_empty() && !new_rvk.is_empty();
     let signer_change = signer_set_differs(&prior.trusted_signers, &candidate.authorized_signers);
     // Changing the governance rule ITSELF is a privileged change too — so weakening it (e.g. 3-of-4 ->
     // 1-of-4) must still satisfy the CURRENT (prior) rule. Anti-downgrade.
     let governance_change = candidate.governance_kind != prior.governance_kind
         || candidate.governance_threshold != prior.governance_threshold;
-    if signer_change || governance_change {
+    if signer_change || governance_change || rvk_establishment {
         let self_removal = signer_change
             && is_self_removal(&prior.trusted_signers, &candidate.authorized_signers, candidate);
         if !(self_removal || prior_governance_met(prior, candidate, &prior_keys)) {
@@ -249,13 +255,10 @@ pub fn verify_transition(
         return Err(ChainError::WrapIncomplete);
     }
 
-    // The recovery authority (RVK) may change across a transition ONLY as an authorized rotation: the
-    // new revision must be signed by the OLD recovery authority (proving possession of the current
-    // recovery secret) — the chain analogue of the dag's RotateRecoveryAuthority, and the only genuine
-    // way to revoke a prior recovery-key holder. An unchanged RVK needs no such signature; establishing a
-    // first RVK on a pre-RVK keyring (prior empty) rides the ordinary signer authorization above.
-    let new_rvk = reset_rvk(candidate).unwrap_or(&[]);
-    let old_rvk = prior.recovery_verifying_key.as_slice();
+    // ROTATING an existing recovery authority (old non-empty → different new) requires the OLD RVK's
+    // signature — proving possession of the current recovery secret; the only genuine way to revoke a
+    // prior recovery-key holder (the chain analogue of the dag's RotateRecoveryAuthority). An unchanged
+    // RVK needs no such signature; ESTABLISHING a first RVK was gated as a privileged change above.
     if new_rvk != old_rvk && !old_rvk.is_empty() {
         let old_key = old_rvk
             .try_into()
@@ -925,6 +928,42 @@ mod tests {
         assert!(
             verify_transition(&anchor, &rotate(false)).is_err(),
             "a rotation not signed by the old recovery authority is rejected"
+        );
+    }
+
+    #[test]
+    fn establishing_a_first_rvk_needs_governance_not_a_lone_co_owner() {
+        use openom_protocol::v1::RecoveryKey;
+        // A pre-RVK genesis with the founder + TWO co-owners (so a lone co-owner is not unanimity).
+        let (f, bob, carol) = (sk(1), sk(2), sk(3));
+        let prior = genesis(&f, &[(&bob, "bob"), (&carol, "carol")], &[]);
+        let anchor = KeyringAnchor::from_keyring(&prior);
+        assert!(anchor.recovery_verifying_key.is_empty(), "the prior keyring pins no recovery authority");
+
+        let rvk_pub = openom_crypto::derive_rvk(&[7u8; 32]).verifying_key().to_bytes().to_vec();
+        let establish = |signer_seed: u8| -> Keyring {
+            let mut k = prior.clone();
+            k.revision = 2;
+            k.prev_keyring_hash = keyring_hash(&prior).to_vec();
+            k.recovery_keys = vec![RecoveryKey {
+                public_key: vec![5; 32],
+                member_id: "owner".into(),
+                wraps: vec![],
+                recovery_verifying_key: rvk_pub.clone(),
+            }];
+            k.signatures.clear();
+            sign_keyring(&mut k, &sk(signer_seed));
+            k
+        };
+        // A lone co-owner cannot plant a recovery authority — it's a privileged change (founder-or-unanimity).
+        assert!(
+            verify_transition(&anchor, &establish(2)).is_err(),
+            "a lone co-owner cannot establish the recovery authority"
+        );
+        // The founder can (satisfies founder-or-unanimity alone).
+        assert!(
+            verify_transition(&anchor, &establish(1)).is_ok(),
+            "the founder may establish the recovery authority"
         );
     }
 

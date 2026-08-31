@@ -175,6 +175,10 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
         for w in &rk.wraps {
             put_wrap(&mut out, w);
         }
+        // The recovery verifying key (RVK) MUST be signed — otherwise an untrusted server could
+        // substitute or blank it undetectably (the signature + keyring_hash would still verify) and
+        // defeat the entire reset-authorization gate that trusts this value. (OPE-277 crypto review.)
+        put_bytes(&mut out, &rk.recovery_verifying_key);
     }
     // Governance rule — signed, so it's tamper-evident and a change to it is authorized like a set change.
     put_u32(&mut out, keyring.governance_kind);
@@ -593,6 +597,26 @@ mod tests {
             keyring_signing_bytes(&chained),
             "prev_keyring_hash is covered"
         );
+
+        // The recovery verifying key (RVK) is covered — an untrusted server must not be able to
+        // substitute OR blank it undetectably, or the reset-authorization gate that trusts it is defeated
+        // (OPE-277 crypto review).
+        use crate::v1::RecoveryKey;
+        let mut with_rvk = kr.clone();
+        with_rvk.revision = 1;
+        with_rvk.recovery_keys = vec![RecoveryKey {
+            public_key: vec![0x22; 32],
+            member_id: "acct".into(),
+            wraps: vec![],
+            recovery_verifying_key: vec![0xAA; 32],
+        }];
+        let with = keyring_signing_bytes(&with_rvk);
+        let mut swapped = with_rvk.clone();
+        swapped.recovery_keys[0].recovery_verifying_key = vec![0xBB; 32];
+        assert_ne!(with, keyring_signing_bytes(&swapped), "recovery_verifying_key substitution is covered");
+        let mut blanked = with_rvk.clone();
+        blanked.recovery_keys[0].recovery_verifying_key = vec![];
+        assert_ne!(with, keyring_signing_bytes(&blanked), "recovery_verifying_key blanking is covered");
     }
 
     #[test]
