@@ -173,8 +173,9 @@ pub struct Sealer {
     replica_id: Vec<u8>,
     /// The member's author identity for signing + attributing entries on a shared tree (§B3 launch
     /// gate), owned for the session and borrowed into each seal. Set at unlock via
-    /// [`Sealer::with_author`]; `keyring_revision` is the member's watermarked keyring head at unlock
-    /// (a keyring change re-unlocks and refreshes it). `None` → unattributed entries (V1 communal-DEK).
+    /// [`Sealer::with_author`]; `governing_ref` is the opaque, engine-encoded reference to the member's
+    /// watermarked keyring head at unlock (a keyring change re-unlocks and refreshes it — for the chain,
+    /// the head revision). `None` → unattributed entries (V1 communal-DEK).
     author: Option<openom_crypto::AuthorIdentity>,
 }
 
@@ -207,9 +208,9 @@ impl Sealer {
         mut self,
         signing_key: openom_keyring::SigningKey,
         member_id: String,
-        keyring_revision: u32,
+        governing_ref: Vec<u8>,
     ) -> Self {
-        self.set_author(signing_key, member_id, keyring_revision);
+        self.set_author(signing_key, member_id, governing_ref);
         self
     }
 
@@ -219,12 +220,12 @@ impl Sealer {
         &mut self,
         signing_key: openom_keyring::SigningKey,
         member_id: String,
-        keyring_revision: u32,
+        governing_ref: Vec<u8>,
     ) {
         self.author = Some(openom_crypto::AuthorIdentity {
             signing_key,
             member_id,
-            keyring_revision,
+            governing_ref,
         });
     }
 
@@ -375,11 +376,11 @@ impl SealerSet {
         mut self,
         signing_key: openom_keyring::SigningKey,
         member_id: String,
-        keyring_revision: u32,
+        governing_ref: Vec<u8>,
     ) -> Self {
         let write = self.write_key_id.clone();
         if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == write) {
-            w.set_author(signing_key, member_id, keyring_revision);
+            w.set_author(signing_key, member_id, governing_ref);
         }
         self
     }
@@ -497,7 +498,7 @@ mod tests {
     #[test]
     fn with_author_signs_and_attributes_the_entry() {
         let author = openom_keyring::generate_identity().unwrap();
-        let s = sealer().with_author(author, "m1".into(), 3);
+        let s = sealer().with_author(author, "m1".into(), openom_keyring::encode_governing_ref(3));
         let delta = SealContext {
             kind: EntryKind::Delta,
             format: Format::OpenomOps,
@@ -513,14 +514,14 @@ mod tests {
             "an author-bearing sealer signs the entry"
         );
         assert_eq!(h.author_member_id, "m1");
-        assert_eq!(h.keyring_revision, 3);
+        assert_eq!(h.governing_ref, openom_keyring::encode_governing_ref(3));
         // Default (no author) → unattributed, V1 communal-DEK behaviour.
         let plain = sealer().seal_entry(&delta, b"a change").unwrap().envelope;
         let h2 = Envelope::decode(plain.as_slice()).unwrap().header.unwrap();
         assert!(
             h2.author_signature.is_empty()
                 && h2.author_member_id.is_empty()
-                && h2.keyring_revision == 0
+                && h2.governing_ref.is_empty()
         );
     }
 

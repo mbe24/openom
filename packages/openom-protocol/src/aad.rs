@@ -49,7 +49,7 @@ pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
         replaces_ciphertext_hash,
         author_signature,
         author_member_id,
-        keyring_revision,
+        governing_ref,
         blob_id,
     } = header;
     let mut out = Vec::with_capacity(160);
@@ -71,7 +71,9 @@ pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
     // Attribution fields (§B3): bound so the keyless server can't rewrite who authored an entry or which
     // keyring revision governs it without the key-holder detecting it on decrypt.
     put_bytes(&mut out, author_member_id.as_bytes());
-    put_u32(&mut out, *keyring_revision);
+    // Opaque engine-produced governing reference (length-prefixed, so unambiguous). Replaces the old
+    // chain-only keyring_revision scalar (OPE-277 GoverningRef).
+    put_bytes(&mut out, governing_ref);
     out
 }
 
@@ -109,7 +111,7 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
         replaces_ciphertext_hash,
         author_signature: _,
         author_member_id,
-        keyring_revision,
+        governing_ref,
         blob_id,
     } = header;
     let mut out = Vec::with_capacity(224);
@@ -128,7 +130,9 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
     put_bytes(&mut out, replaces_ciphertext_hash);
     put_bytes(&mut out, blob_id);
     put_bytes(&mut out, author_member_id.as_bytes());
-    put_u32(&mut out, *keyring_revision);
+    // Opaque engine-produced governing reference (length-prefixed, so unambiguous). Replaces the old
+    // chain-only keyring_revision scalar (OPE-277 GoverningRef).
+    put_bytes(&mut out, governing_ref);
     put_bytes(&mut out, plaintext_hash);
     out
 }
@@ -325,7 +329,7 @@ mod tests {
             author_signature: vec![],
             blob_id: vec![],
             author_member_id: String::new(),
-            keyring_revision: 0,
+            governing_ref: vec![],
         }
     }
 
@@ -359,7 +363,7 @@ mod tests {
         framed(&mut want, &[]); // author_signature
         framed(&mut want, &[]); // blob_id
         framed(&mut want, &[]); // author_member_id
-        want.extend_from_slice(&0u32.to_be_bytes()); // keyring_revision
+        framed(&mut want, &[]); // governing_ref (length-prefixed opaque bytes; empty here)
         assert_eq!(header_aad(1, &sample()), want);
     }
 
@@ -407,7 +411,7 @@ mod tests {
         let mut h = sample();
         h.kind = Kind::Delta as i32;
         h.author_member_id = "member-1".into();
-        h.keyring_revision = 3;
+        h.governing_ref = 3u32.to_be_bytes().to_vec();
         h
     }
 
@@ -443,7 +447,7 @@ mod tests {
         framed(&mut want, &[]); // blob_id
                                 // author_signature EXCLUDED (self)
         framed(&mut want, b"member-1"); // author_member_id
-        want.extend_from_slice(&3u32.to_be_bytes()); // keyring_revision
+        framed(&mut want, &3u32.to_be_bytes()); // governing_ref (length-prefixed; chain = revision 3)
         framed(&mut want, &hash); // SHA-256(plaintext)
         assert_eq!(author_signing_bytes(1, &h, &hash), want);
     }
@@ -490,11 +494,11 @@ mod tests {
             "author_member_id bound"
         );
         let mut r = h.clone();
-        r.keyring_revision = 4;
+        r.governing_ref = 4u32.to_be_bytes().to_vec();
         assert_ne!(
             author_signing_bytes(1, &r, &hash),
             base,
-            "keyring_revision bound"
+            "governing_ref bound"
         );
         let mut k = h.clone();
         k.kind = Kind::Proposal as i32;

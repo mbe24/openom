@@ -63,10 +63,13 @@ message Header {
   // The member who authored this entry, on a shared tree (matches a Keyring.members
   // entry). Names whose key verifies author_signature. Empty on unattributed trees.
   string author_member_id = 16;
-  // The keyring revision that GOVERNED this entry when authored — the verifier looks
-  // up the author's role at this revision. Signed (in author_signing_bytes) so it
-  // can't be tampered; 0/empty on unattributed trees. (§B3 launch gate.)
-  uint32 keyring_revision = 17;
+  // Opaque, ENGINE-PRODUCED reference to the keyring state that GOVERNED this entry when
+  // authored — the verifier resolves it (via the engine adapter) to the governing keyring to
+  // look up the author's role. Chain encodes (revision, keyring_hash); dag encodes
+  // (era, history_commitment). Signed (in author_signing_bytes) so it can't be tampered;
+  // empty on unattributed trees. Distinct from the client's keyring watermark (a sync-layer
+  // anti-rollback cursor, engine-owned, NOT in the header). (§B3; OPE-277 GoverningRef.)
+  bytes governing_ref = 17;
 
   // KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
   // cannot swap two of a tree's blobs undetected (the AAD otherwise binds only

@@ -94,7 +94,8 @@ const api = {
 
   // Verify a landed entry's author attribution (§B3 launch gate). Throws if the entry wasn't validly
   // authored by a member with the required capability at its governing keyring revision — the caller
-  // then refuses to merge it. `governing` is the keyring bytes at the entry's header.keyring_revision.
+  // then refuses to merge it. `governing` is the keyring the caller resolved from the entry's
+  // header.governing_ref (for the chain, the revision it decodes to).
   async verifyEntry(version, envelope, plaintext, governing) {
     await ensureInit();
     wasmVerifyEntry(version, envelope, plaintext, governing); // throws on reject

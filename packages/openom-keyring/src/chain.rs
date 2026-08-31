@@ -94,6 +94,26 @@ impl KeyringAnchor {
 ///
 /// (The single deliberate exception, [`from_unverified_wasm_boundary`](Self::from_unverified_wasm_boundary),
 /// is the documented OPE-186 residual for the wasm boundary, where JS cannot yet hold a verified token.)
+/// Chain engine: encode a governing keyring's **revision** as the entry's opaque `governing_ref` — 4
+/// big-endian bytes. The ref is opaque to every layer but this adapter; the verifier [`decodes`] it back
+/// to a revision, then walks the chain to that revision to mint the [`GoverningKeyring`]. (OPE-277
+/// GoverningRef; the dag engine encodes an era+commitment instead, behind the same opaque bytes.)
+///
+/// Encoding is intentionally minimal (revision only) to preserve V1 resolution semantics; binding the
+/// keyring hash into the ref later is a change confined to this adapter alone — the point of the seam.
+///
+/// [`decodes`]: decode_governing_ref
+pub fn encode_governing_ref(revision: u32) -> Vec<u8> {
+    revision.to_be_bytes().to_vec()
+}
+
+/// Decode a chain [`encode_governing_ref`] back to a revision. `None` if the bytes aren't exactly a
+/// 4-byte big-endian revision (a malformed or foreign ref — the caller refuses to resolve it).
+pub fn decode_governing_ref(governing_ref: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = governing_ref.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
+}
+
 #[derive(Clone, Debug)]
 pub struct GoverningKeyring {
     keyring: Keyring,
@@ -108,6 +128,12 @@ impl GoverningKeyring {
     /// The revision this keyring governs.
     pub fn revision(&self) -> u32 {
         self.keyring.revision
+    }
+
+    /// This keyring's [`governing reference`](encode_governing_ref) — the opaque per-entry ref an author
+    /// stamps into an entry sealed under it, and what the verifier resolves back to this keyring.
+    pub fn governing_ref(&self) -> Vec<u8> {
+        encode_governing_ref(self.revision())
     }
 
     /// The trust anchor to persist (so the next transition can chain onto it).

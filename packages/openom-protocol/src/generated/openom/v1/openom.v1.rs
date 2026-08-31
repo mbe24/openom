@@ -75,11 +75,12 @@ pub struct Header {
     /// entry). Names whose key verifies author_signature. Empty on unattributed trees.
     #[prost(string, tag="16")]
     pub author_member_id: ::prost::alloc::string::String,
-    /// The keyring revision that GOVERNED this entry when authored — the verifier looks
-    /// up the author's role at this revision. Signed (in author_signing_bytes) so it
-    /// can't be tampered; 0/empty on unattributed trees. (§B3 launch gate.)
-    #[prost(uint32, tag="17")]
-    pub keyring_revision: u32,
+    /// Opaque, engine-produced reference to the keyring state that governed this entry when
+    /// authored — resolved (via the engine adapter) to the governing keyring for the role lookup.
+    /// Chain: (revision, keyring_hash); dag: (era, history_commitment). Signed in
+    /// author_signing_bytes; empty on unattributed trees. (§B3; OPE-277 GoverningRef.)
+    #[prost(bytes="vec", tag="17")]
+    pub governing_ref: ::prost::alloc::vec::Vec<u8>,
     /// KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
     /// cannot swap two of a tree's blobs undetected (the AAD otherwise binds only
     /// tree_id). Empty for tree kinds and throughout V1. Reader-side ciphertext-hash

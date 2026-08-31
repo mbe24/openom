@@ -15,8 +15,8 @@ use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring::{
-    epoch_is_attributed, keyring_hash, verify_entry, verify_reset, verify_walk, GoverningKeyring,
-    KeyringAnchor, VerifyingKey,
+    decode_governing_ref, epoch_is_attributed, keyring_hash, verify_entry, verify_reset,
+    verify_walk, GoverningKeyring, KeyringAnchor, VerifyingKey,
 };
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
@@ -704,7 +704,8 @@ pub fn accept_remote_keyring(
 
 /// Verify a landed entry's author attribution (§B3 launch gate). `envelope` is the sealed entry (its
 /// header carries the attribution fields), `plaintext` its AEAD-opened payload, `governing` the keyring
-/// bytes at `header.keyring_revision` (which the caller fetched + chain-verified). Throws if the entry
+/// bytes the caller resolved from `header.governing_ref` (for the chain, the revision it decodes to;
+/// fetched + chain-verified by the caller). Throws if the entry
 /// wasn't validly authored by a member with the capability its kind requires at the governing revision —
 /// the caller then refuses to merge it. The trust decision is the Rust `verify_entry`'s; this only marshals.
 ///
@@ -756,6 +757,10 @@ impl EntryAttribution {
 /// Read an entry's attribution coordinates (governing keyring revision + sealing key_id) from its header,
 /// so the client can pick the governing keyring + check whether the epoch is attributed. Both fields are
 /// AAD-bound (a keyless server can't rewrite them without failing the AEAD open), so they're trustworthy.
+///
+/// The header stores the opaque `governing_ref`; this chain-side veneer decodes it to a revision for the
+/// JS resolver (empty ⇒ 0, an unattributed V1 entry). A non-empty ref that isn't a valid chain reference
+/// is rejected — the caller must not resolve a foreign/malformed ref to a keyring.
 #[wasm_bindgen(js_name = entryAttribution)]
 pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
     let env =
@@ -764,8 +769,14 @@ pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
         .header
         .as_ref()
         .ok_or_else(|| JsError::new("envelope has no header"))?;
+    let keyring_revision = if header.governing_ref.is_empty() {
+        0
+    } else {
+        decode_governing_ref(&header.governing_ref)
+            .ok_or_else(|| JsError::new("governing_ref is not a valid chain reference"))?
+    };
     Ok(EntryAttribution {
-        keyring_revision: header.keyring_revision,
+        keyring_revision,
         key_id: header.key_id.clone(),
     })
 }
@@ -820,7 +831,15 @@ pub fn accept_reset_keyring(
     if cand.prev_keyring_hash.as_slice() != keyring_hash(&anchor_kr) {
         return Err(JsError::new("reset does not chain onto the trusted head"));
     }
-    let new_anchor = verify_reset(&cand).map_err(|e| JsError::new(&e.to_string()))?;
+    // Reader-side RVK continuity gate: the candidate must pin the SAME recovery authority the trusted head
+    // pinned (and be signed by it), so a hostile server can't swap in a reset under an authority we never
+    // endorsed. The prior authority is the trusted anchor's own RVK (empty ⇒ pre-RVK head ⇒ gate inert).
+    let prior_rvk = KeyringAnchor::from_keyring(&anchor_kr).recovery_verifying_key;
+    let new_anchor = verify_reset(
+        (!prior_rvk.is_empty()).then_some(prior_rvk.as_slice()),
+        &cand,
+    )
+    .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(VaultResult {
         keyring: candidate.to_vec(),
         recovery_code: String::new(),

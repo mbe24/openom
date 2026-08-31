@@ -942,7 +942,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// refuse-our-own-bug discipline as [`commit_transition`].
     fn commit_reset(&self, tree_key: &str, produced_bytes: &[u8]) -> Result<u32> {
         let produced = decode_keyring(produced_bytes)?;
-        let new_anchor = verify_reset(&produced).map_err(self_check_failed)?;
+        // Writer self-check: structural soundness + self-signature of our OWN output (refuse-our-own-bug).
+        // The RVK continuity gate (candidate rvk == prior rvk) is a READER-side defense against a hostile
+        // server swapping the reset — not something the writer enforces against itself — so `None` here.
+        let new_anchor = verify_reset(None, &produced).map_err(self_check_failed)?;
         self.store
             .commit_keyring(tree_key, produced_bytes, new_anchor.revision)
             .map_err(VaultError::storage)?;

@@ -3,9 +3,10 @@
 // never from the entry's own emptiness — whether an entry must be signed, and if so verifies it.
 //
 // Flow per entry:
-//   1. Read the entry's governing keyring revision + sealing key_id from its header (worker.entryAttribution).
-//   2. keyring_revision 0 → no governing keyring: an unattributed V1 (single-owner) entry → accept.
-//      (keyring_revision is AAD-bound, so a hostile server can't forge it to 0 on a shared-tree entry —
+//   1. Read the entry's governing keyring revision + sealing key_id from its header (worker.entryAttribution
+//      decodes the header's opaque `governing_ref` to a revision for the chain).
+//   2. revision 0 (empty governing_ref) → no governing keyring: an unattributed V1 (single-owner) entry → accept.
+//      (governing_ref is AAD-bound, so a hostile server can't forge it to empty on a shared-tree entry —
 //      tampering it breaks the AEAD open, and the entry never reaches here.)
 //   3. Fetch the governing keyring at that revision (from the client's verified chain). Missing → a
 //      RetryableVerifyError: the caller holds the entry and retries after the next keyring sync (fail-closed,

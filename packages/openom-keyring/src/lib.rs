@@ -8,8 +8,8 @@ mod keyring;
 mod roles;
 
 pub use chain::{
-    bootstrap_from_genesis, bootstrap_from_oob, verify_reset, verify_transition, verify_walk,
-    ChainError, GoverningKeyring, KeyringAnchor,
+    bootstrap_from_genesis, bootstrap_from_oob, decode_governing_ref, encode_governing_ref,
+    verify_reset, verify_transition, verify_walk, ChainError, GoverningKeyring, KeyringAnchor,
 };
 pub use entry::{epoch_is_attributed, verify_entry, EntryError};
 pub use roles::moderators;

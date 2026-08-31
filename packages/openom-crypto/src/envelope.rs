@@ -16,13 +16,15 @@ use sha2::{Digest, Sha256};
 use crate::{open, seal, CryptoError, KEY_LEN};
 
 /// Optional author attribution for a shared-tree entry (§B3 launch gate). When present, the member's
-/// Ed25519 author key signs the entry — naming them (`member_id`) and the keyring revision that governs
-/// it — so peers can verify authorship + role via `openom_keyring::verify_entry`. `None` seals an *unattributed*
-/// entry (empty `author_signature`), the V1 communal-DEK model.
+/// Ed25519 author key signs the entry — naming them (`member_id`) and the opaque, engine-produced
+/// `governing_ref` (the keyring state that governs it) — so peers can verify authorship + role via
+/// `openom_keyring::verify_entry`. This crate treats `governing_ref` as opaque bytes: the caller (the
+/// engine adapter) encodes it. `None` seals an *unattributed* entry (empty `author_signature`), the V1
+/// communal-DEK model.
 pub struct AuthorIdentity {
     pub signing_key: SigningKey,
     pub member_id: String,
-    pub keyring_revision: u32,
+    pub governing_ref: Vec<u8>,
 }
 
 /// Inputs for a sealed envelope's header (everything but the nonce + ciphertext_hash,
@@ -106,7 +108,10 @@ pub fn seal_envelope_with_nonce(
             .as_ref()
             .map(|a| a.member_id.to_string())
             .unwrap_or_default(),
-        keyring_revision: params.author.as_ref().map_or(0, |a| a.keyring_revision),
+        governing_ref: params
+            .author
+            .as_ref()
+            .map_or_else(Vec::new, |a| a.governing_ref.clone()),
     };
 
     // Attribution (§B3): sign the entry with the member's author key BEFORE sealing, so the signature
@@ -211,7 +216,7 @@ mod tests {
         assert!(
             h.author_signature.is_empty()
                 && h.author_member_id.is_empty()
-                && h.keyring_revision == 0
+                && h.governing_ref.is_empty()
         );
     }
 

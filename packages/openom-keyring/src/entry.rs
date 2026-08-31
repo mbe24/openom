@@ -38,8 +38,9 @@ pub enum EntryError {
     InsufficientRole,
 }
 
-/// Verify a landed entry's author attribution against `governing` — the keyring at
-/// `header.keyring_revision`. Its type ([`GoverningKeyring`]) is the guarantee that it was chain-verified:
+/// Verify a landed entry's author attribution against `governing` — the keyring the caller resolved from
+/// `header.governing_ref` (for the chain, the revision it decodes to). Its type ([`GoverningKeyring`]) is
+/// the guarantee that it was chain-verified:
 /// it can only be minted by the chain-walk, never by decoding raw bytes, so a caller cannot pass an
 /// unverified keyring here by mistake. `plaintext` is the AEAD-opened payload (verification runs after
 /// open — the AEAD tag has already authenticated the header, including `author_signature`, against this
@@ -179,7 +180,7 @@ mod tests {
             replica_id: vec![2; 4],
             replica_counter: 1,
             author_member_id: author_id.into(),
-            keyring_revision: 3,
+            governing_ref: crate::encode_governing_ref(3),
             ..Default::default()
         };
         let msg = author_signing_bytes(VERSION, &h, Sha256::digest(plaintext).as_slice());
@@ -294,7 +295,7 @@ mod tests {
         let author = AuthorIdentity {
             signing_key: generate_identity().unwrap(),
             member_id: "m1".into(),
-            keyring_revision: 3,
+            governing_ref: crate::encode_governing_ref(3),
         };
         let params = SealParams {
             version: VERSION,
@@ -315,7 +316,7 @@ mod tests {
         let header = env.header.as_ref().unwrap();
         assert!(!header.author_signature.is_empty(), "signed");
         assert_eq!(header.author_member_id, "m1");
-        assert_eq!(header.keyring_revision, 3);
+        assert_eq!(header.governing_ref, crate::encode_governing_ref(3));
 
         // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
         let kr = governing(vec![member("m1", MemberRole::Admin, &author.signing_key)]);

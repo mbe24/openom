@@ -219,7 +219,10 @@ pub fn unlock(
         KeyId::new(write_key_id),
     );
     if attributed {
-        sealer = sealer.with_author(identity, member_id.to_string(), revision);
+        // The chain encodes the member's watermarked keyring head (`revision`) as the entry's opaque
+        // governing_ref; every entry this sealer signs stamps it (OPE-277 GoverningRef).
+        let governing_ref = openom_keyring::encode_governing_ref(revision);
+        sealer = sealer.with_author(identity, member_id.to_string(), governing_ref);
     }
     Ok(Unlocked {
         sealer,
