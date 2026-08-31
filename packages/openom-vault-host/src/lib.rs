@@ -26,6 +26,9 @@ pub enum VaultErrorCode {
     CryptoOpen,
     /// Served keyring revision is below the client's watermark: a rollback/replay.
     RevisionRollback,
+    /// Served dag anchor is behind the client's watermark — a frontier op it named is absent, so history
+    /// was rolled back (the dag analogue of `RevisionRollback`; frontiers aren't scalar revisions).
+    WatermarkRollback,
     /// The next revision would overflow u32 (a poisoned served revision).
     RevisionOverflow,
     /// The opaque anti-rollback watermark handed to a lifecycle call wasn't a valid encoding for this
@@ -129,6 +132,7 @@ impl From<SealerError> for VaultError {
             E::NotAuthorized => C::NotAuthorized,
             E::TreeMismatch => C::TreeMismatch,
             E::RevisionRollback { .. } => C::RevisionRollback,
+            E::WatermarkRollback { .. } => C::WatermarkRollback,
             E::RevisionOverflow => C::RevisionOverflow,
             E::MalformedWatermark => C::MalformedWatermark,
         };

@@ -163,6 +163,10 @@ pub enum SealerError {
     /// The served keyring revision is below the client's watermark — a rollback/replay.
     #[error("keyring revision rolled back: floor {have}, served {got}")]
     RevisionRollback { have: u32, got: u32 },
+    /// The served dag anchor is behind the client's watermark — a frontier op it names is absent, so
+    /// history was rolled back (the dag analogue of [`Self::RevisionRollback`]; frontiers aren't scalars).
+    #[error("dag anchor rolled back below watermark: {detail}")]
+    WatermarkRollback { detail: String },
     /// The next revision would overflow `u32` (a poisoned/absurd served revision).
     #[error("keyring revision overflow")]
     RevisionOverflow,

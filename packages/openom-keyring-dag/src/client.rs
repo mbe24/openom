@@ -88,6 +88,12 @@ pub enum ClientError {
     Malformed(String),
     /// A stored op was rejected replaying onto a fresh engine (corrupt/tampered anchor, not a new refusal).
     Engine(String),
+    /// The served anchor is behind the caller's anti-rollback watermark: a previously-seen frontier op-id
+    /// is absent from its op set, so history was rolled back (a stale or equivocating anchor).
+    RolledBack(String),
+    /// The opaque `floor` handed to [`check_floor`] isn't a valid watermark encoding (length not a multiple
+    /// of 32). Client-local corruption, refused rather than silently dropped (dropping it drops protection).
+    BadWatermark(String),
 }
 
 impl std::fmt::Display for ClientError {
@@ -95,6 +101,8 @@ impl std::fmt::Display for ClientError {
         match self {
             ClientError::Malformed(m) => write!(f, "malformed dag anchor: {m}"),
             ClientError::Engine(m) => write!(f, "dag anchor replay rejected: {m}"),
+            ClientError::RolledBack(m) => write!(f, "dag anchor rolled back below watermark: {m}"),
+            ClientError::BadWatermark(m) => write!(f, "malformed anti-rollback watermark: {m}"),
         }
     }
 }
@@ -237,6 +245,60 @@ fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
     tips
 }
 
+/// Decode an anchor's op closure (shared by [`watermark`] and [`check_floor`]).
+fn anchor_ops(anchor_bytes: &[u8]) -> Result<Vec<KeyringOp>, ClientError> {
+    let anchor: DagAnchor =
+        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    anchor
+        .ops
+        .iter()
+        .map(|b| decode_op(b))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))
+}
+
+/// The anchor's opaque anti-rollback **watermark**: its frontier (sorted tip op-ids) concatenated as raw
+/// 32-byte ids. Deterministic — equal frontiers give equal bytes — so the caller persists it and passes it
+/// back as the `floor` on the next mutating flow. The sealer treats these bytes as opaque (guardrail #1).
+pub fn watermark(anchor_bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
+    let ops = anchor_ops(anchor_bytes)?;
+    Ok(frontier(&ops).into_iter().flatten().collect())
+}
+
+/// Enforce the caller's anti-rollback `floor` (a watermark previously emitted by [`watermark`]) against a
+/// served anchor: every frontier op-id it names must still be present in the anchor's (append-only,
+/// causally-closed) op set. A missing one means the anchor dropped history — [`ClientError::RolledBack`].
+/// An empty floor is "no floor" (Ok); a floor whose length isn't a multiple of 32 is a corrupt watermark
+/// and is refused ([`ClientError::Malformed`]) rather than silently ignored — dropping it would drop
+/// rollback protection.
+pub fn check_floor(anchor_bytes: &[u8], floor: &[u8]) -> Result<(), ClientError> {
+    if floor.is_empty() {
+        return Ok(());
+    }
+    if floor.len() % 32 != 0 {
+        return Err(ClientError::BadWatermark(format!(
+            "length {} is not a multiple of 32",
+            floor.len()
+        )));
+    }
+    let present: HashSet<[u8; 32]> = anchor_ops(anchor_bytes)?.iter().map(|o| o.id).collect();
+    for chunk in floor.chunks_exact(32) {
+        let id: [u8; 32] = chunk.try_into().expect("chunks_exact(32) yields 32 bytes");
+        if !present.contains(&id) {
+            return Err(ClientError::RolledBack(format!(
+                "frontier op {} is absent from the served anchor",
+                hex32(&id)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// First 8 bytes of an op-id, hex, for error messages (full id is 32 bytes).
+fn hex32(id: &[u8; 32]) -> String {
+    id[..8].iter().map(|b| format!("{b:02x}")).collect::<String>() + "…"
+}
+
 /// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
 /// (RVK), carrying the re-escrow in its opaque `sealing` envelope. Parents = the current frontier. Returns
 /// the new anchor bytes.
@@ -369,6 +431,38 @@ mod tests {
         assert!(
             !resolved.members.members.iter().any(|m| m.member_id == "mallory"),
             "and the voided op has no membership effect either"
+        );
+    }
+
+    /// The watermark is the frontier op-id set, and check_floor is causal-descendant containment: an
+    /// advanced anchor still satisfies an older floor (the old tip remains an ancestor), while a stale
+    /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
+    #[test]
+    fn watermark_advances_and_check_floor_catches_rollback() {
+        let a0 = provision_anchor("founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        let w0 = watermark(&a0).unwrap();
+        assert_eq!(w0.len(), 32, "a single tip (the genesis op) encodes to 32 bytes");
+        assert!(check_floor(&a0, &w0).is_ok(), "the current frontier satisfies its own floor");
+        assert!(check_floor(&a0, &[]).is_ok(), "an empty floor is no floor");
+        assert!(
+            matches!(check_floor(&a0, &[1, 2, 3]), Err(ClientError::BadWatermark(_))),
+            "a floor whose length isn't a multiple of 32 is refused"
+        );
+
+        // Append an Add — an authorized owner adds a co-owner; the frontier moves to the new op.
+        let a1 = append_add(
+            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"wrap".to_vec(), &sk(1),
+        )
+        .unwrap();
+        let w1 = watermark(&a1).unwrap();
+        assert_ne!(w1, w0, "the watermark advances when the frontier moves");
+        assert!(
+            check_floor(&a1, &w0).is_ok(),
+            "the old tip is still an ancestor in the advanced anchor"
+        );
+        assert!(
+            matches!(check_floor(&a0, &w1), Err(ClientError::RolledBack(_))),
+            "the advanced tip is absent from the stale anchor — a rollback"
         );
     }
 }

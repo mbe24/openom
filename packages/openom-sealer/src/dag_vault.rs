@@ -8,9 +8,10 @@
 //! import grep enforces it); it drives the facade.
 //!
 //! STATUS: all four [`KeyringLifecycle`] flows are built — provision, unlock, recover (RVK-authorized
-//! ReFound), change_passphrase (current-key Retarget). Membership authoring (add/remove with member-unlock),
-//! the fuller effective-op fold (reset-merge carve-out / quorum-Commit), and the anti-rollback watermark
-//! (OPE-284) land next; DagVault is now interchangeable with ChainVault behind the trait.
+//! ReFound), change_passphrase (current-key Retarget) — with membership authoring (add/remove with
+//! member-unlock), the effective-op sealing fold (reset-merge carve-out / quorum-Commit), and the
+//! anti-rollback watermark (the anchor's frontier op-id set; enforced as a floor on recover +
+//! change_passphrase). DagVault is interchangeable with ChainVault behind the trait.
 
 use openom_crypto::{
     derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
@@ -93,6 +94,17 @@ fn fold_sealing(sealing: &[Vec<u8>]) -> Result<(Vec<SealedEpoch>, RecoveryEscrow
     let escrow =
         escrow.ok_or_else(|| SealerError::BadKeyring("dag keyring has no recovery escrow".into()))?;
     Ok((epochs, escrow))
+}
+
+/// Map a facade anti-rollback failure onto the sealer's error vocabulary: a rolled-back anchor and a
+/// corrupt floor stay distinct (mirroring the chain's `RevisionRollback` / `MalformedWatermark`); anything
+/// else (a bad anchor) is a `BadKeyring`.
+fn map_floor_err(e: dag_client::ClientError) -> SealerError {
+    match e {
+        dag_client::ClientError::RolledBack(detail) => SealerError::WatermarkRollback { detail },
+        dag_client::ClientError::BadWatermark(_) => SealerError::MalformedWatermark,
+        other => SealerError::BadKeyring(other.to_string()),
+    }
 }
 
 /// The DAG engine's vault — a zero-sized selector, like [`crate::lifecycle::ChainVault`]. Its anchor is the
@@ -218,9 +230,9 @@ impl KeyringLifecycle for DagVault {
             .map_err(|_| SealerError::BadKeyring("owner key is not 32 bytes".into()))?;
         Ok(Unlocked {
             sealer,
-            // TODO(OPE-284): the dag watermark is the frontier op-id set; empty until the anti-rollback
-            // wiring lands. Provision+unlock don't exercise it.
-            watermark: Vec::new(),
+            // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor —
+            // it reports the cursor the caller persists and passes back as the floor on the next mutation.
+            watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
             did_key: DidKey::from_public_key(&owner_key),
         })
     }
@@ -236,11 +248,15 @@ impl KeyringLifecycle for DagVault {
         anchor: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
-        _floor: &[u8],
+        floor: &[u8],
     ) -> Result<Recovered, SealerError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
+
+        // Anti-rollback: the served anchor is untrusted on recovery, so refuse one that dropped a frontier
+        // op below the caller's floor before doing any work.
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
         let resolved =
@@ -293,11 +309,12 @@ impl KeyringLifecycle for DagVault {
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
         let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
 
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Recovered {
             anchor: new_anchor,
             recovery_code: secrets.recovery_code,
             sealer,
-            watermark: Vec::new(),
+            watermark,
             did_key,
         })
     }
@@ -313,10 +330,12 @@ impl KeyringLifecycle for DagVault {
         anchor: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
-        _floor: &[u8],
+        floor: &[u8],
     ) -> Result<Rekeyed, SealerError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let resolved =
             dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
@@ -369,10 +388,11 @@ impl KeyringLifecycle for DagVault {
         )
         .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
 
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Rekeyed {
             anchor: new_anchor,
             recovery_code: secrets.recovery_code,
-            watermark: Vec::new(),
+            watermark,
         })
     }
 }
@@ -745,6 +765,63 @@ mod tests {
         assert_eq!(
             r.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"keepsake"
+        );
+    }
+
+    /// The anti-rollback watermark is wired (OPE-284): unlock reports the anchor's frontier, a mutation past
+    /// that floor advances the watermark, and serving the now-stale original anchor — whose op set is behind
+    /// the advanced floor — is refused as a rollback.
+    #[test]
+    fn dag_watermark_advances_and_a_stale_anchor_is_refused() {
+        let tree = TreeId::new(TREE);
+        let member = MemberId::new(MEMBER);
+        let old_pass = Passphrase::new(b"correct horse");
+        let new_pass = Passphrase::new(b"battery staple unicorn");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &old_pass)
+            .unwrap();
+        let u = DagVault
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &p.anchor, &old_pass)
+            .unwrap();
+        assert!(!u.watermark.is_empty(), "unlock reports the frontier watermark, not a stub");
+
+        // A passphrase change, gated on the unlock floor, advances the watermark.
+        let re = DagVault
+            .change_passphrase(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &old_pass,
+                &new_pass,
+                &u.watermark,
+            )
+            .unwrap();
+        assert_ne!(re.watermark, u.watermark, "a keyring change advances the watermark");
+
+        // Serving the ORIGINAL anchor now — its op set is behind the advanced floor — is a rollback.
+        let rolled_back = DagVault.change_passphrase(
+            &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+            &p.anchor,
+            &old_pass,
+            &new_pass,
+            &re.watermark,
+        );
+        assert!(
+            matches!(rolled_back, Err(SealerError::WatermarkRollback { .. })),
+            "a stale anchor below the floor is refused"
+        );
+
+        // A corrupt floor (not a multiple of 32 bytes) is refused, not silently ignored.
+        let bad_floor = DagVault.change_passphrase(
+            &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+            &re.anchor,
+            &new_pass,
+            &Passphrase::new(b"third one"),
+            &[1, 2, 3],
+        );
+        assert!(
+            matches!(bad_floor, Err(SealerError::MalformedWatermark)),
+            "a corrupt floor is refused"
         );
     }
 

@@ -334,16 +334,25 @@ mod tests {
             .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rB")), &p.anchor, &pass)
             .unwrap();
         assert_eq!(u.did_key, p.did_key);
+        assert!(!u.watermark.is_empty(), "unlock reports an anti-rollback watermark, not a stub");
         assert_eq!(
             u.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
             b"parity data"
         );
 
-        // change_passphrase, then unlock under the new passphrase opens the same data.
+        // change_passphrase — gated on the unlock floor — then unlock under the new passphrase opens the
+        // same data, and the watermark has advanced past the floor.
         let new_pass = Passphrase::new(b"changed passphrase");
         let re = engine
-            .change_passphrase(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &p.anchor, &pass, &new_pass, &[])
+            .change_passphrase(
+                &ctx(&tree, &member, &ReplicaId::new(b"rA")),
+                &p.anchor,
+                &pass,
+                &new_pass,
+                &u.watermark,
+            )
             .unwrap();
+        assert_ne!(re.watermark, u.watermark, "a keyring change advances the watermark");
         let u2 = engine
             .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rC")), &re.anchor, &new_pass)
             .unwrap();
@@ -352,16 +361,18 @@ mod tests {
             b"parity data"
         );
 
-        // recover (with the provision recovery code, a fresh passphrase) opens the same data.
+        // recover (with the provision recovery code, a fresh passphrase) opens the same data. The served
+        // anchor is the original, so its own frontier (`u.watermark`) is a satisfiable floor.
         let r = engine
             .recover(
                 &ctx(&tree, &member, &ReplicaId::new(b"rD")),
                 &p.anchor,
                 &p.recovery_code,
                 &Passphrase::new(b"recovered passphrase"),
-                &[],
+                &u.watermark,
             )
             .unwrap();
+        assert!(!r.watermark.is_empty(), "recovery reports an advanced watermark");
         assert_eq!(
             r.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
             b"parity data"
