@@ -52,6 +52,23 @@ impl std::error::Error for BlobSyncError {}
 
 type Result<T> = std::result::Result<T, BlobSyncError>;
 
+/// The outcome of a [`KeyringBlobSync::pull`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PullReport {
+    /// How many new ops were submitted to the engine this pull.
+    pub submitted: usize,
+    /// Op ids this replica had already applied that are ABSENT from the store's current listing — i.e. a
+    /// rollback / withholding attempt (a content-addressed op set can only be regressed by *omission*;
+    /// re-serving old ops is idempotent). This is the DAG's anti-rollback signal: monotonicity itself
+    /// holds structurally (pull only ever adds to the engine, never removes), so the local op set — and
+    /// everything resolved from it, including any recovery — is unaffected. A non-empty `withheld` is
+    /// therefore a loud alarm about a stale or hostile store, NOT data loss. (A managed backend can also
+    /// prevent this below the blob seam by refusing deletions; a BYO backend can only detect it, which is
+    /// what this does. Cross-device frontier attestation + new-device first-sight are broader concerns
+    /// than one replica's own history and are out of scope here.)
+    pub withheld: Vec<[u8; 32]>,
+}
+
 /// One replica's blob sync for a keyring DAG: publishes locally-applied ops and pulls remote ones into
 /// an engine. Tracks which op ids it has already submitted so pull is incremental.
 pub struct KeyringBlobSync<S: BlobStore> {
@@ -84,9 +101,12 @@ impl<S: BlobStore> KeyringBlobSync<S> {
     }
 
     /// Fetch every op blob not yet applied and hand it to `engine`; then flush so any op buffered awaiting
-    /// its parents lands once they arrive. Returns how many new ops were submitted. Idempotent.
-    pub fn pull(&mut self, engine: &mut KeyringEngine) -> Result<usize> {
+    /// its parents lands once they arrive. Idempotent. Also checks anti-rollback: any op this replica has
+    /// already applied that the store no longer serves is reported in [`PullReport::withheld`] — the local
+    /// op set is never regressed (pull only adds), so this is a detection signal, not data loss.
+    pub fn pull(&mut self, engine: &mut KeyringEngine) -> Result<PullReport> {
         let keys = self.store.list(OP_PREFIX)?;
+        let mut present: HashSet<[u8; 32]> = HashSet::with_capacity(keys.len());
         let mut submitted = 0;
         for (key, _etag) in keys {
             let (bytes, _) = self
@@ -97,6 +117,7 @@ impl<S: BlobStore> KeyringBlobSync<S> {
             if op_key(&op.id) != key {
                 return Err(BlobSyncError::Malformed("op id does not match its blob key"));
             }
+            present.insert(op.id);
             if self.applied.contains(&op.id) {
                 continue;
             }
@@ -110,7 +131,14 @@ impl<S: BlobStore> KeyringBlobSync<S> {
         engine
             .flush()
             .map_err(|e| BlobSyncError::Engine(format!("{e:?}")))?;
-        Ok(submitted)
+        // Anti-rollback: everything we ever applied must still be served; a gap is a withholding attempt.
+        let withheld: Vec<[u8; 32]> = self
+            .applied
+            .iter()
+            .filter(|id| !present.contains(*id))
+            .copied()
+            .collect();
+        Ok(PullReport { submitted, withheld })
     }
 }
 
@@ -324,7 +352,7 @@ fn dto_to_minit(d: &MemberInitDto) -> Result<KeyringMemberInit> {
 mod tests {
     use super::*;
     use crate::{sign_op, KeyringAccess, KeyringState};
-    use blobstore::MemoryBlob;
+    use blobstore::{BlobStore, MemoryBlob, Precondition};
     use keyeo::{Keyeo, StrongRemove};
     use std::sync::Arc;
 
@@ -460,6 +488,39 @@ mod tests {
         assert_eq!(members(&ea), members(&eb), "both replicas converge after the fork");
         let m = members(&ea);
         assert!(m.contains(&"dave".to_string()) && m.contains(&"erin".to_string()));
+    }
+
+    #[test]
+    fn pull_detects_a_withheld_op_without_losing_local_state() {
+        // Anti-rollback (OPE-269): a content-addressed op set can only be regressed by omission. A pull
+        // reports any already-applied op the store no longer serves, and — because pull only ever adds to
+        // the engine — the local resolved state is unaffected by the rollback attempt.
+        let store = Arc::new(MemoryBlob::new());
+        let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
+        let (mut ea, mut eb) = (engine(&gm), engine(&gm));
+        let mut sa = KeyringBlobSync::new(store.clone());
+        let mut sb = KeyringBlobSync::new(store.clone());
+
+        let g = sign_op([1; 32], vec![], "founder", create(&gm), &sk(1));
+        let ab = sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1));
+        ea.apply(g.clone()).unwrap();
+        sa.push(&g).unwrap();
+        ea.apply(ab.clone()).unwrap();
+        sa.push(&ab).unwrap();
+
+        // B pulls both — a complete listing withholds nothing.
+        let clean = sb.pull(&mut eb).unwrap();
+        assert!(clean.withheld.is_empty(), "a complete listing withholds nothing");
+        assert!(members(&eb).contains(&"bob".to_string()));
+
+        // The store drops the genesis op — a rollback attempt.
+        store.delete(&op_key(&g.id), Precondition::Any).unwrap();
+        let rolled = sb.pull(&mut eb).unwrap();
+        assert_eq!(rolled.withheld, vec![g.id], "the dropped op is flagged as withheld");
+        assert!(
+            members(&eb).contains(&"bob".to_string()),
+            "the local resolved state is unaffected — monotonicity holds, this is detection not loss"
+        );
     }
 
     #[test]
