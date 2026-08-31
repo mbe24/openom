@@ -489,7 +489,7 @@ impl DagVault {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
-        member_kdf: &CoreKdf,
+        member_kdf: &KdfParams,
     ) -> Result<Unlocked, SealerError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
@@ -505,8 +505,8 @@ impl DagVault {
             .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
         let (epochs, _escrow) = fold_sealing(&resolved.sealing)?;
 
-        validate_kdf(member_kdf)?;
-        let root = derive_root(passphrase.expose(), &KdfParams::from(member_kdf))?;
+        validate_kdf(&CoreKdf::from(member_kdf))?;
+        let root = derive_root(passphrase.expose(), member_kdf)?;
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
@@ -520,7 +520,9 @@ impl DagVault {
             .map_err(|_| SealerError::BadKeyring("member key is not 32 bytes".into()))?;
         Ok(Unlocked {
             sealer,
-            watermark: Vec::new(),
+            // A member unlock reports the same frontier watermark as the owner path (anti-rollback is not
+            // owner-specific): the member persists it and passes it back as their floor.
+            watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
             did_key: DidKey::from_public_key(&my_key),
         })
     }
@@ -916,7 +918,7 @@ mod tests {
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                 &new_anchor,
                 &bob_pass,
-                &bob.pass_kdf,
+                &KdfParams::from(&bob.pass_kdf),
             )
             .unwrap();
         assert_eq!(
@@ -924,6 +926,7 @@ mod tests {
             b"family data"
         );
         assert_eq!(u.did_key, DidKey::from_public_key(&bob_author));
+        assert!(!u.watermark.is_empty(), "a member unlock reports the frontier watermark too");
 
         // A wrong passphrase for bob is rejected (anti-substitution against his resolved key).
         assert!(
@@ -932,7 +935,7 @@ mod tests {
                     &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                     &new_anchor,
                     &Passphrase::new(b"not bobs passphrase"),
-                    &bob.pass_kdf,
+                    &KdfParams::from(&bob.pass_kdf),
                 )
                 .is_err()
         );
@@ -966,7 +969,7 @@ mod tests {
             .unwrap();
         assert!(
             DagVault
-                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a1, &bob_pass, &bob.pass_kdf)
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a1, &bob_pass, &KdfParams::from(&bob.pass_kdf))
                 .is_ok(),
             "bob can read before removal"
         );
@@ -982,7 +985,7 @@ mod tests {
 
         assert!(
             DagVault
-                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a2, &bob_pass, &bob.pass_kdf)
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a2, &bob_pass, &KdfParams::from(&bob.pass_kdf))
                 .is_err(),
             "a removed member can no longer unlock"
         );
