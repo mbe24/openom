@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 keyeo.workspace = true
 blobstore.workspace = true
+openom-keyring-seam.workspace = true
 openom-sign.workspace = true
 openom-roles.workspace = true
 serde.workspace = true

@@ -206,14 +206,14 @@ enum ActionDto {
 }
 
 #[derive(Serialize, Deserialize)]
-struct MemberInitDto {
+pub(crate) struct MemberInitDto {
     id: String,
     role: KeyringRole,
     author_public_key: [u8; 32],
     hpke_public_key: [u8; 32],
 }
 
-fn encode_op(op: &KeyringOp) -> Vec<u8> {
+pub(crate) fn encode_op(op: &KeyringOp) -> Vec<u8> {
     let dto = OpDto {
         id: op.id,
         parents: op.parents.clone(),
@@ -225,7 +225,7 @@ fn encode_op(op: &KeyringOp) -> Vec<u8> {
     serde_json::to_vec(&dto).expect("op DTO serialization is infallible")
 }
 
-fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
+pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
     let dto: OpDto = serde_json::from_slice(bytes).map_err(BlobSyncError::Decode)?;
     Ok(keyeo::Op::new(
         dto.id,
@@ -348,7 +348,7 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
     })
 }
 
-fn minit_to_dto(m: &KeyringMemberInit) -> MemberInitDto {
+pub(crate) fn minit_to_dto(m: &KeyringMemberInit) -> MemberInitDto {
     MemberInitDto {
         id: m.id.clone(),
         role: m.role,
@@ -357,7 +357,7 @@ fn minit_to_dto(m: &KeyringMemberInit) -> MemberInitDto {
     }
 }
 
-fn dto_to_minit(d: &MemberInitDto) -> Result<KeyringMemberInit> {
+pub(crate) fn dto_to_minit(d: &MemberInitDto) -> Result<KeyringMemberInit> {
     Ok(KeyringMemberInit {
         id: d.id.clone(),
         role: d.role,

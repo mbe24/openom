@@ -16,6 +16,7 @@ use std::collections::HashSet;
 
 pub mod blob_sync;
 pub mod recovery;
+pub mod verifier;
 
 /// openom's Ed25519 plugged into keyeo's `SignatureScheme` seam, so the engine verifies with
 /// openom-sign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
