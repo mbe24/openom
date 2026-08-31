@@ -88,7 +88,9 @@ pub fn sign_op(
     key: &openom_sign::SigningKey,
 ) -> KeyringOp {
     let author = author.into();
-    let canonical = keyeo::canonical_encode(&parents, &author, &action);
+    // No sealing on these ops — sign_op is the id-supplied constructor used across tests + the keyless
+    // paths; the sealing-carrying, content-addressed minting lives in the DagKeyring client facade (OPE-273).
+    let canonical = keyeo::canonical_encode(&parents, &author, &action, &[]);
     let signature = key.sign(&canonical).to_bytes();
     let author_public_key = key.verifying_key().to_bytes();
     keyeo::Op::new(id, parents, author, action, signature, author_public_key)

@@ -151,9 +151,14 @@ impl<Id: MemberId> CanonicalBytes for DekWrap<Id> {
 }
 
 /// Deterministically encode the **signed content** of a block: a version tag followed by the postcard
-/// encoding of `parents` and `author`, then the action's own canonical bytes. Excludes the op id (see
-/// module docs). Both the signer ([`crate::op::Op::sign`]) and the verifier (the engine) call this over
-/// the block's own fields.
+/// encoding of `parents` and `author`, then the action's own canonical bytes, then the opaque `sealing`
+/// payload. Excludes the op id (see module docs). Both the signer ([`crate::op::Op::sign`]) and the
+/// verifier (the engine) call this over the block's own fields.
+///
+/// `sealing` is an OPAQUE application payload the engine signs + content-addresses but never interprets —
+/// keyeo stays domain-free (openom rides its DEK-epoch / recovery-escrow records here; OPE-273). It is
+/// length-prefixed so it can't be re-partitioned against the action's trailing bytes. Empty (`&[]`) for
+/// ops that carry none.
 ///
 /// Generic over the payload via the [`CanonicalBytes`] seam — the byte layout of a blocklace block is
 /// defined independently of *what* the block carries. keyeo's payload is [`MembershipAction`], but this
@@ -163,14 +168,19 @@ pub fn canonical_encode<OId: OpId, MId: MemberId, A: CanonicalBytes>(
     parents: &[OId],
     author: &MId,
     action: &A,
+    sealing: &[u8],
 ) -> Vec<u8> {
-    let mut buf = b"keyeo:op:v1".to_vec();
+    // v2 adds the trailing length-prefixed `sealing` payload (OPE-273). Bumped from v1 so the two layouts
+    // are byte-disjoint — pre-release, no persisted ops, so no migration.
+    let mut buf = b"keyeo:op:v2".to_vec();
     buf.extend_from_slice(&(parents.len() as u64).to_le_bytes());
     for p in parents {
         Postcard(p).write_canonical(&mut buf);
     }
     Postcard(author).write_canonical(&mut buf);
     action.write_canonical(&mut buf);
+    buf.extend_from_slice(&(sealing.len() as u64).to_le_bytes());
+    buf.extend_from_slice(sealing);
     buf
 }
 

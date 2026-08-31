@@ -32,6 +32,10 @@ pub struct Op<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme = Ed25519> {
     pub action: MembershipAction<MId, R, S>,
     pub signature: <S as SignatureScheme>::Signature,
     pub author_public_key: <S as SignatureScheme>::PublicKey,
+    /// An opaque application payload, signed + content-addressed with the op but never interpreted by
+    /// keyeo (openom rides its DEK-epoch / recovery-escrow records here; OPE-273). Empty for ops that
+    /// carry none. Set it via [`Op::new`]'s result (the field is public) or the sealing-aware constructors.
+    pub sealing: Vec<u8>,
 }
 
 impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
@@ -53,6 +57,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
             action,
             signature,
             author_public_key,
+            sealing: Vec::new(),
         }
     }
 
@@ -73,8 +78,12 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
         S: SignatureScheme<PublicKey = [u8; 32], Signature = [u8; 64]>,
     {
         use ed25519_dalek::Signer;
-        let canonical =
-            crate::canonical::canonical_encode(&self.parents, &self.author, &self.action);
+        let canonical = crate::canonical::canonical_encode(
+            &self.parents,
+            &self.author,
+            &self.action,
+            &self.sealing,
+        );
         let signature = signing_key.sign(&canonical).to_bytes();
         let author_public_key = signing_key.verifying_key().to_bytes();
         Self {
@@ -131,6 +140,9 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> SignedOp for Op<OId,
     fn author_public_key(&self) -> &<S as SignatureScheme>::PublicKey {
         &self.author_public_key
     }
+    fn sealing(&self) -> &[u8] {
+        &self.sealing
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +173,8 @@ mod tests {
         .sign(&sk);
 
         // the signature verifies over the library's canonical encoding of the fields
-        let canonical = crate::canonical::canonical_encode(&op.parents, &op.author, &op.action);
+        let canonical =
+            crate::canonical::canonical_encode(&op.parents, &op.author, &op.action, &op.sealing);
         assert_eq!(op.author_public_key, sk.verifying_key().to_bytes());
         assert!(<Ed25519 as SignatureScheme>::verify(
             &op.author_public_key,
@@ -174,6 +187,7 @@ mod tests {
             &op.parents,
             &op.author,
             &MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [2u8; 32] },
+            &op.sealing,
         );
         assert_ne!(canonical, other);
     }

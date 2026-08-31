@@ -37,6 +37,11 @@ pub trait SignedOp: Debug + Clone + Eq + std::hash::Hash + Ord {
     fn action(&self) -> &MembershipAction<Self::MemberId, Self::R, Self::S>;
     fn signature(&self) -> &<Self::S as SignatureScheme>::Signature;
     fn author_public_key(&self) -> &<Self::S as SignatureScheme>::PublicKey;
+    /// An opaque application payload, folded into the signed + content-addressed bytes but never
+    /// interpreted by keyeo (OPE-273). Defaults to empty for op types that carry none.
+    fn sealing(&self) -> &[u8] {
+        &[]
+    }
 }
 
 // Not `derive(Serialize)`: these embed crypto byte-arrays (incl. `[u8; 64]` sigs, which serde won't

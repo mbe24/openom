@@ -23,36 +23,41 @@ pub struct ContentId(pub [u8; 32]);
 
 impl OpId for ContentId {}
 
-/// Compute the content id from an op's fields: `H(canonical(parents, author, action) ‖ signature ‖
-/// author_public_key)`.
+/// Compute the content id from an op's fields: `H(canonical(parents, author, action, sealing) ‖ signature
+/// ‖ author_public_key)`. `sealing` is folded in via the canonical bytes, so tampering with it changes the
+/// id (the whole op — including its opaque payload — is content-addressed).
+#[allow(clippy::too_many_arguments)]
 pub fn content_id<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
     parents: &[OId],
     author: &MId,
     action: &MembershipAction<MId, R, S>,
+    sealing: &[u8],
     signature: &<S as SignatureScheme>::Signature,
     author_public_key: &<S as SignatureScheme>::PublicKey,
 ) -> ContentId {
     let mut h = Sha256::new();
-    h.update(canonical_encode(parents, author, action));
+    h.update(canonical_encode(parents, author, action, sealing));
     h.update(signature.as_ref());
     h.update(author_public_key.as_ref());
     ContentId(h.finalize().into())
 }
 
 impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
-    /// Build a signed, content-addressed op: sign `(parents, author, action)`, then set
-    /// `id = H(canonical ‖ signature ‖ author_public_key)`. The recommended constructor for a keyring.
+    /// Build a signed, content-addressed op carrying an opaque `sealing` payload: sign `(parents, author,
+    /// action, sealing)`, then set `id = H(canonical ‖ signature ‖ author_public_key)`. The recommended
+    /// constructor for a keyring. Pass an empty `sealing` for ops that carry none.
     pub fn content_addressed(
         parents: Vec<ContentId>,
         author: MId,
         action: MembershipAction<MId, R, Ed25519>,
+        sealing: Vec<u8>,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
         use ed25519_dalek::Signer;
-        let canonical = canonical_encode(&parents, &author, &action);
+        let canonical = canonical_encode(&parents, &author, &action, &sealing);
         let signature = signing_key.sign(&canonical).to_bytes();
         let author_public_key = signing_key.verifying_key().to_bytes();
-        let id = content_id(&parents, &author, &action, &signature, &author_public_key);
+        let id = content_id(&parents, &author, &action, &sealing, &signature, &author_public_key);
         Op {
             id,
             parents,
@@ -60,6 +65,7 @@ impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
             action,
             signature,
             author_public_key,
+            sealing,
         }
     }
 }
@@ -76,6 +82,7 @@ pub fn verify_content_id<MId: MemberId, R: Role, S: SignatureScheme>(
         op.parents(),
         op.author(),
         op.action(),
+        op.sealing(),
         op.signature(),
         op.author_public_key(),
     ) == op.id()
@@ -98,7 +105,7 @@ mod tests {
     fn content_id_verifies_and_detects_tampering() {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let action = MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] };
-        let op = Op::content_addressed(vec![], [3u8; 32], action, &sk);
+        let op = Op::content_addressed(vec![], [3u8; 32], action, Vec::new(), &sk);
 
         // The id names this content; re-derivation matches.
         assert!(verify_content_id(&op));
@@ -116,6 +123,7 @@ mod tests {
             vec![],
             [3u8; 32],
             MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] },
+            Vec::new(),
             &sk2,
         );
         assert_ne!(

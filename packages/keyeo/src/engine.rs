@@ -158,7 +158,8 @@ where
         // signature over THAT — never trust a caller-supplied `canonical` blob.
         // This binds the signature to (id, parents, author, action), so a valid
         // (canonical, signature) pair can't be replayed onto a different action.
-        let canonical = crate::canonical::canonical_encode(op.parents(), op.author(), op.action());
+        let canonical =
+            crate::canonical::canonical_encode(op.parents(), op.author(), op.action(), op.sealing());
         <Op::S as SignatureScheme>::verify(pk, &canonical, op.signature())
             .map_err(|_| Error::BadSignature)
     }
