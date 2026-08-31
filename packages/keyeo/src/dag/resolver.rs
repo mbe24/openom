@@ -100,6 +100,17 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
         era: u64,
         recovery_rewrap: Vec<u8>,
     },
+    /// Rotate the group's recovery authority (OPE-272): replace the pinned [`GroupState::reset_authority`]
+    /// with `new_reset_authority`, authorized by the op being signed by the CURRENT recovery authority.
+    /// This is the ONLY way to genuinely revoke a prior recovery-key holder: re-wrapping the RRK secret
+    /// (change-passphrase) leaves the keypair unchanged, so anyone who ever unwrapped it keeps recovery
+    /// power until a rotation mints a fresh keypair. Gating on the OLD authority means an attacker without
+    /// the current secret cannot rotate it out from under the legitimate owner. `recovery_rewrap` is the
+    /// opaque wraps of the new RRK secret (openom's sealer interprets them), carried in the signed content.
+    RotateRecoveryAuthority {
+        new_reset_authority: <S as SignatureScheme>::PublicKey,
+        recovery_rewrap: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,12 +282,14 @@ where
     match op.action() {
         MembershipAction::Create { .. } => true,
         MembershipAction::Add { member, .. } if member == op.author() => true,
-        // A ReFound's authority is the pinned recovery key, not a member registration: it is valid only
-        // when signed by the group's `reset_authority` (openom: the RVK). This is the engine-side half of
-        // the "distinguish a legitimate recovery from a hostile re-founding" gate — a reset branch a
-        // replica can't verify against the founded-with authority is unauthorized, hence ignored, hence
-        // never merged. (The domain shape — that it retargets the Owner, continuity — is AccessControl's.)
-        MembershipAction::ReFound { .. } => {
+        // The recovery-authorized ops — a re-founding (ReFound) and a rotation of the authority itself
+        // (RotateRecoveryAuthority) — are authorized by the pinned recovery key, not a member
+        // registration: valid only when signed by the group's CURRENT `reset_authority` (openom: the RVK).
+        // This is the engine-side half of the "distinguish a legitimate recovery from a hostile one" gate —
+        // a branch a replica can't verify against the founded-with (or currently-pinned) authority is
+        // unauthorized, hence ignored, hence never merged. Rotating gated by the OLD authority is exactly
+        // what lets it revoke a prior holder. (Domain shape — Owner target/author — is AccessControl's.)
+        MembershipAction::ReFound { .. } | MembershipAction::RotateRecoveryAuthority { .. } => {
             state.reset_authority.as_ref() == Some(op.author_public_key())
         }
         _ => state

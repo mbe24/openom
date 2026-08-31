@@ -133,6 +133,13 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             }
             Ok((state, events))
         }
+        // Rotate the recovery authority: replace the pinned key. Membership is untouched — this only
+        // changes who may authorize a future recovery. Authority (signed by the CURRENT authority) is
+        // decided by the caller before this runs (see `key_matches_registration`).
+        MembershipAction::RotateRecoveryAuthority { new_reset_authority, .. } => {
+            state.reset_authority = Some(new_reset_authority.clone());
+            Ok((state, events))
+        }
         // Quorum-protocol ops (v2) don't directly mutate membership: a Propose/Approve records intent,
         // and a Commit's *target* is applied by the quorum resolver at the Commit's position, not here.
         // Folding one of these is a no-op; the effect enters via the resolver, not `apply_action`.

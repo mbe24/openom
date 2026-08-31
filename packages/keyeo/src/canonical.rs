@@ -115,6 +115,15 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 out.extend_from_slice(&(recovery_rewrap.len() as u64).to_le_bytes());
                 out.extend_from_slice(recovery_rewrap);
             }
+            MembershipAction::RotateRecoveryAuthority {
+                new_reset_authority,
+                recovery_rewrap,
+            } => {
+                out.push(8);
+                out.extend_from_slice(new_reset_authority.as_ref());
+                out.extend_from_slice(&(recovery_rewrap.len() as u64).to_le_bytes());
+                out.extend_from_slice(recovery_rewrap);
+            }
         }
     }
 }

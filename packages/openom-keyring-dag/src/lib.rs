@@ -199,6 +199,10 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             // ReFound needs BOTH the RVK signature AND an Owner target to take effect. `author_role` above
             // is unused here (the signer is the RVK, not the member), which is fine.
             MembershipAction::ReFound { member, .. } => Self::role_of(state, member).is_owner(),
+            // Rotating the recovery authority: the RVK-signature (current authority signs) is enforced by
+            // the engine; here we bind the domain shape — only the Owner may author a rotation. Revoking a
+            // prior recovery-key holder is the Owner's prerogative.
+            MembershipAction::RotateRecoveryAuthority { .. } => author_role.is_owner(),
         }
     }
 
@@ -219,7 +223,8 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             MembershipAction::Propose { .. }
             | MembershipAction::Approve { .. }
             | MembershipAction::Commit { .. }
-            | MembershipAction::ReFound { .. } => true,
+            | MembershipAction::ReFound { .. }
+            | MembershipAction::RotateRecoveryAuthority { .. } => true,
             MembershipAction::Create { .. } => false,
         }
     }
@@ -738,6 +743,95 @@ mod tests {
             k.state().members.get("bob").unwrap().author_public_key,
             vk(2),
             "a ReFound may re-found only the Owner, never another member"
+        );
+    }
+
+    // ---- RRK rotation: revoke a prior recovery-key holder (OPE-272) ----
+
+    #[test]
+    fn rotating_the_recovery_authority_revokes_the_old_rvk() {
+        // The only genuine revoke-prior-holder path. After rotating the pinned authority from rvk1 to
+        // rvk2 (signed by the CURRENT authority rvk1), the old rvk1 can no longer authorize a recovery,
+        // but the new rvk2 can.
+        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
+        let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+            &sk(1),
+        ))
+        .unwrap();
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::RotateRecoveryAuthority {
+                new_reset_authority: rvk2.verifying_key().to_bytes(),
+                recovery_rewrap: vec![0xCD; 4],
+            },
+            &rvk1,
+        ))
+        .unwrap();
+        // the rotated-out authority can't recover any more...
+        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk1))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(1),
+            "a ReFound signed by the rotated-out old authority is rejected"
+        );
+        // ...but the new authority can.
+        k.apply(sign_op([4; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk2))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(7),
+            "a ReFound signed by the new authority re-founds the owner"
+        );
+    }
+
+    #[test]
+    fn a_rotation_not_signed_by_the_current_authority_is_rejected() {
+        // Gating on the OLD authority is what makes rotation safe: a rotation not signed by the current
+        // recovery key (here mallory's own key) has no effect, so it can't seize recovery power.
+        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
+        let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+            &sk(1),
+        ))
+        .unwrap();
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::RotateRecoveryAuthority {
+                new_reset_authority: rvk2.verifying_key().to_bytes(),
+                recovery_rewrap: vec![],
+            },
+            &sk(9), // NOT the current authority
+        ))
+        .unwrap();
+        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk2))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(1),
+            "the forged rotation had no effect — rvk2 is still not the authority"
+        );
+        k.apply(sign_op([4; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk1))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(7),
+            "the original authority still governs recovery"
         );
     }
 

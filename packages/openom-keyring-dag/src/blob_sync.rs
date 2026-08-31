@@ -199,6 +199,10 @@ enum ActionDto {
         era: u64,
         recovery_rewrap: Vec<u8>,
     },
+    RotateRecoveryAuthority {
+        new_reset_authority: [u8; 32],
+        recovery_rewrap: Vec<u8>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -279,6 +283,13 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
             era: *era,
             recovery_rewrap: recovery_rewrap.clone(),
         },
+        MembershipAction::RotateRecoveryAuthority {
+            new_reset_authority,
+            recovery_rewrap,
+        } => ActionDto::RotateRecoveryAuthority {
+            new_reset_authority: *new_reset_authority,
+            recovery_rewrap: recovery_rewrap.clone(),
+        },
     }
 }
 
@@ -325,6 +336,13 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
             new_author_public_key: *new_author_public_key,
             new_hpke_public_key: *new_hpke_public_key,
             era: *era,
+            recovery_rewrap: recovery_rewrap.clone(),
+        },
+        ActionDto::RotateRecoveryAuthority {
+            new_reset_authority,
+            recovery_rewrap,
+        } => MembershipAction::RotateRecoveryAuthority {
+            new_reset_authority: *new_reset_authority,
             recovery_rewrap: recovery_rewrap.clone(),
         },
     })
@@ -434,6 +452,22 @@ mod tests {
         let rf_back = decode_op(&encode_op(&rf)).unwrap();
         assert_eq!(rf_back.id, rf.id);
         assert_eq!(rf_back.action, rf.action, "ReFound survives the wire codec field-for-field");
+        // and a recovery-authority rotation
+        let rot = sign_op(
+            [5; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::RotateRecoveryAuthority {
+                new_reset_authority: vk(8),
+                recovery_rewrap: vec![9, 9, 9],
+            },
+            &sk(1),
+        );
+        assert_eq!(
+            decode_op(&encode_op(&rot)).unwrap().action,
+            rot.action,
+            "RotateRecoveryAuthority survives the wire codec"
+        );
     }
 
     #[test]
