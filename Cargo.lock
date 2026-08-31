@@ -399,6 +399,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blobstore"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1211,6 +1221,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "docsync"
+version = "0.1.0"
+dependencies = [
+ "journal",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3616,9 +3634,11 @@ dependencies = [
 name = "openom-keyring"
 version = "0.1.0"
 dependencies = [
+ "blobstore",
  "getrandom 0.3.4",
  "openom-crypto",
  "openom-did",
+ "openom-keyring-seam",
  "openom-protocol",
  "openom-roles",
  "openom-sign",
@@ -3631,13 +3651,27 @@ dependencies = [
 name = "openom-keyring-dag"
 version = "0.1.0"
 dependencies = [
+ "blobstore",
  "keyeo",
+ "openom-crypto",
  "openom-keyring",
+ "openom-keyring-seam",
  "openom-protocol",
  "openom-roles",
  "openom-sign",
  "proptest",
  "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "openom-keyring-seam"
+version = "0.1.0"
+dependencies = [
+ "openom-roles",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3682,12 +3716,17 @@ dependencies = [
 name = "openom-sealer"
 version = "0.1.0"
 dependencies = [
+ "blobstore",
  "openom-crypto",
  "openom-did",
  "openom-keyring",
+ "openom-keyring-dag",
  "openom-protocol",
  "openom-roles",
  "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "wasm-bindgen",
  "zeroize",
@@ -3707,6 +3746,7 @@ dependencies = [
 name = "openom-sync"
 version = "0.1.0"
 dependencies = [
+ "docsync",
  "journal",
  "openom-claim",
  "openom-crdt",
@@ -3714,7 +3754,6 @@ dependencies = [
  "openom-protocol",
  "openom-sealer",
  "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
