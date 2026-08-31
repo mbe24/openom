@@ -344,6 +344,10 @@ pub enum Error<Id: Debug + Clone> {
     MissingParents(Vec<Id>),
     DagCycle,
     Crypto(String),
+    /// The op branches from BEFORE the set merge horizon (some horizon op is not in its causal past) — a
+    /// stale fork / equivocation-rollback vector past the compaction frontier, rejected rather than merged
+    /// (OPE-270).
+    StaleFork,
 }
 
 impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
@@ -356,6 +360,7 @@ impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
             Error::MissingParents(ids) => write!(f, "missing parents: {:?}", ids),
             Error::DagCycle => write!(f, "DAG cycle detected"),
             Error::Crypto(msg) => write!(f, "crypto: {}", msg),
+            Error::StaleFork => write!(f, "op branches from before the merge horizon"),
         }
     }
 }

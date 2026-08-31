@@ -835,6 +835,43 @@ mod tests {
         );
     }
 
+    // ---- bounded fork-merge horizon (OPE-270) ----
+
+    #[test]
+    fn a_fork_branching_from_before_the_merge_horizon_is_rejected() {
+        // GHOST-derived anti-rollback hygiene: once a stable frontier is pinned as the merge horizon, an
+        // op that branches from BEFORE it is rejected as a stale fork, not merged — closing the
+        // rollback/equivocation vector of re-introducing history past the compaction cut. An op that
+        // builds ON the horizon is accepted.
+        let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+            &sk(1),
+        ))
+        .unwrap();
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("bob", KeyringRole::CO_OWNER, 2), &sk(1)))
+            .unwrap();
+
+        // Pin the horizon at the current tip [2].
+        k.set_merge_horizon(vec![[2; 32]]);
+
+        // A fork off [1] (before the horizon) is rejected outright.
+        let stale = k.apply(sign_op([4; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::EDITOR, 9), &sk(1)));
+        assert!(
+            matches!(stale, Err(keyeo::Error::StaleFork)),
+            "a fork from before the horizon is rejected, not merged"
+        );
+        assert!(!k.state().members.contains_key("mallory"), "and never enters the resolved state");
+
+        // An op building ON the horizon [2] is accepted normally.
+        k.apply(sign_op([3; 32], vec![[2; 32]], "founder", add("carol", KeyringRole::EDITOR, 3), &sk(1)))
+            .unwrap();
+        assert!(k.state().members.contains_key("carol"), "an op that builds on the horizon is accepted");
+    }
+
     // ---- RESET-MERGE: how a recovery interacts with concurrent ops (OPE-269) ----
 
     fn recovery_genesis(k: &mut KeyringEngine) {

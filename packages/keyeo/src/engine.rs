@@ -58,6 +58,10 @@ where
     genesis_epoch: u64,
     /// The multi-signer quorum policy (v2). `Individual` (the default) means no change needs quorum.
     quorum: QP,
+    /// The bounded fork-merge horizon (OPE-270): a stable compaction frontier below which the DAG will no
+    /// longer accept a fork. Empty = no horizon (accept everything, the default). Set it to the frontier a
+    /// compaction anchors to; thereafter an op that does not descend from it is rejected as a `StaleFork`.
+    merge_horizon: Vec<Op::OpId>,
 }
 
 impl<Op, AC, RS> Keyeo<Op, AC, RS, Individual>
@@ -100,7 +104,17 @@ where
             replica_epochs: Vec::new(),
             genesis_epoch: 0,
             quorum,
+            merge_horizon: Vec::new(),
         }
+    }
+
+    /// Set the bounded fork-merge horizon to a stable frontier (OPE-270). After this, `apply` rejects any
+    /// op that branches from before the frontier — one whose causal past does not include every horizon op
+    /// — as a [`Error::StaleFork`], rather than merging it or buffering it forever. Anchored to the
+    /// compaction frontier, this is the anti-rollback hygiene that stops a fork off pruned history from
+    /// re-entering after the group has moved past it. Pass an empty frontier to clear the horizon.
+    pub fn set_merge_horizon(&mut self, frontier: Vec<Op::OpId>) {
+        self.merge_horizon = frontier;
     }
 
     fn authenticate(&self, op: &Op) -> Result<(), Error<Op::MemberId>> {
@@ -173,6 +187,21 @@ where
         //    reject it up front (that made mutual/concurrent actions order-dependent). We admit it
         //    and let the resolver + causal rebuild decide its effect (admit-then-resolve).
         self.authenticate(&op)?;
+
+        // 2b. Bounded fork-merge horizon (OPE-270): once a stable frontier is set, every new op must
+        //     build ON it — its causal past must include every horizon op. An op that branches from
+        //     before the horizon (some horizon op is not an ancestor of any of its parents) is a stale
+        //     fork / equivocation-rollback vector past the compaction frontier, and is rejected here
+        //     rather than merged. Parents are already present (step 1), so ancestry is checkable now;
+        //     a re-applied op already in the DAG is exempt (idempotent).
+        if !self.merge_horizon.is_empty() && !self.ops.contains_key(&op.id()) {
+            let descends = self.merge_horizon.iter().all(|h| {
+                op.parents().iter().any(|p| p == h || self.graph.has_path(*h, *p))
+            });
+            if !descends {
+                return Err(Error::StaleFork);
+            }
+        }
 
         // 3. Admit to the DAG.
         let op_id = op.id();
