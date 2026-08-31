@@ -504,6 +504,84 @@ impl DagVault {
             did_key: DidKey::from_public_key(&my_key),
         })
     }
+
+    /// Remove `remove_member_id` from a dag tree with forward secrecy: the owner mints a FRESH DEK the
+    /// removed member can't reach, wraps it to the RRK (owner) + each REMAINING ordinary member's HPKE key,
+    /// and appends a `Remove` op carrying that new epoch in its sealing. Future entries seal under the new
+    /// epoch, so the removed member — who has no wrap for it — can't read them. Returns the new anchor.
+    pub fn remove_member(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        remove_member_id: &str,
+    ) -> Result<Vec<u8>, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let owner_id = ctx.member_id.as_str();
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+
+        // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
+        // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(SealerError::MissingWrap)?;
+        let kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+
+        // Forward-secret re-epoch: a fresh DEK wrapped to the RRK (owner) + each REMAINING ordinary member.
+        let new_dek = generate_dek()?;
+        let new_key_id = generate_salt()?.to_vec();
+        let new_epoch = epochs.iter().map(|e| e.epoch).max().map_or(0, |m| m + 1);
+        let mut wraps = vec![rrk_wrap_epoch(
+            &escrow.public_key,
+            &new_dek,
+            tree_id,
+            owner_id,
+            &new_key_id,
+            new_epoch,
+        )?];
+        for m in &resolved.members.members {
+            if m.member_id == remove_member_id || m.member_id == owner_id {
+                continue; // the removed member gets no wrap; the owner reaches it via the RRK
+            }
+            wraps.push(member_wrap_epoch(
+                &m.hpke_public_key,
+                &new_dek,
+                tree_id,
+                &m.member_id,
+                &new_key_id,
+                new_epoch,
+            )?);
+        }
+        let sealing = SealingPayload {
+            new_epochs: vec![SealedEpoch {
+                key_id: new_key_id,
+                epoch: new_epoch,
+                wraps,
+            }],
+            added_wraps: vec![],
+            escrow: None,
+        }
+        .to_bytes();
+        dag_client::append_remove(anchor, owner_id, remove_member_id, sealing, &root.identity)
+            .map_err(|e| SealerError::BadKeyring(e.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -780,6 +858,70 @@ mod tests {
                     &bob.pass_kdf,
                 )
                 .is_err()
+        );
+    }
+
+    /// Removing a member mints a forward-secret epoch: the removed member can no longer unlock, and the
+    /// owner reads post-removal data sealed under the new epoch.
+    #[test]
+    fn dag_remove_member_forward_secret_epoch_locks_them_out() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"owner passphrase");
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+
+        let bob_pass = Passphrase::new(b"bobs passphrase");
+        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob_author = bob.root.identity.verifying_key().to_bytes();
+        let bob_id = MemberId::new("acct-bob");
+        let a1 = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                "acct-bob",
+                KeyringRole::EDITOR,
+                bob_author,
+                bob.root.hpke_public,
+            )
+            .unwrap();
+        assert!(
+            DagVault
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a1, &bob_pass, &bob.pass_kdf)
+                .is_ok(),
+            "bob can read before removal"
+        );
+
+        let a2 = DagVault
+            .remove_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &a1,
+                &owner_pass,
+                "acct-bob",
+            )
+            .unwrap();
+
+        assert!(
+            DagVault
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a2, &bob_pass, &bob.pass_kdf)
+                .is_err(),
+            "a removed member can no longer unlock"
+        );
+
+        // The owner unlocks the new anchor and reads post-removal data sealed under the forward-secret epoch.
+        let u = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &a2, &owner_pass)
+            .unwrap();
+        let post = u
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"post-removal")
+            .unwrap()
+            .envelope;
+        assert_eq!(
+            u.sealer.open_entry(EntryKind::Snapshot, &post).unwrap(),
+            b"post-removal"
         );
     }
 

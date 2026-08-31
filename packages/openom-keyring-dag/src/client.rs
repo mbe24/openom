@@ -65,6 +65,22 @@ pub fn append_add(
     append(anchor_bytes, author, action, sealing, author_signing_key)
 }
 
+/// Append a **Remove** op — an authorized signer (`author`) removes `member_id`, carrying the
+/// forward-secret re-epoch (a fresh DEK wrapped only to the remaining members) in `sealing`. Signed by the
+/// author's current key.
+pub fn append_remove(
+    anchor_bytes: &[u8],
+    author: &str,
+    member_id: &str,
+    sealing: Vec<u8>,
+    author_signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let action = MembershipAction::Remove {
+        member: member_id.to_string(),
+    };
+    append(anchor_bytes, author, action, sealing, author_signing_key)
+}
+
 /// A client-side failure resolving or minting against the dag keyring.
 #[derive(Debug)]
 pub enum ClientError {
