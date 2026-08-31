@@ -310,4 +310,69 @@ mod tests {
             Err(SealerError::MalformedWatermark)
         ));
     }
+
+    /// The whole `KeyringLifecycle` contract, engine-agnostic: provision on one replica + seal; unlock on
+    /// another (from the opaque anchor alone) opens it; change_passphrase then unlock-under-the-new-pass
+    /// opens it; recover (with the provision recovery code) opens it. All over opaque anchors + watermarks
+    /// + floors, so the body is identical for both engines.
+    fn lifecycle_contract<E: KeyringLifecycle>(engine: &E) {
+        let tree = TreeId::new(TREE);
+        let member = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"correct horse");
+
+        let p = engine
+            .provision(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &pass)
+            .unwrap();
+        let sealed = p
+            .sealer
+            .seal_entry(&crate::SealContext::snapshot(0, Vec::new(), 0), b"parity data")
+            .unwrap()
+            .envelope;
+
+        // unlock from the anchor alone opens the data, same owner identity.
+        let u = engine
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rB")), &p.anchor, &pass)
+            .unwrap();
+        assert_eq!(u.did_key, p.did_key);
+        assert_eq!(
+            u.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            b"parity data"
+        );
+
+        // change_passphrase, then unlock under the new passphrase opens the same data.
+        let new_pass = Passphrase::new(b"changed passphrase");
+        let re = engine
+            .change_passphrase(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &p.anchor, &pass, &new_pass, &[])
+            .unwrap();
+        let u2 = engine
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rC")), &re.anchor, &new_pass)
+            .unwrap();
+        assert_eq!(
+            u2.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            b"parity data"
+        );
+
+        // recover (with the provision recovery code, a fresh passphrase) opens the same data.
+        let r = engine
+            .recover(
+                &ctx(&tree, &member, &ReplicaId::new(b"rD")),
+                &p.anchor,
+                &p.recovery_code,
+                &Passphrase::new(b"recovered passphrase"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            r.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            b"parity data"
+        );
+    }
+
+    /// Parity: the chain and dag engines satisfy the SAME lifecycle contract behaviorally — OPE-267's
+    /// parity matrix carried through the real vaults, behind the trait.
+    #[test]
+    fn chain_and_dag_satisfy_the_same_lifecycle_contract() {
+        lifecycle_contract(&ChainVault);
+        lifecycle_contract(&crate::DagVault);
+    }
 }
