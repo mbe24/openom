@@ -249,10 +249,20 @@ pub fn verify_transition(
         return Err(ChainError::WrapIncomplete);
     }
 
-    // The recovery authority (RVK) is immutable across an ordinary transition — changing it is a
-    // privileged recovery-root rotation, not an ordinary re-sign. (Rotation is a dedicated flow.)
-    if reset_rvk(candidate).unwrap_or(&[]) != prior.recovery_verifying_key.as_slice() {
-        return Err(ChainError::UnendorsedSetChange);
+    // The recovery authority (RVK) may change across a transition ONLY as an authorized rotation: the
+    // new revision must be signed by the OLD recovery authority (proving possession of the current
+    // recovery secret) — the chain analogue of the dag's RotateRecoveryAuthority, and the only genuine
+    // way to revoke a prior recovery-key holder. An unchanged RVK needs no such signature; establishing a
+    // first RVK on a pre-RVK keyring (prior empty) rides the ordinary signer authorization above.
+    let new_rvk = reset_rvk(candidate).unwrap_or(&[]);
+    let old_rvk = prior.recovery_verifying_key.as_slice();
+    if new_rvk != old_rvk && !old_rvk.is_empty() {
+        let old_key = old_rvk
+            .try_into()
+            .ok()
+            .and_then(|b: [u8; 32]| VerifyingKey::from_bytes(&b).ok())
+            .ok_or(ChainError::BadStructure("prior recovery verifying key"))?;
+        verify_keyring_any(candidate, &[old_key]).map_err(|_| ChainError::UnendorsedSetChange)?;
     }
 
     Ok(KeyringAnchor {
@@ -870,6 +880,51 @@ mod tests {
         assert!(
             verify_reset(None, &build(rvk_pub.clone(), false)).is_ok(),
             "no prior recovery authority → the gate is inactive (backward-compatible)"
+        );
+    }
+
+    #[test]
+    fn verify_transition_allows_an_rvk_rotation_only_when_signed_by_the_old_authority() {
+        use openom_protocol::v1::RecoveryKey;
+        let rvk1 = openom_crypto::derive_rvk(&[42u8; 32]);
+        let rvk1_pub = rvk1.verifying_key().to_bytes().to_vec();
+        let rvk2_pub = openom_crypto::derive_rvk(&[99u8; 32]).verifying_key().to_bytes().to_vec();
+
+        // Prior: a founder-only genesis pinning rvk1.
+        let f = sk(1);
+        let mut prior = genesis(&f, &[], &[]);
+        prior.recovery_keys = vec![RecoveryKey {
+            public_key: vec![5; 32],
+            member_id: "owner".into(),
+            wraps: vec![],
+            recovery_verifying_key: rvk1_pub.clone(),
+        }];
+        prior.signatures.clear();
+        sign_keyring(&mut prior, &f);
+        let anchor = KeyringAnchor::from_keyring(&prior);
+        assert_eq!(anchor.recovery_verifying_key, rvk1_pub);
+
+        // A rev-2 that rotates the recovery authority rvk1 → rvk2, founder-signed and optionally OLD-RVK-signed.
+        let rotate = |old_rvk_signs: bool| -> Keyring {
+            let mut k = prior.clone();
+            k.revision = 2;
+            k.prev_keyring_hash = keyring_hash(&prior).to_vec();
+            k.recovery_keys[0].recovery_verifying_key = rvk2_pub.clone();
+            k.signatures.clear();
+            sign_keyring(&mut k, &f);
+            if old_rvk_signs {
+                sign_keyring(&mut k, &rvk1);
+            }
+            k
+        };
+
+        // Signed by the OLD authority → the rotation takes effect; the anchor now carries rvk2.
+        let ok = verify_transition(&anchor, &rotate(true)).unwrap();
+        assert_eq!(ok.recovery_verifying_key, rvk2_pub, "an old-RVK-signed rotation is accepted");
+        // Not signed by the OLD authority → rejected (can't rotate the recovery root out from under it).
+        assert!(
+            verify_transition(&anchor, &rotate(false)).is_err(),
+            "a rotation not signed by the old recovery authority is rejected"
         );
     }
 
