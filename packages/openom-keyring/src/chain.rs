@@ -1093,11 +1093,50 @@ mod tests {
         promoter.bootstrap().unwrap();
         assert_eq!(promoter.promote("p1").unwrap(), Promotion::NotReady);
 
-        // Co-owner "b" countersigns → 2 of 2 → the draft promotes and the head advances.
-        owner.countersign("p1", &b).unwrap();
+        // Co-owner "b" reviews the proposed candidate and countersigns it → 2 of 2 → promotes.
+        owner.countersign("p1", &candidate.encode_to_vec(), &b).unwrap();
         assert_eq!(promoter.promote("p1").unwrap(), Promotion::Promoted);
         assert_eq!(promoter.revision(), Some(candidate.revision));
         assert!(promoter.get_draft("p1").unwrap().is_none(), "the promoted draft is cleaned up");
+    }
+
+    #[test]
+    fn countersign_refuses_a_draft_swapped_since_review() {
+        use crate::blob_sync::{KeyringChainBlobSync, SyncError};
+        use blobstore::MemoryBlob;
+        use openom_protocol::Message;
+        use std::sync::Arc;
+
+        let (founder, a, b, d) = (key(), key(), key(), key());
+        let g = genesis(&founder, &[(&a, "a"), (&b, "b")], &[]);
+        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+
+        let store = Arc::new(MemoryBlob::new());
+        let mut owner = KeyringChainBlobSync::new(store.clone());
+        owner.publish(&g.encode_to_vec()).unwrap();
+        owner.publish(&ruled.encode_to_vec()).unwrap();
+
+        // The draft actually sitting in the store escalates "d" to co-owner (a new signer), signed by "a".
+        let in_store = next(&ruled, add_coowner(&d), &[&a]);
+        owner.propose("p1", &in_store.encode_to_vec()).unwrap();
+
+        // But co-owner "b" reviewed a DIFFERENT candidate — a benign governance tweak, no new signer.
+        let reviewed = next(&ruled, |k| { k.governance_threshold = 1; }, &[&a]);
+
+        // b countersigns what THEY reviewed; the store's content differs → refused, no signature harvested
+        // over the unseen escalation.
+        assert!(matches!(
+            owner.countersign("p1", &reviewed.encode_to_vec(), &b),
+            Err(SyncError::DraftContentChanged)
+        ));
+
+        // The store's draft never gained b's countersignature — it still carries only "a"'s.
+        let after = Keyring::decode(owner.get_draft("p1").unwrap().unwrap().as_slice()).unwrap();
+        assert_eq!(
+            after.signatures.len(),
+            1,
+            "the swapped draft did not collect b's countersignature"
+        );
     }
 
     #[test]

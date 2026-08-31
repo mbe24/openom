@@ -14,6 +14,7 @@
 //! [`KeyringChainBlobSync::accept_reset`], never silently walked.
 
 use blobstore::{BlobError, BlobStore, Etag, Precondition};
+use openom_protocol::aad::keyring_signing_bytes;
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 
@@ -54,6 +55,10 @@ pub enum SyncError {
     Malformed(&'static str),
     /// The head advanced under us during a publish — pull, re-produce the keyring, and publish again.
     Conflict,
+    /// A countersign was asked to sign a draft whose current content differs from the bytes the caller
+    /// reviewed — a store swapped the draft between review and signature. Refused: a signer must never
+    /// certify content they did not see. Re-review the current draft, then countersign that.
+    DraftContentChanged,
 }
 
 impl From<BlobError> for SyncError {
@@ -70,6 +75,9 @@ impl std::fmt::Display for SyncError {
             SyncError::Chain(e) => write!(f, "chain rejected: {e}"),
             SyncError::Malformed(m) => write!(f, "malformed keyring transport state: {m}"),
             SyncError::Conflict => write!(f, "head advanced concurrently; retry"),
+            SyncError::DraftContentChanged => {
+                write!(f, "draft content changed since review; re-review before countersigning")
+            }
         }
     }
 }
@@ -253,10 +261,25 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         Ok(self.store.get(&draft_key(proposal_id))?.map(|(b, _)| b))
     }
 
-    /// Add this signer's approval to a draft — a read / append-signature / CAS-write, retried if another
-    /// co-owner's countersignature landed first. Signatures are excluded from the signed bytes, so every
-    /// co-owner signs identical content.
-    pub fn countersign(&self, proposal_id: &str, key: &SigningKey) -> Result<(), SyncError> {
+    /// Add this signer's approval to the draft the caller **reviewed** — `reviewed_bytes` is the exact
+    /// candidate the co-owner approved (in the UI). The signature is bound to that content: before signing,
+    /// the store's current draft is fetched and its content (signatures excluded, [`keyring_signing_bytes`])
+    /// is compared to the reviewed content; a mismatch is refused with [`SyncError::DraftContentChanged`].
+    /// This closes a review/sign TOCTOU — a hostile store cannot swap the draft between the co-owner's
+    /// review and their signature (nor during the CAS retry loop, which re-checks each iteration) and so
+    /// cannot harvest a countersignature over content the signer never saw.
+    ///
+    /// The store's copy — not `reviewed_bytes` — is what we re-sign, so co-owners' signatures accumulate
+    /// (signatures are excluded from the signed content, so appending ours preserves the others'); we only
+    /// require that copy's content still equals what was reviewed. Retried if another co-owner's
+    /// countersignature landed first.
+    pub fn countersign(
+        &self,
+        proposal_id: &str,
+        reviewed_bytes: &[u8],
+        key: &SigningKey,
+    ) -> Result<(), SyncError> {
+        let reviewed_content = keyring_signing_bytes(&decode(reviewed_bytes)?);
         let dkey = draft_key(proposal_id);
         loop {
             let (bytes, etag) = self
@@ -264,13 +287,18 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 .get(&dkey)?
                 .ok_or(SyncError::Malformed("no such draft"))?;
             let mut candidate = decode(&bytes)?;
+            // Sign ONLY the content the co-owner reviewed. If the store served different content (a swap
+            // attack, or a genuinely different draft under this id), refuse rather than certify unseen bytes.
+            if keyring_signing_bytes(&candidate) != reviewed_content {
+                return Err(SyncError::DraftContentChanged);
+            }
             sign_keyring(&mut candidate, key);
             match self
                 .store
                 .put(&dkey, &candidate.encode_to_vec(), Precondition::IfMatch(etag))
             {
                 Ok(_) => return Ok(()),
-                Err(BlobError::PreconditionFailed) => continue, // concurrent countersign — refetch + retry
+                Err(BlobError::PreconditionFailed) => continue, // concurrent countersign — refetch + re-check
                 Err(e) => return Err(SyncError::Store(e)),
             }
         }
