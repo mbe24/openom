@@ -6,6 +6,7 @@ use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
 
 pub mod vault;
+mod vault_core;
 
 pub mod lifecycle;
 pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};

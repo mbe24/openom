@@ -14,10 +14,9 @@
 //!   unwrapping, and mint the new revision as `checked(max(watermark, served) + 1)`.
 
 use openom_crypto::{
-    default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair,
-    generate_recovery_code, generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code,
-    recovery_kdf_params, unwrap_rrk_secret, wrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
-    HpkePrivate, Kek, Passphrase, RecoveryCode, RootKeys, RrkSecret,
+    default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
+    hpke_wrap_dek, parse_recovery_code, unwrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
+    HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_did::DidKey;
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
@@ -25,7 +24,6 @@ use openom_protocol::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
-    WrapMethod,
 };
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 // The founder is the sole authorized signer of a freshly-built single-owner keyring, and the owner is
@@ -36,27 +34,18 @@ use openom_roles::{
     SIGNER_FOUNDER as FOUNDER,
 };
 
+use crate::vault_core::{
+    build_recovery_key, epoch_deks, member_epoch_deks, new_owner_secrets,
+    owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealer_set_from_deks,
+    validate_kdf_params, HPKE, PASSPHRASE, RECOVERY,
+};
 use crate::{SealerError, SealerSet};
-
-const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
-const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
-const HPKE: i32 = WrapMethod::X25519Hpke as i32;
-/// An epoch DEK wrapped to the founder's recovery root key — the founder's access to every
-/// epoch (past, future, and co-owner-minted) via one recovery-key private key.
-const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
 /// Bound on untrusted keyring input — a real V1 keyring is well under 1 KiB.
 const MAX_KEYRING_BYTES: usize = 64 * 1024;
 
-// The Argon2id window this build will actually run (checked before the KDF, on params read
-// from an unverified keyring). Rejects absurd values rather than clamping — clamping could
-// silently weaken; a legitimate future cost increase stays inside this ceiling.
-const MIN_MEMORY_KIB: u32 = 8 * 1024; // 8 MiB — the recovery-wrap floor
-const MAX_MEMORY_KIB: u32 = 256 * 1024; // 256 MiB — heavy but won't OOM a browser tab
-const MAX_ITERATIONS: u32 = 16;
-const MAX_PARALLELISM: u32 = 8;
 
 /// Result of [`provision`]: the encoded keyring to store, the recovery code to show ONCE,
 /// and the ready sealer set (built from the fresh DEK — one Argon2id, no second unlock).
@@ -204,7 +193,7 @@ pub fn unlock(
     // The did:key is over the PUBLIC identity key — capture it before `identity` may move into the
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
     let did_key = openom_did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
-    let epochs = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?
+    let epochs = epoch_deks(&keyring.epochs, tree_id, member_id, &rrk_secret)?
         .into_iter()
         .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
@@ -315,7 +304,7 @@ pub fn recover(
     // across a recovery (re-wrap, not rotate), so this RVK matches the prior one — continuity holds.
     sign_keyring(&mut keyring, &openom_crypto::derive_rvk(rrk_secret.expose()));
 
-    let deks = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring.epochs, tree_id, member_id, &rrk_secret)?;
     let write_key_id = deks
         .iter()
         .max_by_key(|(_, e, _)| *e)
@@ -444,7 +433,7 @@ pub fn rotate_recovery(
 
     // Move the founder's cross-epoch access onto the new RRK, then swap in the new RecoveryKey (new RRK
     // public + new RVK + freshly-wrapped secret).
-    rewrap_epochs_to_new_rrk(&mut keyring, tree_id, member_id, &old_rrk, &new_rrk_public)?;
+    rewrap_epochs_to_new_rrk(&mut keyring.epochs, tree_id, member_id, &old_rrk, &new_rrk_public)?;
     let new_rk = build_recovery_key(&new_rrk, &new_rrk_public, tree_id, member_id, &secrets)?;
     replace_recovery_key(&mut keyring, member_id, new_rk);
 
@@ -532,7 +521,7 @@ pub fn add_member(
 
     // The owner reaches every epoch's DEK via the RRK; wrap them all for the new member so
     // they see the full history.
-    let deks = epoch_deks(&keyring, tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring.epochs, tree_id, owner_member_id, &rrk_secret)?;
     do_add_member(
         keyring,
         tree_id,
@@ -591,7 +580,7 @@ pub fn add_member_as_co_owner(
         .max(acc.revision)
         .checked_add(1)
         .ok_or(SealerError::RevisionOverflow)?;
-    let deks = member_epoch_deks(&acc.keyring, tree_id, co_owner_member_id, &acc.hpke_secret)?;
+    let deks = member_epoch_deks(&acc.keyring.epochs, tree_id, co_owner_member_id, &acc.hpke_secret)?;
     do_add_member(
         acc.keyring,
         tree_id,
@@ -644,7 +633,7 @@ pub fn unlock_as_member(
 
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
-    let deks = member_epoch_deks(&keyring, tree_id, member_id, &root.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring.epochs, tree_id, member_id, &root.hpke_secret)?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
     let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
@@ -721,7 +710,7 @@ pub fn remove_member(
 
     // The owner re-seals with a set spanning every epoch (reached via the RRK); the new epoch
     // is the highest, so the set writes under it.
-    let deks = epoch_deks(&keyring, tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring.epochs, tree_id, owner_member_id, &rrk_secret)?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
@@ -792,7 +781,7 @@ pub fn remove_member_as_co_owner(
 
     // The co-owner re-seals with a set spanning the epochs their own wraps reach (including
     // the new one they were re-wrapped into); the new epoch is the highest, so it's the write.
-    let deks = member_epoch_deks(&keyring, tree_id, co_owner_member_id, &acc.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring.epochs, tree_id, co_owner_member_id, &acc.hpke_secret)?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
@@ -1127,232 +1116,6 @@ fn open_as_co_owner(
     })
 }
 
-/// The new owner secrets minted by provision / passphrase change / recovery: the new
-/// passphrase KEK + KDF (and derived identity/HPKE keys), plus a fresh recovery code + its
-/// KEK/KDF. Used to (re)wrap the recovery root key under the owner's two credentials.
-struct NewOwnerSecrets {
-    root: RootKeys,
-    pass_kdf: KdfParams,
-    recovery_code: RecoveryCode,
-    recovery_kek: Kek,
-    recovery_kdf: KdfParams,
-}
-
-fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, SealerError> {
-    let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
-    let root = derive_root(new_passphrase, &pass_kdf)?;
-    let recovery_code = generate_recovery_code()?;
-    let entropy = parse_recovery_code(&recovery_code)?;
-    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
-    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(NewOwnerSecrets {
-        root,
-        pass_kdf,
-        recovery_code,
-        recovery_kek,
-        recovery_kdf,
-    })
-}
-
-/// Like [`new_owner_secrets`] but REUSING the existing passphrase KDF params (salt), so the derived root
-/// — the founder identity and passphrase KEK — is UNCHANGED. Only the recovery code (and its KEK/salt) is
-/// fresh. Used by `rotate_recovery`, which keeps the founder + passphrase and changes only the recovery
-/// root, so it must not re-found the founder identity the way a passphrase change does.
-fn owner_secrets_reusing_pass_kdf(
-    passphrase: &[u8],
-    pass_kdf: KdfParams,
-) -> Result<NewOwnerSecrets, SealerError> {
-    let root = derive_root(passphrase, &pass_kdf)?;
-    let recovery_code = generate_recovery_code()?;
-    let entropy = parse_recovery_code(&recovery_code)?;
-    let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
-    let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(NewOwnerSecrets {
-        root,
-        pass_kdf,
-        recovery_code,
-        recovery_kek,
-        recovery_kdf,
-    })
-}
-
-/// Build the founder's [`RecoveryKey`]: the RRK private key wrapped under the new passphrase
-/// KEK and the new recovery-code KEK (the only two ways to reach it), bound to the tree-
-/// scoped rrk AAD.
-fn build_recovery_key(
-    rrk_secret: &RrkSecret,
-    rrk_public: &[u8],
-    tree_id: &[u8],
-    member_id: &str,
-    s: &NewOwnerSecrets,
-) -> Result<RecoveryKey, SealerError> {
-    let pass = wrap_rrk_secret(&s.root.kek, rrk_secret, tree_id, member_id, PASSPHRASE)?;
-    let rec = wrap_rrk_secret(&s.recovery_kek, rrk_secret, tree_id, member_id, RECOVERY)?;
-    Ok(RecoveryKey {
-        public_key: rrk_public.to_vec(),
-        member_id: member_id.to_string(),
-        wraps: vec![
-            KeyWrap {
-                member_id: member_id.to_string(),
-                wrap_method: PASSPHRASE,
-                nonce: pass.nonce,
-                wrapped_dek: pass.wrapped_dek,
-                kdf_params: Some(s.pass_kdf.clone()),
-                ephemeral_public_key: Vec::new(),
-            },
-            KeyWrap {
-                member_id: member_id.to_string(),
-                wrap_method: RECOVERY,
-                nonce: rec.nonce,
-                wrapped_dek: rec.wrapped_dek,
-                kdf_params: Some(s.recovery_kdf.clone()),
-                ephemeral_public_key: Vec::new(),
-            },
-        ],
-        // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
-        // openom_crypto::derive_rvk (so the chain and dag pin an identical RVK). Covered by the keyring
-        // signature; a future reset is verified for continuity + authorization against it.
-        recovery_verifying_key: openom_crypto::derive_rvk(rrk_secret.expose())
-            .verifying_key()
-            .to_bytes()
-            .to_vec(),
-    })
-}
-
-/// HPKE-wrap an epoch's `dek` to the founder's recovery root **public** key (needs no
-/// secret), as the `WRAP_METHOD_RRK_HPKE` wrap that gives the founder cross-epoch access.
-fn rrk_wrap_epoch(
-    rrk_public: &[u8],
-    dek: &Dek,
-    tree_id: &[u8],
-    founder_id: &str,
-    key_id: &[u8],
-    epoch: u32,
-) -> Result<KeyWrap, SealerError> {
-    let info = wrap_aad(tree_id, key_id, founder_id, RRK_HPKE, epoch);
-    let w = hpke_wrap_dek(rrk_public, dek, &info)?;
-    Ok(KeyWrap {
-        member_id: founder_id.to_string(),
-        wrap_method: RRK_HPKE,
-        nonce: Vec::new(),
-        wrapped_dek: w.ciphertext,
-        kdf_params: None,
-        ephemeral_public_key: w.encapped_key,
-    })
-}
-
-/// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.
-fn open_epoch_dek(
-    epoch: &KeyEpoch,
-    tree_id: &[u8],
-    founder_id: &str,
-    rrk_secret: &RrkSecret,
-) -> Result<Dek, SealerError> {
-    let w = epoch
-        .wraps
-        .iter()
-        .find(|w| w.wrap_method == RRK_HPKE)
-        .ok_or_else(|| SealerError::BadKeyring("epoch missing rrk wrap".into()))?;
-    let info = wrap_aad(tree_id, &epoch.key_id, founder_id, RRK_HPKE, epoch.epoch);
-    Ok(hpke_unwrap_dek(
-        rrk_secret.expose(),
-        &w.ephemeral_public_key,
-        &w.wrapped_dek,
-        &info,
-    )?)
-}
-
-/// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
-fn epoch_deks(
-    keyring: &Keyring,
-    tree_id: &[u8],
-    founder_id: &str,
-    rrk_secret: &RrkSecret,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
-    keyring
-        .epochs
-        .iter()
-        .map(|ep| {
-            Ok((
-                ep.key_id.clone(),
-                ep.epoch,
-                open_epoch_dek(ep, tree_id, founder_id, rrk_secret)?,
-            ))
-        })
-        .collect()
-}
-
-/// Re-wrap every epoch's DEK from the OLD recovery root to a NEW one (the RRK-HPKE wrap only; each
-/// member's own HPKE wraps are untouched). Used by `rotate_recovery`: mint a fresh RRK, then move the
-/// founder's cross-epoch access onto it so the old recovery secret no longer reaches any DEK.
-fn rewrap_epochs_to_new_rrk(
-    keyring: &mut Keyring,
-    tree_id: &[u8],
-    founder_id: &str,
-    old_rrk: &RrkSecret,
-    new_rrk_public: &[u8],
-) -> Result<(), SealerError> {
-    for ep in &mut keyring.epochs {
-        let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
-        let new_wrap = rrk_wrap_epoch(new_rrk_public, &dek, tree_id, founder_id, &ep.key_id, ep.epoch)?;
-        ep.wraps.retain(|w| w.wrap_method != RRK_HPKE);
-        ep.wraps.push(new_wrap);
-    }
-    Ok(())
-}
-
-/// Every `(key_id, epoch, DEK)` a MEMBER reaches via their per-epoch HPKE wraps (the epochs
-/// their wraps cover — join-epoch-onward). Empty means a removed member.
-fn member_epoch_deks(
-    keyring: &Keyring,
-    tree_id: &[u8],
-    member_id: &str,
-    hpke_secret: &HpkePrivate,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
-    let mut out = Vec::new();
-    for ep in &keyring.epochs {
-        if let Some(w) = ep
-            .wraps
-            .iter()
-            .find(|w| w.member_id == member_id && w.wrap_method == HPKE)
-        {
-            let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE, ep.epoch);
-            let dek = hpke_unwrap_dek(
-                hpke_secret.expose(),
-                &w.ephemeral_public_key,
-                &w.wrapped_dek,
-                &info,
-            )?;
-            out.push((ep.key_id.clone(), ep.epoch, dek));
-        }
-    }
-    Ok(out)
-}
-
-/// Build a [`SealerSet`] from reachable epoch DEKs, writing under the latest one. Errors if
-/// the caller reaches no epoch (e.g. a removed member).
-fn sealer_set_from_deks(
-    tree_id: &[u8],
-    replica_id: &[u8],
-    deks: Vec<(Vec<u8>, u32, Dek)>,
-) -> Result<SealerSet, SealerError> {
-    let write_key_id = deks
-        .iter()
-        .max_by_key(|(_, e, _)| *e)
-        .map(|(k, _, _)| k.clone())
-        .ok_or(SealerError::MissingWrap)?;
-    // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
-    let epochs = deks
-        .into_iter()
-        .map(|(k, _e, d)| (k, d.into_inner()))
-        .collect();
-    Ok(SealerSet::new(
-        TreeId::new(tree_id),
-        ReplicaId::new(replica_id),
-        epochs,
-        KeyId::new(write_key_id),
-    ))
-}
 
 /// The Ed25519 verify keys of the keyring's current authorized signers (malformed entries
 /// skipped). Used for any-of verification of an ordinary revision, which a co-owner may have
@@ -1539,17 +1302,6 @@ fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
 }
 
 /// Reject Argon2id params outside the runnable window (they come from an unverified keyring).
-fn validate_kdf_params(p: &openom_protocol::v1::KdfParams) -> Result<(), SealerError> {
-    let ok = (MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&p.memory_kib)
-        && (1..=MAX_ITERATIONS).contains(&p.iterations)
-        && (1..=MAX_PARALLELISM).contains(&p.parallelism)
-        && (8..=64).contains(&p.salt.len());
-    if ok {
-        Ok(())
-    } else {
-        Err(SealerError::BadKdfParams)
-    }
-}
 
 const _: () = assert!(KEY_ID_LEN == 16);
 
