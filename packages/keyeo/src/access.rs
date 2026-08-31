@@ -11,6 +11,25 @@ pub trait AccessControl<Id: MemberId, R: Role, S: SignatureScheme>: Send + Sync 
         author: &Id,
         action: &MembershipAction<Id, R, S>,
     ) -> bool;
+
+    /// Whether `action` (evaluated against `state`, the resolved state at the op's causal position) is a
+    /// **privileged** change — one that alters the authority structure (the signer set, governance, or
+    /// recovery material) rather than an ordinary member change.
+    ///
+    /// Used only by the reset-merge carve-out ([`crate::dag::strong_remove::StrongRemove`]): a privileged
+    /// op that is *concurrent* with a surviving recovery re-founding ([`MembershipAction::ReFound`]) is
+    /// voided. A recovery is minted precisely when key custody is in doubt, so a concurrent authority
+    /// change is, with meaningful probability, the very escalation the recovery defends against; voiding
+    /// it costs one re-approval by holders who still have their keys, and never loses an ordinary member
+    /// edit (which is not privileged, so it auto-merges). Default: `false` — a consumer with no
+    /// recovery/reset concept has no carve-out and this is inert.
+    fn is_privileged(
+        &self,
+        _state: &GroupState<Id, R, S>,
+        _action: &MembershipAction<Id, R, S>,
+    ) -> bool {
+        false
+    }
 }
 
 /// Default access control: requires a minimum role for modification actions.

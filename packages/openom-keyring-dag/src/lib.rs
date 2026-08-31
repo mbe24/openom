@@ -201,6 +201,28 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             MembershipAction::ReFound { member, .. } => Self::role_of(state, member).is_owner(),
         }
     }
+
+    fn is_privileged(&self, state: &KeyringState, action: &KeyringAction) -> bool {
+        // The authority-structure-changing ops — everything the reset-merge carve-out voids when it is
+        // concurrent with a surviving recovery. Ordinary member changes (adding/removing/re-roling a
+        // non-signer) are NOT privileged, so they auto-merge across a recovery (compass: never lose an
+        // innocent edit). Signer-set changes, governance (quorum), and recovery are.
+        match action {
+            // Adding a signer is privileged; adding an ordinary member is not.
+            MembershipAction::Add { role, .. } => role.is_signer(),
+            // Touching a signer in either direction (promoting into, or demoting/removing out of).
+            MembershipAction::ChangeRole { member, new_role } => {
+                new_role.is_signer() || Self::role_of(state, member).is_signer()
+            }
+            MembershipAction::Remove { member } => Self::role_of(state, member).is_signer(),
+            // Governance and recovery are always authority-structure changes.
+            MembershipAction::Propose { .. }
+            | MembershipAction::Approve { .. }
+            | MembershipAction::Commit { .. }
+            | MembershipAction::ReFound { .. } => true,
+            MembershipAction::Create { .. } => false,
+        }
+    }
 }
 
 /// The member a change *acts on* — the one whose consent shouldn't gate their own removal/demotion.
@@ -717,6 +739,121 @@ mod tests {
             vk(2),
             "a ReFound may re-found only the Owner, never another member"
         );
+    }
+
+    // ---- RESET-MERGE: how a recovery interacts with concurrent ops (OPE-269) ----
+
+    fn recovery_genesis(k: &mut KeyringEngine) {
+        // A shared root op for the reset-merge tests: genesis {founder(Owner), bob(CoOwner)}.
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create {
+                initial_members: vec![
+                    minit("founder", KeyringRole::OWNER, 1),
+                    minit("bob", KeyringRole::CO_OWNER, 2),
+                ],
+            },
+            &sk(1),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_ordinary_member_add_concurrent_with_recovery_auto_merges() {
+        // Compass #2 (never lose data): a recovery must not clobber an innocent relative's concurrent
+        // work. bob adds an ordinary editor on one branch while the owner is recovered on another — both
+        // survive, because an ordinary member add is not privileged and so isn't carved out.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let mut k = engine_with_rvk(
+            &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
+            rvk.verifying_key().to_bytes(),
+        );
+        recovery_genesis(&mut k);
+        k.apply(sign_op([2; 32], vec![[1; 32]], "bob", add("erin", KeyringRole::EDITOR, 5), &sk(2)))
+            .unwrap();
+        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("erin").map(|m| m.role),
+            Some(KeyringRole::EDITOR),
+            "an ordinary add concurrent with recovery auto-merges — nothing innocent is lost"
+        );
+        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(7), "owner recovered");
+    }
+
+    #[test]
+    fn a_privileged_op_concurrent_with_recovery_is_voided_but_a_later_owner_op_stands() {
+        // The carve-out. A compromised founder key (the thief) adds an accomplice SIGNER concurrent with
+        // the legitimate recovery — precisely the escalation a recovery defends against — so it is voided.
+        // Then, AFTER the recovery, the recovered owner adds a signer with the NEW key: not concurrent
+        // with the recovery, so it stands. Together: the thief's concurrent grab dies, real governance
+        // resumes on the new key.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let mut k = engine_with_rvk(
+            &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
+            rvk.verifying_key().to_bytes(),
+        );
+        recovery_genesis(&mut k);
+        // thief branch (old founder key) and recovery branch (RVK), concurrent children of genesis.
+        k.apply(sign_op([2; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::CO_OWNER, 9), &sk(1)))
+            .unwrap();
+        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk))
+            .unwrap();
+        assert!(
+            !k.state().members.contains_key("mallory"),
+            "a signer add concurrent with the recovery is voided by the carve-out"
+        );
+        assert_eq!(k.state().members.get("founder").unwrap().author_public_key, vk(7), "owner recovered");
+        assert!(k.state().members.contains_key("bob"), "the innocent co-owner is untouched");
+        // post-recovery: the recovered owner (new key sk(7)) adds a signer — not concurrent with R*.
+        k.apply(sign_op([4; 32], vec![[3; 32]], "founder", add("carol", KeyringRole::CO_OWNER, 3), &sk(7)))
+            .unwrap();
+        assert_eq!(
+            k.state().members.get("carol").map(|m| m.role),
+            Some(KeyringRole::CO_OWNER),
+            "the recovered owner governs normally with the new key after recovery"
+        );
+    }
+
+    #[test]
+    fn reset_merge_converges_regardless_of_arrival_order() {
+        // BEC: the carve-out depends only on the op DAG + causal authorization, never arrival order, so
+        // two replicas that see the thief-add and the recovery in opposite orders converge identically.
+        let rvk = crate::recovery::derive_rvk(&[42u8; 32]);
+        let rvk_pub = rvk.verifying_key().to_bytes();
+        let mk = || {
+            let mut k = engine_with_rvk(
+                &[minit("founder", KeyringRole::OWNER, 1), minit("bob", KeyringRole::CO_OWNER, 2)],
+                rvk_pub,
+            );
+            recovery_genesis(&mut k);
+            k
+        };
+        let thief =
+            sign_op([2; 32], vec![[1; 32]], "founder", add("mallory", KeyringRole::CO_OWNER, 9), &sk(1));
+        let recovery = sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 7, 1), &rvk);
+
+        let mut k1 = mk();
+        k1.apply(thief.clone()).unwrap();
+        k1.apply(recovery.clone()).unwrap();
+
+        let mut k2 = mk();
+        k2.apply(recovery).unwrap();
+        k2.apply(thief).unwrap();
+
+        assert_eq!(
+            k1.state().active_members(),
+            k2.state().active_members(),
+            "the carve-out resolves identically regardless of op arrival order (BEC)"
+        );
+        assert_eq!(
+            k1.state().members.get("founder").unwrap().author_public_key,
+            k2.state().members.get("founder").unwrap().author_public_key,
+            "the recovered owner key converges"
+        );
+        assert!(!k1.state().members.contains_key("mallory"), "and the carve-out held in both orders");
     }
 
     #[test]

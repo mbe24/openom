@@ -122,6 +122,37 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
             .copied()
             .filter(|id| !authorized.get(id).copied().unwrap_or(false))
             .collect();
+
+        // Rule 5 — reset-merge carve-out (OPE-269). If a recovery re-founding is present, the single
+        // highest-ranked authorized `ReFound` `R*` (by `(depth, id)`) is the effective recovery: the
+        // fold's Kahn ordering applies it last among any concurrent resets, so its key deterministically
+        // wins with no separate election. Any PRIVILEGED op concurrent with `R*` — a signer/governance
+        // change, or a losing competing reset, plausibly the very escalation the recovery defends against —
+        // is voided; ordinary member edits are not privileged and so auto-merge across the recovery. This
+        // is seeded BEFORE the fixpoint so a voided signer-add cascades through rule 3 (presence). `R*`'s
+        // author is the Owner, who cannot be removed or presence-invalidated, so `R*` is a stable pivot —
+        // its selection depends only on the fixed `authorized` map, never on the growing ignore set.
+        let rstar = ops
+            .iter()
+            .filter(|(id, op)| {
+                matches!(op.action(), MembershipAction::ReFound { .. })
+                    && authorized.get(*id).copied().unwrap_or(false)
+            })
+            .map(|(id, _)| *id)
+            .max_by_key(|id| (*depth.get(id).unwrap_or(&0), *id));
+        if let Some(rstar) = rstar {
+            let carved: Vec<OId> = ops
+                .iter()
+                .filter(|(o, _)| **o != rstar && !invalid.contains(*o) && graph.is_concurrent(**o, rstar))
+                .filter(|(o, op)| {
+                    let st = resolved_state_before(**o, genesis_state, graph, ops, &authorized, &depth);
+                    ac.is_privileged(&st, op.action())
+                })
+                .map(|(o, _)| *o)
+                .collect();
+            invalid.extend(carved);
+        }
+
         loop {
             // Inner fixpoint: rules 1+2+3 iterated until stable (all monotone — the ignore set only
             // grows — so this converges). Any rule-4 suppressions from a previous outer pass are
@@ -284,6 +315,43 @@ where
     on_stack.remove(&id);
     memo.insert(id, result);
     result
+}
+
+/// The resolved state at `target`'s causal position: fold `target`'s AUTHORIZED ancestors (in
+/// `(depth, id)` topological order) onto the genesis base. Mirrors `authorized_at`'s ancestor fold and,
+/// like it, depends only on the fixed `authorized` map (not the strong-remove ignore set), so it is
+/// well-founded and replica-independent. Used by the reset-merge carve-out to classify whether a
+/// concurrent op is privileged *as of its own position* (e.g. whether the member a `Remove`/`ChangeRole`
+/// targets was a signer there).
+fn resolved_state_before<OId, R, S, Op>(
+    target: OId,
+    genesis_state: &GroupState<Op::MemberId, R, S>,
+    graph: &Graph<OId>,
+    ops: &HashMap<OId, Op>,
+    authorized: &HashMap<OId, bool>,
+    depth: &HashMap<OId, usize>,
+) -> GroupState<Op::MemberId, R, S>
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    let mut ancestors: Vec<OId> = ops
+        .keys()
+        .copied()
+        .filter(|&a| graph.has_path(a, target))
+        .collect();
+    ancestors.sort_by_key(|a| (*depth.get(a).unwrap_or(&0), *a));
+    let mut state = genesis_state.clone();
+    for a in ancestors {
+        if authorized.get(&a).copied().unwrap_or(false) {
+            if let Ok((next, _)) = apply_action(state.clone(), ops[&a].action()) {
+                state = next;
+            }
+        }
+    }
+    state
 }
 
 /// Lamport depth of every op: 0 at a root, else 1 + max parent depth. Used only as a deterministic
