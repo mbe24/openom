@@ -39,11 +39,15 @@ impl<T: Serialize> CanonicalBytes for Postcard<'_, T> {
 }
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id, R, S> {
+    #[deny(unused_variables)]
     fn write_canonical(&self, out: &mut Vec<u8>) {
-        Postcard(&self.id).write_canonical(out);
-        Postcard(&self.role).write_canonical(out);
-        out.extend_from_slice(self.author_public_key.as_ref());
-        out.extend_from_slice(&self.hpke_public_key);
+        // Exhaustive destructure (no `..`): a new MemberInit field is a compile error until it's encoded
+        // into the signed/content-addressed bytes (OPE-277 crypto-review hardening). Byte order unchanged.
+        let MemberInit { id, role, author_public_key, hpke_public_key } = self;
+        Postcard(id).write_canonical(out);
+        Postcard(role).write_canonical(out);
+        out.extend_from_slice(author_public_key.as_ref());
+        out.extend_from_slice(hpke_public_key);
     }
 }
 
@@ -129,17 +133,20 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
 }
 
 impl<Id: MemberId> CanonicalBytes for DekWrap<Id> {
+    #[deny(unused_variables)]
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // The member label is bound too: otherwise an attacker could permute which member each wrap
         // targets on a signed epoch and it would still verify, handing members wraps under the wrong
         // HPKE key — a group-wide lockout via a still-"valid" artifact. The variable-length byte
         // fields are length-prefixed so adjacent wraps can't be re-partitioned into a colliding blob.
-        Postcard(&self.member).write_canonical(out);
-        out.extend_from_slice(&self.hpke_public_key);
-        out.extend_from_slice(&(self.encapped_key.len() as u64).to_le_bytes());
-        out.extend_from_slice(&self.encapped_key);
-        out.extend_from_slice(&(self.ciphertext.len() as u64).to_le_bytes());
-        out.extend_from_slice(&self.ciphertext);
+        // Exhaustive destructure (no `..`): a new field can't slip out of the signed bytes. Order unchanged.
+        let DekWrap { member, hpke_public_key, encapped_key, ciphertext } = self;
+        Postcard(member).write_canonical(out);
+        out.extend_from_slice(hpke_public_key);
+        out.extend_from_slice(&(encapped_key.len() as u64).to_le_bytes());
+        out.extend_from_slice(encapped_key);
+        out.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
+        out.extend_from_slice(ciphertext);
     }
 }
 

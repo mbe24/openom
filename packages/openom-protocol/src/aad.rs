@@ -13,7 +13,9 @@
 //! the header + plaintext and build the AAD internally, so no JS twin of this encoder
 //! can drift from it (openom-crypto owns the only call sites).
 
-use crate::v1::{Header, Keyring};
+use crate::v1::{
+    AuthorizedSigner, Header, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey,
+};
 
 /// Build the canonical AAD for an envelope with wire `version` and `header` (§5).
 ///
@@ -24,33 +26,52 @@ use crate::v1::{Header, Keyring};
 /// `replaces_ciphertext_hash, author_signature, blob_id` (framed bytes).
 /// `ciphertext_hash` is **excluded** (it derives from the ciphertext the AEAD tag
 /// already authenticates — binding it would be circular; see below).
+#[deny(unused_variables)]
 pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
+    // Exhaustive destructure (no `..`) + deny(unused): adding a Header field is a compile error here
+    // until it is bound into the AAD or explicitly excluded — the guard against silently leaving a new
+    // field unauthenticated (OPE-277 crypto review). Byte order below is UNCHANGED (layout is signed).
+    let Header {
+        kind,
+        format,
+        aead,
+        compression,
+        key_id,
+        nonce,
+        tree_id,
+        replica_id,
+        replica_counter,
+        // `ciphertext_hash` EXCLUDED: it's SHA-256(ciphertext), and the ciphertext is produced by the
+        // AEAD *using* this AAD — binding it would be circular; the AEAD tag already authenticates it.
+        ciphertext_hash: _,
+        prev_ciphertext_hash,
+        covers_through_seq,
+        replaces_ciphertext_hash,
+        author_signature,
+        author_member_id,
+        keyring_revision,
+        blob_id,
+    } = header;
     let mut out = Vec::with_capacity(160);
     put_u32(&mut out, version);
-    put_u32(&mut out, header.kind as u32);
-    put_u32(&mut out, header.format as u32);
-    put_u32(&mut out, header.aead as u32);
-    put_u32(&mut out, header.compression as u32);
-    put_bytes(&mut out, &header.key_id);
-    put_bytes(&mut out, &header.nonce);
-    put_bytes(&mut out, &header.tree_id);
-    put_bytes(&mut out, &header.replica_id);
-    put_u64(&mut out, header.replica_counter);
-    // `ciphertext_hash` is deliberately NOT in the AAD: it's SHA-256(ciphertext), and
-    // the ciphertext is produced by the AEAD *using* this AAD — binding it would be
-    // circular. It's also redundant (the AEAD tag already authenticates the ciphertext)
-    // and is verified keylessly by the server on upload / by the reader on open.
-    put_bytes(&mut out, &header.prev_ciphertext_hash);
-    put_u64(&mut out, header.covers_through_seq);
-    put_bytes(&mut out, &header.replaces_ciphertext_hash);
-    put_bytes(&mut out, &header.author_signature);
-    put_bytes(&mut out, &header.blob_id);
-    // Attribution fields (§B3): bound here so the keyless server can't rewrite who authored an entry or
-    // which keyring revision governs it without the key-holder detecting it on decrypt. `author_signature`
-    // itself stays in the AAD (above) — stripping it changes the AAD, so the AEAD tag fails to open
-    // (fail-closed), which is what makes a downgrade-to-unattributed impossible for a keyless server.
-    put_bytes(&mut out, header.author_member_id.as_bytes());
-    put_u32(&mut out, header.keyring_revision);
+    put_u32(&mut out, *kind as u32);
+    put_u32(&mut out, *format as u32);
+    put_u32(&mut out, *aead as u32);
+    put_u32(&mut out, *compression as u32);
+    put_bytes(&mut out, key_id);
+    put_bytes(&mut out, nonce);
+    put_bytes(&mut out, tree_id);
+    put_bytes(&mut out, replica_id);
+    put_u64(&mut out, *replica_counter);
+    put_bytes(&mut out, prev_ciphertext_hash);
+    put_u64(&mut out, *covers_through_seq);
+    put_bytes(&mut out, replaces_ciphertext_hash);
+    put_bytes(&mut out, author_signature);
+    put_bytes(&mut out, blob_id);
+    // Attribution fields (§B3): bound so the keyless server can't rewrite who authored an entry or which
+    // keyring revision governs it without the key-holder detecting it on decrypt.
+    put_bytes(&mut out, author_member_id.as_bytes());
+    put_u32(&mut out, *keyring_revision);
     out
 }
 
@@ -67,24 +88,47 @@ pub fn header_aad(version: u32, header: &Header) -> Vec<u8> {
 /// Verification order (client): AEAD-open the entry (authenticates the header, incl. `author_signature`,
 /// against this exact ciphertext) → compute `SHA-256(plaintext)` → rebuild these bytes → Ed25519-verify
 /// against the claimed member's `author_public_key` at the governing keyring revision.
+#[deny(unused_variables)]
 pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]) -> Vec<u8> {
+    // Exhaustive destructure (no `..`) + deny(unused): a new Header field can't slip out of what the
+    // author signs without a compile error. EXCLUDES nonce (minted inside seal), ciphertext_hash
+    // (circular), and author_signature itself. Byte order UNCHANGED (this is signed).
+    let Header {
+        kind,
+        format,
+        aead,
+        compression,
+        key_id,
+        nonce: _,
+        tree_id,
+        replica_id,
+        replica_counter,
+        ciphertext_hash: _,
+        prev_ciphertext_hash,
+        covers_through_seq,
+        replaces_ciphertext_hash,
+        author_signature: _,
+        author_member_id,
+        keyring_revision,
+        blob_id,
+    } = header;
     let mut out = Vec::with_capacity(224);
     put_bytes(&mut out, b"openom:author:v1");
     put_u32(&mut out, version);
-    put_u32(&mut out, header.kind as u32);
-    put_u32(&mut out, header.format as u32);
-    put_u32(&mut out, header.aead as u32);
-    put_u32(&mut out, header.compression as u32);
-    put_bytes(&mut out, &header.key_id);
-    put_bytes(&mut out, &header.tree_id);
-    put_bytes(&mut out, &header.replica_id);
-    put_u64(&mut out, header.replica_counter);
-    put_bytes(&mut out, &header.prev_ciphertext_hash);
-    put_u64(&mut out, header.covers_through_seq);
-    put_bytes(&mut out, &header.replaces_ciphertext_hash);
-    put_bytes(&mut out, &header.blob_id);
-    put_bytes(&mut out, header.author_member_id.as_bytes());
-    put_u32(&mut out, header.keyring_revision);
+    put_u32(&mut out, *kind as u32);
+    put_u32(&mut out, *format as u32);
+    put_u32(&mut out, *aead as u32);
+    put_u32(&mut out, *compression as u32);
+    put_bytes(&mut out, key_id);
+    put_bytes(&mut out, tree_id);
+    put_bytes(&mut out, replica_id);
+    put_u64(&mut out, *replica_counter);
+    put_bytes(&mut out, prev_ciphertext_hash);
+    put_u64(&mut out, *covers_through_seq);
+    put_bytes(&mut out, replaces_ciphertext_hash);
+    put_bytes(&mut out, blob_id);
+    put_bytes(&mut out, author_member_id.as_bytes());
+    put_u32(&mut out, *keyring_revision);
     put_bytes(&mut out, plaintext_hash);
     out
 }
@@ -134,55 +178,78 @@ pub fn rrk_wrap_aad(tree_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8
 /// and history chain), the `authorized_signers` trust set, the `members` role/key manifest,
 /// and the epochs/wraps. `signatures` is excluded, so every signer signs identical bytes
 /// and their signatures collect independently.
+#[deny(unused_variables)]
 pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
+    // Exhaustive destructure (no `..`) + deny(unused): adding a Keyring/RecoveryKey/etc. field is a
+    // compile error here until it is signed or explicitly excluded. This is the guard that would have
+    // prevented the recovery_verifying_key signing-omission (OPE-277 crypto review). Byte order UNCHANGED.
+    let Keyring {
+        tree_id,
+        epochs,
+        revision,
+        layout_version,
+        prev_keyring_hash,
+        authorized_signers,
+        members,
+        // `signatures` EXCLUDED by design: every signer signs identical bytes, so their signatures
+        // collect independently — the one field that must NOT be in its own signed bytes.
+        signatures: _,
+        recovery_keys,
+        governance_kind,
+        governance_threshold,
+    } = keyring;
+
     let mut out = Vec::with_capacity(256);
     put_bytes(&mut out, b"openom:keyring");
-    put_u32(&mut out, keyring.layout_version);
-    put_bytes(&mut out, &keyring.tree_id);
-    put_u32(&mut out, keyring.revision);
-    put_bytes(&mut out, &keyring.prev_keyring_hash);
+    put_u32(&mut out, *layout_version);
+    put_bytes(&mut out, tree_id);
+    put_u32(&mut out, *revision);
+    put_bytes(&mut out, prev_keyring_hash);
 
-    put_u32(&mut out, keyring.authorized_signers.len() as u32);
-    for s in &keyring.authorized_signers {
-        put_bytes(&mut out, &s.public_key);
-        put_bytes(&mut out, s.member_id.as_bytes());
-        put_u32(&mut out, s.role as u32);
+    put_u32(&mut out, authorized_signers.len() as u32);
+    for s in authorized_signers {
+        let AuthorizedSigner { public_key, member_id, role } = s;
+        put_bytes(&mut out, public_key);
+        put_bytes(&mut out, member_id.as_bytes());
+        put_u32(&mut out, *role as u32);
     }
 
-    put_u32(&mut out, keyring.members.len() as u32);
-    for m in &keyring.members {
-        put_bytes(&mut out, m.member_id.as_bytes());
-        put_u32(&mut out, m.role as u32);
-        put_bytes(&mut out, &m.author_public_key);
-        put_bytes(&mut out, &m.hpke_public_key);
+    put_u32(&mut out, members.len() as u32);
+    for m in members {
+        let Member { member_id, role, author_public_key, hpke_public_key } = m;
+        put_bytes(&mut out, member_id.as_bytes());
+        put_u32(&mut out, *role as u32);
+        put_bytes(&mut out, author_public_key);
+        put_bytes(&mut out, hpke_public_key);
     }
 
-    put_u32(&mut out, keyring.epochs.len() as u32);
-    for epoch in &keyring.epochs {
-        put_bytes(&mut out, &epoch.key_id);
-        put_u32(&mut out, epoch.epoch);
-        put_u32(&mut out, epoch.wraps.len() as u32);
-        for w in &epoch.wraps {
+    put_u32(&mut out, epochs.len() as u32);
+    for ep in epochs {
+        let KeyEpoch { key_id, epoch, wraps } = ep;
+        put_bytes(&mut out, key_id);
+        put_u32(&mut out, *epoch);
+        put_u32(&mut out, wraps.len() as u32);
+        for w in wraps {
             put_wrap(&mut out, w);
         }
     }
 
-    put_u32(&mut out, keyring.recovery_keys.len() as u32);
-    for rk in &keyring.recovery_keys {
-        put_bytes(&mut out, &rk.public_key);
-        put_bytes(&mut out, rk.member_id.as_bytes());
-        put_u32(&mut out, rk.wraps.len() as u32);
-        for w in &rk.wraps {
+    put_u32(&mut out, recovery_keys.len() as u32);
+    for rk in recovery_keys {
+        // The RVK (recovery_verifying_key) MUST be signed — the omission the crypto review caught. The
+        // destructure now makes forgetting it a compile error.
+        let RecoveryKey { public_key, member_id, wraps, recovery_verifying_key } = rk;
+        put_bytes(&mut out, public_key);
+        put_bytes(&mut out, member_id.as_bytes());
+        put_u32(&mut out, wraps.len() as u32);
+        for w in wraps {
             put_wrap(&mut out, w);
         }
-        // The recovery verifying key (RVK) MUST be signed — otherwise an untrusted server could
-        // substitute or blank it undetectably (the signature + keyring_hash would still verify) and
-        // defeat the entire reset-authorization gate that trusts this value. (OPE-277 crypto review.)
-        put_bytes(&mut out, &rk.recovery_verifying_key);
+        put_bytes(&mut out, recovery_verifying_key);
     }
     // Governance rule — signed, so it's tamper-evident and a change to it is authorized like a set change.
-    put_u32(&mut out, keyring.governance_kind);
-    put_u32(&mut out, keyring.governance_threshold);
+    put_u32(&mut out, *governance_kind);
+    put_u32(&mut out, *governance_threshold);
     out
 }
 
@@ -190,18 +257,23 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
 /// wrapped_dek`, then a branchless `kdf_params` (presence flag + four fields, zeros when
 /// absent), then `ephemeral_public_key`. Shared by the epoch wraps and the recovery-key
 /// wraps so the two never drift.
-fn put_wrap(out: &mut Vec<u8>, w: &crate::v1::KeyWrap) {
-    put_bytes(out, w.member_id.as_bytes());
-    put_u32(out, w.wrap_method as u32);
-    put_bytes(out, &w.nonce);
-    put_bytes(out, &w.wrapped_dek);
-    match &w.kdf_params {
+#[deny(unused_variables)]
+fn put_wrap(out: &mut Vec<u8>, w: &KeyWrap) {
+    // Exhaustive destructure (no `..`) + deny(unused): a new KeyWrap/KdfParams field can't slip out of
+    // the signed/AAD wrap encoding. Byte order UNCHANGED.
+    let KeyWrap { member_id, wrap_method, nonce, wrapped_dek, kdf_params, ephemeral_public_key } = w;
+    put_bytes(out, member_id.as_bytes());
+    put_u32(out, *wrap_method as u32);
+    put_bytes(out, nonce);
+    put_bytes(out, wrapped_dek);
+    match kdf_params {
         Some(k) => {
+            let KdfParams { salt, memory_kib, iterations, parallelism } = k;
             put_u32(out, 1);
-            put_bytes(out, &k.salt);
-            put_u32(out, k.memory_kib);
-            put_u32(out, k.iterations);
-            put_u32(out, k.parallelism);
+            put_bytes(out, salt);
+            put_u32(out, *memory_kib);
+            put_u32(out, *iterations);
+            put_u32(out, *parallelism);
         }
         None => {
             put_u32(out, 0);
@@ -211,7 +283,7 @@ fn put_wrap(out: &mut Vec<u8>, w: &crate::v1::KeyWrap) {
             put_u32(out, 0);
         }
     }
-    put_bytes(out, &w.ephemeral_public_key);
+    put_bytes(out, ephemeral_public_key);
 }
 
 #[inline]
