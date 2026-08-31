@@ -276,3 +276,99 @@ pub fn append_retarget(
     };
     append(anchor_bytes, member_id, action, sealing, current_signing_key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recovery;
+
+    fn sk(seed: u8) -> openom_sign::SigningKey {
+        openom_sign::SigningKey::from_seed(&[seed; 32])
+    }
+    fn vk(seed: u8) -> [u8; 32] {
+        sk(seed).verifying_key().to_bytes()
+    }
+    fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
+        KeyringMemberInit {
+            id: id.to_string(),
+            role,
+            author_public_key: vk(seed),
+            hpke_public_key: [seed; 32],
+        }
+    }
+
+    /// A privileged op concurrent with a surviving recovery is carve-out-voided — and its SEALING must be
+    /// dropped from the fold, not merely its membership effect. Proves resolve() folds over the engine's
+    /// `effective_ops` (topo + carve-out + quorum), never mere op presence. (OPE-285.)
+    #[test]
+    fn a_carve_out_voided_ops_sealing_is_dropped() {
+        let founder = minit("founder", KeyringRole::OWNER, 1);
+        let bob = minit("bob", KeyringRole::CO_OWNER, 2);
+        let rvk = recovery::derive_rvk(&[42u8; 32]);
+        let rvk_pub = rvk.verifying_key().to_bytes();
+
+        // Genesis {founder Owner, bob CoOwner}, RVK pinned; carries a genesis sealing.
+        let genesis_op = mint(
+            vec![],
+            "founder".to_string(),
+            MembershipAction::Create {
+                initial_members: vec![founder.clone(), bob.clone()],
+            },
+            b"GENESIS-SEALING".to_vec(),
+            &sk(1),
+        );
+        let genesis_id = genesis_op.id;
+
+        // (A) the compromised founder key adds a co-owner (a signer = privileged), concurrent with (B) an
+        // RVK-signed recovery ReFound. Both are children of genesis. Each carries a sealing delta.
+        let thief = mint(
+            vec![genesis_id],
+            "founder".to_string(),
+            MembershipAction::Add {
+                member: "mallory".to_string(),
+                role: KeyringRole::CO_OWNER,
+                author_public_key: vk(9),
+                hpke_public_key: [9; 32],
+                member_proof: None,
+            },
+            b"THIEF-SEALING".to_vec(),
+            &sk(1),
+        );
+        let recovery_op = mint(
+            vec![genesis_id],
+            "founder".to_string(),
+            MembershipAction::ReFound {
+                member: "founder".to_string(),
+                new_author_public_key: vk(7),
+                new_hpke_public_key: [7; 32],
+                era: 1,
+            },
+            b"RECOVERY-SEALING".to_vec(),
+            &rvk,
+        );
+
+        let anchor = DagAnchor {
+            genesis: vec![minit_to_dto(&founder), minit_to_dto(&bob)],
+            reset_authority: Some(rvk_pub),
+            genesis_op_id: genesis_id,
+            ops: vec![
+                encode_op(&genesis_op),
+                encode_op(&thief),
+                encode_op(&recovery_op),
+            ],
+        };
+        let resolved = resolve(&serde_json::to_vec(&anchor).unwrap()).unwrap();
+
+        let has = |needle: &[u8]| resolved.sealing.iter().any(|s| s.as_slice() == needle);
+        assert!(has(b"GENESIS-SEALING"), "the pinned genesis op always contributes");
+        assert!(has(b"RECOVERY-SEALING"), "the surviving recovery contributes");
+        assert!(
+            !has(b"THIEF-SEALING"),
+            "a carve-out-voided op's sealing is dropped, not folded"
+        );
+        assert!(
+            !resolved.members.members.iter().any(|m| m.member_id == "mallory"),
+            "and the voided op has no membership effect either"
+        );
+    }
+}
