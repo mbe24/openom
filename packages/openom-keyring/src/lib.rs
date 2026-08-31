@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod blob_sync;
+pub mod verifier;
 mod chain;
 mod entry;
 mod keyring;
