@@ -307,6 +307,10 @@ pub fn recover(
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
     sign_keyring(&mut keyring, &secrets.root.identity);
+    // The RVK co-signs the reset: verify_reset's gate requires a signature by the recovery verifying key
+    // pinned in the prior keyring (proving possession of the RRK secret). The RRK keypair is unchanged
+    // across a recovery (re-wrap, not rotate), so this RVK matches the prior one — continuity holds.
+    sign_keyring(&mut keyring, &openom_crypto::derive_rvk(rrk_secret.expose()));
 
     let deks = epoch_deks(&keyring, tree_id, member_id, &rrk_secret)?;
     let write_key_id = deks
@@ -1114,9 +1118,13 @@ fn build_recovery_key(
                 ephemeral_public_key: Vec::new(),
             },
         ],
-        // Pinned in a follow-up (the RVK-mint slice): the Ed25519 recovery verifying key derived from the
-        // RRK secret. Empty here keeps verify_reset's RVK gate inert until vault mints + pins it.
-        recovery_verifying_key: Vec::new(),
+        // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
+        // openom_crypto::derive_rvk (so the chain and dag pin an identical RVK). Covered by the keyring
+        // signature; a future reset is verified for continuity + authorization against it.
+        recovery_verifying_key: openom_crypto::derive_rvk(rrk_secret.expose())
+            .verifying_key()
+            .to_bytes()
+            .to_vec(),
     })
 }
 
