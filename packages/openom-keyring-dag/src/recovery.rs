@@ -14,21 +14,11 @@
 //! This is the crypto primitive only; the `ReFound` op, its pinning, and the merge semantics land in the
 //! following OPE-269 slices.
 
-use zeroize::Zeroizing;
-
-/// HKDF info label for the RVK — distinct from any identity / HPKE / KEK label the RRK secret feeds, so
-/// the RVK is cryptographically separated from those uses.
-pub const RVK_HKDF_INFO: &[u8] = b"openom:rvk:v1";
-
-/// Derive the Recovery Verification Key from the RRK secret. Deterministic: the same secret always yields
-/// the same RVK, so a recovering client re-derives the identical signing key that the pinned `rvk_public`
-/// verifies against.
+/// Derive the Recovery Verification Key from the RRK secret. Delegates to the SHARED derivation in
+/// openom-crypto, so the chain and dag keyrings produce a byte-identical RVK from the same secret (a
+/// recovery is verifiable identically whichever engine authored it). Deterministic + domain-separated.
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> openom_sign::SigningKey {
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, rrk_secret);
-    let mut seed = Zeroizing::new([0u8; 32]);
-    hk.expand(RVK_HKDF_INFO, seed.as_mut_slice())
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    openom_sign::SigningKey::from_seed(&seed)
+    openom_crypto::derive_rvk(rrk_secret)
 }
 
 /// The public half of the RVK — the value pinned in genesis and checked against a `ReFound`'s carried

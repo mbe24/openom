@@ -64,7 +64,7 @@ pub use kdf::{
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,
 };
-pub use root::{derive_root, RootKeys};
+pub use root::{derive_root, derive_rvk, RootKeys};
 pub use seal::{open, seal};
 pub use secret::{Dek, HpkePrivate, Kek, Passphrase, RecoveryCode, RrkSecret};
 pub use wrap::{unwrap_dek, unwrap_rrk_secret, wrap_dek, wrap_rrk_secret, WrapContext, WrappedDek};
