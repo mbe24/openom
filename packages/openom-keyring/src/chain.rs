@@ -458,6 +458,14 @@ fn check_structure(k: &Keyring) -> Result<(), ChainError> {
     if k.epochs.is_empty() {
         return Err(ChainError::BadStructure("no epochs"));
     }
+    // Epoch ordinals are plausibility-bounded (OPE-289). The linear chain assigns each new epoch ordinal
+    // `max(existing)+1` (one per removal), so with N epochs every ordinal is in `0..N`. A signer grinding a
+    // huge ordinal (e.g. `u32::MAX`) would otherwise brick every future `max()+1` re-epoch with
+    // `RevisionOverflow` — a permanent, unrecoverable DoS. Reject any ordinal at/above the epoch count; this
+    // holds for every honest keyring and runs on the server's admission path too.
+    if k.epochs.iter().any(|e| e.epoch as usize >= k.epochs.len()) {
+        return Err(ChainError::BadStructure("epoch ordinal out of range"));
+    }
     Ok(())
 }
 
@@ -1268,6 +1276,22 @@ mod tests {
             |k| k.authorized_signers.push(signer(&x, "owner", CO_OWNER)),
             &[&f],
         );
+        assert!(matches!(
+            verify_transition(&a, &bad),
+            Err(ChainError::BadStructure(_))
+        ));
+    }
+
+    #[test]
+    fn an_out_of_range_epoch_ordinal_is_rejected() {
+        // OPE-289: for the linear chain, epoch ordinals are `0..N` (one per removal via max()+1). A signer
+        // grinding an ordinal at/above the epoch count would brick every future re-epoch with
+        // RevisionOverflow — a permanent DoS — so check_structure rejects it. The honest genesis passes.
+        let f = key();
+        let g = genesis(&f, &[], &[]);
+        assert!(check_structure(&g).is_ok(), "honest genesis (epoch 0, len 1) is in range");
+        let a = anchor(&g);
+        let bad = next(&g, |k| k.epochs[0].epoch = u32::MAX, &[&f]);
         assert!(matches!(
             verify_transition(&a, &bad),
             Err(ChainError::BadStructure(_))

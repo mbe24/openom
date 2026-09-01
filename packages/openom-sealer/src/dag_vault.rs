@@ -87,9 +87,18 @@ fn fold_sealing(
     // epoch) and is dropped: no legitimate write is ever sealed under it, so it never needs retaining.
     let mut tagged: Vec<(SealedEpoch, SealingOrigin, [u8; 32])> = Vec::new();
     let mut escrow: Option<RecoveryEscrow> = None;
+    // Count epoch-minting OPS (Genesis/Remove/Reseal) — the plausibility bound on epoch ordinals below
+    // (OPE-289). Counting ops not epochs means one op stuffing many epochs can't inflate the bound.
+    let mut minting_ops: u32 = 0;
     for entry in sealing {
         let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
             .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        if matches!(
+            entry.origin,
+            SealingOrigin::Genesis | SealingOrigin::Remove | SealingOrigin::Reseal
+        ) {
+            minting_ops = minting_ops.saturating_add(1);
+        }
         for e in payload.new_epochs {
             match entry.origin {
                 SealingOrigin::Genesis | SealingOrigin::Remove | SealingOrigin::Reseal => {
@@ -111,6 +120,14 @@ fn fold_sealing(
     }
     let escrow =
         escrow.ok_or_else(|| SealerError::BadKeyring("dag keyring has no recovery escrow".into()))?;
+
+    // Sanitize epoch ordinals (OPE-289). A legitimately-minted ordinal is `max(existing)+1`, so after M
+    // epoch-minting ops the greatest possible ordinal is M-1; drop any epoch whose ordinal is >= M. A
+    // member-authored Remove/Reseal grinding a huge ordinal (e.g. u32::MAX) would otherwise (a) BRICK every
+    // future `max()+1` re-epoch with RevisionOverflow, a permanent DoS, and (b) permanently win the
+    // write-epoch race. The bound never drops an honest epoch (its ordinal is always < M) and caps a hostile
+    // one at M-1, so `checked_add` can only overflow after ~4e9 real ops.
+    tagged.retain(|(e, _, _)| e.epoch < minting_ops);
 
     // The write epoch is the deterministic winner among ELIGIBLE epochs — genesis/remove are always
     // eligible (the legitimate baseline), a reseal only if it COVERS the resolved membership, so a
@@ -976,6 +993,41 @@ mod tests {
             "a smuggled Other-origin epoch cannot win the write epoch"
         );
         assert!(!folded.needs_reseal, "the covering genesis epoch is the clean winner");
+    }
+
+    /// Ordinal-inflation DoS defense (OPE-289): an ELIGIBLE (Remove-origin) epoch grinding an implausible
+    /// ordinal is dropped by the plausibility bound (ordinal < minting-op count) — so it can neither win the
+    /// write epoch nor sit in the retained set where a later `max()+1` re-epoch would `RevisionOverflow` and
+    /// permanently brick removals/reseals. A plausible higher ordinal still wins, so the bound never
+    /// over-rejects.
+    #[test]
+    fn fold_sealing_drops_an_epoch_with_an_implausible_ordinal() {
+        use dag_client::SealingOrigin::{Genesis, Remove};
+        let members = membership("owner", &["bob"]);
+
+        // A Remove op grinds an epoch at u32::MAX. Two minting ops → bound 2, so u32::MAX (>= 2) is dropped:
+        // without the guard it is eligible and its huge ordinal would win AND brick every future re-epoch.
+        let attack = vec![
+            sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob")], Some(escrow())),
+            sealing_entry(9, b"evil", u32::MAX, Remove, vec![rrk_wrap(), member_wrap("bob")], None),
+        ];
+        let folded = fold_sealing(&attack, &members).unwrap();
+        assert_eq!(folded.write_key_id, b"k0".to_vec(), "an implausible-ordinal epoch cannot win");
+        assert!(
+            folded.epochs.iter().all(|e| e.epoch < 2),
+            "the u32::MAX epoch is dropped from the retained set, so max()+1 cannot overflow"
+        );
+
+        // Boundary: a legit Remove epoch at ordinal 1 (bound 2, 1 < 2) is retained and legitimately wins.
+        let legit = vec![
+            sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob")], Some(escrow())),
+            sealing_entry(9, b"k1", 1, Remove, vec![rrk_wrap(), member_wrap("bob")], None),
+        ];
+        assert_eq!(
+            fold_sealing(&legit, &members).unwrap().write_key_id,
+            b"k1".to_vec(),
+            "a plausible higher ordinal is retained and wins — the bound does not over-reject"
+        );
     }
 
     /// OPE-287: a garbage epoch (a malicious member could append one) whose RRK wrap won't open is SKIPPED
