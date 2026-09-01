@@ -409,12 +409,8 @@ pub(crate) fn sealer_set_from_deks(
     tree_id: &[u8],
     replica_id: &[u8],
     deks: Vec<(Vec<u8>, u32, Dek)>,
+    write_key_id: Vec<u8>,
 ) -> Result<SealerSet, SealerError> {
-    let write_key_id = deks
-        .iter()
-        .max_by_key(|(_, e, _)| *e)
-        .map(|(k, _, _)| k.clone())
-        .ok_or(SealerError::MissingWrap)?;
     // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
     let epochs = deks
         .into_iter()
@@ -426,6 +422,17 @@ pub(crate) fn sealer_set_from_deks(
         epochs,
         KeyId::new(write_key_id),
     ))
+}
+
+/// The chain's write epoch: the `key_id` of the highest-ordinal epoch. Chain epochs are a single linear
+/// sequence, so ordinals never collide — no tiebreak is needed (unlike the dag, which breaks concurrent
+/// same-ordinal ties by minting op-id). Choosing the write epoch is the ENGINE's call, not the neutral
+/// core's, so it is threaded into [`sealer_set_from_deks`].
+pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u32, Dek)]) -> Result<Vec<u8>, SealerError> {
+    deks.iter()
+        .max_by_key(|(_, e, _)| *e)
+        .map(|(k, _, _)| k.clone())
+        .ok_or(SealerError::MissingWrap)
 }
 
 /// Reject Argon2id `kdf` outside the window this build will run — a hostile keyring could otherwise

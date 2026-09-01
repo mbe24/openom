@@ -69,17 +69,29 @@ impl SealingPayload {
     }
 }
 
-/// Fold the effective ops' sealing deltas (in order) into the current epochs + escrow. `new_epochs` are
-/// inserted (keyed by `key_id`), `added_wraps` are appended to the matching existing epoch (a wrap over an
-/// unknown epoch is skipped — a delta whose epoch this replica hasn't/won't see), and the latest escrow
-/// wins. Errors if no escrow was ever set.
-fn fold_sealing(sealing: &[Vec<u8>]) -> Result<(Vec<SealedEpoch>, RecoveryEscrow), SealerError> {
+/// Fold the effective ops' sealing deltas (in order) into the current epochs + escrow + the deterministic
+/// write epoch. `new_epochs` are inserted (keyed by `key_id`), `added_wraps` are appended to the matching
+/// existing epoch (a wrap over an unknown epoch is skipped — a delta whose epoch this replica hasn't/won't
+/// see), and the latest escrow wins. The write epoch is the WINNER: the epoch with the greatest
+/// `(ordinal, minting op-id)`, so a concurrent same-ordinal tie (two branches that re-epoch independently)
+/// resolves to the same epoch on every replica. Errors if no escrow / no epoch was ever set.
+fn fold_sealing(
+    sealing: &[dag_client::SealingEntry],
+) -> Result<(Vec<SealedEpoch>, RecoveryEscrow, Vec<u8>), SealerError> {
     let mut epochs: Vec<SealedEpoch> = Vec::new();
     let mut escrow: Option<RecoveryEscrow> = None;
-    for bytes in sealing {
-        let payload: SealingPayload =
-            serde_json::from_slice(bytes).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+    // (ordinal, minting op-id, key_id) of the winning write epoch so far.
+    let mut winner: Option<(u32, [u8; 32], Vec<u8>)> = None;
+    for entry in sealing {
+        let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
+            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
         for e in payload.new_epochs {
+            if winner
+                .as_ref()
+                .is_none_or(|(we, wid, _)| (e.epoch, entry.op_id) > (*we, *wid))
+            {
+                winner = Some((e.epoch, entry.op_id, e.key_id.clone()));
+            }
             epochs.push(e);
         }
         for aw in payload.added_wraps {
@@ -93,7 +105,8 @@ fn fold_sealing(sealing: &[Vec<u8>]) -> Result<(Vec<SealedEpoch>, RecoveryEscrow
     }
     let escrow =
         escrow.ok_or_else(|| SealerError::BadKeyring("dag keyring has no recovery escrow".into()))?;
-    Ok((epochs, escrow))
+    let write_key_id = winner.map(|(_, _, k)| k).ok_or(SealerError::MissingWrap)?;
+    Ok((epochs, escrow, write_key_id))
 }
 
 /// Map a facade anti-rollback failure onto the sealer's error vocabulary: a rolled-back anchor and a
@@ -162,7 +175,7 @@ impl KeyringLifecycle for DagVault {
             &secrets.root.identity,
         );
 
-        let sealer = sealer_set_from_deks(tree_id, replica_id, vec![(key_id, 0, dek)])?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, vec![(key_id.clone(), 0, dek)], key_id)?;
         Ok(Provisioned {
             anchor,
             recovery_code: secrets.recovery_code,
@@ -190,7 +203,7 @@ impl KeyringLifecycle for DagVault {
             .owner()
             .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
 
-        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+        let (epochs, escrow, write_key_id) = fold_sealing(&resolved.sealing)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
         let pass_wrap = escrow
@@ -221,7 +234,7 @@ impl KeyringLifecycle for DagVault {
             PASSPHRASE,
         )?;
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let owner_key: [u8; 32] = founder
             .author_public_key
@@ -261,7 +274,7 @@ impl KeyringLifecycle for DagVault {
         // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
         let resolved =
             dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
-        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+        let (epochs, escrow, write_key_id) = fold_sealing(&resolved.sealing)?;
         let rec_wrap = escrow
             .wraps
             .iter()
@@ -307,7 +320,7 @@ impl KeyringLifecycle for DagVault {
 
         // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Recovered {
@@ -343,7 +356,7 @@ impl KeyringLifecycle for DagVault {
             .members
             .owner()
             .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let (_epochs, escrow) = fold_sealing(&resolved.sealing)?;
+        let (_epochs, escrow, _write_key_id) = fold_sealing(&resolved.sealing)?;
 
         // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
         let pass_wrap = escrow
@@ -422,7 +435,7 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+        let (epochs, escrow, _write_key_id) = fold_sealing(&resolved.sealing)?;
 
         // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
         let pass_wrap = escrow
@@ -503,7 +516,7 @@ impl DagVault {
             .iter()
             .find(|m| m.member_id == member_id)
             .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
-        let (epochs, _escrow) = fold_sealing(&resolved.sealing)?;
+        let (epochs, _escrow, write_key_id) = fold_sealing(&resolved.sealing)?;
 
         validate_kdf(&CoreKdf::from(member_kdf))?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
@@ -512,7 +525,7 @@ impl DagVault {
         }
 
         let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
         let my_key: [u8; 32] = me
             .author_public_key
             .as_slice()
@@ -547,7 +560,7 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let (epochs, escrow) = fold_sealing(&resolved.sealing)?;
+        let (epochs, escrow, _write_key_id) = fold_sealing(&resolved.sealing)?;
 
         // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
         // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
@@ -623,6 +636,51 @@ mod tests {
             member_id: member,
             replica_id: replica,
         }
+    }
+
+    /// The write epoch is the deterministic `(ordinal, minting op-id)` winner: among concurrent same-ordinal
+    /// epochs the greater op-id wins, and the choice is independent of fold order — so every replica agrees
+    /// without coordination (OPE-282). Fable's flagged `max_by_key` last-on-tie fragility is now explicit.
+    #[test]
+    fn fold_sealing_picks_the_ordinal_then_op_id_winner() {
+        let escrow = RecoveryEscrow {
+            public_key: vec![1],
+            member_id: "owner".into(),
+            wraps: vec![],
+            recovery_verifying_key: vec![2],
+        };
+        let entry = |op_id: u8, key_id: &[u8], ordinal: u32, escrow: Option<RecoveryEscrow>| {
+            let payload = SealingPayload {
+                new_epochs: vec![SealedEpoch {
+                    key_id: key_id.to_vec(),
+                    epoch: ordinal,
+                    wraps: vec![],
+                }],
+                added_wraps: vec![],
+                escrow,
+            };
+            dag_client::SealingEntry {
+                op_id: [op_id; 32],
+                bytes: payload.to_bytes(),
+            }
+        };
+        // Epoch 0 carries the escrow; two CONCURRENT epoch-1 ops (different op-ids) contend for the winner.
+        let entries = vec![
+            entry(0, b"k0", 0, Some(escrow.clone())),
+            entry(5, b"kA", 1, None),
+            entry(9, b"kB", 1, None),
+        ];
+        let (_e, _es, wk) = fold_sealing(&entries).unwrap();
+        assert_eq!(wk, b"kB".to_vec(), "the greater op-id wins the same-ordinal tie");
+
+        // Order-independent: reorder the input, same winner.
+        let reordered = vec![
+            entry(9, b"kB", 1, None),
+            entry(0, b"k0", 0, Some(escrow)),
+            entry(5, b"kA", 1, None),
+        ];
+        let (_e2, _es2, wk2) = fold_sealing(&reordered).unwrap();
+        assert_eq!(wk2, b"kB".to_vec(), "the winner is independent of fold order");
     }
 
     /// Provision on device A, seal data, then unlock from the anchor alone on device B and open it —

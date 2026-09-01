@@ -37,7 +37,7 @@ use openom_roles::{
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, member_epoch_deks, new_owner_secrets,
     owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealed_epochs,
-    sealer_set_from_deks, validate_kdf, CoreKdf, HPKE, PASSPHRASE, RECOVERY,
+    sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, HPKE, PASSPHRASE, RECOVERY,
 };
 use crate::{SealerError, SealerSet};
 
@@ -640,7 +640,8 @@ pub fn unlock_as_member(
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
     let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &root.hpke_secret)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+    let write_key_id = write_epoch_by_ordinal(&deks)?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
     let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
         sealer,
@@ -717,7 +718,8 @@ pub fn remove_member(
     // The owner re-seals with a set spanning every epoch (reached via the RRK); the new epoch
     // is the highest, so the set writes under it.
     let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, owner_member_id, &rrk_secret)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+    let write_key_id = write_epoch_by_ordinal(&deks)?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
@@ -788,7 +790,8 @@ pub fn remove_member_as_co_owner(
     // The co-owner re-seals with a set spanning the epochs their own wraps reach (including
     // the new one they were re-wrapped into); the new epoch is the highest, so it's the write.
     let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, co_owner_member_id, &acc.hpke_secret)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks)?;
+    let write_key_id = write_epoch_by_ordinal(&deks)?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,

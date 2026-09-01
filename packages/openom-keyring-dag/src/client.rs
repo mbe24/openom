@@ -171,9 +171,18 @@ pub fn provision_anchor(
 /// the vault's sealing fold.
 pub struct Resolved {
     pub members: MembershipView,
-    /// The sealing payloads of the effective ops, in fold order (the pinned genesis op first). The vault
-    /// deserializes + folds these into the current epochs + escrow.
-    pub sealing: Vec<Vec<u8>>,
+    /// The sealing payloads of the effective ops, in fold order (the pinned genesis op first), each tagged
+    /// with the id of the op that minted it. The vault deserializes + folds these into the current epochs +
+    /// escrow, and uses the op-id to break concurrent same-ordinal epoch ties deterministically (OPE-282).
+    pub sealing: Vec<SealingEntry>,
+}
+
+/// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
+/// it. The op-id is the deterministic winner tiebreak for concurrent same-ordinal epochs; it is attached
+/// here, at resolve time, because it cannot live inside the sealing — the op-id is a hash *of* the sealing.
+pub struct SealingEntry {
+    pub op_id: [u8; 32],
+    pub bytes: Vec<u8>,
 }
 
 /// Resolve an anchor: rebuild the engine from the pinned config, replay the op closure, and return the
@@ -217,7 +226,10 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     })?;
     let mut sealing = Vec::new();
     if !genesis_op.sealing.is_empty() {
-        sealing.push(genesis_op.sealing.clone());
+        sealing.push(SealingEntry {
+            op_id: anchor.genesis_op_id,
+            bytes: genesis_op.sealing.clone(),
+        });
     }
     for op_id in engine.effective_ops() {
         if op_id == anchor.genesis_op_id {
@@ -225,7 +237,10 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         }
         if let Some(op) = by_id.get(&op_id) {
             if !op.sealing.is_empty() {
-                sealing.push(op.sealing.clone());
+                sealing.push(SealingEntry {
+                    op_id,
+                    bytes: op.sealing.clone(),
+                });
             }
         }
     }
@@ -421,7 +436,7 @@ mod tests {
         };
         let resolved = resolve(&serde_json::to_vec(&anchor).unwrap()).unwrap();
 
-        let has = |needle: &[u8]| resolved.sealing.iter().any(|s| s.as_slice() == needle);
+        let has = |needle: &[u8]| resolved.sealing.iter().any(|s| s.bytes.as_slice() == needle);
         assert!(has(b"GENESIS-SEALING"), "the pinned genesis op always contributes");
         assert!(has(b"RECOVERY-SEALING"), "the surviving recovery contributes");
         assert!(
