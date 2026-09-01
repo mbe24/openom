@@ -43,14 +43,20 @@ export function frameHops(revisions) {
   return out;
 }
 
+// The chain watermark is the 4-byte big-endian keyring revision; the chain-only retention + sync paths need
+// that scalar. (The dag watermark is a frontier and is never decoded — it stays opaque bytes end to end.)
+const chainRevision = (wm) =>
+  wm && wm.length === 4 ? new DataView(wm.buffer, wm.byteOffset, 4).getUint32(0, false) : 0;
+
 /**
  * @param {object} deps
  * @param {object} deps.worker         the crypto worker proxy (provision/unlock/recover/changePassphrase/sealEntry/openEntry/lock)
- * @param {object} deps.keyringStore   { save(treeKey, revision, bytes), at(treeKey, revision), head, load }
+ * @param {object} deps.keyringStore   { saveHead, loadHead, load, save(revision), at(revision), head }
  * @param {object} deps.watermarks     a Watermarks instance
+ * @param {'chain'|'dag'} [deps.engine]  the deployment's keyring engine (a backend preset; default 'chain')
  * @param {() => Uint8Array} [deps.makeReplicaId]  fresh replica id per unlock (default: CSPRNG)
  */
-export function createVault({ worker, keyringStore, watermarks, makeReplicaId = freshReplicaId }) {
+export function createVault({ worker, keyringStore, watermarks, engine = 'chain', makeReplicaId = freshReplicaId }) {
   if (!worker || !keyringStore || !watermarks) {
     throw new Error('createVault needs { worker, keyringStore, watermarks }');
   }
@@ -62,41 +68,46 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
   };
   const sessionFor = (sealerId) => new SealerSession(workerCore(worker, sealerId));
 
+  // Persist a flow's result: the engine-neutral head record (the unlock anchor), the chain-only per-revision
+  // retention (for §B3 entry attribution), and the opaque watermark cursor.
+  const persist = async (treeKey, anchor, watermark) => {
+    await keyringStore.saveHead(treeKey, engine, anchor);
+    if (engine === 'chain') await keyringStore.save(treeKey, chainRevision(watermark), anchor);
+    watermarks.observe(treeKey, { keyringCursor: watermark });
+  };
+  const floor = (treeKey) => watermarks.current(treeKey).keyringCursor;
+
   return {
     async hasKeyring(treeKey) {
       return (await keyringStore.load(treeKey)) != null;
     },
 
     async provision(treeKey, treeId, passphrase, memberId) {
-      const r = await worker.provision(passphrase, treeId, memberId, makeReplicaId());
-      await keyringStore.save(treeKey, r.revision, r.keyring);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      const r = await worker.provision(engine, passphrase, treeId, memberId, makeReplicaId());
+      await persist(treeKey, r.keyring, r.watermark);
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
     async unlock(treeKey, treeId, passphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
-      const min = watermarks.current(treeKey).keyringRevision;
-      const r = await worker.unlock(keyring, passphrase, treeId, memberId, makeReplicaId(), min);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { session: sessionFor(r.sealerId), didKey: r.didKey };
+      // Unlock is a pure read of the LOCAL (trusted) anchor: it takes no floor and does NOT touch the
+      // cursor (which is already the one persisted when this anchor last changed) — writing the read-back
+      // watermark could only ever regress it in a store/cursor desync, never advance it.
+      const r = await worker.unlock(engine, keyring, passphrase, treeId, memberId, makeReplicaId());
+      return { session: sessionFor(r.sealerId), didKey: r.didKey, needsReseal: r.needsReseal };
     },
 
     async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
-      const min = watermarks.current(treeKey).keyringRevision;
-      const r = await worker.recover(keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), min);
-      await keyringStore.save(treeKey, r.revision, r.keyring);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      const r = await worker.recover(engine, keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), floor(treeKey));
+      await persist(treeKey, r.keyring, r.watermark);
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
     async changePassphrase(treeKey, treeId, oldPassphrase, newPassphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
-      const min = watermarks.current(treeKey).keyringRevision;
-      const r = await worker.changePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, min);
-      await keyringStore.save(treeKey, r.revision, r.keyring);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
+      const r = await worker.changePassphrase(engine, keyring, oldPassphrase, newPassphrase, treeId, memberId, makeReplicaId(), floor(treeKey));
+      await persist(treeKey, r.keyring, r.watermark);
       return { recoveryCode: r.recoveryCode };
     },
 
@@ -112,18 +123,20 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
      */
     async syncKeyring(treeKey, treeId, fetchSuccessors) {
       const anchor = await requireKeyring(treeKey);
-      const since = watermarks.current(treeKey).keyringRevision;
+      const since = chainRevision(floor(treeKey));
       const successors = await fetchSuccessors(since); // [{ revision, bytes }] ascending, revisions > since
       if (!successors || successors.length === 0) {
         return { revision: since, changed: false };
       }
       const r = await worker.acceptRemoteKeyring(anchor, treeId, frameHops(successors.map((s) => s.bytes)));
       // The worker validated the whole run as a legitimate chain → RETAIN every revision (each is the
-      // governing keyring for entries stamped at it, §B3 launch gate) and watermark the new head. Persist
-      // only after validation, so an untrusted server can never plant an unverified revision.
+      // governing keyring for entries stamped at it, §B3 launch gate), update the unlock head record, and
+      // watermark the new head. Persist only after validation, so an untrusted server can never plant an
+      // unverified revision.
       for (const s of successors) await keyringStore.save(treeKey, s.revision, s.bytes);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { revision: r.revision, changed: true };
+      await keyringStore.saveHead(treeKey, engine, r.keyring);
+      watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      return { revision: chainRevision(r.watermark), changed: true };
     },
 
     /**
@@ -139,9 +152,11 @@ export function createVault({ worker, keyringStore, watermarks, makeReplicaId = 
     async adoptReset(treeKey, treeId, candidate) {
       const anchor = await requireKeyring(treeKey);
       const r = await worker.acceptResetKeyring(anchor, treeId, candidate);
-      await keyringStore.save(treeKey, r.revision, r.keyring);
-      watermarks.observe(treeKey, { keyringRevision: r.revision });
-      return { revision: r.revision };
+      const revision = chainRevision(r.watermark);
+      await keyringStore.save(treeKey, revision, r.keyring);
+      await keyringStore.saveHead(treeKey, engine, r.keyring);
+      watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      return { revision };
     },
   };
 }

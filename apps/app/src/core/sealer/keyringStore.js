@@ -4,17 +4,23 @@
 // store RETAINS EVERY revision (not just the head): a peer's delta stamped at an older revision is verified
 // against the keyring AT that revision, which the client walked + trusts.
 //
-// Interface (async): the vault reads/writes the head for unlock; the verify composer reads `at(revision)`.
-//   save(treeKey, revision, bytes)      // persist one verified revision
-//   at(treeKey, revision) -> bytes|null // a specific retained revision (the governing keyring)
-//   head(treeKey) -> {revision, bytes}|null   // the highest retained revision
-//   load(treeKey) -> bytes|null         // head bytes (the unlock anchor) — a convenience over head()
+// Interface (async):
+//   saveHead(treeKey, engine, bytes)    // the current UNLOCK anchor + its engine tag (both engines; OPE-278)
+//   loadHead(treeKey) -> {engine,bytes}|null
+//   load(treeKey) -> bytes|null         // the head record's anchor — a convenience over loadHead()
+//   save(treeKey, revision, bytes)      // CHAIN retention: persist one verified revision (§B3)
+//   at(treeKey, revision) -> bytes|null // a specific retained revision (the governing keyring, chain-only)
+//   head(treeKey) -> {revision, bytes}|null   // the highest retained revision (chain-only)
 //
-// Kept in its own IndexedDB database so it never entangles with the snapshot/update store's versioning.
+// The head record is the engine-neutral unlock anchor (the dag has no revisions — its anchor is one blob).
+// The per-revision retention is CHAIN-ONLY: the §B3 verify composer reads `at(revision)` for the keyring
+// that governed a landed entry. Kept in its own IndexedDB database so it never entangles with the
+// snapshot/update store's versioning.
 
 const DB = 'openom-keyrings';
 const STORE = 'keyrings';
-const HEAD = (treeKey) => `${treeKey}::head`; // pointer record: the max retained revision
+const HEAD = (treeKey) => `${treeKey}::head`; // pointer record: the max retained revision (chain retention)
+const HEADREC = (treeKey) => `${treeKey}::headrec`; // the current head record: { engine, bytes }
 const REV = (treeKey, revision) => `${treeKey}::r${revision}`;
 
 function openDb() {
@@ -53,6 +59,16 @@ export function indexedDbKeyringStore() {
   let dbPromise = null;
   const db = () => (dbPromise ??= openDb());
   return {
+    async saveHead(treeKey, engine, bytes) {
+      await put(tx(await db(), 'readwrite'), { engine, bytes: Array.from(bytes) }, HEADREC(treeKey));
+    },
+    async loadHead(treeKey) {
+      const rec = await get(tx(await db(), 'readonly'), HEADREC(treeKey));
+      return rec ? { engine: rec.engine, bytes: new Uint8Array(rec.bytes) } : null;
+    },
+    async load(treeKey) {
+      return (await this.loadHead(treeKey))?.bytes ?? null;
+    },
     async save(treeKey, revision, bytes) {
       const store = tx(await db(), 'readwrite');
       await put(store, Array.from(bytes), REV(treeKey, revision));
@@ -70,16 +86,13 @@ export function indexedDbKeyringStore() {
       const row = await get(store, REV(treeKey, rev));
       return row ? { revision: rev, bytes: new Uint8Array(row) } : null;
     },
-    async load(treeKey) {
-      const h = await this.head(treeKey);
-      return h ? h.bytes : null;
-    },
   };
 }
 
 /** In-memory keyring store (tests, or environments without IndexedDB), retaining every revision. */
 export function memoryKeyringStore() {
-  const trees = new Map(); // treeKey -> Map(revision -> bytes)
+  const trees = new Map(); // treeKey -> Map(revision -> bytes)   (chain retention)
+  const heads = new Map(); // treeKey -> { engine, bytes }        (the unlock head record)
   const forTree = (k) => {
     let t = trees.get(k);
     if (!t) trees.set(k, (t = new Map()));
@@ -93,6 +106,15 @@ export function memoryKeyringStore() {
     return { revision: max, bytes: t.get(max) };
   };
   return {
+    async saveHead(treeKey, engine, bytes) {
+      heads.set(treeKey, { engine, bytes });
+    },
+    async loadHead(treeKey) {
+      return heads.get(treeKey) ?? null;
+    },
+    async load(treeKey) {
+      return heads.get(treeKey)?.bytes ?? null;
+    },
     async save(treeKey, revision, bytes) {
       forTree(treeKey).set(revision, bytes);
     },
@@ -101,9 +123,6 @@ export function memoryKeyringStore() {
     },
     async head(treeKey) {
       return headOf(treeKey);
-    },
-    async load(treeKey) {
-      return headOf(treeKey)?.bytes ?? null;
     },
   };
 }

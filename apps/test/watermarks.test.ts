@@ -11,18 +11,27 @@ function memStore() {
   };
 }
 
+// The keyring cursor is opaque bytes now (OPE-278); a chain cursor happens to be the 4-byte revision.
+const cur = (n: number) => new Uint8Array([0, 0, 0, n]);
+const asArr = (u: Uint8Array) => Array.from(u);
+
 describe('Watermarks (§10 refuse-on-regression)', () => {
-  it('advances the watermark forward', () => {
+  it('advances the coverage watermark forward', () => {
     const wm = new Watermarks(memStore());
-    wm.observe('t', { keyringRevision: 3, coversThroughSeq: 10 });
-    expect(wm.current('t')).toEqual({ keyringRevision: 3, coversThroughSeq: 10, snapshots: [] });
+    wm.observe('t', { keyringCursor: cur(3), coversThroughSeq: 10 });
+    const c = wm.current('t');
+    expect(asArr(c.keyringCursor)).toEqual(asArr(cur(3)));
+    expect(c.coversThroughSeq).toBe(10);
+    expect(c.snapshots).toEqual([]);
   });
 
-  it('refuses a keyring revision below the watermark (rollback)', () => {
+  it('stores the keyring cursor opaquely + write-through (order check is engine-owned, not JS)', () => {
     const wm = new Watermarks(memStore());
-    wm.observe('t', { keyringRevision: 5 });
-    expect(() => wm.observe('t', { keyringRevision: 4 })).toThrow(RegressionError);
-    expect(wm.current('t').keyringRevision).toBe(5); // unchanged
+    wm.observe('t', { keyringCursor: cur(5) });
+    // JS can't order opaque bytes and mustn't try — the engine refuses a rollback. A "lower" cursor just
+    // overwrites; nothing throws.
+    expect(() => wm.observe('t', { keyringCursor: cur(4) })).not.toThrow();
+    expect(asArr(wm.current('t').keyringCursor)).toEqual(asArr(cur(4)));
   });
 
   it('refuses a snapshot coordinate regression', () => {
@@ -31,31 +40,31 @@ describe('Watermarks (§10 refuse-on-regression)', () => {
     expect(() => wm.observe('t', { coversThroughSeq: 9 })).toThrow(RegressionError);
   });
 
-  it('treats an equal observation as idempotent', () => {
+  it('treats an equal coverage observation as idempotent', () => {
     const wm = new Watermarks(memStore());
-    wm.observe('t', { keyringRevision: 2, coversThroughSeq: 4 });
-    expect(() => wm.observe('t', { keyringRevision: 2, coversThroughSeq: 4 })).not.toThrow();
+    wm.observe('t', { keyringCursor: cur(2), coversThroughSeq: 4 });
+    expect(() => wm.observe('t', { keyringCursor: cur(2), coversThroughSeq: 4 })).not.toThrow();
   });
 
-  it('advances one coordinate while the other holds', () => {
+  it('keeps the keyring cursor when observing only another coordinate', () => {
     const wm = new Watermarks(memStore());
-    wm.observe('t', { keyringRevision: 3, coversThroughSeq: 3 });
-    const next = wm.observe('t', { keyringRevision: 3, coversThroughSeq: 5 });
-    expect(next).toEqual({ keyringRevision: 3, coversThroughSeq: 5, snapshots: [] });
+    wm.observe('t', { keyringCursor: cur(3) });
+    wm.observe('t', { coversThroughSeq: 5 }); // no keyringCursor supplied → cursor preserved
+    expect(asArr(wm.current('t').keyringCursor)).toEqual(asArr(cur(3)));
+    expect(wm.current('t').coversThroughSeq).toBe(5);
   });
 
-  it('persists across instances sharing a store (second device detects rollback)', () => {
+  it('persists the keyring cursor across instances sharing a store', () => {
     const store = memStore();
-    new Watermarks(store).observe('t', { keyringRevision: 7 });
+    new Watermarks(store).observe('t', { keyringCursor: cur(7) });
     const b = new Watermarks(store);
-    expect(b.current('t').keyringRevision).toBe(7);
-    expect(() => b.observe('t', { keyringRevision: 6 })).toThrow(RegressionError);
+    expect(asArr(b.current('t').keyringCursor)).toEqual(asArr(cur(7)));
   });
 
   it('is per-tree', () => {
     const wm = new Watermarks(memStore());
-    wm.observe('tree-a', { keyringRevision: 5 });
-    expect(() => wm.observe('tree-b', { keyringRevision: 1 })).not.toThrow();
+    wm.observe('tree-a', { coversThroughSeq: 5 });
+    expect(() => wm.observe('tree-b', { coversThroughSeq: 1 })).not.toThrow();
   });
 
   describe('snapshot-hash replay detection (V1 anti-rollback)', () => {
@@ -114,12 +123,14 @@ describe('Watermarks (§10 refuse-on-regression)', () => {
       expect(() => wm.observe('t', { snapshotHash: 'h60' })).toThrow(RegressionError);
     });
 
-    it('coexists with the keyring and coverage coordinates', () => {
+    it('coexists with the keyring cursor and coverage coordinates', () => {
       const wm = new Watermarks(memStore());
-      wm.observe('t', { keyringRevision: 2, coversThroughSeq: 0, snapshotHash: 'aa' });
-      wm.observe('t', { keyringRevision: 3, coversThroughSeq: 0, snapshotHash: 'bb' });
-      // keyring rollback is still refused independently of the snapshot dimension.
-      expect(() => wm.observe('t', { keyringRevision: 1, snapshotHash: 'bb' })).toThrow(RegressionError);
+      wm.observe('t', { keyringCursor: cur(2), coversThroughSeq: 0, snapshotHash: 'aa' });
+      wm.observe('t', { keyringCursor: cur(3), coversThroughSeq: 0, snapshotHash: 'bb' });
+      // The keyring cursor is write-through (engine-owned order — no throw); the snapshot dimension still
+      // catches a replay independently.
+      expect(() => wm.observe('t', { keyringCursor: cur(1) })).not.toThrow();
+      expect(() => wm.observe('t', { snapshotHash: 'aa' })).toThrow(RegressionError);
     });
   });
 });

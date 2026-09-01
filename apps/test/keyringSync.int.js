@@ -11,6 +11,14 @@ import { Watermarks } from '../app/src/core/watermarks.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
 
 const bytes = (...xs) => new Uint8Array(xs);
+// The chain watermark is the 4-byte big-endian revision (what the neutral cursor carries now).
+const be32 = (n) => {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, false);
+  return b;
+};
+const revOf = (cursor) =>
+  cursor && cursor.length === 4 ? new DataView(cursor.buffer, cursor.byteOffset, 4).getUint32(0, false) : 0;
 
 // Inverse of frameHops — [u32-BE len][bytes]… → parts. Used to assert the client framed correctly.
 function unframe(buf) {
@@ -48,7 +56,7 @@ function fakeWorker({ reject = false, headRevision = 3 } = {}) {
       state.calls++;
       if (reject) throw new Error('keyring chain refused (fork/rollback)');
       state.seen = unframe(hops);
-      return { keyring: state.seen[state.seen.length - 1], revision: headRevision };
+      return { keyring: state.seen[state.seen.length - 1], watermark: be32(headRevision) };
     },
   };
 }
@@ -60,8 +68,9 @@ describe('vault.syncKeyring', () => {
   async function setup(worker) {
     const keyringStore = memoryKeyringStore();
     const watermarks = new Watermarks();
-    await keyringStore.save(treeKey, 1, bytes(7, 7)); // a stored anchor …
-    watermarks.observe(treeKey, { keyringRevision: 1 }); // … at revision 1
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7)); // the unlock anchor (head record) …
+    await keyringStore.save(treeKey, 1, bytes(7, 7)); // … retained at revision 1 (chain §B3) …
+    watermarks.observe(treeKey, { keyringCursor: be32(1) }); // … cursor at revision 1
     const vault = createVault({ worker, keyringStore, watermarks });
     return { vault, keyringStore, watermarks };
   }
@@ -78,7 +87,7 @@ describe('vault.syncKeyring', () => {
     });
     expect(r).toEqual({ revision: 3, changed: true });
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([3, 3]); // head = the newest revision
-    expect(watermarks.current(treeKey).keyringRevision).toBe(3);
+    expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(3);
     expect(worker.state.seen.map((u) => Array.from(u))).toEqual([[2, 2], [3, 3]]); // framing round-tripped
     // Every validated revision is RETAINED (governs entries stamped at it) — not just the head.
     expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]);
@@ -93,7 +102,7 @@ describe('vault.syncKeyring', () => {
     expect(r).toEqual({ revision: 1, changed: false });
     expect(worker.state.calls).toBe(0);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]);
-    expect(watermarks.current(treeKey).keyringRevision).toBe(1);
+    expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(1);
   });
 
   it('a refused chain (fork/rollback from a hostile server) leaves stored keyring + watermark UNTOUCHED', async () => {
@@ -101,7 +110,7 @@ describe('vault.syncKeyring', () => {
     const { vault, keyringStore, watermarks } = await setup(worker);
     await expect(vault.syncKeyring(treeKey, treeId, async () => [{ revision: 2, bytes: bytes(9) }])).rejects.toThrow(/refused/);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // NOT overwritten
-    expect(watermarks.current(treeKey).keyringRevision).toBe(1); // NOT advanced
+    expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(1); // NOT advanced
   });
 });
 
@@ -134,8 +143,9 @@ describe('vault.adoptReset (recovery/succession)', () => {
   async function setup(worker) {
     const keyringStore = memoryKeyringStore();
     const watermarks = new Watermarks();
-    await keyringStore.save(treeKey, 1, bytes(7, 7)); // trusted head at rev 1
-    watermarks.observe(treeKey, { keyringRevision: 1 });
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7)); // the unlock anchor (head record)
+    await keyringStore.save(treeKey, 1, bytes(7, 7)); // retained at rev 1 (chain §B3)
+    watermarks.observe(treeKey, { keyringCursor: be32(1) });
     const vault = createVault({ worker, keyringStore, watermarks });
     return { vault, keyringStore, watermarks };
   }
@@ -143,12 +153,12 @@ describe('vault.adoptReset (recovery/succession)', () => {
   it('adopts a validated reset after OOB confirm: stores it + advances the watermark', async () => {
     // The worker (Rust) has validated the reset chains onto the trusted head; this asserts the vault
     // persists + watermarks it. (The OOB signer re-verification is the caller's job, before this.)
-    const worker = { acceptResetKeyring: async (_a, _t, candidate) => ({ keyring: candidate, revision: 2 }) };
+    const worker = { acceptResetKeyring: async (_a, _t, candidate) => ({ keyring: candidate, watermark: be32(2) }) };
     const { vault, keyringStore, watermarks } = await setup(worker);
     const r = await vault.adoptReset(treeKey, treeId, bytes(2, 2));
     expect(r).toEqual({ revision: 2 });
     expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]);
-    expect(watermarks.current(treeKey).keyringRevision).toBe(2);
+    expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(2);
   });
 
   it('a candidate that is not a valid reset onto the head is refused; stored state untouched', async () => {
@@ -160,6 +170,6 @@ describe('vault.adoptReset (recovery/succession)', () => {
     const { vault, keyringStore, watermarks } = await setup(worker);
     await expect(vault.adoptReset(treeKey, treeId, bytes(9))).rejects.toThrow(/does not chain/);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // head unchanged
-    expect(watermarks.current(treeKey).keyringRevision).toBe(1); // not advanced
+    expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(1); // not advanced
   });
 });

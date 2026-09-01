@@ -51,43 +51,54 @@ const api = {
     await ensureInit();
   },
 
-  async provision(passphrase, treeId, memberId, replicaId) {
+  async provision(engine, passphrase, treeId, memberId, replicaId) {
     await ensureInit();
-    const r = wasmProvision(passphrase, treeId, memberId, replicaId);
+    const r = wasmProvision(engine, passphrase, treeId, memberId, replicaId);
     const sealerId = register(r.takeSealer()); // move the sealer out INSIDE the worker
-    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, didKey: r.didKey, sealerId };
+    const out = {
+      keyring: r.keyring,
+      recoveryCode: r.recoveryCode,
+      watermark: r.watermark,
+      needsReseal: r.needsReseal,
+      didKey: r.didKey,
+      sealerId,
+    };
     r.free();
     return out;
   },
 
-  async unlock(keyring, passphrase, treeId, memberId, replicaId, minRevision) {
+  async unlock(engine, keyring, passphrase, treeId, memberId, replicaId) {
     await ensureInit();
-    const r = wasmUnlock(keyring, passphrase, treeId, memberId, replicaId);
-    // Refuse a rolled-back keyring BEFORE handing out a sealer id (unlock skips this in Rust;
-    // recover checks it there). Freeing the result drops the just-built sealer + its DEK.
-    if (r.revision < minRevision) {
-      r.free();
-      throw new Error('keyring revision rollback');
-    }
+    // No JS floor check: unlock reads the LOCAL (trusted) anchor and takes no floor in the trait — the
+    // anti-rollback floor is enforced engine-side on the untrusted paths (recover + keyring sync), and JS
+    // can't compare opaque watermark bytes. Freeing the result drops the just-built sealer + its DEK.
+    const r = wasmUnlock(engine, keyring, passphrase, treeId, memberId, replicaId);
     const sealerId = register(r.takeSealer());
-    const out = { revision: r.revision, didKey: r.didKey, sealerId };
+    const out = { watermark: r.watermark, needsReseal: r.needsReseal, didKey: r.didKey, sealerId };
     r.free();
     return out;
   },
 
-  async recover(keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, minRevision) {
+  async recover(engine, keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, floor) {
     await ensureInit();
-    const r = wasmRecover(keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, minRevision);
+    const r = wasmRecover(engine, keyring, recoveryCode, newPassphrase, treeId, memberId, replicaId, floor);
     const sealerId = register(r.takeSealer());
-    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision, didKey: r.didKey, sealerId };
+    const out = {
+      keyring: r.keyring,
+      recoveryCode: r.recoveryCode,
+      watermark: r.watermark,
+      needsReseal: r.needsReseal,
+      didKey: r.didKey,
+      sealerId,
+    };
     r.free();
     return out;
   },
 
-  async changePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, minRevision) {
+  async changePassphrase(engine, keyring, oldPassphrase, newPassphrase, treeId, memberId, replicaId, floor) {
     await ensureInit();
-    const r = wasmChangePassphrase(keyring, oldPassphrase, newPassphrase, treeId, memberId, minRevision);
-    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, revision: r.revision };
+    const r = wasmChangePassphrase(engine, keyring, oldPassphrase, newPassphrase, treeId, memberId, replicaId, floor);
+    const out = { keyring: r.keyring, recoveryCode: r.recoveryCode, watermark: r.watermark };
     r.free();
     return out;
   },
@@ -125,7 +136,7 @@ const api = {
   async acceptRemoteKeyring(anchor, treeId, hops) {
     await ensureInit();
     const r = wasmAcceptRemoteKeyring(anchor, treeId, hops);
-    const out = { keyring: r.keyring, revision: r.revision };
+    const out = { keyring: r.keyring, watermark: r.watermark };
     r.free();
     return out;
   },
@@ -137,7 +148,7 @@ const api = {
   async acceptResetKeyring(anchor, treeId, candidate) {
     await ensureInit();
     const r = wasmAcceptResetKeyring(anchor, treeId, candidate);
-    const out = { keyring: r.keyring, revision: r.revision };
+    const out = { keyring: r.keyring, watermark: r.watermark };
     r.free();
     return out;
   },

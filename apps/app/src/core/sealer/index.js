@@ -18,6 +18,12 @@ import { createInvokeVault, invokeCore } from './invokeSealer.js';
 import { indexedDbKeyringStore } from './keyringStore.js';
 import { cryptoWorker, workerCore } from './workerSealer.js';
 
+// The keyring ENGINE is a deployment/backend PRESET (OPE-278), not a per-tree user choice: the managed
+// backend is fixed to one engine, a BYO backend to one. It's a constant here (a hidden setting / build flag
+// changes it); the vault records it in the local head record and dispatches on it. Default = the shipping
+// chain engine.
+const KEYRING_ENGINE = 'chain';
+
 // The Tauri invoke entry point when running inside the Tauri webview, else undefined (web).
 function tauriInvoke() {
   return globalThis.__TAURI__?.core?.invoke;
@@ -34,7 +40,12 @@ export async function createAppVault() {
   if (invoke) return createInvokeVault(invoke);
   const worker = cryptoWorker();
   await worker.warm(); // pre-warm the WASM so only the KDF is visible at submit
-  return createVault({ worker, keyringStore: indexedDbKeyringStore(), watermarks: new Watermarks() });
+  return createVault({
+    worker,
+    keyringStore: indexedDbKeyringStore(),
+    watermarks: new Watermarks(),
+    engine: KEYRING_ENGINE,
+  });
 }
 
 // A stable 16-byte tree id derived from a doc id. Real trees carry a UUID; for the dev/local

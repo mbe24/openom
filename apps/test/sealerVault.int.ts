@@ -12,6 +12,15 @@ import { Watermarks } from '../app/src/core/watermarks.js';
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// The keyring watermark is engine-opaque bytes now (OPE-278); a chain cursor is the 4-byte BE revision.
+const be32 = (n: number) => {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, false);
+  return b;
+};
+const revOf = (wm: Uint8Array) =>
+  wm && wm.length === 4 ? new DataView(wm.buffer, wm.byteOffset, 4).getUint32(0, false) : 0;
+
 function fakeWorker() {
   const decode = (b: Uint8Array) => JSON.parse(dec.decode(b));
   const encode = (o: any) => enc.encode(JSON.stringify(o));
@@ -24,31 +33,32 @@ function fakeWorker() {
     return id;
   };
   return {
-    async provision(passphrase: string) {
+    async provision(_engine: string, passphrase: string) {
       const dek = ++dekSeq;
       const kr = { passphrase, revision: 1, dek, recoveryCode: 'CODE-1' };
-      return { keyring: encode(kr), recoveryCode: 'CODE-1', revision: 1, didKey: 'did:key:z6Mk' + passphrase, sealerId: reg(dek) };
+      return { keyring: encode(kr), recoveryCode: 'CODE-1', watermark: be32(1), needsReseal: false, didKey: 'did:key:z6Mk' + passphrase, sealerId: reg(dek) };
     },
-    async unlock(keyring: Uint8Array, passphrase: string, _t: any, _m: any, _r: any, minRev: number) {
+    // unlock takes no floor now (reads the local trusted anchor); the engine reports the cursor.
+    async unlock(_engine: string, keyring: Uint8Array, passphrase: string) {
       const kr = decode(keyring);
       if (kr.passphrase !== passphrase) throw new Error('wrong passphrase');
-      if (kr.revision < minRev) throw new Error('keyring revision rollback');
-      return { revision: kr.revision, didKey: 'did:key:z6Mk' + kr.passphrase, sealerId: reg(kr.dek) };
+      return { watermark: be32(kr.revision), needsReseal: false, didKey: 'did:key:z6Mk' + kr.passphrase, sealerId: reg(kr.dek) };
     },
-    async recover(keyring: Uint8Array, code: string, newPass: string, _t: any, _m: any, _r: any, minRev: number) {
+    async recover(_engine: string, keyring: Uint8Array, code: string, newPass: string, _t: any, _m: any, _r: any, floor: Uint8Array) {
       const kr = decode(keyring);
       if (code !== kr.recoveryCode) throw new Error('wrong code');
+      const minRev = revOf(floor); // the engine decodes the opaque floor + refuses a rollback
       if (kr.revision < minRev) throw new Error('revision rollback');
       const revision = Math.max(minRev, kr.revision) + 1;
       const nk = { passphrase: newPass, revision, dek: kr.dek, recoveryCode: 'CODE-' + revision };
-      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, revision, didKey: 'did:key:z6Mk' + newPass, sealerId: reg(kr.dek) };
+      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, watermark: be32(revision), needsReseal: false, didKey: 'did:key:z6Mk' + newPass, sealerId: reg(kr.dek) };
     },
-    async changePassphrase(keyring: Uint8Array, oldPass: string, newPass: string, _t: any, _m: any, minRev: number) {
+    async changePassphrase(_engine: string, keyring: Uint8Array, oldPass: string, newPass: string, _t: any, _m: any, _r: any, floor: Uint8Array) {
       const kr = decode(keyring);
       if (oldPass !== kr.passphrase) throw new Error('wrong passphrase');
-      const revision = Math.max(minRev, kr.revision) + 1;
+      const revision = Math.max(revOf(floor), kr.revision) + 1;
       const nk = { passphrase: newPass, revision, dek: kr.dek, recoveryCode: 'CODE-' + revision };
-      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, revision };
+      return { keyring: encode(nk), recoveryCode: nk.recoveryCode, watermark: be32(revision) };
     },
     async sealEntry(id: string, kind: string, _f: string, _c: string, counter: number) {
       const dek = sealers.get(id);
@@ -99,7 +109,7 @@ describe('createVault (worker orchestration)', () => {
     const { session, recoveryCode } = await vault.provision(TREE, TID, 'pass', MEMBER);
     expect(recoveryCode).toBe('CODE-1');
     expect(await keyringStore.load(TREE)).not.toBeNull();
-    expect(watermarks.current(TREE).keyringRevision).toBe(1);
+    expect(revOf(watermarks.current(TREE).keyringCursor)).toBe(1);
     expect(await roundTrips(session)).toBe(true);
   });
 
@@ -134,17 +144,16 @@ describe('createVault (worker orchestration)', () => {
     await expect(vault.unlock(TREE, TID, 'wrong', MEMBER)).rejects.toThrow(/wrong passphrase/);
   });
 
-  it('refuses to unlock a keyring below the watermark (min_revision backstop)', async () => {
+  it('unlock reads the local anchor without a floor check, leaving the cursor untouched', async () => {
     const store = memoryKeyringStore();
     const { vault, watermarks } = newVault(store);
-    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1, stored head = 1
-    // The watermark has advanced past the stored head (e.g. a keyring sync saw a newer revision) — the
-    // worker refuses unlocking a below-watermark keyring BEFORE exposing a sealer. (The store now retains
-    // every revision + always unlocks with its head, so a server can't roll the head back by serving an
-    // old keyring; this min_revision check is the deeper backstop.)
-    watermarks.observe(TREE, { keyringRevision: 2 });
-    await expect(vault.unlock(TREE, TID, 'old', MEMBER)).rejects.toThrow(/rollback/i);
-    expect(watermarks.current(TREE).keyringRevision).toBe(2);
+    await vault.provision(TREE, TID, 'old', MEMBER); // rev 1, stored head = 1, cursor = 1
+    // Unlock takes NO floor now — it reads the LOCAL (trusted) anchor, and the anti-rollback floor is
+    // enforced engine-side on the untrusted paths (recover + keyring sync), not on unlock. So an artificially
+    // ahead cursor doesn't block unlock, and unlock (a pure read) doesn't regress it either.
+    watermarks.observe(TREE, { keyringCursor: be32(2) });
+    await expect(vault.unlock(TREE, TID, 'old', MEMBER)).resolves.toBeTruthy();
+    expect(revOf(watermarks.current(TREE).keyringCursor)).toBe(2); // untouched by unlock
   });
 
   it('recovers with the code, bumps revision, rotates the code, opens old data', async () => {
@@ -156,7 +165,7 @@ describe('createVault (worker orchestration)', () => {
     const b = newVault(store);
     const { session: sb, recoveryCode } = await b.vault.recover(TREE, TID, 'CODE-1', 'new', MEMBER);
     expect(recoveryCode).toBe('CODE-2');
-    expect(b.watermarks.current(TREE).keyringRevision).toBe(2);
+    expect(revOf(b.watermarks.current(TREE).keyringCursor)).toBe(2);
     await expect(sb.open(sealed, TREE, { kind: 'snapshot' })).resolves.toBeInstanceOf(Uint8Array);
     await expect(b.vault.unlock(TREE, TID, 'new', MEMBER)).resolves.toBeTruthy();
     await expect(b.vault.unlock(TREE, TID, 'old', MEMBER)).rejects.toThrow();
@@ -167,7 +176,7 @@ describe('createVault (worker orchestration)', () => {
     await vault.provision(TREE, TID, 'old', MEMBER);
     const { recoveryCode } = await vault.changePassphrase(TREE, TID, 'old', 'new', MEMBER);
     expect(recoveryCode).toBe('CODE-2');
-    expect(watermarks.current(TREE).keyringRevision).toBe(2);
+    expect(revOf(watermarks.current(TREE).keyringCursor)).toBe(2);
     await expect(vault.unlock(TREE, TID, 'new', MEMBER)).resolves.toBeTruthy();
     await expect(vault.unlock(TREE, TID, 'old', MEMBER)).rejects.toThrow();
   });
@@ -176,7 +185,7 @@ describe('createVault (worker orchestration)', () => {
     const store = memoryKeyringStore();
     const { vault, watermarks } = newVault(store);
     await vault.provision(TREE, TID, 'old', MEMBER); // rev 1, stored head = 1
-    watermarks.observe(TREE, { keyringRevision: 2 }); // watermark advanced past the stored head
+    watermarks.observe(TREE, { keyringCursor: be32(2) }); // watermark advanced past the stored head
     await expect(vault.recover(TREE, TID, 'CODE-1', 'x', MEMBER)).rejects.toThrow(/rollback/);
   });
 

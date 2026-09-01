@@ -35,7 +35,12 @@ function defaultStore() {
   };
 }
 
-const ZERO = { keyringRevision: 0, coversThroughSeq: 0, snapshots: [] };
+// `keyringCursor` is the engine-OPAQUE keyring anti-rollback cursor (OPE-278) — the bytes the last vault
+// flow returned, stored as a plain number[] for JSON. It replaces the old scalar `keyringRevision`: the
+// order check lives INSIDE the engine now (the chain refuses a lower revision, the dag refuses a rolled-back
+// frontier), so JS can't and mustn't compare opaque bytes — it just persists what a flow produced and hands
+// it back as the floor. `coversThroughSeq`/`snapshots` stay JS-side sync watermarks, unchanged.
+const ZERO = { keyringCursor: [], coversThroughSeq: 0, snapshots: [] };
 
 // How many recent snapshot hashes to remember per tree for replay detection. A rollback to
 // a snapshot older than this window can't be caught — a bounded, honest degradation (memory
@@ -77,9 +82,10 @@ export class Watermarks {
     }
   }
 
-  /** The highest watermark seen for a tree (zeros if none). */
+  /** The watermark for a tree (zeros if none). `keyringCursor` is returned as bytes (empty = no floor). */
   current(treeId) {
-    return this.#load(treeId);
+    const wm = this.#load(treeId);
+    return { ...wm, keyringCursor: Uint8Array.from(wm.keyringCursor ?? []) };
   }
 
   /**
@@ -96,16 +102,18 @@ export class Watermarks {
    *     sees can't be verified (no prior state to anchor against), and a rollback older than
    *     the remembered window (`MAX_SNAPSHOTS`) escapes detection.
    */
-  observe(treeId, { keyringRevision = 0, coversThroughSeq = 0, snapshotHash } = {}) {
+  observe(treeId, { keyringCursor, coversThroughSeq = 0, snapshotHash } = {}) {
     const wm = this.#load(treeId);
-    if (keyringRevision < wm.keyringRevision) {
-      throw new RegressionError('keyring', wm.keyringRevision, keyringRevision);
-    }
     if (coversThroughSeq < wm.coversThroughSeq) {
       throw new RegressionError('coverage', wm.coversThroughSeq, coversThroughSeq);
     }
+    // The keyring cursor is opaque + write-through: every value comes from a vault flow that was itself
+    // produced under the engine's own floor check, so there is no JS-side order comparison. Absent => keep
+    // the existing cursor (a caller observing only a snapshot/coverage must not clear it).
+    const cursor =
+      keyringCursor === undefined ? (wm.keyringCursor ?? []) : Array.from(keyringCursor);
     const next = {
-      keyringRevision: Math.max(wm.keyringRevision, keyringRevision),
+      keyringCursor: cursor,
       coversThroughSeq: Math.max(wm.coversThroughSeq, coversThroughSeq),
       snapshots: this.#observeSnapshot(wm.snapshots ?? [], snapshotHash),
     };
