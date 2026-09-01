@@ -18,7 +18,14 @@ const be32 = (n) => {
   return b;
 };
 const revOf = (cursor) =>
-  cursor && cursor.length === 4 ? new DataView(cursor.buffer, cursor.byteOffset, 4).getUint32(0, false) : 0;
+  cursor && cursor.length >= 4 ? new DataView(cursor.buffer, cursor.byteOffset, 4).getUint32(0, false) : 0;
+
+// A 52-byte pinned chain watermark: revision(4) ‖ write-epoch pin key_id(16)‖H(DEK)(32) (OPE-286 phase 2).
+const pinnedWm = (rev, fill = 0xab) => {
+  const b = new Uint8Array(4 + 48).fill(fill);
+  b.set(be32(rev), 0);
+  return b;
+};
 
 // Inverse of frameHops — [u32-BE len][bytes]… → parts. Used to assert the client framed correctly.
 function unframe(buf) {
@@ -95,6 +102,22 @@ describe('vault.syncKeyring', () => {
     expect(Array.from(await keyringStore.at(treeKey, 1))).toEqual([7, 7]); // the original anchor stays
   });
 
+  it('carries the recover pin forward across a sync (OPE-286 phase 2): the accept path advances the revision but keeps the write-epoch pin', async () => {
+    const worker = fakeWorker({ headRevision: 3 }); // wasm returns a bare-revision watermark
+    const keyringStore = memoryKeyringStore();
+    const watermarks = new Watermarks();
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7));
+    await keyringStore.save(treeKey, 1, bytes(7, 7));
+    const pin = pinnedWm(1);
+    watermarks.observe(treeKey, { keyringCursor: pin }); // a pinned cursor from the last unlock/recover
+    const vault = createVault({ worker, keyringStore, watermarks });
+    await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 3, bytes: bytes(3, 3) }]);
+    const cursor = watermarks.current(treeKey).keyringCursor;
+    expect(cursor.length).toBe(4 + 48); // still pinned — NOT erased to a bare revision
+    expect(revOf(cursor)).toBe(3); // advanced to the synced head
+    expect(Array.from(cursor.subarray(4))).toEqual(Array.from(pin.subarray(4))); // same pin carried forward
+  });
+
   it('nothing newer → no-op: no verify call, stored keyring + watermark unchanged', async () => {
     const worker = fakeWorker();
     const { vault, keyringStore, watermarks } = await setup(worker);
@@ -159,6 +182,22 @@ describe('vault.adoptReset (recovery/succession)', () => {
     expect(r).toEqual({ revision: 2 });
     expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]);
     expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(2);
+  });
+
+  it('carries the recover pin forward across a reset (OPE-286 phase 2)', async () => {
+    const worker = { acceptResetKeyring: async (_a, _t, candidate) => ({ keyring: candidate, watermark: be32(2) }) };
+    const keyringStore = memoryKeyringStore();
+    const watermarks = new Watermarks();
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7));
+    await keyringStore.save(treeKey, 1, bytes(7, 7));
+    const pin = pinnedWm(1);
+    watermarks.observe(treeKey, { keyringCursor: pin });
+    const vault = createVault({ worker, keyringStore, watermarks });
+    await vault.adoptReset(treeKey, treeId, bytes(2, 2));
+    const cursor = watermarks.current(treeKey).keyringCursor;
+    expect(cursor.length).toBe(4 + 48);
+    expect(revOf(cursor)).toBe(2);
+    expect(Array.from(cursor.subarray(4))).toEqual(Array.from(pin.subarray(4)));
   });
 
   it('a candidate that is not a valid reset onto the head is refused; stored state untouched', async () => {

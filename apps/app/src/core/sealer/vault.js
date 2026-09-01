@@ -50,6 +50,22 @@ export function frameHops(revisions) {
 const chainRevision = (wm) =>
   wm && wm.length >= 4 ? new DataView(wm.buffer, wm.byteOffset, 4).getUint32(0, false) : 0;
 
+// The write-epoch pin (key_id ‖ H(DEK)) is the 48 bytes after the 4-byte revision (OPE-286).
+const CHAIN_PIN_LEN = 16 + 32;
+
+// Carry a chain watermark's recover pin forward. The accept/reset paths advance the revision WITHOUT
+// opening the DEK, so the wasm returns a bare-revision watermark; splice the previously-stored pin onto the
+// new revision so it isn't erased (OPE-286 phase 2). If the stored watermark carried no pin, or the new one
+// already has its own, pass the new one through unchanged.
+function carryChainPin(next, prev) {
+  if (!next || next.length >= 4 + CHAIN_PIN_LEN) return next; // already pinned
+  if (!prev || prev.length < 4 + CHAIN_PIN_LEN) return next; // nothing to carry
+  const out = new Uint8Array(4 + CHAIN_PIN_LEN);
+  out.set(next.subarray(0, 4), 0); // new revision
+  out.set(prev.subarray(4, 4 + CHAIN_PIN_LEN), 4); // prior write-epoch pin
+  return out;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.worker         the crypto worker proxy (provision/unlock/recover/changePassphrase/sealEntry/openEntry/lock)
@@ -137,7 +153,9 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // unverified revision.
       for (const s of successors) await keyringStore.save(treeKey, s.revision, s.bytes);
       await keyringStore.saveHead(treeKey, engine, r.keyring);
-      watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      // The accept path advances the revision without opening the DEK — carry the stored write-epoch pin
+      // forward so this sync doesn't erase the recover commitment (OPE-286 phase 2).
+      watermarks.observe(treeKey, { keyringCursor: carryChainPin(r.watermark, floor(treeKey)) });
       return { revision: chainRevision(r.watermark), changed: true };
     },
 
@@ -153,11 +171,13 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
      */
     async adoptReset(treeKey, treeId, candidate) {
       const anchor = await requireKeyring(treeKey);
+      const prior = floor(treeKey);
       const r = await worker.acceptResetKeyring(anchor, treeId, candidate);
       const revision = chainRevision(r.watermark);
       await keyringStore.save(treeKey, revision, r.keyring);
       await keyringStore.saveHead(treeKey, engine, r.keyring);
-      watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      // A reset opens no epoch here — carry the stored write-epoch pin forward (OPE-286 phase 2).
+      watermarks.observe(treeKey, { keyringCursor: carryChainPin(r.watermark, prior) });
       return { revision };
     },
   };

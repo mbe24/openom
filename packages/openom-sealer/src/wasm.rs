@@ -502,7 +502,7 @@ pub fn add_member(
         keyring: added.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        watermark: added.revision.to_be_bytes().to_vec(),
+        watermark: chain_wm_pinned(added.revision, &added.write_key_id, &added.write_dek_hash),
         needs_reseal: false,
         sealer: None,
     })
@@ -541,7 +541,7 @@ pub fn unlock_as_member(
         keyring: Vec::new(),
         recovery_code: String::new(),
         did_key: u.did_key.into_string(),
-        watermark: u.revision.to_be_bytes().to_vec(),
+        watermark: chain_wm_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
         needs_reseal: false,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
@@ -574,7 +574,7 @@ pub fn remove_member(
         keyring: r.keyring,
         recovery_code: String::new(), // removal no longer rotates the recovery code (RRK)
         did_key: String::new(),
-        watermark: r.revision.to_be_bytes().to_vec(),
+        watermark: chain_wm_pinned(r.revision, &r.write_key_id, &r.write_dek_hash),
         needs_reseal: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -965,7 +965,7 @@ pub fn add_member_as_co_owner(
         keyring: added.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        watermark: added.revision.to_be_bytes().to_vec(),
+        watermark: chain_wm_pinned(added.revision, &added.write_key_id, &added.write_dek_hash),
         needs_reseal: false,
         sealer: None,
     })
@@ -1005,7 +1005,7 @@ pub fn remove_member_as_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        watermark: r.revision.to_be_bytes().to_vec(),
+        watermark: chain_wm_pinned(r.revision, &r.write_key_id, &r.write_dek_hash),
         needs_reseal: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
@@ -1035,6 +1035,8 @@ pub fn add_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
+        // A signer-set change opens no epoch — the caller carries the stored write-epoch pin forward onto
+        // this revision so a bare-revision watermark can't erase a recover pin (OPE-286 phase 2).
         watermark: r.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
         sealer: None,
@@ -1068,6 +1070,7 @@ pub fn remove_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
+        // Signer-set change, no epoch opened — caller carries the write-epoch pin forward (OPE-286 phase 2).
         watermark: r.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
         sealer: None,
@@ -1099,6 +1102,8 @@ pub fn accept_remote_keyring(
             keyring: Vec::new(),
             recovery_code: String::new(),
             did_key: String::new(),
+            // No-op / accept opens no epoch — the caller carries the stored write-epoch pin forward onto
+            // this revision rather than let a bare-revision watermark erase a recover pin (OPE-286 phase 2).
             watermark: anchor_keyring.revision.to_be_bytes().to_vec(),
             needs_reseal: false,
             sealer: None,
@@ -1289,6 +1294,19 @@ fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, JsError> {
         i = end;
     }
     Ok(out)
+}
+
+/// Build a chain watermark that pins the write epoch: `revision(4) ‖ write_key_id(16) ‖ H(DEK)(32)`, the
+/// commitment recover authenticates the write epoch against (OPE-286 phase 2). Membership ops that open the
+/// write epoch (add/remove member) know its key material, so they emit the full pin rather than a bare
+/// revision that would erase a prior recover pin. Falls back to revision-only if the pin isn't sized right.
+fn chain_wm_pinned(revision: u32, write_key_id: &[u8], write_dek_hash: &[u8]) -> Vec<u8> {
+    let mut wm = revision.to_be_bytes().to_vec();
+    if write_key_id.len() == 16 && write_dek_hash.len() == 32 {
+        wm.extend_from_slice(write_key_id);
+        wm.extend_from_slice(write_dek_hash);
+    }
+    wm
 }
 
 fn parse_member_role(s: &str) -> Result<MemberRole, JsError> {

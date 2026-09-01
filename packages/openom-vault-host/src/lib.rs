@@ -611,8 +611,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             member_hpke_public,
             member_author_public,
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &added.keyring)?;
-        Ok(MemberAdded { watermark: chain_watermark(revision) })
+        let watermark = self.commit_transition(
+            tree_key,
+            &keyring,
+            &added.keyring,
+            Some((&added.write_key_id, &added.write_dek_hash)),
+        )?;
+        Ok(MemberAdded { watermark })
     }
 
     /// Unlock a shared tree AS A MEMBER: verify against the caller's pinned signer keys
@@ -653,7 +658,8 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let id = self.register(u.sealer)?;
         Ok(Unlocked {
             sealer_id: id,
-            watermark: chain_watermark(u.revision),
+            // A member unlock opens the write epoch, so it carries the pin like the owner unlock does.
+            watermark: chain_watermark_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
             needs_reseal: false,
             did_key: u.did_key.into_string(),
         })
@@ -688,11 +694,16 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &MemberId::new(remove_member_id),
             &ReplicaId::new(replica),
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
+        let watermark = self.commit_transition(
+            tree_key,
+            &keyring,
+            &r.keyring,
+            Some((&r.write_key_id, &r.write_dek_hash)),
+        )?;
         let id = self.register(r.sealer)?;
         Ok(MemberRemoved {
             sealer_id: id,
-            watermark: chain_watermark(revision),
+            watermark,
         })
     }
 
@@ -736,8 +747,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             member_hpke_public,
             member_author_public,
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &added.keyring)?;
-        Ok(MemberAdded { watermark: chain_watermark(revision) })
+        let watermark = self.commit_transition(
+            tree_key,
+            &keyring,
+            &added.keyring,
+            Some((&added.write_key_id, &added.write_dek_hash)),
+        )?;
+        Ok(MemberAdded { watermark })
     }
 
     /// Remove an ordinary member **as a co-owner** (any-of): re-keys under the new epoch,
@@ -776,11 +792,16 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &MemberId::new(remove_member_id),
             &ReplicaId::new(replica),
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
+        let watermark = self.commit_transition(
+            tree_key,
+            &keyring,
+            &r.keyring,
+            Some((&r.write_key_id, &r.write_dek_hash)),
+        )?;
         let id = self.register(r.sealer)?;
         Ok(MemberRemoved {
             sealer_id: id,
-            watermark: chain_watermark(revision),
+            watermark,
         })
     }
 
@@ -809,8 +830,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             floor,
             &MemberId::new(target_member_id),
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
-        Ok(CoOwnerChanged { watermark: chain_watermark(revision) })
+        // A signer-set change mints no new epoch — carry the write-epoch pin forward (None).
+        let watermark = self.commit_transition(tree_key, &keyring, &r.keyring, None)?;
+        Ok(CoOwnerChanged { watermark })
     }
 
     /// Demote a co-owner to an ordinary role (founder action). Revokes signing authority,
@@ -840,8 +862,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &MemberId::new(target_member_id),
             parse_member_role(new_role)?,
         )?;
-        let revision = self.commit_transition(tree_key, &keyring, &r.keyring)?;
-        Ok(CoOwnerChanged { watermark: chain_watermark(revision) })
+        // A signer-set change mints no new epoch — carry the write-epoch pin forward (None).
+        let watermark = self.commit_transition(tree_key, &keyring, &r.keyring, None)?;
+        Ok(CoOwnerChanged { watermark })
     }
 
     /// Accept a keyring run pulled from the **untrusted network** — the read-side of the
@@ -869,10 +892,12 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 "anchor keyring is for a different tree",
             ));
         }
-        // An empty run is "already up to date" — a no-op at the current revision.
+        // An empty run is "already up to date" — a no-op that must leave the stored watermark (and its
+        // recover pin) exactly as-is rather than rewrite it to a bare revision (OPE-286 phase 2).
         if hops.is_empty() {
+            let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
             return Ok(AcceptedKeyring {
-                watermark: chain_watermark(anchor_keyring.revision),
+                watermark: chain_watermark_carry(anchor_keyring.revision, &stored),
             });
         }
         let decoded: Vec<Keyring> = hops
@@ -889,14 +914,17 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let new_anchor =
             openom_keyring::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
                 .map_err(remote_chain_err)?;
-        // Persist the validated head (the last hop) + advance the floor, atomically.
+        // Persist the validated head (the last hop) + advance the floor, atomically. This path doesn't
+        // open the DEK, so it can't compute a fresh pin — carry the stored one forward (never erase it; a
+        // remote epoch rotation makes it stale → recover fails closed until the next unlock, per
+        // `chain_watermark_carry`'s residual note).
         let head = hops.last().expect("non-empty run");
+        let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let watermark = chain_watermark_carry(new_anchor.revision, &stored);
         self.store
-            .commit_keyring(tree_key, head, &chain_watermark(new_anchor.revision))
+            .commit_keyring(tree_key, head, &watermark)
             .map_err(VaultError::storage)?;
-        Ok(AcceptedKeyring {
-            watermark: chain_watermark(new_anchor.revision),
-        })
+        Ok(AcceptedKeyring { watermark })
     }
 
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
@@ -1175,20 +1203,33 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// chain-walk a remote client would apply (`verify_transition`). A failure is OUR bug, not
     /// the user's — we refuse to persist a keyring our own verifier would later reject, and
     /// surface it as Internal. On success the keyring + floor advance in one store transaction.
+    /// Verify a locally-produced keyring transition, then persist it under the chain watermark and RETURN
+    /// that watermark. `pin` is the produced write epoch's `(key_id, H(DEK))` when the op recomputed the
+    /// write epoch (add/remove member) — it's committed so recover can authenticate that epoch to key
+    /// material (OPE-286). When `pin` is `None` the op minted no new epoch (a co-owner signer change), so
+    /// the stored watermark's pin is carried forward rather than erased.
     fn commit_transition(
         &self,
         tree_key: &str,
         prior_bytes: &[u8],
         produced_bytes: &[u8],
-    ) -> Result<u32> {
+        pin: Option<(&[u8], &[u8])>,
+    ) -> Result<Vec<u8>> {
         let prior = decode_keyring(prior_bytes)?;
         let produced = decode_keyring(produced_bytes)?;
         let new_anchor = verify_transition(&KeyringAnchor::from_keyring(&prior), &produced)
             .map_err(self_check_failed)?;
+        let watermark = match pin {
+            Some((key_id, dek_hash)) => chain_watermark_pinned(new_anchor.revision, key_id, dek_hash),
+            None => {
+                let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+                chain_watermark_carry(new_anchor.revision, &stored)
+            }
+        };
         self.store
-            .commit_keyring(tree_key, produced_bytes, &chain_watermark(new_anchor.revision))
+            .commit_keyring(tree_key, produced_bytes, &watermark)
             .map_err(VaultError::storage)?;
-        Ok(new_anchor.revision)
+        Ok(watermark)
     }
 
     fn sealer(&self, id: &str) -> Result<Arc<SealerSet>> {
@@ -1215,20 +1256,47 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
 // ---------------------------------------------------------------- helpers
 
-/// Encode a chain keyring revision as the engine-opaque watermark (4-byte big-endian — the chain's cursor
-/// shape). The dag produces its own opaque watermark through the lifecycle trait; only the chain-specific
-/// membership/accept paths, which still speak in revisions, encode here.
+const WM_KEY_ID_LEN: usize = 16;
+const WM_DEK_HASH_LEN: usize = 32;
+
+/// Encode a chain keyring revision as a bare 4-byte big-endian watermark with NO write-epoch pin — a
+/// test-only fixture builder now that all production paths pin or carry the pin forward (OPE-286 phase 2).
+#[cfg_attr(not(test), allow(dead_code))]
 fn chain_watermark(revision: u32) -> Vec<u8> {
     revision.to_be_bytes().to_vec()
 }
 
+/// The full chain watermark: `revision(4) ‖ write_key_id(16) ‖ H(DEK)(32)` — commits recover to the write
+/// epoch's key material (OPE-286 phase 2). Falls back to revision-only if the pin isn't the expected size.
+fn chain_watermark_pinned(revision: u32, write_key_id: &[u8], write_dek_hash: &[u8]) -> Vec<u8> {
+    let mut wm = revision.to_be_bytes().to_vec();
+    if write_key_id.len() == WM_KEY_ID_LEN && write_dek_hash.len() == WM_DEK_HASH_LEN {
+        wm.extend_from_slice(write_key_id);
+        wm.extend_from_slice(write_dek_hash);
+    }
+    wm
+}
+
+/// Re-stamp the stored watermark's write-epoch pin under a new revision — for ops that mint NO new epoch
+/// (a co-owner signer change, or adopting a remote run), so the recover pin is carried forward rather than
+/// ERASED (OPE-286 phase 2). Revision-only if the stored watermark carried no pin.
+///
+/// Residual: adopting a remote run that *did* rotate the epoch (a removal on another device) carries a now
+/// STALE pin forward — recover then refuses (pin mismatch) until the next unlock recomputes it. That's a
+/// fail-closed refusal, never a silent mis-select, and is the honest cost of not opening the DEK on the
+/// keyring-only accept path (documented alongside the stateless-recovery bootstrap residual).
+fn chain_watermark_carry(revision: u32, stored: &[u8]) -> Vec<u8> {
+    let mut wm = revision.to_be_bytes().to_vec();
+    if stored.len() == 4 + WM_KEY_ID_LEN + WM_DEK_HASH_LEN {
+        wm.extend_from_slice(&stored[4..]);
+    }
+    wm
+}
+
 /// Decode a chain watermark's scalar revision — its first 4 big-endian bytes. The chain watermark is
-/// `revision(4) [‖ write_key_id ‖ H(DEK)]` since OPE-286 (the epoch pin the ChainVault threads through
-/// recover); this reads only the revision (empty / too-short = 0). Only the chain-only membership/accept
-/// paths use it, to pass a scalar floor to `vault::*`. NOTE (OPE-286 phase 2): the membership paths still
-/// emit a revision-only watermark via `chain_watermark`, which would ERASE a recover pin if it overwrote a
-/// full watermark — a hard gate to close (carry the write-epoch pin forward) BEFORE chain membership is
-/// app-wired (OPE-10).
+/// `revision(4) [‖ write_key_id(16) ‖ H(DEK)(32)]` since OPE-286 (the epoch pin the ChainVault threads
+/// through recover); this reads only the revision (empty / too-short = 0). Only the chain-only
+/// membership/accept paths use it, to pass a scalar floor to `vault::*`.
 fn chain_floor(watermark: &[u8]) -> u32 {
     watermark
         .get(..4)
@@ -1756,6 +1824,49 @@ mod tests {
     }
 
     #[test]
+    fn chain_membership_carries_the_recover_pin_forward() {
+        // OPE-286 phase 2: a chain membership op must emit the write-epoch pin (revision ‖ key_id ‖ H(DEK)
+        // = 52 bytes), never a bare revision that would erase the recover commitment. An add carries the
+        // unchanged epoch's pin forward; a removal mints a new epoch and pins THAT; recover then still
+        // authenticates the write epoch instead of the unauthenticated max-ordinal fallback.
+        const PINNED: usize = 4 + WM_KEY_ID_LEN + WM_DEK_HASH_LEN;
+        let h = host();
+        let p = h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
+        assert_eq!(p.watermark.len(), PINNED, "provision pins the write epoch");
+
+        let m = h.provision_member("member pass".into()).unwrap();
+        let added = h
+            .add_member(
+                KEY,
+                TREE,
+                "owner pass".into(),
+                MEMBER,
+                MEMBER2,
+                "editor",
+                &m.hpke_public,
+                &m.author_public,
+            )
+            .unwrap();
+        assert_eq!(added.watermark.len(), PINNED, "an add must not erase the pin");
+        // An add mints no epoch → the SAME write-epoch pin is carried forward.
+        assert_eq!(&added.watermark[4..], &p.watermark[4..]);
+
+        let removed = h
+            .remove_member(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2)
+            .unwrap();
+        assert_eq!(removed.watermark.len(), PINNED);
+        // A removal mints a fresh forward-secret epoch → a DIFFERENT pin.
+        assert_ne!(&removed.watermark[4..], &p.watermark[4..]);
+
+        // The pin survived both ops, so recover authenticates the write epoch and succeeds.
+        let r = h
+            .recover(KEY, TREE, p.recovery_code.clone(), "new pass".into(), MEMBER)
+            .unwrap();
+        assert_eq!(chain_floor(&r.watermark), 4);
+        assert!(h.unlock(KEY, TREE, "new pass".into(), MEMBER).is_ok());
+    }
+
+    #[test]
     fn unlock_without_a_keyring_is_no_keyring() {
         let h = host();
         assert_eq!(
@@ -2018,7 +2129,7 @@ mod tests {
 
         // The self-check rejects it as an internal fault (a keyring our own verifier refuses)...
         let err = h
-            .commit_transition(KEY, &prior_bytes, &bad_bytes)
+            .commit_transition(KEY, &prior_bytes, &bad_bytes, None)
             .unwrap_err();
         assert_eq!(err.code, VaultErrorCode::Internal);
         // ...and nothing was persisted: the stored keyring is untouched.

@@ -54,6 +54,17 @@ fn dek_hash(dek: &[u8]) -> Vec<u8> {
     sha2::Sha256::digest(dek).to_vec()
 }
 
+/// The write epoch's `(key_id, H(DEK))` commitment — the highest-ordinal epoch's id and its DEK hash — for
+/// the recover watermark's epoch pin (OPE-286). The DEKs come from a VERIFIED open, so this witnesses the
+/// real key material. Used by the membership flows so a chain add/remove carries the pin forward (an add
+/// leaves the write epoch unchanged; a removal mints a fresh one that this then commits to).
+fn write_epoch_pin(deks: &[(Vec<u8>, u32, Dek)]) -> Result<(Vec<u8>, Vec<u8>), SealerError> {
+    deks.iter()
+        .max_by_key(|(_, e, _)| *e)
+        .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
+        .ok_or(SealerError::MissingWrap)
+}
+
 
 /// Result of [`provision`]: the encoded keyring to store, the recovery code to show ONCE,
 /// and the ready sealer set (built from the fresh DEK — one Argon2id, no second unlock).
@@ -583,6 +594,10 @@ pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, Seal
 pub struct MemberAdded {
     pub keyring: Vec<u8>,
     pub revision: u32,
+    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to carry forward in the watermark — an add mints
+    /// no new epoch, so the recover pin is preserved rather than erased (OPE-286).
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Add a member to a shared tree. An authorized signer (V1: the owner) re-opens the
@@ -767,6 +782,9 @@ pub struct MemberRemoved {
     pub keyring: Vec<u8>,
     pub revision: u32,
     pub sealer: SealerSet,
+    /// The NEW forward-secret write epoch's `key_id` + `H(DEK)` for the watermark's recover pin (OPE-286).
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Remove a member with **forward-secure revocation**: mint a fresh DEK under a new epoch,
@@ -827,12 +845,16 @@ pub fn remove_member(
     // The owner re-seals with a set spanning every epoch (reached via the RRK); the new epoch
     // is the highest, so the set writes under it.
     let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, owner_member_id, &rrk_secret)?;
-    let write_key_id = write_epoch_by_ordinal(&deks)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+    // Pin the freshly-minted write epoch (key_id + H(DEK)) into the result so the watermark commits to it
+    // for the next recover (OPE-286 phase 2), before `deks` is moved into the sealer.
+    let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
         sealer,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -899,12 +921,14 @@ pub fn remove_member_as_co_owner(
     // The co-owner re-seals with a set spanning the epochs their own wraps reach (including
     // the new one they were re-wrapped into); the new epoch is the highest, so it's the write.
     let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, co_owner_member_id, &acc.hpke_secret)?;
-    let write_key_id = write_epoch_by_ordinal(&deks)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+    let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
         sealer,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -1303,9 +1327,14 @@ fn do_add_member(
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
     sign_keyring(&mut keyring, identity);
+    // An add mints no new epoch — carry the unchanged write epoch's pin forward so the watermark keeps
+    // the recover commitment rather than erasing it (OPE-286 phase 2).
+    let (write_key_id, write_dek_hash) = write_epoch_pin(deks)?;
     Ok(MemberAdded {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
