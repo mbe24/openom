@@ -45,6 +45,17 @@ impl AppVault {
             AppVault::Dag(_) => EngineKind::Dag,
         }
     }
+
+    /// The DAG engine, if this is one — the seam a host uses to reach the dag-specific membership authoring
+    /// (add/remove member, member-unlock, reseal, merge), which is deliberately NOT on the shared lifecycle
+    /// trait (the chain and dag signatures differ). `None` on a chain deployment. `DagVault` is a zero-sized
+    /// selector, so this hands back a value, not a borrow.
+    pub fn as_dag(&self) -> Option<DagVault> {
+        match self {
+            AppVault::Dag(_) => Some(DagVault),
+            AppVault::Chain(_) => None,
+        }
+    }
 }
 
 impl KeyringLifecycle for AppVault {

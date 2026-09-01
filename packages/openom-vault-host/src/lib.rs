@@ -12,7 +12,7 @@ use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::Message;
 use openom_sealer::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_sealer::{vault, AppVault};
+use openom_sealer::{vault, AppVault, DagVault, KeyringRole};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use serde::Serialize;
 
@@ -257,6 +257,15 @@ pub struct CoOwnerChanged {
 #[serde(rename_all = "camelCase")]
 pub struct AcceptedKeyring {
     pub watermark: Vec<u8>,
+}
+
+/// Result of a dag [`VaultHost::dag_reseal`]: the (possibly unchanged) watermark now anchored locally, and
+/// whether a repair was actually appended (`false` = nothing was stale, an idempotent no-op).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resealed {
+    pub watermark: Vec<u8>,
+    pub resealed: bool,
 }
 
 // ---------------------------------------------------------------- registry
@@ -953,7 +962,201 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         self.registry.clear();
     }
 
+    // --- dag membership authoring (OPE-278) ---
+    //
+    // The dag engine's membership + reseal + merge live OFF the shared lifecycle trait (their signatures
+    // differ from the chain's — the dag needs no trusted-signer set and no scalar floor), so the host reaches
+    // them through `AppVault::as_dag` and dispatches here. Each persists the new opaque anchor + its frontier
+    // watermark through the SAME `VaultStore` seam the chain uses. Calling one on a chain deployment is a
+    // `BadRequest`, not a panic.
+
+    /// Add a member to a dag tree (owner action): the owner reaches every epoch's DEK and wraps it to the
+    /// joiner's HPKE key, appending a signed Add op. Persists the new anchor + watermark; the owner's live
+    /// sealer is unaffected (Add mints no new epoch). The joiner's keys MUST be verified out-of-band first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dag_add_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        new_member_id: &str,
+        role: &str,
+        member_author_public: &[u8],
+        member_hpke_public: &[u8],
+    ) -> Result<MemberAdded> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(owner_member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let new_anchor = dag.add_member(
+            &ctx,
+            &anchor,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            new_member_id,
+            parse_keyring_role(role)?,
+            key32(member_author_public, "member author key")?,
+            key32(member_hpke_public, "member hpke key")?,
+        )?;
+        let watermark = dag.watermark(&new_anchor)?;
+        self.store
+            .commit_keyring(tree_key, &new_anchor, &watermark)
+            .map_err(VaultError::storage)?;
+        Ok(MemberAdded { watermark })
+    }
+
+    /// Remove a member from a dag tree (owner action) with forward secrecy: appends a Remove op minting a
+    /// fresh epoch the removed member can't reach, then re-unlocks under that epoch so the caller gets a
+    /// sealer scoped to it (matching the chain's remove). Persists the new anchor + watermark.
+    pub fn dag_remove_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        remove_member_id: &str,
+    ) -> Result<MemberRemoved> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let pass = Passphrase::new(owner_passphrase.into_bytes());
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(owner_member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let new_anchor = dag.remove_member(&ctx, &anchor, &pass, remove_member_id)?;
+        let watermark = dag.watermark(&new_anchor)?;
+        self.store
+            .commit_keyring(tree_key, &new_anchor, &watermark)
+            .map_err(VaultError::storage)?;
+        // Re-unlock under the fresh forward-secret epoch so the caller re-seals with a scoped sealer.
+        let u = dag.unlock(&ctx, &new_anchor, &pass)?;
+        let id = self.register(u.sealer)?;
+        Ok(MemberRemoved {
+            sealer_id: id,
+            watermark,
+        })
+    }
+
+    /// Unlock a dag tree AS AN ORDINARY member: reach the DEKs via the member's own per-epoch HPKE wraps (not
+    /// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key (dag membership
+    /// is resolved from the op-DAG, so no caller-supplied trusted-signer set is needed, unlike the chain).
+    pub fn dag_unlock_as_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        member_kdf_params: &[u8],
+        member_id: &str,
+    ) -> Result<Unlocked> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let kdf = KdfParams::decode(member_kdf_params).map_err(|e| {
+            VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
+        })?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let u = dag.unlock_as_member(&ctx, &anchor, &Passphrase::new(passphrase.into_bytes()), &kdf)?;
+        let id = self.register(u.sealer)?;
+        Ok(Unlocked {
+            sealer_id: id,
+            watermark: u.watermark,
+            needs_reseal: u.needs_reseal,
+            did_key: u.did_key.into_string(),
+        })
+    }
+
+    /// Merge a peer's dag anchor of the SAME tree into the local one (the causal set-union of their op
+    /// closures) and persist the merged anchor + advanced watermark. Merge only ADDS ops, so it can't roll the
+    /// local anchor back — no floor needed. A following `unlock`/`dag_unlock_as_member` reports `needs_reseal`
+    /// if the merged write epoch is stale (a concurrent-removal race); call [`dag_reseal`] to repair.
+    pub fn dag_merge_remote(&self, tree_key: &str, remote_anchor: &[u8]) -> Result<AcceptedKeyring> {
+        let dag = self.dag()?;
+        let local = self.require_keyring(tree_key)?;
+        let merged = dag.merge(&local, remote_anchor)?;
+        let watermark = dag.watermark(&merged)?;
+        self.store
+            .commit_keyring(tree_key, &merged, &watermark)
+            .map_err(VaultError::storage)?;
+        Ok(AcceptedKeyring { watermark })
+    }
+
+    /// Repair a stale write epoch (OPE-282) after a concurrent membership merge: if the resolved keyring needs
+    /// it, append a covering Reseal op (a fresh DEK wrapped to exactly the resolved membership). Idempotent —
+    /// a no-op (`resealed=false`, nothing persisted) when nothing is stale. The stored watermark is the floor.
+    pub fn dag_reseal(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+    ) -> Result<Resealed> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(owner_member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let r = dag.reseal(
+            &ctx,
+            &anchor,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &floor,
+        )?;
+        if r.resealed {
+            self.store
+                .commit_keyring(tree_key, &r.anchor, &r.watermark)
+                .map_err(VaultError::storage)?;
+        }
+        Ok(Resealed {
+            watermark: r.watermark,
+            resealed: r.resealed,
+        })
+    }
+
     // --- internals ---
+
+    /// The dag engine handle, or a `BadRequest` on a chain deployment — the gate for every dag membership op.
+    fn dag(&self) -> Result<DagVault> {
+        self.vault().as_dag().ok_or_else(|| {
+            VaultError::new(
+                VaultErrorCode::BadRequest,
+                "this operation requires the dag keyring engine",
+            )
+        })
+    }
 
     fn require_keyring(&self, tree_key: &str) -> Result<Vec<u8>> {
         self.store
@@ -1122,6 +1325,32 @@ fn parse_member_role(s: &str) -> Result<MemberRole> {
             format!("unknown role: {other}"),
         )),
     }
+}
+
+/// Parse a role tag into the dag engine's [`KeyringRole`] (the openom-roles axis, lower is stronger). The
+/// dag membership methods take this rather than the chain's `MemberRole`.
+fn parse_keyring_role(s: &str) -> Result<KeyringRole> {
+    match s {
+        "owner" => Ok(KeyringRole::OWNER),
+        "co-owner" => Ok(KeyringRole::CO_OWNER),
+        "maintainer" => Ok(KeyringRole::MAINTAINER),
+        "editor" => Ok(KeyringRole::EDITOR),
+        "viewer" => Ok(KeyringRole::VIEWER),
+        other => Err(VaultError::new(
+            VaultErrorCode::BadRequest,
+            format!("unknown role: {other}"),
+        )),
+    }
+}
+
+/// A 32-byte public key from wire bytes, or a `BadRequest` naming the field.
+fn key32(b: &[u8], what: &str) -> Result<[u8; 32]> {
+    b.try_into().map_err(|_| {
+        VaultError::new(
+            VaultErrorCode::BadRequest,
+            format!("{what} must be 32 bytes, got {}", b.len()),
+        )
+    })
 }
 
 /// Decode the caller's pinned signer verify-keys (32-byte Ed25519 each). At least one is
@@ -1344,6 +1573,127 @@ mod tests {
             b"heirloom"
         );
         assert!(h.unlock(KEY, TREE, "new".into(), MEMBER).is_ok());
+    }
+
+    #[test]
+    fn a_dag_owner_adds_a_member_who_unlocks_through_the_host() {
+        // Dag membership authoring through the host (OPE-278): the owner adds bob, and bob unlocks AS A
+        // MEMBER with his own passphrase + account kdf (reaching the DEK via his HPKE wrap, not the RRK) and
+        // reads the shared data. The dag membership ops are refused on a chain deployment.
+        let h = dag_host();
+        let p = h.provision(KEY, TREE, "owner horse".into(), MEMBER).unwrap();
+        let envelope = seal(&h, &p.sealer_id, b"shared data");
+
+        let bob = h.provision_member("bob pass".into()).unwrap();
+        let added = h
+            .dag_add_member(
+                KEY, TREE, "owner horse".into(), MEMBER, "acct-bob", "editor",
+                &bob.author_public, &bob.hpke_public,
+            )
+            .unwrap();
+        assert!(!added.watermark.is_empty(), "adding a member advances the persisted frontier");
+
+        let u = h
+            .dag_unlock_as_member(KEY, TREE, "bob pass".into(), &bob.kdf_params, "acct-bob")
+            .unwrap();
+        assert_eq!(
+            h.open_entry(&u.sealer_id, "snapshot", &envelope).unwrap(),
+            b"shared data"
+        );
+        assert!(
+            h.dag_unlock_as_member(KEY, TREE, "wrong".into(), &bob.kdf_params, "acct-bob")
+                .is_err(),
+            "a wrong member passphrase is rejected"
+        );
+
+        // The dag membership ops require the dag engine — a chain host refuses them.
+        let chain = host();
+        chain.provision(KEY, TREE, "owner".into(), MEMBER).unwrap();
+        assert_eq!(
+            chain
+                .dag_add_member(
+                    KEY, TREE, "owner".into(), MEMBER, "acct-x", "editor",
+                    &bob.author_public, &bob.hpke_public,
+                )
+                .unwrap_err()
+                .code,
+            VaultErrorCode::BadRequest
+        );
+    }
+
+    #[test]
+    fn two_dag_replicas_concurrently_remove_then_merge_reseal_and_converge() {
+        // Two devices (hosts A and B) of the SAME dag-tree owner, each with its own store. Both start from a
+        // tree with editors bob, carol, dave. A removes bob; B concurrently removes carol (both parent on the
+        // same frontier). A merges B's branch: the op-DAG set-unions, BOTH removals take effect (resolved
+        // membership converges to {owner, dave}), and the merged write epoch is stale — it still wraps a
+        // concurrently-removed member. Reseal mints a covering epoch; then dave (the survivor) still reads,
+        // while bob and carol (removed) are locked out. Forward secrecy across a concurrent-merge, end to end
+        // through the host — the flagship dag capability (OPE-278 / OPE-282).
+        let owner = "owner horse";
+
+        // --- Host A: provision + add three editors ---
+        let a = dag_host();
+        a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let bob = a.provision_member("bob pass".into()).unwrap();
+        let carol = a.provision_member("carol pass".into()).unwrap();
+        let dave = a.provision_member("dave pass".into()).unwrap();
+        for (id, m) in [
+            ("acct-bob", &bob),
+            ("acct-carol", &carol),
+            ("acct-dave", &dave),
+        ] {
+            a.dag_add_member(KEY, TREE, owner.into(), MEMBER, id, "editor", &m.author_public, &m.hpke_public)
+                .unwrap();
+        }
+        // Snapshot the shared anchor after the three adds, and seed host B (the second device) with it.
+        let shared = a.store.load_keyring(KEY).unwrap().unwrap();
+        let shared_wm = a.store.watermark(KEY).unwrap();
+        let b = dag_host();
+        b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
+
+        // --- Concurrent removals: A removes bob, B removes carol (both children of `shared`'s frontier) ---
+        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
+        b.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-carol").unwrap();
+        let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
+
+        // --- A merges B's branch: the two concurrent removals set-union onto A's anchor ---
+        a.dag_merge_remote(KEY, &b_branch).unwrap();
+
+        // The merged write epoch is stale (still wraps a concurrently-removed member).
+        let u = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(u.needs_reseal, "concurrent removals leave the merged write epoch stale");
+        a.lock(&u.sealer_id);
+
+        // Reseal repairs it; the flag clears and the owner seals a post-merge entry under the covering epoch.
+        let re = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(re.resealed, "a stale write epoch is repaired");
+        let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(!u2.needs_reseal, "after reseal the write epoch covers the resolved membership");
+        let post = seal(&a, &u2.sealer_id, b"after the merge");
+
+        // dave (survivor) still reads it; bob and carol (both concurrently removed) are locked out.
+        let ud = a
+            .dag_unlock_as_member(KEY, TREE, "dave pass".into(), &dave.kdf_params, "acct-dave")
+            .unwrap();
+        assert_eq!(
+            a.open_entry(&ud.sealer_id, "snapshot", &post).unwrap(),
+            b"after the merge"
+        );
+        assert!(
+            a.dag_unlock_as_member(KEY, TREE, "bob pass".into(), &bob.kdf_params, "acct-bob")
+                .is_err(),
+            "a concurrently-removed member is locked out after the merge + reseal"
+        );
+        assert!(
+            a.dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+                .is_err(),
+            "the other concurrently-removed member is locked out too"
+        );
+
+        // A second reseal is an idempotent no-op — the replicas have converged.
+        let re2 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(!re2.resealed, "nothing stale -> reseal is a no-op");
     }
 
     #[test]

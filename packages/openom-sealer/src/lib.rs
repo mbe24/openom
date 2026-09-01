@@ -12,7 +12,10 @@ pub mod lifecycle;
 pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
 
 pub mod dag_vault;
-pub use dag_vault::DagVault;
+pub use dag_vault::{DagVault, Resealed};
+// Re-exported: the dag membership host methods (add_member) take a KeyringRole, so callers name it
+// through the sealer without a direct openom-keyring-dag dependency.
+pub use openom_keyring_dag::KeyringRole;
 
 pub mod app_vault;
 pub use app_vault::AppVault;

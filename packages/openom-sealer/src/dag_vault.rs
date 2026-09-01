@@ -490,6 +490,20 @@ impl KeyringLifecycle for DagVault {
 }
 
 impl DagVault {
+    /// Merge a remote anchor of the SAME tree into the local one — the causal set-union of their op closures
+    /// (the op-DAG is a set-union CRDT), so concurrent membership branches both survive and resolve
+    /// deterministically. The host calls this to fold in a peer's anchor before persisting + re-watermarking;
+    /// a following `unlock` reports `needs_reseal` if the merged write epoch is stale (see [`Self::reseal`]).
+    pub fn merge(&self, local: &[u8], remote: &[u8]) -> Result<Vec<u8>, SealerError> {
+        dag_client::merge(local, remote).map_err(|e| SealerError::BadKeyring(e.to_string()))
+    }
+
+    /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
+    /// alongside the anchor and passes back as the floor on the next mutation. Opaque bytes to every caller.
+    pub fn watermark(&self, anchor: &[u8]) -> Result<Vec<u8>, SealerError> {
+        dag_client::watermark(anchor).map_err(map_floor_err)
+    }
+
     /// Add `new_member_id` (at `role`, with their OOB-verified keys) to a dag tree. The owner unwraps the
     /// RRK via their passphrase, reaches every epoch's DEK, wraps each to the new member's HPKE key, and
     /// appends an `Add` op carrying those per-epoch wraps in its sealing. Returns the new anchor. Inherent,
