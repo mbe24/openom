@@ -251,11 +251,13 @@ impl KeyringLifecycle for DagVault {
         );
 
         let sealer = sealer_set_from_deks(tree_id, replica_id, vec![(key_id.clone(), 0, dek)], key_id)?;
+        let watermark = dag_client::watermark(&anchor).map_err(map_floor_err)?;
         Ok(Provisioned {
             anchor,
             recovery_code: secrets.recovery_code,
             sealer,
             did_key,
+            watermark,
         })
     }
 

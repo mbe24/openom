@@ -14,6 +14,9 @@ pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
 pub mod dag_vault;
 pub use dag_vault::DagVault;
 
+pub mod app_vault;
+pub use app_vault::AppVault;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
 

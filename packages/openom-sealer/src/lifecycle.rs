@@ -52,6 +52,10 @@ pub struct Provisioned {
     pub recovery_code: RecoveryCode,
     pub sealer: SealerSet,
     pub did_key: DidKey,
+    /// The genesis anti-rollback cursor to persist — engine-opaque, like [`Unlocked::watermark`] (chain:
+    /// the genesis revision as bytes; dag: the genesis frontier). Without this the caller would have to
+    /// invent a starting floor, and a scalar guess (`1`) is only right for the chain by construction.
+    pub watermark: Vec<u8>,
 }
 
 /// Result of [`KeyringLifecycle::unlock`]: the sealer plus the opaque anti-rollback `watermark` the caller
@@ -165,6 +169,7 @@ impl KeyringLifecycle for ChainVault {
             recovery_code: p.recovery_code,
             sealer: p.sealer,
             did_key: p.did_key,
+            watermark: Self::watermark(p.revision),
         })
     }
 
@@ -331,6 +336,7 @@ mod tests {
         let p = engine
             .provision(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &pass)
             .unwrap();
+        assert!(!p.watermark.is_empty(), "provision reports a genesis watermark, not a stub");
         let sealed = p
             .sealer
             .seal_entry(&crate::SealContext::snapshot(0, Vec::new(), 0), b"parity data")
@@ -393,5 +399,9 @@ mod tests {
     fn chain_and_dag_satisfy_the_same_lifecycle_contract() {
         lifecycle_contract(&ChainVault);
         lifecycle_contract(&crate::DagVault);
+        // ...and the same contract holds through the AppVault enum for BOTH engines — the single dispatch
+        // point (OPE-278) delegates identically, so the hosts can drive one type (OPE-276's "write once").
+        lifecycle_contract(&crate::AppVault::Chain(ChainVault));
+        lifecycle_contract(&crate::AppVault::Dag(crate::DagVault));
     }
 }

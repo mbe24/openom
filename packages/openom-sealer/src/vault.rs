@@ -56,6 +56,8 @@ pub struct Provisioned {
     /// The owner's stable author id — a `did:key` over their PUBLIC identity key. Public; stamped as
     /// `createdBy` on claims. Distinct from the per-context sync replica id.
     pub did_key: DidKey,
+    /// The genesis keyring `revision` the caller must watermark (parallels [`Unlocked::revision`]).
+    pub revision: u32,
 }
 
 /// Result of [`unlock`]: the sealer set (all epochs the caller can reach) plus the keyring
@@ -161,6 +163,7 @@ pub fn provision(
         KeyId::new(key_id),
     );
     Ok(Provisioned {
+        revision: keyring.revision,
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
         sealer,
