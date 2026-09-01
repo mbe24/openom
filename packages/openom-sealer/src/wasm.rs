@@ -18,6 +18,7 @@ use openom_keyring::{
     decode_governing_ref, epoch_is_attributed, keyring_hash, verify_entry, verify_reset,
     verify_walk, GoverningKeyring, KeyringAnchor, VerifyingKey,
 };
+use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
@@ -801,6 +802,127 @@ pub fn dag_reseal(
         keyring: r.anchor,
         watermark: r.watermark,
         resealed: r.resealed,
+    })
+}
+
+// ---- keyring membership summary + basis (OPE-278/293 client hook) ----
+//
+// What the client pushes to the server's advisory /access endpoint after a keyring change: the resolved
+// {memberId, role} view + the engine-opaque `basis` (its keyring frontier). Plus `keyringCovers` — the
+// coverage check the client runs BEFORE asserting, so a causally-stale device doesn't overwrite a newer
+// view (dag = check_floor on the frontier; chain = a revision compare). Both engine-neutral to JS: the
+// caller (membershipSummary.js) feeds the summary + coversBasis to pushMembershipSummary.
+
+#[derive(serde::Serialize)]
+struct KeyringSummaryDto {
+    members: Vec<SummaryMemberDto>,
+    basis: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SummaryMemberDto {
+    #[serde(rename = "memberId")]
+    member_id: String,
+    role: i16,
+}
+
+fn hex(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
+}
+
+/// A dag frontier (concatenated 32-byte op-ids) → `["op:<hex>", ...]`.
+fn dag_basis_tokens(anchor: &[u8]) -> Result<Vec<String>, JsError> {
+    let wm = dag_client::watermark(anchor).map_err(|e| JsError::new(&e.to_string()))?;
+    if wm.len() % 32 != 0 {
+        return Err(JsError::new("dag watermark is not a whole number of op-ids"));
+    }
+    Ok(wm.chunks_exact(32).map(|c| format!("op:{}", hex(c))).collect())
+}
+
+/// Decode `["op:<hex>", ...]` back to the concatenated 32-byte floor for `check_floor`. `None` if any token
+/// is malformed (→ treated as "not covered", the safe default that triggers a refresh).
+fn dag_floor_from_tokens(tokens: &[String]) -> Option<Vec<u8>> {
+    let mut floor = Vec::with_capacity(tokens.len() * 32);
+    for t in tokens {
+        let h = t.strip_prefix("op:")?;
+        if h.len() != 64 {
+            return None;
+        }
+        for i in 0..32 {
+            floor.push(u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()?);
+        }
+    }
+    Some(floor)
+}
+
+/// The resolved advisory membership + the engine-opaque basis for a keyring anchor, as a JSON string
+/// `{"members":[{"memberId","role"}],"basis":[...]}` — what the client asserts to the server's /access.
+#[wasm_bindgen(js_name = keyringSummary)]
+pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> {
+    let dto = match parse_engine(engine)? {
+        EngineKind::Dag => {
+            let resolved = dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
+            KeyringSummaryDto {
+                members: resolved
+                    .members
+                    .members
+                    .iter()
+                    .map(|m| SummaryMemberDto {
+                        member_id: m.member_id.clone(),
+                        role: m.role,
+                    })
+                    .collect(),
+                basis: dag_basis_tokens(keyring)?,
+            }
+        }
+        EngineKind::Chain => {
+            let k = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            KeyringSummaryDto {
+                members: k
+                    .members
+                    .iter()
+                    .map(|m| SummaryMemberDto {
+                        member_id: m.member_id.clone(),
+                        role: m.role as i16,
+                    })
+                    .collect(),
+                basis: vec![format!("rev:{}:{}", k.revision, hex(keyring_hash(&k).as_slice()))],
+            }
+        }
+    };
+    serde_json::to_string(&dto).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Whether this keyring's trust state COVERS `stored_basis` (the frontier a prior /access push was computed
+/// from) — the client's pre-push staleness guard. dag: every stored tip op-id is in our op closure
+/// (`check_floor`); chain: our revision ≥ the stored revision. An empty basis is trivially covered; a
+/// malformed stored basis is treated as NOT covered (safe default — the caller then refreshes).
+#[wasm_bindgen(js_name = keyringCovers)]
+pub fn keyring_covers(engine: &str, keyring: &[u8], stored_basis: Vec<String>) -> Result<bool, JsError> {
+    if stored_basis.is_empty() {
+        return Ok(true);
+    }
+    Ok(match parse_engine(engine)? {
+        EngineKind::Dag => match dag_floor_from_tokens(&stored_basis) {
+            Some(floor) => dag_client::check_floor(keyring, &floor).is_ok(),
+            None => false,
+        },
+        EngineKind::Chain => {
+            let k = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            match stored_basis
+                .first()
+                .and_then(|t| t.strip_prefix("rev:"))
+                .and_then(|s| s.split(':').next())
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some(stored_rev) => k.revision >= stored_rev,
+                None => false,
+            }
+        }
     })
 }
 

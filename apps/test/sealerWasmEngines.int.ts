@@ -12,7 +12,10 @@ import init, {
   dagUnlockAsMember as wasmDagUnlockAsMember,
   dagMerge as wasmDagMerge,
   dagReseal as wasmDagReseal,
+  keyringSummary as wasmKeyringSummary,
+  keyringCovers as wasmKeyringCovers,
 } from '../app/src/vendor/sealer/openom_sealer.js';
+import { pushMembershipSummary } from '../app/src/core/membershipSummary.js';
 
 // The REAL wasm sealer, driven directly (no fake worker): loads the vendored openom_sealer_bg.wasm and
 // runs the passphrase lifecycle through it, selecting the engine by tag. This is the web host's half of
@@ -273,5 +276,86 @@ describe('the real wasm runs dag membership + concurrent merge end to end (OPE-2
     expect(() =>
       wasmDagAddMember(anchor0, ownerPass, TREE, MEMBER, replica(1), 'x', 'sovereign', bobAuthor, bobHpke),
     ).toThrow(/unknown role/);
+  });
+});
+
+describe('keyring membership summary + basis coverage (real wasm, OPE-293/294)', () => {
+  it('dag: summary resolves members + a frontier basis, and coverage tracks the frontier', () => {
+    const p = wasmProvision('dag', 'owner horse', TREE, MEMBER, replica(1));
+    const anchor0 = p.keyring;
+    p.takeSealer()!.free();
+    p.free();
+
+    const s0 = JSON.parse(wasmKeyringSummary('dag', anchor0));
+    expect(s0.members.some((m: any) => m.memberId === MEMBER && m.role === 1)).toBe(true);
+    expect(s0.basis.length).toBeGreaterThan(0);
+    expect(s0.basis.every((t: string) => /^op:[0-9a-f]{64}$/.test(t))).toBe(true);
+
+    // Our own basis is covered; a bogus tip is not; an empty basis is trivially covered.
+    expect(wasmKeyringCovers('dag', anchor0, s0.basis)).toBe(true);
+    expect(wasmKeyringCovers('dag', anchor0, ['op:' + 'ab'.repeat(32)])).toBe(false);
+    expect(wasmKeyringCovers('dag', anchor0, [])).toBe(true);
+
+    // Advance the frontier by adding a member.
+    const bob = wasmProvisionMember('bob pass');
+    const added = wasmDagAddMember(anchor0, 'owner horse', TREE, MEMBER, replica(1), 'acct-bob', 'editor', bob.authorPublic, bob.hpkePublic);
+    const anchor1 = added.keyring;
+    added.free();
+    bob.free();
+    const s1 = JSON.parse(wasmKeyringSummary('dag', anchor1));
+    expect(s1.members.some((m: any) => m.memberId === 'acct-bob')).toBe(true);
+
+    // The advanced anchor covers the OLD basis (old tip is now an ancestor); the STALE anchor does NOT
+    // cover the new basis (it lacks the new tip) — exactly the pre-push staleness guard.
+    expect(wasmKeyringCovers('dag', anchor1, s0.basis)).toBe(true);
+    expect(wasmKeyringCovers('dag', anchor0, s1.basis)).toBe(false);
+  });
+
+  it('chain: summary + revision-based coverage', () => {
+    const p = wasmProvision('chain', 'owner horse', TREE, MEMBER, replica(1));
+    const anchor = p.keyring;
+    p.takeSealer()!.free();
+    p.free();
+    const s = JSON.parse(wasmKeyringSummary('chain', anchor));
+    expect(s.members.some((m: any) => m.memberId === MEMBER && m.role === 1)).toBe(true);
+    expect(s.basis).toHaveLength(1);
+    expect(s.basis[0]).toMatch(/^rev:1:[0-9a-f]{64}$/);
+    expect(wasmKeyringCovers('chain', anchor, s.basis)).toBe(true);
+    expect(wasmKeyringCovers('chain', anchor, ['rev:5:' + 'ab'.repeat(32)])).toBe(false); // my rev 1 < 5
+  });
+
+  it('the real wasm seam drives pushMembershipSummary against an in-memory /access', async () => {
+    // A tiny in-memory RemoteStore: one summary per tree, CAS on a generation.
+    const store = new Map<string, { generation: number; basis: string[]; members: any[] }>();
+    const remote = {
+      getAccess: async (id: string) => store.get(id) ?? null,
+      putAccess: async (id: string, { basis, expectedGeneration, members }: any) => {
+        const cur = store.get(id) ?? null;
+        const curGen = cur ? cur.generation : null;
+        if (expectedGeneration !== curGen) {
+          const e: any = new Error('conflict');
+          e.name = 'ConflictError';
+          throw e;
+        }
+        const generation = (curGen ?? 0) + 1;
+        store.set(id, { generation, basis, members });
+        return { generation, unchanged: false };
+      },
+    };
+
+    const p = wasmProvision('dag', 'owner horse', TREE, MEMBER, replica(1));
+    const anchor = p.keyring;
+    p.takeSealer()!.free();
+    p.free();
+    const summary = JSON.parse(wasmKeyringSummary('dag', anchor));
+    const out = await pushMembershipSummary(
+      remote,
+      'tree-1',
+      { view: summary.members, basis: summary.basis },
+      { coversBasis: (stored: string[]) => wasmKeyringCovers('dag', anchor, stored), refresh: async () => summary },
+    );
+    expect(out.generation).toBe(1);
+    expect(store.get('tree-1')!.members.some((m: any) => m.memberId === MEMBER)).toBe(true);
+    expect(store.get('tree-1')!.basis).toEqual(summary.basis);
   });
 });
