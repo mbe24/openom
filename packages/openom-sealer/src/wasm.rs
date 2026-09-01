@@ -22,7 +22,9 @@ use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
-use crate::{vault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
+use crate::lifecycle::{KeyringLifecycle, VaultContext};
+use crate::{vault, AppVault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
+use openom_keyring_seam::EngineKind;
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -200,6 +202,15 @@ fn to_js(e: SealerError) -> JsError {
     JsError::new(&e.to_string())
 }
 
+/// Parse the deployment's configured engine tag (a backend preset, never a per-tree user choice — OPE-278).
+fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
+    match s {
+        "chain" => Ok(EngineKind::Chain),
+        "dag" => Ok(EngineKind::Dag),
+        other => Err(JsError::new(&format!("unknown keyring engine: {other}"))),
+    }
+}
+
 // ---- the keyring vault (passphrase lifecycle) ----
 
 /// The result of a vault flow. Carries only non-secret outputs — the keyring (to store), the
@@ -211,7 +222,12 @@ pub struct VaultResult {
     keyring: Vec<u8>,
     recovery_code: String,
     did_key: String,
-    revision: u32,
+    /// The engine-opaque anti-rollback cursor to persist (chain: the 4-byte revision; dag: the frontier).
+    /// Replaces the old scalar `revision` so the same result serves both engines (OPE-278).
+    watermark: Vec<u8>,
+    /// Advisory: the dag write epoch is stale after a concurrent merge and a reseal is due (always `false`
+    /// for the chain). Never blocks; the client repairs it out-of-band.
+    needs_reseal: bool,
     sealer: Option<WasmSealer>,
 }
 
@@ -236,10 +252,16 @@ impl VaultResult {
         self.did_key.clone()
     }
 
-    /// The keyring revision the caller must watermark.
+    /// The engine-opaque anti-rollback cursor the caller must persist and pass back as the floor.
     #[wasm_bindgen(getter)]
-    pub fn revision(&self) -> u32 {
-        self.revision
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+
+    /// Whether the dag write epoch needs a reseal (always `false` for the chain).
+    #[wasm_bindgen(getter, js_name = needsReseal)]
+    pub fn needs_reseal(&self) -> bool {
+        self.needs_reseal
     }
 
     /// Take the sealer out to JS (once). `undefined` for change-passphrase (no new sealer).
@@ -259,109 +281,152 @@ impl VaultResult {
 /// 1, and the sealer.
 #[wasm_bindgen]
 pub fn provision(
+    engine: &str,
     passphrase: String,
     tree_id: &[u8],
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let p = vault::provision(
-        &Passphrase::new(passphrase.into_bytes()),
-        &TreeId::new(tree_id),
-        &MemberId::new(member_id),
-        &ReplicaId::new(replica_id),
-    )
-    .map_err(to_js)?;
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let p = vault
+        .provision(&ctx, &Passphrase::new(passphrase.into_bytes()))
+        .map_err(to_js)?;
     Ok(VaultResult {
-        keyring: p.keyring,
+        keyring: p.anchor,
         recovery_code: p.recovery_code.into_string(),
         did_key: p.did_key.into_string(),
-        revision: 1,
+        watermark: p.watermark,
+        needs_reseal: false,
         sealer: Some(WasmSealer { inner: p.sealer }),
     })
 }
 
-/// Open an existing keyring with a passphrase; returns the sealer + revision.
+/// Open an existing keyring with a passphrase; returns the sealer + the opaque watermark.
 #[wasm_bindgen]
 pub fn unlock(
+    engine: &str,
     keyring: &[u8],
     passphrase: String,
     tree_id: &[u8],
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let u = vault::unlock(
-        keyring,
-        &Passphrase::new(passphrase.into_bytes()),
-        &TreeId::new(tree_id),
-        &MemberId::new(member_id),
-        &ReplicaId::new(replica_id),
-    )
-    .map_err(to_js)?;
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let u = vault
+        .unlock(&ctx, keyring, &Passphrase::new(passphrase.into_bytes()))
+        .map_err(to_js)?;
     Ok(VaultResult {
         keyring: Vec::new(),
         recovery_code: String::new(),
         did_key: u.did_key.into_string(),
-        revision: u.revision,
+        watermark: u.watermark,
+        needs_reseal: u.needs_reseal,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
 
-/// Recover with the recovery code, re-provisioning under a new passphrase. `min_revision` is
-/// the caller's stored watermark (0 if none) — a served revision below it is refused.
+/// Recover with the recovery code, re-provisioning under a new passphrase. `floor` is the caller's
+/// stored opaque watermark (empty if none) — a served anchor below it is refused inside the engine.
 #[wasm_bindgen]
 pub fn recover(
+    engine: &str,
     keyring: &[u8],
     recovery_code: String,
     new_passphrase: String,
     tree_id: &[u8],
     member_id: &str,
     replica_id: &[u8],
-    min_revision: u32,
+    floor: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let r = vault::recover(
-        keyring,
-        &RecoveryCode::new(recovery_code),
-        &Passphrase::new(new_passphrase.into_bytes()),
-        &TreeId::new(tree_id),
-        &MemberId::new(member_id),
-        &ReplicaId::new(replica_id),
-        min_revision,
-    )
-    .map_err(to_js)?;
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let r = vault
+        .recover(
+            &ctx,
+            keyring,
+            &RecoveryCode::new(recovery_code),
+            &Passphrase::new(new_passphrase.into_bytes()),
+            floor,
+        )
+        .map_err(to_js)?;
     Ok(VaultResult {
-        keyring: r.keyring,
+        keyring: r.anchor,
         recovery_code: r.recovery_code.into_string(),
         did_key: r.did_key.into_string(),
-        revision: r.revision,
+        watermark: r.watermark,
+        needs_reseal: r.needs_reseal,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
 
-/// Change the passphrase (rotates the recovery code, bumps the revision). No new sealer — the
-/// DEK is unchanged, so the running one keeps working.
+/// Change the passphrase (rotates the recovery code, advances the watermark). No new sealer — the
+/// DEK is unchanged, so the running one keeps working. `floor` is the caller's opaque watermark.
 #[wasm_bindgen(js_name = changePassphrase)]
 pub fn change_passphrase(
+    engine: &str,
     keyring: &[u8],
     old_passphrase: String,
     new_passphrase: String,
     tree_id: &[u8],
     member_id: &str,
-    min_revision: u32,
+    replica_id: &[u8],
+    floor: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let re = vault::change_passphrase(
-        keyring,
-        &Passphrase::new(old_passphrase.into_bytes()),
-        &Passphrase::new(new_passphrase.into_bytes()),
-        &TreeId::new(tree_id),
-        &MemberId::new(member_id),
-        min_revision,
-    )
-    .map_err(to_js)?;
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let re = vault
+        .change_passphrase(
+            &ctx,
+            keyring,
+            &Passphrase::new(old_passphrase.into_bytes()),
+            &Passphrase::new(new_passphrase.into_bytes()),
+            floor,
+        )
+        .map_err(to_js)?;
     Ok(VaultResult {
-        keyring: re.keyring,
+        keyring: re.anchor,
         recovery_code: re.recovery_code.into_string(),
         did_key: String::new(),
-        revision: re.revision,
+        watermark: re.watermark,
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -439,7 +504,8 @@ pub fn add_member(
         keyring: added.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: added.revision,
+        watermark: added.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -477,7 +543,8 @@ pub fn unlock_as_member(
         keyring: Vec::new(),
         recovery_code: String::new(),
         did_key: u.did_key.into_string(),
-        revision: u.revision,
+        watermark: u.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
@@ -509,7 +576,8 @@ pub fn remove_member(
         keyring: r.keyring,
         recovery_code: String::new(), // removal no longer rotates the recovery code (RRK)
         did_key: String::new(),
-        revision: r.revision,
+        watermark: r.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
@@ -553,7 +621,8 @@ pub fn add_member_as_co_owner(
         keyring: added.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: added.revision,
+        watermark: added.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -592,7 +661,8 @@ pub fn remove_member_as_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: r.revision,
+        watermark: r.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
@@ -621,7 +691,8 @@ pub fn add_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: r.revision,
+        watermark: r.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -653,7 +724,8 @@ pub fn remove_co_owner(
         keyring: r.keyring,
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: r.revision,
+        watermark: r.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -683,7 +755,8 @@ pub fn accept_remote_keyring(
             keyring: Vec::new(),
             recovery_code: String::new(),
             did_key: String::new(),
-            revision: anchor_keyring.revision,
+            watermark: anchor_keyring.revision.to_be_bytes().to_vec(),
+            needs_reseal: false,
             sealer: None,
         });
     }
@@ -697,7 +770,8 @@ pub fn accept_remote_keyring(
         keyring: raw.last().expect("non-empty run").to_vec(),
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: new_anchor.revision,
+        watermark: new_anchor.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
@@ -844,7 +918,8 @@ pub fn accept_reset_keyring(
         keyring: candidate.to_vec(),
         recovery_code: String::new(),
         did_key: String::new(),
-        revision: new_anchor.revision,
+        watermark: new_anchor.revision.to_be_bytes().to_vec(),
+        needs_reseal: false,
         sealer: None,
     })
 }
