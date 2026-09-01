@@ -24,6 +24,41 @@ pub enum EngineKind {
     Dag,
 }
 
+impl EngineKind {
+    /// The canonical config/wire tag for this engine — the single source of truth every host boundary maps
+    /// through (the wasm veneer's `engine` argument, the Tauri `OPENOM_KEYRING_ENGINE` override, the web
+    /// `KEYRING_ENGINE` constant), so the tag strings can't drift apart. Paired with [`FromStr`].
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            EngineKind::Chain => "chain",
+            EngineKind::Dag => "dag",
+        }
+    }
+}
+
+impl std::str::FromStr for EngineKind {
+    type Err = UnknownEngine;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "chain" => Ok(EngineKind::Chain),
+            "dag" => Ok(EngineKind::Dag),
+            other => Err(UnknownEngine(other.to_string())),
+        }
+    }
+}
+
+/// A tag string that named no known engine — carries the offending value for diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownEngine(pub String);
+
+impl std::fmt::Display for UnknownEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown keyring engine: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownEngine {}
+
 /// One member of the resolved keyring, engine-agnostic. Both engines fold to this: chain from
 /// `Keyring.members`, dag from the resolved `GroupState`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +191,22 @@ mod tests {
         // signers = Owner(1) + CoOwner(2); Maintainer(3)/Editor(4) are not.
         let signers: Vec<_> = v.signers().map(|s| s.member_id.clone()).collect();
         assert_eq!(signers, vec!["bob".to_string(), "owner".to_string()]);
+    }
+
+    #[test]
+    fn engine_tag_round_trips_and_rejects_the_unknown() {
+        // The one source of truth both host boundaries parse through: every engine's tag round-trips, and an
+        // unknown tag is a typed error carrying the offending value — not a silent fallback.
+        for k in [EngineKind::Chain, EngineKind::Dag] {
+            assert_eq!(k.as_tag().parse::<EngineKind>().unwrap(), k);
+        }
+        assert_eq!("chain".parse::<EngineKind>().unwrap(), EngineKind::Chain);
+        assert_eq!("dag".parse::<EngineKind>().unwrap(), EngineKind::Dag);
+        assert_eq!(
+            "mosaic".parse::<EngineKind>().unwrap_err(),
+            UnknownEngine("mosaic".to_string())
+        );
+        assert_eq!("dag".parse::<EngineKind>().unwrap().as_tag(), "dag");
     }
 
     #[test]

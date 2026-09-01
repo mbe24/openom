@@ -203,12 +203,9 @@ fn to_js(e: SealerError) -> JsError {
 }
 
 /// Parse the deployment's configured engine tag (a backend preset, never a per-tree user choice — OPE-278).
+/// The tag mapping is [`EngineKind`]'s own `FromStr`, so this host and the Tauri host can't drift apart.
 fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
-    match s {
-        "chain" => Ok(EngineKind::Chain),
-        "dag" => Ok(EngineKind::Dag),
-        other => Err(JsError::new(&format!("unknown keyring engine: {other}"))),
-    }
+    s.parse().map_err(|e: openom_keyring_seam::UnknownEngine| JsError::new(&e.to_string()))
 }
 
 // ---- the keyring vault (passphrase lifecycle) ----

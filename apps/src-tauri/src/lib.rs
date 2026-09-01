@@ -22,10 +22,12 @@ type Vault = Arc<VaultHost<SqliteVaultStore>>;
 /// picks what to stamp on a NEW tree. Today every backend uses the chain engine; the hidden
 /// `OPENOM_KEYRING_ENGINE=dag` override selects the dag keyring for bring-up.
 fn keyring_engine() -> EngineKind {
-    match std::env::var("OPENOM_KEYRING_ENGINE").as_deref() {
-        Ok("dag") => EngineKind::Dag,
-        _ => EngineKind::Chain,
-    }
+    // Same tag mapping as the web/wasm host — EngineKind's FromStr — so the two can't drift. An unset or
+    // unrecognized value falls back to the shipping chain engine.
+    std::env::var("OPENOM_KEYRING_ENGINE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(EngineKind::Chain)
 }
 
 // ----------------------------------------------------------------- doc store (opaque bytes)

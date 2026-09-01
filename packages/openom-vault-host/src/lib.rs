@@ -1200,6 +1200,10 @@ mod tests {
         VaultHost::new(MemStore::default())
     }
 
+    fn dag_host() -> VaultHost<MemStore> {
+        VaultHost::new(MemStore::default()).with_engine(EngineKind::Dag)
+    }
+
     fn seal(h: &VaultHost<MemStore>, id: &str, plaintext: &[u8]) -> Vec<u8> {
         h.seal_entry(
             id,
@@ -1276,6 +1280,70 @@ mod tests {
         h.provision(KEY, TREE, "right".into(), MEMBER).unwrap();
         let err = h.unlock(KEY, TREE, "wrong".into(), MEMBER).unwrap_err();
         assert_eq!(err.code, VaultErrorCode::CryptoOpen);
+    }
+
+    #[test]
+    fn the_dag_engine_runs_the_full_lifecycle_through_the_host() {
+        // OPE-278: the dag engine, selected via `with_engine`, runs end to end THROUGH the host —
+        // provision → seal → lock → unlock → open, then change-passphrase — dispatched via AppVault::Dag
+        // and persisted through the SAME VaultStore seam as the chain. Proves the host is engine-agnostic
+        // (the opaque frontier watermark + needs_reseal marshal cleanly), not just DagVault in isolation.
+        let h = dag_host();
+        let p = h
+            .provision(KEY, TREE, "correct horse".into(), MEMBER)
+            .unwrap();
+        assert!(
+            !p.watermark.is_empty(),
+            "dag provision reports an opaque frontier watermark, not a stub"
+        );
+        assert!(!p.needs_reseal, "a fresh single-replica dag tree is not stale");
+        let envelope = seal(&h, &p.sealer_id, b"the family tree");
+
+        // Lock frees the sealer; a fresh unlock re-derives the same DEK from the stored anchor and opens
+        // pre-lock data — the anchor + frontier round-tripped through the store as opaque bytes.
+        h.lock(&p.sealer_id);
+        let u = h.unlock(KEY, TREE, "correct horse".into(), MEMBER).unwrap();
+        assert_eq!(u.did_key, p.did_key, "same owner identity across provision + unlock");
+        assert_eq!(
+            h.open_entry(&u.sealer_id, "snapshot", &envelope).unwrap(),
+            b"the family tree"
+        );
+
+        // Change the passphrase (a current-key Retarget, floor = the stored frontier): the old passphrase
+        // is retired, the new one opens, and the DEK is unchanged so pre-change data still opens.
+        h.change_passphrase(KEY, TREE, "correct horse".into(), "battery staple".into(), MEMBER)
+            .unwrap();
+        assert_eq!(
+            h.unlock(KEY, TREE, "correct horse".into(), MEMBER)
+                .unwrap_err()
+                .code,
+            VaultErrorCode::CryptoOpen
+        );
+        let u2 = h.unlock(KEY, TREE, "battery staple".into(), MEMBER).unwrap();
+        assert_eq!(
+            h.open_entry(&u2.sealer_id, "snapshot", &envelope).unwrap(),
+            b"the family tree"
+        );
+    }
+
+    #[test]
+    fn the_dag_engine_recovers_through_the_host() {
+        // Dag recover THROUGH the host: the recovery code re-provisions under a new passphrase, the stored
+        // frontier is the engine-enforced rollback floor, and the recovered sealer opens pre-recovery data
+        // (the DEK is re-wrapped, not rotated).
+        let h = dag_host();
+        let p = h.provision(KEY, TREE, "old".into(), MEMBER).unwrap();
+        let envelope = seal(&h, &p.sealer_id, b"heirloom");
+        let r = h
+            .recover(KEY, TREE, p.recovery_code.clone(), "new".into(), MEMBER)
+            .unwrap();
+        assert!(!r.watermark.is_empty(), "recover advances to a fresh frontier watermark");
+        assert_ne!(r.did_key, p.did_key, "recovery mints a fresh owner identity");
+        assert_eq!(
+            h.open_entry(&r.sealer_id, "snapshot", &envelope).unwrap(),
+            b"heirloom"
+        );
+        assert!(h.unlock(KEY, TREE, "new".into(), MEMBER).is_ok());
     }
 
     #[test]

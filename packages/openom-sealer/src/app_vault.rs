@@ -4,8 +4,9 @@
 //! client lifecycle [`KeyringLifecycle`] by delegating to the selected engine.
 //!
 //! The engine is a **deployment/backend preset** (owner decision 2026-09-03): the managed Lambda backend is
-//! fixed to one engine, a BYO backend (Google Drive) to one — a hidden setting / compile-time feature, never
-//! a per-tree user choice. So the host builds the right `AppVault` from config via [`AppVault::from_kind`]
+//! fixed to one engine, a BYO backend (Google Drive) to one — never a per-tree user choice. The choice is
+//! resolved at RUNTIME, not a compile-time feature (revised 2026-09-02), so one binary can map different
+//! backends to different engines: the host builds the right `AppVault` from config via [`AppVault::from_kind`]
 //! and records the tag in its local head record; there is no per-tree engine discovery.
 //!
 //! Engine-SPECIFIC membership authoring (add/remove member, member-unlock, reseal) is deliberately NOT on
