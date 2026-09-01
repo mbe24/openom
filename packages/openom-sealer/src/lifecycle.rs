@@ -139,21 +139,43 @@ pub trait KeyringLifecycle {
 /// by held state. (The dag lifecycle impl is OPE-273.)
 pub struct ChainVault;
 
+/// The write-epoch `key_id` length (matches `vault::KEY_ID_LEN`) and the `H(DEK)` (SHA-256) length that make
+/// up the chain watermark's epoch-pin (OPE-286).
+const KEY_ID_LEN: usize = 16;
+const DEK_HASH_LEN: usize = 32;
+
 impl ChainVault {
-    /// Encode the chain's anti-rollback cursor (a keyring revision) as the opaque seam watermark.
-    fn watermark(revision: u32) -> Vec<u8> {
-        revision.to_be_bytes().to_vec()
+    /// Encode the chain's opaque anti-rollback watermark: the keyring `revision` (4 BE bytes), then the write
+    /// epoch's `key_id` (16 bytes) and `H(DEK)` (32 bytes). The epoch commitment authenticates key MATERIAL,
+    /// so a later `recover` (which skips signature verification) can't be handed a forged epoch wearing a
+    /// copied `key_id` (OPE-286). A revision-only (4-byte) form means "no epoch pin" (a bootstrap/stateless
+    /// or pre-pin watermark).
+    fn watermark(revision: u32, write_key_id: &[u8], write_dek_hash: &[u8]) -> Vec<u8> {
+        let mut w = revision.to_be_bytes().to_vec();
+        if write_key_id.len() == KEY_ID_LEN && write_dek_hash.len() == DEK_HASH_LEN {
+            w.extend_from_slice(write_key_id);
+            w.extend_from_slice(write_dek_hash);
+        }
+        w
     }
 
-    /// Decode an opaque `floor` back to the chain's `min_revision`. Empty ⇒ no floor (0). A non-empty
-    /// value that isn't a 4-byte revision is refused ([`SealerError::MalformedWatermark`]) rather than
-    /// silently treated as 0 — dropping a corrupt floor would drop rollback protection.
-    fn floor(bytes: &[u8]) -> Result<u32, SealerError> {
+    /// Decode an opaque `floor` to `(min_revision, expected_write_key_id, expected_dek_hash)`. Empty ⇒ no
+    /// floor. 4 bytes ⇒ revision only (no epoch pin). The full `4 + KEY_ID_LEN + DEK_HASH_LEN` (52) form
+    /// carries the pin. Any other length is a corrupt watermark and is refused
+    /// ([`SealerError::MalformedWatermark`]) — never silently dropped, which would drop protection.
+    fn floor(bytes: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>), SealerError> {
         if bytes.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new(), Vec::new()));
         }
-        let b: [u8; 4] = bytes.try_into().map_err(|_| SealerError::MalformedWatermark)?;
-        Ok(u32::from_be_bytes(b))
+        if bytes.len() == 4 {
+            let b: [u8; 4] = bytes[..4].try_into().expect("len checked");
+            return Ok((u32::from_be_bytes(b), Vec::new(), Vec::new()));
+        }
+        if bytes.len() == 4 + KEY_ID_LEN + DEK_HASH_LEN {
+            let rev = u32::from_be_bytes(bytes[..4].try_into().expect("len checked"));
+            return Ok((rev, bytes[4..4 + KEY_ID_LEN].to_vec(), bytes[4 + KEY_ID_LEN..].to_vec()));
+        }
+        Err(SealerError::MalformedWatermark)
     }
 }
 
@@ -169,7 +191,7 @@ impl KeyringLifecycle for ChainVault {
             recovery_code: p.recovery_code,
             sealer: p.sealer,
             did_key: p.did_key,
-            watermark: Self::watermark(p.revision),
+            watermark: Self::watermark(p.revision, &p.write_key_id, &p.write_dek_hash),
         })
     }
 
@@ -182,7 +204,7 @@ impl KeyringLifecycle for ChainVault {
         let u = vault::unlock(anchor, passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Unlocked {
             sealer: u.sealer,
-            watermark: Self::watermark(u.revision),
+            watermark: Self::watermark(u.revision, &u.write_key_id, &u.write_dek_hash),
             did_key: u.did_key,
             needs_reseal: false, // a linear chain has no concurrent-merge stale epoch
         })
@@ -196,6 +218,7 @@ impl KeyringLifecycle for ChainVault {
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Recovered, SealerError> {
+        let (min_rev, expected_key_id, expected_dek_hash) = Self::floor(floor)?;
         let r = vault::recover(
             anchor,
             recovery_code,
@@ -203,13 +226,15 @@ impl KeyringLifecycle for ChainVault {
             ctx.tree_id,
             ctx.member_id,
             ctx.replica_id,
-            Self::floor(floor)?,
+            min_rev,
+            &expected_key_id,
+            &expected_dek_hash,
         )?;
         Ok(Recovered {
             anchor: r.keyring,
             recovery_code: r.recovery_code,
             sealer: r.sealer,
-            watermark: Self::watermark(r.revision),
+            watermark: Self::watermark(r.revision, &r.write_key_id, &r.write_dek_hash),
             did_key: r.did_key,
             needs_reseal: false,
         })
@@ -223,18 +248,19 @@ impl KeyringLifecycle for ChainVault {
         new_passphrase: &Passphrase,
         floor: &[u8],
     ) -> Result<Rekeyed, SealerError> {
+        let (min_rev, _, _) = Self::floor(floor)?;
         let re = vault::change_passphrase(
             anchor,
             old_passphrase,
             new_passphrase,
             ctx.tree_id,
             ctx.member_id,
-            Self::floor(floor)?,
+            min_rev,
         )?;
         Ok(Rekeyed {
             anchor: re.keyring,
             recovery_code: re.recovery_code,
-            watermark: Self::watermark(re.revision),
+            watermark: Self::watermark(re.revision, &re.write_key_id, &re.write_dek_hash),
         })
     }
 }
@@ -274,7 +300,11 @@ mod tests {
         let u = engine
             .unlock(&ctx(&tree, &member, &replica), &p.anchor, &pass)
             .unwrap();
-        assert_eq!(u.watermark, ChainVault::watermark(1), "chain watermark = revision 1, as bytes");
+        assert_eq!(
+            ChainVault::floor(&u.watermark).unwrap().0,
+            1,
+            "chain watermark carries revision 1 (plus the write-epoch pin)",
+        );
         assert_eq!(u.did_key, p.did_key, "same identity across provision + unlock");
 
         // change_passphrase → a new anchor; the OLD passphrase must no longer unlock it. The floor is
@@ -316,8 +346,8 @@ mod tests {
     /// dropping a corrupt local cursor would drop rollback protection.
     #[test]
     fn a_malformed_floor_is_refused_not_dropped() {
-        assert_eq!(ChainVault::floor(&[]).unwrap(), 0, "empty floor = no floor");
-        assert_eq!(ChainVault::floor(&7u32.to_be_bytes()).unwrap(), 7);
+        assert_eq!(ChainVault::floor(&[]).unwrap().0, 0, "empty floor = no floor");
+        assert_eq!(ChainVault::floor(&7u32.to_be_bytes()).unwrap().0, 7);
         assert!(matches!(
             ChainVault::floor(&[1, 2, 3]),
             Err(SealerError::MalformedWatermark)

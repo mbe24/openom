@@ -46,6 +46,14 @@ const KEY_ID_LEN: usize = 16;
 /// Bound on untrusted keyring input — a real V1 keyring is well under 1 KiB.
 const MAX_KEYRING_BYTES: usize = 64 * 1024;
 
+/// `H(DEK)` — the content commitment that lets the recover watermark authenticate key MATERIAL rather than
+/// the forgeable public `key_id` label (OPE-286). SHA-256, the codebase's standard digest. `H` of a 32-byte
+/// random DEK is neither invertible nor brute-forceable, so watermarking it leaks nothing.
+fn dek_hash(dek: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(dek).to_vec()
+}
+
 
 /// Result of [`provision`]: the encoded keyring to store, the recovery code to show ONCE,
 /// and the ready sealer set (built from the fresh DEK — one Argon2id, no second unlock).
@@ -58,6 +66,11 @@ pub struct Provisioned {
     pub did_key: DidKey,
     /// The genesis keyring `revision` the caller must watermark (parallels [`Unlocked::revision`]).
     pub revision: u32,
+    /// The write epoch's `key_id` + `H(DEK)` — the caller watermarks these so a later [`recover`] (which
+    /// can't verify signatures) can PIN the write epoch to authenticated key MATERIAL, not the forgeable
+    /// public `key_id` label (OPE-286). See [`Unlocked::write_key_id`].
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Result of [`unlock`]: the sealer set (all epochs the caller can reach) plus the keyring
@@ -68,6 +81,10 @@ pub struct Unlocked {
     /// The member's stable author id — a `did:key` over their PUBLIC identity key (see
     /// [`Provisioned::did_key`]). Stable across a member's tabs/reloads.
     pub did_key: DidKey,
+    /// The write epoch's `key_id` and `H(DEK)`, watermarked so a later [`recover`] pins the write epoch to
+    /// key MATERIAL. Sourced from a VERIFIED unlock — the trusted witness of the real epoch set (OPE-286).
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Result of [`recover`]: a freshly re-provisioned keyring + a NEW recovery code (both to
@@ -80,6 +97,10 @@ pub struct Recovered {
     /// The NEW owner's stable author id — a `did:key` over the new public identity key (recovery
     /// mints a fresh identity, so this differs from the pre-recovery did:key).
     pub did_key: DidKey,
+    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark (recovery re-wraps the RRK,
+    /// epochs untouched, so the write epoch is the one that was pinned) (OPE-286).
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Result of [`change_passphrase`]: the new keyring + a rotated recovery code + new revision.
@@ -88,6 +109,9 @@ pub struct Rekeyed {
     pub keyring: Vec<u8>,
     pub recovery_code: RecoveryCode,
     pub revision: u32,
+    /// The (unchanged) write epoch's `key_id` + `H(DEK)` to re-watermark (OPE-286).
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Create a brand-new encrypted tree: a fresh DEK under epoch 0, a fresh **recovery root
@@ -156,11 +180,13 @@ pub fn provision(
     };
     sign_keyring(&mut keyring, &secrets.root.identity);
 
+    let dek_bytes = dek.into_inner();
+    let write_dek_hash = dek_hash(&dek_bytes[..]);
     let sealer = SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
-        vec![(key_id.clone(), dek.into_inner())],
-        KeyId::new(key_id),
+        vec![(key_id.clone(), dek_bytes)],
+        KeyId::new(key_id.clone()),
     );
     Ok(Provisioned {
         revision: keyring.revision,
@@ -168,6 +194,8 @@ pub fn provision(
         recovery_code: secrets.recovery_code,
         sealer,
         did_key,
+        write_key_id: key_id,
+        write_dek_hash,
     })
 }
 
@@ -196,19 +224,27 @@ pub fn unlock(
     // The did:key is over the PUBLIC identity key — capture it before `identity` may move into the
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
     let did_key = openom_did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
-    let epochs = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
-        .into_iter()
-        .map(|(k, _e, d)| (k, d.into_inner()))
-        .collect();
+    let epochs: Vec<(Vec<u8>, openom_crypto::Key32)> =
+        epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
+            .into_iter()
+            .map(|(k, _e, d)| (k, d.into_inner()))
+            .collect();
     // Sign entries only on an ATTRIBUTED (shared) write epoch — one wrapped beyond the sole founder.
     // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
     // skips verification for them); the moment the tree is shared, the sealer starts signing (§B3).
+    // Commit to the write epoch's key MATERIAL (H(DEK)) for the recover watermark — this unlock is VERIFIED,
+    // so it's the trusted witness of the real write epoch's DEK (OPE-286).
+    let write_dek_hash = epochs
+        .iter()
+        .find(|(k, _)| *k == write_key_id)
+        .map(|(_, d)| dek_hash(&d[..]))
+        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
     let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
     let mut sealer = SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
         epochs,
-        KeyId::new(write_key_id),
+        KeyId::new(write_key_id.clone()),
     );
     if attributed {
         // The chain encodes the member's watermarked keyring head (`revision`) as the entry's opaque
@@ -220,6 +256,8 @@ pub fn unlock(
         sealer,
         revision,
         did_key,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -241,6 +279,12 @@ pub fn recover(
     member_id: &MemberId,
     replica_id: &ReplicaId,
     min_revision: u32,
+    // The caller's watermarked write epoch — its `key_id` and `H(DEK)`, from a prior VERIFIED unlock. Both
+    // empty ⇒ a stateless device with no watermark (unauthenticated bootstrap; see the epoch-select block).
+    // Recovery skips signature verification, so this watermark is the ONLY authentication of the served
+    // epoch set (OPE-286).
+    expected_write_key_id: &[u8],
+    expected_dek_hash: &[u8],
 ) -> Result<Recovered, SealerError> {
     let new_passphrase = new_passphrase.expose();
     let tree_id = tree_id.as_bytes();
@@ -309,11 +353,44 @@ pub fn recover(
     sign_keyring(&mut keyring, &openom_crypto::derive_rvk(rrk_secret.expose()));
 
     let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?;
-    let write_key_id = deks
-        .iter()
-        .max_by_key(|(_, e, _)| *e)
-        .map(|(k, _, _)| k.clone())
-        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+    // A legitimate keyring never repeats an epoch key_id (16 CSPRNG bytes). Reject duplicates: otherwise an
+    // attacker could add a same-key_id epoch with an attacker-known DEK that `SealerSet`'s first-match
+    // routing would pick over the authenticated one (OPE-286).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for (k, _, _) in &deks {
+            if !seen.insert(k.clone()) {
+                return Err(SealerError::BadKeyring("duplicate epoch key_id".into()));
+            }
+        }
+    }
+    // The RRK opens EVERY epoch — including an attacker-INJECTED one sealed to the (public) RRK key — so the
+    // served epoch SET is untrusted. Authenticate the write epoch against the caller's watermark, which
+    // commits to key MATERIAL (H(DEK)), NOT the forgeable public key_id label. A forged same-key_id epoch
+    // carries an attacker DEK → a different hash → rejected; a relabel is moot (we key on identity+material,
+    // not ordinal); truncating the pinned epoch makes it absent → rejected.
+    let (write_key_id, write_dek_hash) = if expected_write_key_id.is_empty() && expected_dek_hash.is_empty() {
+        // No watermark: a stateless device (lost/replaced/wiped; evicted browser storage) has no trusted
+        // witness of the epoch set — unauthenticated bootstrap, the documented OOB-trust residual. Highest
+        // ordinal, as before. (This is the common recovery case; recovery on a stateless device cannot be
+        // authenticated from local state.)
+        let (k, _, d) = deks
+            .iter()
+            .max_by_key(|(_, e, _)| *e)
+            .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+        (k.clone(), dek_hash(d.expose()))
+    } else {
+        deks.iter()
+            .find(|(k, _, d)| {
+                k.as_slice() == expected_write_key_id
+                    && dek_hash(d.expose()).as_slice() == expected_dek_hash
+            })
+            .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
+            .ok_or_else(|| SealerError::WatermarkRollback {
+                detail: "the watermarked write epoch (key_id + DEK material) is absent from the served keyring"
+                    .into(),
+            })?
+    };
     let epochs = deks
         .into_iter()
         .map(|(k, _e, d)| (k, d.into_inner()))
@@ -322,7 +399,7 @@ pub fn recover(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
         epochs,
-        KeyId::new(write_key_id),
+        KeyId::new(write_key_id.clone()),
     );
     let did_key =
         openom_did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
@@ -332,6 +409,8 @@ pub fn recover(
         sealer,
         revision: new_revision,
         did_key,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -356,6 +435,7 @@ pub fn change_passphrase(
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let Opened {
+        key_id: write_key_id,
         rrk_secret,
         revision,
         prev_hash,
@@ -381,10 +461,19 @@ pub fn change_passphrase(
     // then the new identity (so the owner and future revisions verify).
     sign_keyring(&mut keyring, &old_identity);
     sign_keyring(&mut keyring, &secrets.root.identity);
+    // Carry the (unchanged) write epoch's key MATERIAL forward in the watermark (epochs are untouched by a
+    // passphrase change), so a later recover keeps its pin (OPE-286).
+    let write_dek_hash = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
+        .iter()
+        .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
+        .map(|(_, _, d)| dek_hash(d.expose()))
+        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
     Ok(Rekeyed {
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
         revision: new_revision,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -405,6 +494,7 @@ pub fn rotate_recovery(
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let Opened {
+        key_id: write_key_id,
         rrk_secret: old_rrk,
         revision,
         prev_hash,
@@ -415,6 +505,13 @@ pub fn rotate_recovery(
         .max(revision)
         .checked_add(1)
         .ok_or(SealerError::RevisionOverflow)?;
+    // Commit the (unchanged) write epoch's key MATERIAL for the watermark, opened via the OLD RRK before the
+    // epochs are re-wrapped onto the new one (the DEKs themselves are untouched by a rotation) (OPE-286).
+    let write_dek_hash = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &old_rrk)?
+        .iter()
+        .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
+        .map(|(_, _, d)| dek_hash(d.expose()))
+        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
 
     // The OLD recovery authority signs the rotation (proof of possession of the current recovery secret).
     let old_rvk = openom_crypto::derive_rvk(old_rrk.expose());
@@ -454,6 +551,8 @@ pub fn rotate_recovery(
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
         revision: new_revision,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -644,12 +743,19 @@ pub fn unlock_as_member(
     // means a removed member.
     let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &root.hpke_secret)?;
     let write_key_id = write_epoch_by_ordinal(&deks)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+    let write_dek_hash = deks
+        .iter()
+        .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
+        .map(|(_, _, d)| dek_hash(d.expose()))
+        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
         sealer,
         revision: keyring.revision,
         did_key,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -1411,11 +1517,17 @@ mod tests {
         // root (its RRK is gone, and every epoch is re-wrapped to the new one) — so recover with the old
         // code fails, while the NEW code works.
         assert!(
-            recover(&rot.keyring, &p.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-C"), 0).is_err(),
+            recover(&rot.keyring, &p.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-C"), 0,
+            &[],
+            &[],
+        ).is_err(),
             "the pre-rotation recovery code is revoked"
         );
         assert!(
-            recover(&rot.keyring, &rot.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-D"), 0).is_ok(),
+            recover(&rot.keyring, &rot.recovery_code, &Passphrase::new(b"whatever"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-D"), 0,
+            &[],
+            &[],
+        ).is_ok(),
             "the freshly-issued recovery code works"
         );
     }
@@ -1464,6 +1576,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r2"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         assert_ne!(
@@ -1534,6 +1648,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"b"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         a.publish(&r.keyring).unwrap();
@@ -1633,6 +1749,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r2"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(r.revision, 2);
@@ -1676,7 +1794,9 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
-            0
+            0,
+            &[],
+            &[],
         )
         .is_err());
     }
@@ -1698,10 +1818,77 @@ mod tests {
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
-                5
-            ),
+                5,
+            &[],
+            &[],
+        ),
             Err(SealerError::RevisionRollback { .. })
         ));
+    }
+
+    /// OPE-286: recover authenticates the (unverified, attacker-servable) epoch SET against the caller's
+    /// watermark, which commits to key MATERIAL — the write epoch's `H(DEK)` — not the forgeable public
+    /// `key_id` label. So an epoch whose DEK doesn't hash to the committed value is refused (the injection /
+    /// re-key-under-the-label attack), a truncated pinned epoch is refused, and a duplicate `key_id` is
+    /// refused; a correct watermark recovers, and an empty watermark falls back to stateless bootstrap.
+    #[test]
+    fn recover_pins_the_write_epoch_to_dek_material() {
+        let pass = Passphrase::new(b"owner pass");
+        let p = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r0")).unwrap();
+        let sealed = seal_open(&p.sealer, b"heirloom");
+        let u = unlock(&p.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r1"))
+            .unwrap();
+        // provision + unlock agree on the write-epoch commitment (16-byte key_id + 32-byte H(DEK)).
+        assert_eq!(u.write_key_id, p.write_key_id);
+        assert_eq!(u.write_dek_hash, p.write_dek_hash);
+        assert_eq!(u.write_key_id.len(), 16);
+        assert_eq!(u.write_dek_hash.len(), 32);
+
+        let rec = |kr: &[u8], kid: &[u8], hash: &[u8]| {
+            recover(
+                kr,
+                &p.recovery_code,
+                &Passphrase::new(b"new"),
+                &TreeId::new(TREE),
+                &MemberId::new(MEMBER),
+                &ReplicaId::new(b"rr"),
+                0,
+                kid,
+                hash,
+            )
+        };
+
+        // (1) Correct watermark → recovers, and the recovered sealer opens pre-recovery data.
+        let ok = rec(&p.keyring, &u.write_key_id, &u.write_dek_hash).unwrap();
+        assert_eq!(ok.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"heirloom");
+
+        // (2) INJECTION: the served write epoch's DEK doesn't hash to the committed value → refused. (The
+        // check is symmetric to an attacker forging a DEK under the pinned key_id — the served DEK's hash
+        // won't match either way; here we express it as a watermark committing a different H(DEK).)
+        assert!(
+            matches!(rec(&p.keyring, &u.write_key_id, &[0xFFu8; 32]), Err(SealerError::WatermarkRollback { .. })),
+            "an epoch whose DEK doesn't match the committed hash is refused",
+        );
+
+        // (3) TRUNCATION: the pinned key_id is absent from the served keyring → refused.
+        assert!(
+            matches!(rec(&p.keyring, &[0u8; 16], &u.write_dek_hash), Err(SealerError::WatermarkRollback { .. })),
+            "an absent pinned write epoch is refused",
+        );
+
+        // (4) DUPLICATE key_id in the served keyring → refused (SealerSet routes by first match, so a
+        // same-key_id attacker epoch could otherwise be picked).
+        let mut dup = Keyring::decode(p.keyring.as_slice()).unwrap();
+        let e0 = dup.epochs[0].clone();
+        dup.epochs.push(e0);
+        assert!(
+            matches!(rec(&dup.encode_to_vec(), &u.write_key_id, &u.write_dek_hash), Err(SealerError::BadKeyring(_))),
+            "a duplicate epoch key_id is refused",
+        );
+
+        // (5) No watermark (stateless device): the documented unauthenticated-bootstrap fallback recovers.
+        let boot = rec(&p.keyring, &[], &[]).unwrap();
+        assert_eq!(boot.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(), b"heirloom");
     }
 
     #[test]
@@ -1724,8 +1911,10 @@ mod tests {
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r"),
-                0
-            ),
+                0,
+            &[],
+            &[],
+        ),
             Err(SealerError::RevisionOverflow)
         ));
     }
@@ -1775,7 +1964,9 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
-            0
+            0,
+            &[],
+            &[],
         )
         .is_err());
         assert!(recover(
@@ -1785,7 +1976,9 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r"),
-            0
+            0,
+            &[],
+            &[],
         )
         .is_ok());
     }
@@ -2327,6 +2520,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o2"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         assert!(unlock(
@@ -2408,6 +2603,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o3"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         assert!(unlock(
@@ -3108,6 +3305,8 @@ mod tests {
             &MemberId::new(MEMBER),
             &ReplicaId::new(b"r-o2"),
             0,
+            &[],
+            &[],
         )
         .unwrap();
         let k = Keyring::decode(rec.keyring.as_slice()).unwrap();

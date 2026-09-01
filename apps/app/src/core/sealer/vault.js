@@ -43,10 +43,12 @@ export function frameHops(revisions) {
   return out;
 }
 
-// The chain watermark is the 4-byte big-endian keyring revision; the chain-only retention + sync paths need
-// that scalar. (The dag watermark is a frontier and is never decoded — it stays opaque bytes end to end.)
+// The chain watermark begins with the 4-byte big-endian keyring revision, optionally followed by the
+// write-epoch pin (key_id ‖ H(DEK), OPE-286); the chain-only retention + sync paths need that revision
+// scalar, so read the first 4 bytes. (The dag watermark is a frontier and is never decoded — it stays
+// opaque bytes end to end.)
 const chainRevision = (wm) =>
-  wm && wm.length === 4 ? new DataView(wm.buffer, wm.byteOffset, 4).getUint32(0, false) : 0;
+  wm && wm.length >= 4 ? new DataView(wm.buffer, wm.byteOffset, 4).getUint32(0, false) : 0;
 
 /**
  * @param {object} deps

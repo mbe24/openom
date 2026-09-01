@@ -1222,10 +1222,19 @@ fn chain_watermark(revision: u32) -> Vec<u8> {
     revision.to_be_bytes().to_vec()
 }
 
-/// Decode a chain watermark back to its scalar revision (empty / malformed = 0). Only the chain-only
-/// membership/accept paths use it, to pass a scalar floor to `vault::*`.
+/// Decode a chain watermark's scalar revision — its first 4 big-endian bytes. The chain watermark is
+/// `revision(4) [‖ write_key_id ‖ H(DEK)]` since OPE-286 (the epoch pin the ChainVault threads through
+/// recover); this reads only the revision (empty / too-short = 0). Only the chain-only membership/accept
+/// paths use it, to pass a scalar floor to `vault::*`. NOTE (OPE-286 phase 2): the membership paths still
+/// emit a revision-only watermark via `chain_watermark`, which would ERASE a recover pin if it overwrote a
+/// full watermark — a hard gate to close (carry the write-epoch pin forward) BEFORE chain membership is
+/// app-wired (OPE-10).
 fn chain_floor(watermark: &[u8]) -> u32 {
-    watermark.try_into().map(u32::from_be_bytes).unwrap_or(0)
+    watermark
+        .get(..4)
+        .and_then(|b| b.try_into().ok())
+        .map(u32::from_be_bytes)
+        .unwrap_or(0)
 }
 
 /// Decode a keyring we ourselves produced or previously stored. A failure is an internal

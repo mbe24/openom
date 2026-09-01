@@ -13,6 +13,8 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 openom-protocol.workspace = true
 openom-crypto.workspace = true
+# H(write DEK) commits the recover watermark to key MATERIAL, not a forgeable key_id label (OPE-286).
+sha2.workspace = true
 # The keyring/membership mechanism (chain verify, entry authorship, keyring signing) the vault drives.
 openom-keyring.workspace = true
 # The DAG keyring engine (keyeo membership + recovery). openom-sealer is the both-engines convergence

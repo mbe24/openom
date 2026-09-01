@@ -107,6 +107,8 @@ proptest! {
             &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),
             0,
+            &[],
+            &[],
         );
         prop_assert!(r.is_err());
     }
