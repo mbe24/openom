@@ -962,6 +962,38 @@ mod tests {
         assert!(!folded.needs_reseal, "the covering genesis epoch is the clean winner");
     }
 
+    /// OPE-287: a garbage epoch (a malicious member could append one) whose RRK wrap won't open is SKIPPED
+    /// by `epoch_deks`, not fatal — so one junk epoch can't brick unlock for the owner, who still reaches
+    /// every legitimate epoch.
+    #[test]
+    fn epoch_deks_skips_an_unopenable_epoch_instead_of_bricking() {
+        let tree: &[u8] = b"tree-uuid-16byte";
+        let HpkeKeypair { secret, public } = generate_hpke_keypair().unwrap();
+        let rrk_secret = RrkSecret::from(secret);
+        let dek = generate_dek().unwrap();
+        let good = SealedEpoch {
+            key_id: b"good".to_vec(),
+            epoch: 0,
+            wraps: vec![rrk_wrap_epoch(&public, &dek, tree, "owner", b"good").unwrap()],
+        };
+        // A garbage epoch: an RRK-method wrap the owner's RRK secret cannot open.
+        let garbage = SealedEpoch {
+            key_id: b"evil".to_vec(),
+            epoch: 1,
+            wraps: vec![CoreWrap {
+                member_id: "owner".into(),
+                wrap_method: RRK_HPKE,
+                nonce: vec![],
+                wrapped_dek: vec![9u8; 48],
+                kdf: None,
+                ephemeral_public_key: vec![9u8; 32],
+            }],
+        };
+        let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret).unwrap();
+        assert_eq!(deks.len(), 1, "the un-openable garbage epoch is skipped, not fatal");
+        assert_eq!(deks[0].0, b"good".to_vec(), "the legitimate epoch still opens");
+    }
+
     /// Provision on device A, seal data, then unlock from the anchor alone on device B and open it —
     /// the dag vault produces a working SealerSet through the shared core, end to end.
     #[test]

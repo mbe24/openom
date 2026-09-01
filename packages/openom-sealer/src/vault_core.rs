@@ -325,22 +325,27 @@ pub(crate) fn open_epoch_dek(
 }
 
 /// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
+///
+/// TOLERANT (OPE-287): an epoch whose RRK wrap won't open is SKIPPED, not fatal. On the dag any active
+/// member can append an op carrying a fresh epoch, so a malicious member could plant a garbage one; opening
+/// every epoch strictly (`?`) would let a single junk epoch brick `unlock` for the owner and everyone else.
+/// A legitimate epoch always opens under the correct RRK (a wrong passphrase is already caught by the
+/// anti-substitution check before this runs), so the chain — whose epochs are signature-protected — never
+/// skips, and the owner still reaches every real epoch.
 pub(crate) fn epoch_deks(
     epochs: &[SealedEpoch],
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
 ) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
-    epochs
+    Ok(epochs
         .iter()
-        .map(|ep| {
-            Ok((
-                ep.key_id.clone(),
-                ep.epoch,
-                open_epoch_dek(ep, tree_id, founder_id, rrk_secret)?,
-            ))
+        .filter_map(|ep| {
+            open_epoch_dek(ep, tree_id, founder_id, rrk_secret)
+                .ok()
+                .map(|dek| (ep.key_id.clone(), ep.epoch, dek))
         })
-        .collect()
+        .collect())
 }
 
 /// Re-wrap every epoch's DEK from the OLD recovery root to a NEW one (the RRK-HPKE wrap only; each
@@ -376,7 +381,9 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
 }
 
 /// Every `(key_id, epoch, DEK)` a MEMBER reaches via their per-epoch HPKE wraps (the epochs
-/// their wraps cover — join-epoch-onward). Empty means a removed member.
+/// their wraps cover — join-epoch-onward). Empty means a removed member. TOLERANT (OPE-287): a wrap that
+/// won't open (a garbage member-authored epoch, or one wrapping the member's stale key) is skipped, not
+/// fatal — one junk epoch must not brick a member's unlock (see [`epoch_deks`]).
 pub(crate) fn member_epoch_deks(
     epochs: &[SealedEpoch],
     tree_id: &[u8],
@@ -391,13 +398,14 @@ pub(crate) fn member_epoch_deks(
             .find(|w| w.member_id == member_id && w.wrap_method == HPKE)
         {
             let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE);
-            let dek = hpke_unwrap_dek(
+            if let Ok(dek) = hpke_unwrap_dek(
                 hpke_secret.expose(),
                 &w.ephemeral_public_key,
                 &w.wrapped_dek,
                 &info,
-            )?;
-            out.push((ep.key_id.clone(), ep.epoch, dek));
+            ) {
+                out.push((ep.key_id.clone(), ep.epoch, dek));
+            }
         }
     }
     Ok(out)
