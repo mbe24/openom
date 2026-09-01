@@ -6,6 +6,12 @@ import init, {
   unlock as wasmUnlock,
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
+  provisionMember as wasmProvisionMember,
+  dagAddMember as wasmDagAddMember,
+  dagRemoveMember as wasmDagRemoveMember,
+  dagUnlockAsMember as wasmDagUnlockAsMember,
+  dagMerge as wasmDagMerge,
+  dagReseal as wasmDagReseal,
 } from '../app/src/vendor/sealer/openom_sealer.js';
 
 // The REAL wasm sealer, driven directly (no fake worker): loads the vendored openom_sealer_bg.wasm and
@@ -159,5 +165,113 @@ describe('the engine tag selects the engine in one wasm binary (OPE-278)', () =>
     expect(() => wasmProvision('mosaic', 'pass', TREE, MEMBER, replica(1))).toThrow(
       /unknown keyring engine: mosaic/,
     );
+  });
+});
+
+describe('the real wasm runs dag membership + concurrent merge end to end (OPE-278)', () => {
+  // Provision a dag tree and add each of `ids` as an editor; return the shared anchor after all adds plus
+  // the member accounts (kdf + public keys) — the web-host counterpart to the native VaultHost membership.
+  function provisionWithEditors(ownerPass: string, ids: string[]) {
+    const p = wasmProvision('dag', ownerPass, TREE, MEMBER, replica(1));
+    let anchor = p.keyring;
+    p.takeSealer()!.free();
+    p.free();
+    const accounts: Record<string, { kdfParams: Uint8Array; authorPublic: Uint8Array; hpkePublic: Uint8Array }> = {};
+    for (const id of ids) {
+      const acct = wasmProvisionMember(`${id} pass`);
+      accounts[id] = { kdfParams: acct.kdfParams, authorPublic: acct.authorPublic, hpkePublic: acct.hpkePublic };
+      acct.free();
+      const r = wasmDagAddMember(
+        anchor, ownerPass, TREE, MEMBER, replica(1), id, 'editor',
+        accounts[id].authorPublic, accounts[id].hpkePublic,
+      );
+      anchor = r.keyring;
+      r.free();
+    }
+    return { anchor, accounts };
+  }
+
+  it('two replicas concurrently remove members, then merge + reseal and converge', () => {
+    const ownerPass = 'owner horse';
+    const { anchor: shared, accounts } = provisionWithEditors(ownerPass, ['bob', 'carol', 'dave']);
+
+    // Concurrent removals from the SAME shared anchor: replica 1 removes bob, replica 2 removes carol.
+    const remBob = wasmDagRemoveMember(shared, ownerPass, TREE, MEMBER, replica(1), 'bob');
+    const branchA = remBob.keyring;
+    remBob.free();
+    const remCarol = wasmDagRemoveMember(shared, ownerPass, TREE, MEMBER, replica(2), 'carol');
+    const branchB = remCarol.keyring;
+    remCarol.free();
+
+    // Merge B into A: the op-DAG set-unions; BOTH removals take effect (resolved membership = {owner, dave}).
+    const mg = wasmDagMerge(branchA, branchB);
+    const merged = mg.keyring;
+    const mergedWm = mg.watermark;
+    mg.free();
+
+    // The merged write epoch is stale — it still wraps a concurrently-removed member.
+    const u = wasmUnlock('dag', merged, ownerPass, TREE, MEMBER, replica(3));
+    expect(u.needsReseal).toBe(true);
+    u.takeSealer()!.free();
+    u.free();
+
+    // Reseal repairs it (floor = the merged frontier); the flag clears.
+    const re = wasmDagReseal(merged, ownerPass, TREE, MEMBER, replica(4), mergedWm);
+    expect(re.resealed).toBe(true);
+    const resealed = re.keyring;
+    re.free();
+
+    const u2 = wasmUnlock('dag', resealed, ownerPass, TREE, MEMBER, replica(5));
+    expect(u2.needsReseal).toBe(false);
+    const ownerSealer = u2.takeSealer()!;
+    u2.free();
+    const post = sealSnapshot(ownerSealer, 'after the merge');
+    ownerSealer.free();
+
+    // dave (the survivor) still reads the post-merge entry.
+    const ud = wasmDagUnlockAsMember(resealed, 'dave pass', accounts.dave.kdfParams, TREE, 'dave', replica(6));
+    const daveSealer = ud.takeSealer()!;
+    ud.free();
+    expect(dec.decode(daveSealer.openEntry('snapshot', post))).toBe('after the merge');
+    daveSealer.free();
+
+    // bob and carol (both concurrently removed) are locked out after the merge + reseal.
+    expect(() =>
+      wasmDagUnlockAsMember(resealed, 'bob pass', accounts.bob.kdfParams, TREE, 'bob', replica(7)),
+    ).toThrow();
+    expect(() =>
+      wasmDagUnlockAsMember(resealed, 'carol pass', accounts.carol.kdfParams, TREE, 'carol', replica(8)),
+    ).toThrow();
+  });
+
+  it('an added member reads the shared data, and an unknown role is rejected', () => {
+    const ownerPass = 'owner horse';
+    const p = wasmProvision('dag', ownerPass, TREE, MEMBER, replica(1));
+    const anchor0 = p.keyring;
+    const ownerSealer = p.takeSealer()!;
+    p.free();
+    const envelope = sealSnapshot(ownerSealer, 'family data');
+    ownerSealer.free();
+
+    const bob = wasmProvisionMember('bob pass');
+    const bobKdf = bob.kdfParams;
+    const bobAuthor = bob.authorPublic;
+    const bobHpke = bob.hpkePublic;
+    bob.free();
+
+    const added = wasmDagAddMember(anchor0, ownerPass, TREE, MEMBER, replica(1), 'bob', 'editor', bobAuthor, bobHpke);
+    const anchor1 = added.keyring;
+    added.free();
+
+    const u = wasmDagUnlockAsMember(anchor1, 'bob pass', bobKdf, TREE, 'bob', replica(2));
+    const bobSealer = u.takeSealer()!;
+    u.free();
+    expect(dec.decode(bobSealer.openEntry('snapshot', envelope))).toBe('family data');
+    bobSealer.free();
+
+    // An unknown role tag is rejected before any op is minted.
+    expect(() =>
+      wasmDagAddMember(anchor0, ownerPass, TREE, MEMBER, replica(1), 'x', 'sovereign', bobAuthor, bobHpke),
+    ).toThrow(/unknown role/);
   });
 });

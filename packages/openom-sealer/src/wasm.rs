@@ -23,7 +23,7 @@ use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyrin
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
-use crate::{vault, AppVault, EntryKind, SealContext, Sealer, SealerError, SealerSet};
+use crate::{vault, AppVault, DagVault, EntryKind, KeyringRole, SealContext, Sealer, SealerError, SealerSet};
 use openom_keyring_seam::EngineKind;
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
@@ -576,6 +576,231 @@ pub fn remove_member(
         watermark: r.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
+    })
+}
+
+// ---- dag membership authoring (OPE-278) ----
+//
+// The web-host counterpart to the native VaultHost's dag_* methods. The dag engine's membership + merge +
+// reseal live off the shared lifecycle trait (their signatures differ from the chain's — no trusted-signer
+// set, no scalar revision), so these dispatch straight to `DagVault`. The `keyring` argument/return is the
+// opaque dag anchor; the watermark is its frontier. Anchors ARE the wire form here (unlike the chain, whose
+// membership is a keyring blob), so a peer's anchor is merged in via [`dag_merge`].
+
+/// Parse a role tag into the dag engine's [`KeyringRole`] (the openom-roles axis, lower is stronger).
+fn parse_keyring_role(s: &str) -> Result<KeyringRole, JsError> {
+    match s {
+        "owner" => Ok(KeyringRole::OWNER),
+        "co-owner" => Ok(KeyringRole::CO_OWNER),
+        "maintainer" => Ok(KeyringRole::MAINTAINER),
+        "editor" => Ok(KeyringRole::EDITOR),
+        "viewer" => Ok(KeyringRole::VIEWER),
+        other => Err(JsError::new(&format!("unknown role: {other}"))),
+    }
+}
+
+/// A 32-byte public key from wire bytes, or an error naming the field.
+fn key32(b: &[u8], what: &str) -> Result<[u8; 32], JsError> {
+    b.try_into()
+        .map_err(|_| JsError::new(&format!("{what} must be 32 bytes, got {}", b.len())))
+}
+
+/// The result of [`dag_reseal`]: the (possibly unchanged) anchor + its watermark, and whether a repair was
+/// actually appended (`false` = nothing was stale, an idempotent no-op).
+#[wasm_bindgen]
+pub struct ResealResult {
+    keyring: Vec<u8>,
+    watermark: Vec<u8>,
+    resealed: bool,
+}
+
+#[wasm_bindgen]
+impl ResealResult {
+    /// The anchor to persist (unchanged when `resealed` is false).
+    #[wasm_bindgen(getter)]
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+    /// The frontier watermark to persist.
+    #[wasm_bindgen(getter)]
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+    /// Whether a covering reseal op was appended (false = nothing was stale).
+    #[wasm_bindgen(getter)]
+    pub fn resealed(&self) -> bool {
+        self.resealed
+    }
+}
+
+/// Add a member to a dag tree (owner action): wrap the DEK to the joiner's OOB-verified keys and append a
+/// signed Add op. Returns the new anchor + watermark; no sealer (Add mints no epoch, the owner's is intact).
+#[wasm_bindgen(js_name = dagAddMember)]
+#[allow(clippy::too_many_arguments)]
+pub fn dag_add_member(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    new_member_id: &str,
+    role: &str,
+    member_author_public: &[u8],
+    member_hpke_public: &[u8],
+) -> Result<VaultResult, JsError> {
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(owner_member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let new_anchor = DagVault
+        .add_member(
+            &ctx,
+            keyring,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            new_member_id,
+            parse_keyring_role(role)?,
+            key32(member_author_public, "member author key")?,
+            key32(member_hpke_public, "member hpke key")?,
+        )
+        .map_err(to_js)?;
+    let watermark = DagVault.watermark(&new_anchor).map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: new_anchor,
+        recovery_code: String::new(),
+        did_key: String::new(),
+        watermark,
+        needs_reseal: false,
+        sealer: None,
+    })
+}
+
+/// Remove a member from a dag tree (owner action) with forward secrecy: append a Remove op minting a fresh
+/// epoch the removed member can't reach, then re-unlock under it — returns the new anchor + watermark + a
+/// sealer scoped to the new epoch.
+#[wasm_bindgen(js_name = dagRemoveMember)]
+pub fn dag_remove_member(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    remove_member_id: &str,
+) -> Result<VaultResult, JsError> {
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(owner_member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let pass = Passphrase::new(owner_passphrase.into_bytes());
+    let new_anchor = DagVault
+        .remove_member(&ctx, keyring, &pass, remove_member_id)
+        .map_err(to_js)?;
+    let watermark = DagVault.watermark(&new_anchor).map_err(to_js)?;
+    let u = DagVault.unlock(&ctx, &new_anchor, &pass).map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: new_anchor,
+        recovery_code: String::new(),
+        did_key: u.did_key.into_string(),
+        watermark,
+        needs_reseal: u.needs_reseal,
+        sealer: Some(WasmSealer { inner: u.sealer }),
+    })
+}
+
+/// Unlock a dag tree AS AN ORDINARY member: reach the DEKs via the member's own per-epoch HPKE wraps (not
+/// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key. No trusted-signer
+/// set (dag membership resolves from the op-DAG). Returns a sealer + watermark + `needsReseal`.
+#[wasm_bindgen(js_name = dagUnlockAsMember)]
+pub fn dag_unlock_as_member(
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+) -> Result<VaultResult, JsError> {
+    let kdf = KdfParams::decode(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let u = DagVault
+        .unlock_as_member(&ctx, keyring, &Passphrase::new(passphrase.into_bytes()), &kdf)
+        .map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: Vec::new(),
+        recovery_code: String::new(),
+        did_key: u.did_key.into_string(),
+        watermark: u.watermark,
+        needs_reseal: u.needs_reseal,
+        sealer: Some(WasmSealer { inner: u.sealer }),
+    })
+}
+
+/// Merge a peer's dag anchor of the SAME tree into the local one (the causal set-union of their op closures)
+/// and return the merged anchor + advanced watermark. Merge only ADDS ops, so it can't roll back — no floor.
+/// Unlock the result to learn whether the merged write epoch needs a reseal.
+#[wasm_bindgen(js_name = dagMerge)]
+pub fn dag_merge(local: &[u8], remote: &[u8]) -> Result<VaultResult, JsError> {
+    let merged = DagVault.merge(local, remote).map_err(to_js)?;
+    let watermark = DagVault.watermark(&merged).map_err(to_js)?;
+    Ok(VaultResult {
+        keyring: merged,
+        recovery_code: String::new(),
+        did_key: String::new(),
+        watermark,
+        needs_reseal: false,
+        sealer: None,
+    })
+}
+
+/// Repair a stale write epoch (OPE-282) after a concurrent membership merge: if the resolved keyring needs
+/// it, append a covering Reseal op. Idempotent — `resealed=false` (anchor unchanged) when nothing is stale.
+/// `floor` is the caller's stored watermark (the anti-rollback floor).
+#[wasm_bindgen(js_name = dagReseal)]
+pub fn dag_reseal(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    floor: &[u8],
+) -> Result<ResealResult, JsError> {
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(owner_member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let r = DagVault
+        .reseal(&ctx, keyring, &Passphrase::new(owner_passphrase.into_bytes()), floor)
+        .map_err(to_js)?;
+    Ok(ResealResult {
+        keyring: r.anchor,
+        watermark: r.watermark,
+        resealed: r.resealed,
     })
 }
 
