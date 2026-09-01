@@ -19,6 +19,9 @@ openom-keyring.workspace = true
 # point: chain vault (vault.rs) + dag vault (dag_vault.rs), each behind KeyringLifecycle (OPE-273 gate
 # Q1.3=a). No cycle — the dag crate does not depend on the sealer.
 openom-keyring-dag.workspace = true
+# The keyless seam's MembershipView — the engine-neutral resolved membership the dag vault checks epoch
+# coverage against (OPE-282). Re-exported through the dag facade's Resolved; named here for the fold.
+openom-keyring-seam.workspace = true
 # The single home for the role constants (SIGNER_FOUNDER, MEMBER_OWNER, …) the vault compares against.
 openom-roles.workspace = true
 # did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).

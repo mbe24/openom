@@ -3721,6 +3721,7 @@ dependencies = [
  "openom-did",
  "openom-keyring",
  "openom-keyring-dag",
+ "openom-keyring-seam",
  "openom-protocol",
  "openom-roles",
  "proptest",

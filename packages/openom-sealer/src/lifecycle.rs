@@ -61,6 +61,10 @@ pub struct Unlocked {
     /// The engine-opaque anti-rollback cursor to persist (chain: the keyring revision, as bytes).
     pub watermark: Vec<u8>,
     pub did_key: DidKey,
+    /// Advisory: the current write epoch's wraps don't match the resolved membership, so a concurrent
+    /// membership merge left it stale and a reseal is due (dag only — the chain, being linear, is always
+    /// `false`). Never blocks unlock; the client repairs it out-of-band (OPE-282).
+    pub needs_reseal: bool,
 }
 
 /// Result of [`KeyringLifecycle::recover`]: a new `anchor` + a NEW recovery code (both to publish/show),
@@ -71,6 +75,8 @@ pub struct Recovered {
     pub sealer: SealerSet,
     pub watermark: Vec<u8>,
     pub did_key: DidKey,
+    /// See [`Unlocked::needs_reseal`] — recovery also returns a live sealer, so it carries the same signal.
+    pub needs_reseal: bool,
 }
 
 /// Result of [`KeyringLifecycle::change_passphrase`]: the new `anchor` + a rotated recovery code + the new
@@ -173,6 +179,7 @@ impl KeyringLifecycle for ChainVault {
             sealer: u.sealer,
             watermark: Self::watermark(u.revision),
             did_key: u.did_key,
+            needs_reseal: false, // a linear chain has no concurrent-merge stale epoch
         })
     }
 
@@ -199,6 +206,7 @@ impl KeyringLifecycle for ChainVault {
             sealer: r.sealer,
             watermark: Self::watermark(r.revision),
             did_key: r.did_key,
+            needs_reseal: false,
         })
     }
 

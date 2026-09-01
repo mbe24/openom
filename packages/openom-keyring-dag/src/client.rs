@@ -178,11 +178,27 @@ pub struct Resolved {
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
-/// it. The op-id is the deterministic winner tiebreak for concurrent same-ordinal epochs; it is attached
-/// here, at resolve time, because it cannot live inside the sealing — the op-id is a hash *of* the sealing.
+/// it and the coarse kind of that op. The op-id is the deterministic winner tiebreak for concurrent
+/// same-ordinal epochs; it is attached here, at resolve time, because it cannot live inside the sealing —
+/// the op-id is a hash *of* the sealing. The origin lets the sealer's fold decide which epochs may win the
+/// write epoch WITHOUT keyeo ever interpreting the sealing.
 pub struct SealingEntry {
     pub op_id: [u8; 32],
+    pub origin: SealingOrigin,
     pub bytes: Vec<u8>,
+}
+
+/// The coarse kind of the op that minted a sealing payload. Only Genesis, Remove, and Reseal ops
+/// legitimately mint a NEW epoch (Genesis: epoch 0; Remove / Reseal: a forward-secret re-epoch); an epoch
+/// carried by any `Other` op (e.g. an Add's joiner wraps, or a Retarget's re-escrow) is anomalous and the
+/// sealer's fold refuses to let it win the write epoch. The facade maps the keyeo action to this — keyeo
+/// itself never sees the sealing (invariant).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SealingOrigin {
+    Genesis,
+    Remove,
+    Reseal,
+    Other,
 }
 
 /// Resolve an anchor: rebuild the engine from the pinned config, replay the op closure, and return the
@@ -228,6 +244,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     if !genesis_op.sealing.is_empty() {
         sealing.push(SealingEntry {
             op_id: anchor.genesis_op_id,
+            origin: SealingOrigin::Genesis,
             bytes: genesis_op.sealing.clone(),
         });
     }
@@ -239,12 +256,24 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             if !op.sealing.is_empty() {
                 sealing.push(SealingEntry {
                     op_id,
+                    origin: origin_of(&op.action),
                     bytes: op.sealing.clone(),
                 });
             }
         }
     }
     Ok(Resolved { members, sealing })
+}
+
+/// Map a keyeo action to the coarse [`SealingOrigin`] the sealer's fold uses to decide epoch eligibility.
+/// Only Remove (and, once it lands, Reseal) legitimately mints a forward-secret epoch outside genesis; the
+/// genesis Create is tagged [`SealingOrigin::Genesis`] at its own (pinned) call site, so a Create here is an
+/// (inert) non-genesis op and counts as `Other`.
+fn origin_of(action: &KeyringAction) -> SealingOrigin {
+    match action {
+        MembershipAction::Remove { .. } => SealingOrigin::Remove,
+        _ => SealingOrigin::Other,
+    }
 }
 
 /// The DAG frontier: op ids that are no other op's parent (the current tips), sorted for determinism. New
