@@ -413,6 +413,20 @@ pub fn append_reseal(
     append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
 }
 
+/// Append a **Backfill** op (OPE-288) — a membership-inert HISTORICAL-READ repair authored by `member_id`,
+/// carrying ONLY `added_wraps` (the missing member wraps for existing epochs) in its opaque `sealing`, no new
+/// epoch. It reuses the inert `Reseal` keyeo action: keyeo sees only an authored, membership-inert op, and
+/// what the sealing actually does — add wraps vs mint an epoch — is the sealer's concern, invisible to keyeo
+/// (the sealing invariant). Parents = the current frontier. Returns the new anchor bytes.
+pub fn append_backfill(
+    anchor_bytes: &[u8],
+    member_id: &str,
+    sealing: Vec<u8>,
+    signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

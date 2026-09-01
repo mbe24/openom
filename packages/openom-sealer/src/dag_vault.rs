@@ -151,11 +151,39 @@ fn fold_sealing(
     }
     let (_, _, write_key_id, winner_covers) = winner.ok_or(SealerError::MissingWrap)?;
 
+    let epochs: Vec<SealedEpoch> = tagged.into_iter().map(|(e, _, _)| e).collect();
+    let needs_backfill = any_epoch_missing_a_member(&epochs, members);
     Ok(FoldedSealing {
-        epochs: tagged.into_iter().map(|(e, _, _)| e).collect(),
+        epochs,
         escrow,
         write_key_id,
         needs_reseal: !winner_covers,
+        needs_backfill,
+    })
+}
+
+/// Whether some RETAINED epoch lacks an HPKE wrap for a resolved non-owner member (OPE-288) — that member
+/// can't READ history sealed under that epoch, the symptom of a concurrent add on a branch that never saw a
+/// sibling branch's epochs. Unlike `needs_reseal` (the WRITE epoch must wrap EXACTLY the resolved set — both
+/// leaks and lockouts), this is a MISSING-only, ALL-epochs check: an extra (now-removed) member still wrapped
+/// in an old epoch is fine — historical read was already granted and removal is forward-only. The owner
+/// reaches every DEK via the RRK, so it needs no per-epoch owner wrap.
+fn any_epoch_missing_a_member(epochs: &[SealedEpoch], members: &MembershipView) -> bool {
+    use std::collections::HashSet;
+    let resolved: Vec<&str> = members
+        .members
+        .iter()
+        .filter(|m| !m.is_owner())
+        .map(|m| m.member_id.as_str())
+        .collect();
+    epochs.iter().any(|ep| {
+        let wrapped: HashSet<&str> = ep
+            .wraps
+            .iter()
+            .filter(|w| w.wrap_method == HPKE)
+            .map(|w| w.member_id.as_str())
+            .collect();
+        resolved.iter().any(|m| !wrapped.contains(m))
     })
 }
 
@@ -167,6 +195,9 @@ struct FoldedSealing {
     escrow: RecoveryEscrow,
     write_key_id: Vec<u8>,
     needs_reseal: bool,
+    /// Some retained epoch lacks a wrap for a resolved member — they can't read that slice of history until
+    /// the owner backfills it (OPE-288). Orthogonal to `needs_reseal` (a write-epoch/forward-secrecy issue).
+    needs_backfill: bool,
 }
 
 /// The result of [`DagVault::reseal`]: the (possibly unchanged) anchor to publish + its watermark, and
@@ -175,6 +206,14 @@ pub struct Resealed {
     pub anchor: Vec<u8>,
     pub watermark: Vec<u8>,
     pub resealed: bool,
+}
+
+/// The result of [`DagVault::backfill`]: the (possibly unchanged) anchor + its watermark, and whether
+/// historical-read wraps were actually added (`false` = nothing was missing, a no-op).
+pub struct Backfilled {
+    pub anchor: Vec<u8>,
+    pub watermark: Vec<u8>,
+    pub backfilled: bool,
 }
 
 /// Whether `epoch`'s wraps exactly serve the resolved membership: an RRK wrap for the owner, plus an HPKE
@@ -297,7 +336,7 @@ impl KeyringLifecycle for DagVault {
             .owner()
             .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
 
-        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
         let pass_wrap = escrow
@@ -342,6 +381,7 @@ impl KeyringLifecycle for DagVault {
             watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
             did_key: DidKey::from_public_key(&owner_key),
             needs_reseal,
+            needs_backfill,
         })
     }
 
@@ -369,7 +409,7 @@ impl KeyringLifecycle for DagVault {
         // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
         let resolved =
             dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
-        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
         let rec_wrap = escrow
             .wraps
             .iter()
@@ -425,6 +465,7 @@ impl KeyringLifecycle for DagVault {
             watermark,
             did_key,
             needs_reseal,
+            needs_backfill,
         })
     }
 
@@ -626,7 +667,7 @@ impl DagVault {
             .iter()
             .find(|m| m.member_id == member_id)
             .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
-        let FoldedSealing { epochs, write_key_id, needs_reseal, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, write_key_id, needs_reseal, needs_backfill, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         validate_kdf(&CoreKdf::from(member_kdf))?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
@@ -648,6 +689,7 @@ impl DagVault {
             watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
             did_key: DidKey::from_public_key(&my_key),
             needs_reseal,
+            needs_backfill,
         })
     }
 
@@ -834,6 +876,125 @@ impl DagVault {
             anchor: new_anchor,
             watermark,
             resealed: true,
+        })
+    }
+
+    /// Backfill historical READ access (OPE-288). A member added on one branch has no wrap for epochs minted
+    /// concurrently on another branch before the merge, so after resolution they can't read history sealed
+    /// under those epochs. The owner — who reaches every DEK via the RRK — re-wraps each retained epoch for
+    /// every resolved member missing from it, appending an `added_wraps`-only op (no new epoch, membership
+    /// inert; keyeo sees only an authored Reseal-kind op). Owner-authored (only the RRK opens the old DEKs).
+    /// Idempotent: a no-op (`backfilled = false`) when no epoch is missing any resolved member. Enforces the
+    /// anti-rollback `floor`; returns the new anchor + watermark. Orthogonal to `reseal` (forward secrecy).
+    pub fn backfill(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        floor: &[u8],
+    ) -> Result<Backfilled, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let owner_id = ctx.member_id.as_str();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let FoldedSealing {
+            epochs,
+            escrow,
+            needs_backfill,
+            ..
+        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+
+        // Idempotent: every retained epoch already wraps every resolved member → nothing to do.
+        let unchanged = || -> Result<Backfilled, SealerError> {
+            Ok(Backfilled {
+                watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+                anchor: anchor.to_vec(),
+                backfilled: false,
+            })
+        };
+        if !needs_backfill {
+            return unchanged();
+        }
+
+        // The owner authorizes via their passphrase-derived identity (anti-substitution vs the resolved
+        // Owner key) and unwraps the RRK secret — the same open-all-DEKs path as `add_member`.
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(SealerError::MissingWrap)?;
+        let kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+        let rrk_secret = unwrap_rrk_secret(
+            &root.kek,
+            &pass_wrap.nonce,
+            &pass_wrap.wrapped_dek,
+            tree_id,
+            owner_id,
+            PASSPHRASE,
+        )?;
+
+        // Open every epoch the RRK can reach; for each, add the missing resolved non-owner members' wraps.
+        // (`epoch_deks` skips an un-openable epoch rather than failing, so a corrupt epoch can't brick this.)
+        use std::collections::HashSet;
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let mut added_wraps: Vec<AddedWrap> = Vec::new();
+        for (key_id, _epoch, dek) in &deks {
+            let wrapped: HashSet<&str> = epochs
+                .iter()
+                .find(|e| &e.key_id == key_id)
+                .map(|e| {
+                    e.wraps
+                        .iter()
+                        .filter(|w| w.wrap_method == HPKE)
+                        .map(|w| w.member_id.as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for m in &resolved.members.members {
+                if m.is_owner() || wrapped.contains(m.member_id.as_str()) {
+                    continue;
+                }
+                let wrap = member_wrap_epoch(&m.hpke_public_key, dek, tree_id, &m.member_id, key_id)?;
+                added_wraps.push(AddedWrap {
+                    key_id: key_id.clone(),
+                    wrap,
+                });
+            }
+        }
+
+        // Every missing epoch was un-openable (skipped by `epoch_deks`) → nothing we can repair; no-op.
+        if added_wraps.is_empty() {
+            return unchanged();
+        }
+
+        let sealing = SealingPayload {
+            new_epochs: vec![],
+            added_wraps,
+            escrow: None,
+        }
+        .to_bytes();
+        let new_anchor = dag_client::append_backfill(anchor, owner_id, sealing, &root.identity)
+            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        Ok(Backfilled {
+            anchor: new_anchor,
+            watermark,
+            backfilled: true,
         })
     }
 }
@@ -1028,6 +1189,40 @@ mod tests {
             b"k1".to_vec(),
             "a plausible higher ordinal is retained and wins — the bound does not over-reject"
         );
+    }
+
+    /// `needs_backfill` flags a resolved member missing a wrap in some RETAINED epoch (OPE-288) — the
+    /// historical-READ gap a concurrent add leaves — and is ORTHOGONAL to `needs_reseal` (a write-epoch
+    /// forward-secrecy signal): here the write epoch covers everyone, yet an older epoch doesn't. An extra
+    /// (removed) member still wrapped in an old epoch does NOT trip it (removal is forward-only).
+    #[test]
+    fn needs_backfill_flags_a_member_missing_from_an_older_epoch() {
+        use dag_client::SealingOrigin::{Genesis, Remove};
+        let members = membership("owner", &["bob", "carol"]); // resolved = owner + bob + carol
+
+        // Genesis epoch 0 predates carol (wraps owner+bob only); the newer epoch 1 covers owner+bob+carol.
+        // The WRITE epoch (1) covers the resolved set → no reseal — but carol can't read epoch-0 history.
+        let gap = vec![
+            sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob")], Some(escrow())),
+            sealing_entry(5, b"k1", 1, Remove, vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")], None),
+        ];
+        let folded = fold_sealing(&gap, &members).unwrap();
+        assert!(!folded.needs_reseal, "the write epoch (k1) covers the resolved membership");
+        assert!(folded.needs_backfill, "carol lacks a wrap in the older epoch k0");
+
+        // Backfilled: every retained epoch wraps every resolved member → no gap.
+        let complete = vec![
+            sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")], Some(escrow())),
+            sealing_entry(5, b"k1", 1, Remove, vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")], None),
+        ];
+        assert!(!fold_sealing(&complete, &members).unwrap().needs_backfill, "all epochs cover all members");
+
+        // An EXTRA member (a removed dave still wrapped in the old epoch) is NOT a backfill gap.
+        let extra = vec![
+            sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol"), member_wrap("dave")], Some(escrow())),
+            sealing_entry(5, b"k1", 1, Remove, vec![rrk_wrap(), member_wrap("bob"), member_wrap("carol")], None),
+        ];
+        assert!(!fold_sealing(&extra, &members).unwrap().needs_backfill, "an extra removed member is not a gap");
     }
 
     /// OPE-287: a garbage epoch (a malicious member could append one) whose RRK wrap won't open is SKIPPED

@@ -178,6 +178,7 @@ pub struct Provisioned {
     pub sealer_id: String,
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
+    pub needs_backfill: bool,
     pub recovery_code: String,
     /// The owner's stable author id — a `did:key` over their public identity key (the claim
     /// `createdBy`). Distinct from the per-context sync replica id.
@@ -190,6 +191,7 @@ pub struct Unlocked {
     pub sealer_id: String,
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
+    pub needs_backfill: bool,
     /// The member's stable author id — a `did:key` over their public identity key (the claim
     /// `createdBy`), stable across tabs/reloads.
     pub did_key: String,
@@ -201,6 +203,7 @@ pub struct Recovered {
     pub sealer_id: String,
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
+    pub needs_backfill: bool,
     pub recovery_code: String,
     /// The NEW owner's stable author id — recovery mints a fresh identity, so this differs from the
     /// pre-recovery did:key.
@@ -266,6 +269,15 @@ pub struct AcceptedKeyring {
 pub struct Resealed {
     pub watermark: Vec<u8>,
     pub resealed: bool,
+}
+
+/// Result of a dag [`VaultHost::dag_backfill`]: the (possibly unchanged) watermark now anchored locally, and
+/// whether historical-read wraps were actually added (`false` = nothing was missing, an idempotent no-op).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Backfilled {
+    pub watermark: Vec<u8>,
+    pub backfilled: bool,
 }
 
 // ---------------------------------------------------------------- registry
@@ -444,6 +456,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             sealer_id: id,
             watermark: p.watermark,
             needs_reseal: false,
+            needs_backfill: false,
             recovery_code: p.recovery_code.into_string(),
             did_key: p.did_key.into_string(),
         })
@@ -479,6 +492,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             sealer_id: id,
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
+            needs_backfill: u.needs_backfill,
             did_key: u.did_key.into_string(),
         })
     }
@@ -521,6 +535,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             sealer_id: id,
             watermark: r.watermark,
             needs_reseal: r.needs_reseal,
+            needs_backfill: r.needs_backfill,
             recovery_code: r.recovery_code.into_string(),
             did_key: r.did_key.into_string(),
         })
@@ -661,6 +676,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             // A member unlock opens the write epoch, so it carries the pin like the owner unlock does.
             watermark: chain_watermark_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
             needs_reseal: false,
+            needs_backfill: false,
             did_key: u.did_key.into_string(),
         })
     }
@@ -939,6 +955,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             sealer_id: id,
             watermark: Vec::new(),
             needs_reseal: false,
+            needs_backfill: false,
             did_key: String::new(), // dev sealer: no vault identity
         })
     }
@@ -1114,6 +1131,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             sealer_id: id,
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
+            needs_backfill: u.needs_backfill,
             did_key: u.did_key.into_string(),
         })
     }
@@ -1171,6 +1189,48 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         Ok(Resealed {
             watermark: r.watermark,
             resealed: r.resealed,
+        })
+    }
+
+    /// Backfill historical READ access (OPE-288) after a concurrent membership merge: if some retained epoch
+    /// is missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
+    /// Idempotent — a no-op (`backfilled=false`, nothing persisted) when nothing is missing. Owner-authored
+    /// (only the RRK opens the old DEKs). The stored watermark is the floor.
+    pub fn dag_backfill(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+    ) -> Result<Backfilled> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(owner_member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let r = dag.backfill(
+            &ctx,
+            &anchor,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &floor,
+        )?;
+        if r.backfilled {
+            self.store
+                .commit_keyring(tree_key, &r.anchor, &r.watermark)
+                .map_err(VaultError::storage)?;
+        }
+        Ok(Backfilled {
+            watermark: r.watermark,
+            backfilled: r.backfilled,
         })
     }
 
@@ -1771,6 +1831,83 @@ mod tests {
         // A second reseal is an idempotent no-op — the replicas have converged.
         let re2 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(!re2.resealed, "nothing stale -> reseal is a no-op");
+    }
+
+    #[test]
+    fn dag_backfill_restores_a_concurrently_added_members_historical_read() {
+        // OPE-288, the companion to reseal. Owner devices A + B share {owner, bob}. A removes bob (minting
+        // epoch 1) and seals data under it; B concurrently ADDS carol, who gets wraps only for the epoch B
+        // saw (epoch 0). After merge carol is a resolved member but has no wrap for A's epoch 1, so she can't
+        // read that slice of history. Reseal makes the tree unlockable for her again (a fresh covering
+        // epoch); backfill then restores her READ access to the older epoch. The two repairs are orthogonal.
+        let owner = "owner horse";
+        let a = dag_host();
+        a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let bob = a.provision_member("bob pass".into()).unwrap();
+        a.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public)
+            .unwrap();
+
+        // Seed device B with the shared anchor (before A's removal / B's add).
+        let shared = a.store.load_keyring(KEY).unwrap().unwrap();
+        let shared_wm = a.store.watermark(KEY).unwrap();
+        let b = dag_host();
+        b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
+
+        // A removes bob (mints epoch 1) and seals a secret under that new epoch.
+        let removed = a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
+        let secret = seal(&a, &removed.sealer_id, b"branch-A history");
+        a.lock(&removed.sealer_id);
+
+        // B concurrently adds carol — she gets a wrap for epoch 0 only (B never saw A's epoch 1).
+        let carol = a.provision_member("carol pass".into()).unwrap();
+        b.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public)
+            .unwrap();
+        let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
+
+        // A merges B's branch: resolved = {owner, carol} (bob removed). The write epoch doesn't cover carol.
+        a.dag_merge_remote(KEY, &b_branch).unwrap();
+        let u = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(u.needs_reseal, "the merged write epoch doesn't cover the concurrently-added carol");
+        a.lock(&u.sealer_id);
+
+        // Reseal → a fresh covering epoch so carol can unlock; but she STILL can't read A's epoch-1 history.
+        a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(!u2.needs_reseal, "reseal covers the write epoch");
+        assert!(u2.needs_backfill, "carol still lacks a wrap in A's older epoch 1");
+        a.lock(&u2.sealer_id);
+
+        let carol_pre = a
+            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .unwrap();
+        assert!(
+            a.open_entry(&carol_pre.sealer_id, "snapshot", &secret).is_err(),
+            "carol can't read history sealed under the epoch she's missing"
+        );
+        a.lock(&carol_pre.sealer_id);
+
+        // Backfill adds carol's wrap to the older epoch → she can read it, and the flag clears.
+        let bf = a.dag_backfill(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(bf.backfilled, "a missing historical wrap is backfilled");
+        let u3 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(!u3.needs_backfill, "after backfill every epoch covers every resolved member");
+        a.lock(&u3.sealer_id);
+
+        let carol_post = a
+            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .unwrap();
+        assert_eq!(
+            a.open_entry(&carol_post.sealer_id, "snapshot", &secret).unwrap(),
+            b"branch-A history",
+            "after backfill carol reads the previously-unreachable history"
+        );
+        a.lock(&carol_post.sealer_id);
+
+        // Idempotent: a second backfill is a no-op.
+        assert!(
+            !a.dag_backfill(KEY, TREE, owner.into(), MEMBER).unwrap().backfilled,
+            "nothing missing -> backfill is a no-op"
+        );
     }
 
     #[test]

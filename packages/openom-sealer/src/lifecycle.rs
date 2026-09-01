@@ -69,6 +69,10 @@ pub struct Unlocked {
     /// membership merge left it stale and a reseal is due (dag only — the chain, being linear, is always
     /// `false`). Never blocks unlock; the client repairs it out-of-band (OPE-282).
     pub needs_reseal: bool,
+    /// Advisory: some RETAINED epoch lacks a wrap for a resolved member, so a concurrently-added member can't
+    /// read that slice of history until the owner backfills it (dag only; chain is always `false`). Never
+    /// blocks unlock; the OWNER repairs it out-of-band (only the RRK opens the old DEKs) (OPE-288).
+    pub needs_backfill: bool,
 }
 
 /// Result of [`KeyringLifecycle::recover`]: a new `anchor` + a NEW recovery code (both to publish/show),
@@ -81,6 +85,8 @@ pub struct Recovered {
     pub did_key: DidKey,
     /// See [`Unlocked::needs_reseal`] — recovery also returns a live sealer, so it carries the same signal.
     pub needs_reseal: bool,
+    /// See [`Unlocked::needs_backfill`] — recovery returns a live owner sealer, so it carries this too.
+    pub needs_backfill: bool,
 }
 
 /// Result of [`KeyringLifecycle::change_passphrase`]: the new `anchor` + a rotated recovery code + the new
@@ -207,6 +213,7 @@ impl KeyringLifecycle for ChainVault {
             watermark: Self::watermark(u.revision, &u.write_key_id, &u.write_dek_hash),
             did_key: u.did_key,
             needs_reseal: false, // a linear chain has no concurrent-merge stale epoch
+            needs_backfill: false, // nor a concurrent-add historical-read gap (OPE-288)
         })
     }
 
@@ -237,6 +244,7 @@ impl KeyringLifecycle for ChainVault {
             watermark: Self::watermark(r.revision, &r.write_key_id, &r.write_dek_hash),
             did_key: r.did_key,
             needs_reseal: false,
+            needs_backfill: false,
         })
     }
 

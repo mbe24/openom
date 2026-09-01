@@ -226,6 +226,9 @@ pub struct VaultResult {
     /// Advisory: the dag write epoch is stale after a concurrent merge and a reseal is due (always `false`
     /// for the chain). Never blocks; the client repairs it out-of-band.
     needs_reseal: bool,
+    /// Advisory: some retained epoch is missing a resolved member's wrap, so the owner should backfill
+    /// historical read access (always `false` for the chain). Never blocks; repaired out-of-band (OPE-288).
+    needs_backfill: bool,
     sealer: Option<WasmSealer>,
 }
 
@@ -260,6 +263,12 @@ impl VaultResult {
     #[wasm_bindgen(getter, js_name = needsReseal)]
     pub fn needs_reseal(&self) -> bool {
         self.needs_reseal
+    }
+
+    /// Whether some retained epoch needs a historical-read backfill (always `false` for the chain).
+    #[wasm_bindgen(getter, js_name = needsBackfill)]
+    pub fn needs_backfill(&self) -> bool {
+        self.needs_backfill
     }
 
     /// Take the sealer out to JS (once). `undefined` for change-passphrase (no new sealer).
@@ -305,6 +314,7 @@ pub fn provision(
         did_key: p.did_key.into_string(),
         watermark: p.watermark,
         needs_reseal: false,
+        needs_backfill: false,
         sealer: Some(WasmSealer { inner: p.sealer }),
     })
 }
@@ -339,6 +349,7 @@ pub fn unlock(
         did_key: u.did_key.into_string(),
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
+        needs_backfill: u.needs_backfill,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
@@ -382,6 +393,7 @@ pub fn recover(
         did_key: r.did_key.into_string(),
         watermark: r.watermark,
         needs_reseal: r.needs_reseal,
+        needs_backfill: r.needs_backfill,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
@@ -425,6 +437,7 @@ pub fn change_passphrase(
         did_key: String::new(),
         watermark: re.watermark,
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -504,6 +517,7 @@ pub fn add_member(
         did_key: String::new(),
         watermark: chain_wm_pinned(added.revision, &added.write_key_id, &added.write_dek_hash),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -543,6 +557,7 @@ pub fn unlock_as_member(
         did_key: u.did_key.into_string(),
         watermark: chain_wm_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
@@ -576,6 +591,7 @@ pub fn remove_member(
         did_key: String::new(),
         watermark: chain_wm_pinned(r.revision, &r.write_key_id, &r.write_dek_hash),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
@@ -677,6 +693,7 @@ pub fn dag_add_member(
         did_key: String::new(),
         watermark,
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -715,6 +732,7 @@ pub fn dag_remove_member(
         did_key: u.did_key.into_string(),
         watermark,
         needs_reseal: u.needs_reseal,
+        needs_backfill: u.needs_backfill,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
@@ -752,6 +770,7 @@ pub fn dag_unlock_as_member(
         did_key: u.did_key.into_string(),
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
+        needs_backfill: u.needs_backfill,
         sealer: Some(WasmSealer { inner: u.sealer }),
     })
 }
@@ -769,6 +788,7 @@ pub fn dag_merge(local: &[u8], remote: &[u8]) -> Result<VaultResult, JsError> {
         did_key: String::new(),
         watermark,
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -802,6 +822,67 @@ pub fn dag_reseal(
         keyring: r.anchor,
         watermark: r.watermark,
         resealed: r.resealed,
+    })
+}
+
+/// The result of [`dag_backfill`]: the (possibly unchanged) anchor + its watermark, and whether
+/// historical-read wraps were actually added (`false` = nothing was missing, an idempotent no-op).
+#[wasm_bindgen]
+pub struct BackfillResult {
+    keyring: Vec<u8>,
+    watermark: Vec<u8>,
+    backfilled: bool,
+}
+
+#[wasm_bindgen]
+impl BackfillResult {
+    /// The anchor to persist (unchanged when `backfilled` is false).
+    #[wasm_bindgen(getter)]
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+    /// The frontier watermark to persist.
+    #[wasm_bindgen(getter)]
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+    /// Whether a backfill op was appended (false = every epoch already wrapped every resolved member).
+    #[wasm_bindgen(getter)]
+    pub fn backfilled(&self) -> bool {
+        self.backfilled
+    }
+}
+
+/// Backfill historical READ access (OPE-288) after a concurrent membership merge: if some retained epoch is
+/// missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
+/// Idempotent — `backfilled=false` (anchor unchanged) when nothing is missing. `floor` is the anti-rollback
+/// watermark. Owner-authored: only the RRK opens the old DEKs.
+#[wasm_bindgen(js_name = dagBackfill)]
+pub fn dag_backfill(
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    floor: &[u8],
+) -> Result<BackfillResult, JsError> {
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(owner_member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let r = DagVault
+        .backfill(&ctx, keyring, &Passphrase::new(owner_passphrase.into_bytes()), floor)
+        .map_err(to_js)?;
+    Ok(BackfillResult {
+        keyring: r.anchor,
+        watermark: r.watermark,
+        backfilled: r.backfilled,
     })
 }
 
@@ -967,6 +1048,7 @@ pub fn add_member_as_co_owner(
         did_key: String::new(),
         watermark: chain_wm_pinned(added.revision, &added.write_key_id, &added.write_dek_hash),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -1007,6 +1089,7 @@ pub fn remove_member_as_co_owner(
         did_key: String::new(),
         watermark: chain_wm_pinned(r.revision, &r.write_key_id, &r.write_dek_hash),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: Some(WasmSealer { inner: r.sealer }),
     })
 }
@@ -1039,6 +1122,7 @@ pub fn add_co_owner(
         // this revision so a bare-revision watermark can't erase a recover pin (OPE-286 phase 2).
         watermark: r.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -1073,6 +1157,7 @@ pub fn remove_co_owner(
         // Signer-set change, no epoch opened — caller carries the write-epoch pin forward (OPE-286 phase 2).
         watermark: r.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -1106,6 +1191,7 @@ pub fn accept_remote_keyring(
             // this revision rather than let a bare-revision watermark erase a recover pin (OPE-286 phase 2).
             watermark: anchor_keyring.revision.to_be_bytes().to_vec(),
             needs_reseal: false,
+            needs_backfill: false,
             sealer: None,
         });
     }
@@ -1121,6 +1207,7 @@ pub fn accept_remote_keyring(
         did_key: String::new(),
         watermark: new_anchor.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
@@ -1269,6 +1356,7 @@ pub fn accept_reset_keyring(
         did_key: String::new(),
         watermark: new_anchor.revision.to_be_bytes().to_vec(),
         needs_reseal: false,
+        needs_backfill: false,
         sealer: None,
     })
 }
