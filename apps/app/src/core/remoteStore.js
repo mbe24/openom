@@ -160,6 +160,52 @@ export class RemoteStore {
     };
   }
 
+  // ---- advisory membership summary surface (GET/PUT /trees/{id}/access) ----
+
+  /**
+   * The current advisory member list + the summary's CAS `generation` and opaque `basis` (the client's
+   * keyring frontier). 404 (no tree) → null. Returns `{ members: [{memberId, role}], generation, basis }`
+   * where `generation` is `null` (and `basis` empty) for a tree whose ACL was derived in-tx by the chain
+   * keyring PUT and never summary-pushed.
+   */
+  async getAccess(id) {
+    const res = await this.#fetch(`${this.#tree(id)}/access`, { headers: this.#headers() });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`getAccess ${id}: HTTP ${res.status}`);
+    const b = await res.json();
+    return {
+      members: (b.members ?? []).map((m) => ({ memberId: m.member_id, role: m.role })),
+      generation: b.generation ?? null,
+      basis: b.basis ?? [],
+    };
+  }
+
+  /**
+   * Push a client-asserted advisory membership summary (OPE-278): the resolved `{memberId, role}` view +
+   * the engine-opaque `basis` frontier, CAS'd on `expectedGeneration` (from a prior getAccess; null = expect
+   * no summary yet). Throws ConflictError on 409 (stale generation — re-GET + retry). Returns
+   * `{ generation, unchanged }` (`unchanged` = an identical re-assert the server did not bump).
+   */
+  async putAccess(id, { basis, expectedGeneration = null, members }) {
+    const body = {
+      basis,
+      expected_generation: expectedGeneration,
+      members: members.map((m) => ({ member_id: m.memberId, role: m.role })),
+    };
+    const res = await this.#fetch(`${this.#tree(id)}/access`, {
+      method: 'PUT',
+      headers: this.#headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (res.status === 409) throw new ConflictError(expectedGeneration, null);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`putAccess ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+    }
+    const b = await res.json();
+    return { generation: b.generation ?? null, unchanged: !!b.unchanged };
+  }
+
   async list() {
     throw new Error('remote list is not supported');
   }

@@ -71,3 +71,69 @@ describe('RemoteStore', () => {
     await expect(store.delete()).rejects.toThrow();
   });
 });
+
+describe('RemoteStore membership summary (/access)', () => {
+  // A JSON Response stand-in (the base `res` helper is bytes-only).
+  const jres = ({ status = 200, json = {}, text = '' } = {}) => ({
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: () => null },
+    json: async () => json,
+    text: async () => text,
+  });
+
+  it('getAccess maps the server shape and returns null on 404', async () => {
+    const store = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => jres({ json: { members: [{ member_id: 'owner', role: 1 }], generation: 3, basis: ['op:a'] } }),
+    });
+    expect(await store.getAccess('t')).toEqual({
+      members: [{ memberId: 'owner', role: 1 }],
+      generation: 3,
+      basis: ['op:a'],
+    });
+    const s404 = new RemoteStore({ baseUrl: 'http://x', fetch: async () => jres({ status: 404 }) });
+    expect(await s404.getAccess('t')).toBeNull();
+  });
+
+  it('getAccess defaults generation to null and basis to [] when absent (chain, never summary-pushed)', async () => {
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch: async () => jres({ json: { members: [] } }) });
+    expect(await store.getAccess('t')).toEqual({ members: [], generation: null, basis: [] });
+  });
+
+  it('putAccess sends the snake_case body + CAS generation and returns {generation, unchanged}', async () => {
+    const fetch = vi.fn(async () => jres({ json: { generation: 4 } }));
+    const store = new RemoteStore({ baseUrl: 'http://x', fetch });
+    const out = await store.putAccess('t', {
+      basis: ['op:b'],
+      expectedGeneration: 3,
+      members: [
+        { memberId: 'owner', role: 1 },
+        { memberId: 'bob', role: 4 },
+      ],
+    });
+    expect(out).toEqual({ generation: 4, unchanged: false });
+    const init = fetch.mock.calls[0][1] as any;
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({
+      basis: ['op:b'],
+      expected_generation: 3,
+      members: [
+        { member_id: 'owner', role: 1 },
+        { member_id: 'bob', role: 4 },
+      ],
+    });
+  });
+
+  it('putAccess surfaces `unchanged`, and throws ConflictError on 409', async () => {
+    const ok = new RemoteStore({ baseUrl: 'http://x', fetch: async () => jres({ json: { generation: 5, unchanged: true } }) });
+    expect(await ok.putAccess('t', { basis: [], expectedGeneration: 5, members: [] })).toEqual({
+      generation: 5,
+      unchanged: true,
+    });
+    const conflict = new RemoteStore({ baseUrl: 'http://x', fetch: async () => jres({ status: 409 }) });
+    await expect(conflict.putAccess('t', { basis: [], expectedGeneration: 1, members: [] })).rejects.toBeInstanceOf(
+      ConflictError,
+    );
+  });
+});
