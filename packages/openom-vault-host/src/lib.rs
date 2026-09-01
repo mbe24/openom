@@ -2365,6 +2365,7 @@ mod tests {
             wrapped_dek: vec![1],
             kdf_params: None,
             ephemeral_public_key: vec![],
+            recipient_public_key: vec![],
         });
         bad.authorized_signers.push(AuthorizedSigner {
             public_key: rogue_pub,
@@ -2493,6 +2494,7 @@ mod tests {
             wrapped_dek: vec![1],
             kdf_params: None,
             ephemeral_public_key: vec![],
+            recipient_public_key: vec![],
         });
         bad.authorized_signers.push(AuthorizedSigner {
             public_key: rogue_pub,

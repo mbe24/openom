@@ -63,6 +63,11 @@ pub(crate) struct CoreWrap {
     pub wrapped_dek: Vec<u8>,
     pub kdf: Option<CoreKdf>,
     pub ephemeral_public_key: Vec<u8>,
+    /// For HPKE / RRK-HPKE wraps: the RECIPIENT public key this wrap addresses (the member's or the RRK's).
+    /// An UNAUTHENTICATED hint — the op author writes it, it is NOT cryptographically bound to the ciphertext
+    /// — that the dag's `epoch_covers` heuristic reads to spot a wrap left addressed to a member's STALE key
+    /// after a rekey race. Never a proof of decryptability (real addressing is enforced by HPKE) (OPE-290).
+    pub recipient_public_key: Vec<u8>,
 }
 
 /// A DEK epoch: its random `key_id` (also the header's `key_id`), its ordinal, and the wraps that
@@ -115,6 +120,7 @@ impl From<&KeyWrap> for CoreWrap {
             wrapped_dek: w.wrapped_dek.clone(),
             kdf: w.kdf_params.as_ref().map(CoreKdf::from),
             ephemeral_public_key: w.ephemeral_public_key.clone(),
+            recipient_public_key: w.recipient_public_key.clone(),
         }
     }
 }
@@ -127,6 +133,7 @@ impl From<&CoreWrap> for KeyWrap {
             wrapped_dek: w.wrapped_dek.clone(),
             kdf_params: w.kdf.as_ref().map(KdfParams::from),
             ephemeral_public_key: w.ephemeral_public_key.clone(),
+            recipient_public_key: w.recipient_public_key.clone(),
         }
     }
 }
@@ -239,6 +246,7 @@ pub(crate) fn build_recovery_escrow(
                 wrapped_dek: pass.wrapped_dek,
                 kdf: Some(s.pass_kdf.clone()),
                 ephemeral_public_key: Vec::new(),
+                recipient_public_key: Vec::new(), // KDF wrap — no HPKE recipient
             },
             CoreWrap {
                 member_id: member_id.to_string(),
@@ -247,6 +255,7 @@ pub(crate) fn build_recovery_escrow(
                 wrapped_dek: rec.wrapped_dek,
                 kdf: Some(s.recovery_kdf.clone()),
                 ephemeral_public_key: Vec::new(),
+                recipient_public_key: Vec::new(),
             },
         ],
         // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
@@ -279,6 +288,7 @@ pub(crate) fn rrk_wrap_epoch(
         wrapped_dek: w.ciphertext,
         kdf: None,
         ephemeral_public_key: w.encapped_key,
+        recipient_public_key: rrk_public.to_vec(),
     })
 }
 
@@ -300,6 +310,7 @@ pub(crate) fn member_wrap_epoch(
         wrapped_dek: w.ciphertext,
         kdf: None,
         ephemeral_public_key: w.encapped_key,
+        recipient_public_key: member_hpke_public.to_vec(),
     })
 }
 
@@ -392,20 +403,19 @@ pub(crate) fn member_epoch_deks(
 ) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
     let mut out = Vec::new();
     for ep in epochs {
-        if let Some(w) = ep
+        let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE);
+        // Try EVERY HPKE wrap addressed to this member, not just the first (OPE-290). A backfill/retarget can
+        // leave both a stale-key and a current-key wrap for the same member on one epoch; first-match could
+        // land on the dead one and wrongly skip an epoch the member CAN open. Take the first that unwraps.
+        let dek = ep
             .wraps
             .iter()
-            .find(|w| w.member_id == member_id && w.wrap_method == HPKE)
-        {
-            let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE);
-            if let Ok(dek) = hpke_unwrap_dek(
-                hpke_secret.expose(),
-                &w.ephemeral_public_key,
-                &w.wrapped_dek,
-                &info,
-            ) {
-                out.push((ep.key_id.clone(), ep.epoch, dek));
-            }
+            .filter(|w| w.member_id == member_id && w.wrap_method == HPKE)
+            .find_map(|w| {
+                hpke_unwrap_dek(hpke_secret.expose(), &w.ephemeral_public_key, &w.wrapped_dek, &info).ok()
+            });
+        if let Some(dek) = dek {
+            out.push((ep.key_id.clone(), ep.epoch, dek));
         }
     }
     Ok(out)

@@ -252,6 +252,11 @@ pub struct KeyWrap {
     /// Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
     #[prost(bytes="vec", tag="6")]
     pub ephemeral_public_key: ::prost::alloc::vec::Vec<u8>,
+    /// Set for the HPKE wrap methods: the RECIPIENT's public key this wrap addresses. An UNAUTHENTICATED
+    /// hint (op-author-written, not tied to the ciphertext) for the dag's epoch-coverage heuristic to detect
+    /// a stale-key wrap after a rekey race — never a proof of decryptability (OPE-290).
+    #[prost(bytes="vec", tag="7")]
+    pub recipient_public_key: ::prost::alloc::vec::Vec<u8>,
 }
 /// Argon2id parameters (explicit so cost can rise later).
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

@@ -1315,6 +1315,7 @@ fn do_add_member(
             wrapped_dek: w.ciphertext,
             kdf_params: None,
             ephemeral_public_key: w.encapped_key,
+            recipient_public_key: member_hpke_public.to_vec(),
         });
     }
     keyring.members.push(Member {
@@ -1385,6 +1386,7 @@ fn do_remove_member(
             wrapped_dek: w.ciphertext,
             kdf_params: None,
             ephemeral_public_key: w.encapped_key,
+            recipient_public_key: m.hpke_public_key.clone(),
         });
     }
 

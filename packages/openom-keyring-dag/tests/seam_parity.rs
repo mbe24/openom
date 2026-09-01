@@ -45,6 +45,7 @@ fn wrap(id: &str, method: WrapMethod) -> KeyWrap {
         wrapped_dek: vec![1],
         kdf_params: None,
         ephemeral_public_key: vec![],
+        recipient_public_key: vec![],
     }
 }
 fn chain_genesis() -> Keyring {

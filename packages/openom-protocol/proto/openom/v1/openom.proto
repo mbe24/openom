@@ -274,6 +274,11 @@ message KeyWrap {
   KdfParams kdf_params = 5;
   // Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
   bytes ephemeral_public_key = 6;
+  // Set for the HPKE wrap methods (WRAP_METHOD_X25519_HPKE, WRAP_METHOD_RRK_HPKE): the RECIPIENT's public
+  // key this wrap addresses. An UNAUTHENTICATED hint (the op author writes it; it is not cryptographically
+  // tied to the ciphertext) used by the dag's epoch-coverage heuristic to detect a wrap addressed to a
+  // member's STALE key after a rekey race — never a proof of decryptability (OPE-290).
+  bytes recipient_public_key = 7;
 }
 
 // Argon2id parameters (explicit so cost can rise later).

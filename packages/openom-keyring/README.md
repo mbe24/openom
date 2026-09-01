@@ -63,6 +63,7 @@ let wrap = |id: &str, method: WrapMethod| KeyWrap {
     wrapped_dek: vec![1],
     kdf_params: None,
     ephemeral_public_key: vec![],
+    recipient_public_key: vec![],
 };
 
 // A one-founder genesis keyring (revision 1), signed by the founder.

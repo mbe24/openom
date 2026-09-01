@@ -285,6 +285,7 @@ fn build_keyring(
         wrapped_dek: vec![1],
         kdf_params: None,
         ephemeral_public_key: vec![],
+        recipient_public_key: vec![],
     }];
     for (id, role) in extra {
         let s = id.to_string();
@@ -301,6 +302,7 @@ fn build_keyring(
             wrapped_dek: vec![1],
             kdf_params: None,
             ephemeral_public_key: vec![],
+            recipient_public_key: vec![],
         });
     }
     let mut k = Keyring {

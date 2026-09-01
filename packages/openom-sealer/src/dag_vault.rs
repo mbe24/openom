@@ -183,8 +183,10 @@ fn covering_reseal_sealing(
         .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
     let mut wraps = vec![rrk_wrap_epoch(&escrow.public_key, &new_dek, tree_id, owner_id, &new_key_id)?];
     for m in &members.members {
-        if m.is_owner() {
-            continue; // the owner reaches the DEK via the RRK wrap
+        // The owner reaches the DEK via the RRK wrap; a member with an empty/malformed key can't be wrapped
+        // (excluded from coverage too, so this doesn't leave a permanent needs_reseal — OPE-290).
+        if m.is_owner() || m.hpke_public_key.is_empty() {
+            continue;
         }
         wraps.push(member_wrap_epoch(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?);
     }
@@ -207,21 +209,22 @@ fn covering_reseal_sealing(
 /// in an old epoch is fine — historical read was already granted and removal is forward-only. The owner
 /// reaches every DEK via the RRK, so it needs no per-epoch owner wrap.
 fn any_epoch_missing_a_member(epochs: &[SealedEpoch], members: &MembershipView) -> bool {
-    use std::collections::HashSet;
-    let resolved: Vec<&str> = members
+    // Key-bound, MISSING-only (OPE-290): a member is "covered" in an epoch iff it has a wrap addressed to
+    // their CURRENT key. A wrap on their stale key (after a rekey race) counts as missing, so backfill
+    // re-wraps them. Missing-only (not set equality) because backfill only APPENDS — a leftover stale-key
+    // wrap is fine and must not read as an extra. Empty-key members are skipped (can't be wrapped/matched).
+    let need: Vec<(&str, &[u8])> = members
         .members
         .iter()
-        .filter(|m| !m.is_owner())
-        .map(|m| m.member_id.as_str())
+        .filter(|m| !m.is_owner() && !m.hpke_public_key.is_empty())
+        .map(|m| (m.member_id.as_str(), m.hpke_public_key.as_slice()))
         .collect();
     epochs.iter().any(|ep| {
-        let wrapped: HashSet<&str> = ep
-            .wraps
-            .iter()
-            .filter(|w| w.wrap_method == HPKE)
-            .map(|w| w.member_id.as_str())
-            .collect();
-        resolved.iter().any(|m| !wrapped.contains(m))
+        need.iter().any(|(id, key)| {
+            !ep.wraps.iter().any(|w| {
+                w.wrap_method == HPKE && w.member_id == *id && w.recipient_public_key == *key
+            })
+        })
     })
 }
 
@@ -254,28 +257,44 @@ pub struct Backfilled {
     pub backfilled: bool,
 }
 
-/// Whether `epoch`'s wraps exactly serve the resolved membership: an RRK wrap for the owner, plus an HPKE
-/// member wrap for each — and ONLY each — resolved non-owner member. A mismatch means the epoch is stale vs
-/// the merged membership — a concurrently-removed member still wrapped (a leak) or a concurrently-added
-/// member missing (a lockout) — so a reseal is needed. Member-id level for now; binding the recipient's
-/// HPKE key is a later precision refinement (a wrong-key wrap is safe meanwhile — it fails at decrypt and
-/// self-heals via a corrective reseal).
+/// Whether `epoch`'s wraps serve the resolved membership: an RRK wrap for the owner, plus — for each resolved
+/// non-owner member — an HPKE wrap addressed to their CURRENT key, and no wrap for anyone NOT resolved. A
+/// mismatch means the epoch is stale vs the merged membership, so a reseal is due. Two independent checks:
+///  - **member-id set equality** catches a LEAK (a removed member still wrapped) or a LOCKOUT (a resolved
+///    member absent). Kept id-level so a benign leftover stale-key wrap for a still-current member (after a
+///    rekey/backfill) does NOT read as a leak.
+///  - **current-key EXISTS** (OPE-290): every resolved member has AT LEAST ONE wrap addressed to their
+///    current `hpke_public_key`. A wrap left on a member's STALE key after a rekey race passes id-equality
+///    but not this, so it is caught. Exists-form (not pair-set equality) so a coexisting old-key wrap is
+///    ignored, not treated as churn. `recipient_public_key` is an unauthenticated hint (see `CoreWrap`): this
+///    detects honest rekey races, not a malicious author who lies about the recipient over garbage ciphertext.
+///
+/// A resolved member with an empty/malformed `hpke_public_key` is EXCLUDED from both checks — it can be
+/// neither wrapped nor matched, so demanding its coverage would wedge `needs_reseal` permanently true.
 fn epoch_covers(epoch: &SealedEpoch, members: &MembershipView) -> bool {
     use std::collections::HashSet;
     let has_rrk = epoch.wraps.iter().any(|w| w.wrap_method == RRK_HPKE);
-    let wrapped: HashSet<&str> = epoch
+    let need = || {
+        members
+            .members
+            .iter()
+            .filter(|m| !m.is_owner() && !m.hpke_public_key.is_empty())
+    };
+    let wrapped_ids: HashSet<&str> = epoch
         .wraps
         .iter()
         .filter(|w| w.wrap_method == HPKE)
         .map(|w| w.member_id.as_str())
         .collect();
-    let resolved: HashSet<&str> = members
-        .members
-        .iter()
-        .filter(|m| !m.is_owner())
-        .map(|m| m.member_id.as_str())
-        .collect();
-    has_rrk && wrapped == resolved
+    let resolved_ids: HashSet<&str> = need().map(|m| m.member_id.as_str()).collect();
+    let keys_current = need().all(|m| {
+        epoch.wraps.iter().any(|w| {
+            w.wrap_method == HPKE
+                && w.member_id == m.member_id
+                && w.recipient_public_key == m.hpke_public_key
+        })
+    });
+    has_rrk && wrapped_ids == resolved_ids && keys_current
 }
 
 /// Map a facade anti-rollback failure onto the sealer's error vocabulary: a rolled-back anchor and a
@@ -1020,25 +1039,24 @@ impl DagVault {
             PASSPHRASE,
         )?;
 
-        // Open every epoch the RRK can reach; for each, add the missing resolved non-owner members' wraps.
-        // (`epoch_deks` skips an un-openable epoch rather than failing, so a corrupt epoch can't brick this.)
-        use std::collections::HashSet;
+        // Open every epoch the RRK can reach; for each, add a wrap for any resolved non-owner member not
+        // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
+        // STALE key after a rekey race is re-wrapped too). (`epoch_deks` skips an un-openable epoch rather
+        // than failing, so a corrupt epoch can't brick this.) Empty-key members are skipped — nothing to wrap.
         let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _epoch, dek) in &deks {
-            let wrapped: HashSet<&str> = epochs
-                .iter()
-                .find(|e| &e.key_id == key_id)
-                .map(|e| {
-                    e.wraps
-                        .iter()
-                        .filter(|w| w.wrap_method == HPKE)
-                        .map(|w| w.member_id.as_str())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let epoch_wraps = epochs.iter().find(|e| &e.key_id == key_id).map(|e| e.wraps.as_slice()).unwrap_or(&[]);
             for m in &resolved.members.members {
-                if m.is_owner() || wrapped.contains(m.member_id.as_str()) {
+                if m.is_owner() || m.hpke_public_key.is_empty() {
+                    continue;
+                }
+                let covered = epoch_wraps.iter().any(|w| {
+                    w.wrap_method == HPKE
+                        && w.member_id == m.member_id
+                        && w.recipient_public_key == m.hpke_public_key
+                });
+                if covered {
                     continue;
                 }
                 let wrap = member_wrap_epoch(&m.hpke_public_key, dek, tree_id, &m.member_id, key_id)?;
@@ -1089,20 +1107,32 @@ mod tests {
         }
     }
 
+    /// A member's deterministic HPKE public key, so `membership` (the resolved view) and `member_wrap` (the
+    /// epoch wrap) agree on what "the current key" is for the coverage checks (OPE-290).
+    fn hpke_key(member: &str) -> Vec<u8> {
+        format!("hpke-{member}").into_bytes()
+    }
+
     /// A resolved membership: `owner` (role 1) plus each of `members` as an Editor (role 4).
     fn membership(owner: &str, members: &[&str]) -> MembershipView {
         let mv = |id: &str, role: i16| MemberView {
             member_id: id.to_string(),
             role,
             author_public_key: vec![],
-            hpke_public_key: vec![],
+            hpke_public_key: hpke_key(id),
         };
         let mut v = vec![mv(owner, 1)];
         v.extend(members.iter().map(|m| mv(m, 4)));
         MembershipView::new(v, false)
     }
 
+    /// An HPKE wrap addressed to `member`'s CURRENT key (matches `membership`).
     fn member_wrap(member: &str) -> CoreWrap {
+        member_wrap_keyed(member, &hpke_key(member))
+    }
+    /// An HPKE wrap for `member` addressed to an explicit `recipient` key — pass a non-current key to model a
+    /// STALE-key wrap left after a rekey race (OPE-290).
+    fn member_wrap_keyed(member: &str, recipient: &[u8]) -> CoreWrap {
         CoreWrap {
             member_id: member.to_string(),
             wrap_method: HPKE,
@@ -1110,6 +1140,7 @@ mod tests {
             wrapped_dek: vec![],
             kdf: None,
             ephemeral_public_key: vec![],
+            recipient_public_key: recipient.to_vec(),
         }
     }
     fn rrk_wrap() -> CoreWrap {
@@ -1297,6 +1328,81 @@ mod tests {
         assert!(!fold_sealing(&extra, &members).unwrap().needs_backfill, "an extra removed member is not a gap");
     }
 
+    /// Recipient-key binding in coverage (OPE-290): a wrap left on a member's STALE key (a rekey race) is
+    /// detected via the exists-current-key clause, while a benign COEXISTING old+new wrap is NOT flagged —
+    /// exists-form, not pair-set equality, so the leftover doesn't force spurious churn.
+    #[test]
+    fn epoch_covers_binds_the_recipient_key() {
+        let members = membership("owner", &["bob"]); // bob's current key = hpke_key("bob")
+
+        let ok = SealedEpoch { key_id: b"k".to_vec(), epoch: 0, wraps: vec![rrk_wrap(), member_wrap("bob")] };
+        assert!(epoch_covers(&ok, &members), "a wrap to bob's current key covers");
+
+        let stale = SealedEpoch {
+            key_id: b"k".to_vec(),
+            epoch: 0,
+            wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
+        };
+        assert!(!epoch_covers(&stale, &members), "a wrap on bob's STALE key does not cover");
+
+        let both = SealedEpoch {
+            key_id: b"k".to_vec(),
+            epoch: 0,
+            wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key"), member_wrap("bob")],
+        };
+        assert!(epoch_covers(&both, &members), "a coexisting current-key wrap covers; the old one is ignored");
+
+        // needs_backfill uses the same key-bound test: a stale-key-only wrap counts as missing.
+        let entries = vec![sealing_entry(
+            0,
+            b"k0",
+            0,
+            dag_client::SealingOrigin::Genesis,
+            vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
+            Some(escrow()),
+        )];
+        assert!(
+            fold_sealing(&entries, &members).unwrap().needs_backfill,
+            "a member wrapped only under a stale key needs a backfill"
+        );
+    }
+
+    /// A resolved member with an empty/malformed HPKE key is EXCLUDED from coverage (OPE-290) — it can be
+    /// neither wrapped nor matched, so it must not wedge `needs_reseal`/`needs_backfill` permanently true.
+    #[test]
+    fn coverage_excludes_an_empty_keyed_member() {
+        use openom_keyring_seam::MemberView;
+        let members = MembershipView::new(
+            vec![
+                MemberView { member_id: "owner".into(), role: 1, author_public_key: vec![], hpke_public_key: hpke_key("owner") },
+                MemberView { member_id: "ghost".into(), role: 4, author_public_key: vec![], hpke_public_key: vec![] },
+            ],
+            false,
+        );
+        let ep = SealedEpoch { key_id: b"k".to_vec(), epoch: 0, wraps: vec![rrk_wrap()] };
+        assert!(epoch_covers(&ep, &members), "an empty-keyed member is excluded, so an RRK-only epoch covers");
+        assert!(!any_epoch_missing_a_member(&[ep], &members), "and it isn't reported as a backfill gap");
+    }
+
+    /// OPE-290 companion: `member_epoch_deks` tries EVERY wrap addressed to the member, not just the first —
+    /// so a DEAD stale-key wrap listed before the live one doesn't wrongly skip an epoch the member can open
+    /// (without this, a key-bound backfill would be cosmetic).
+    #[test]
+    fn member_epoch_deks_opens_via_the_live_wrap_past_a_dead_one() {
+        let tree = TREE;
+        let kdf = KdfParams { salt: generate_salt().unwrap().to_vec(), memory_kib: 8, iterations: 1, parallelism: 1 };
+        let root = derive_root(b"member pass", &kdf).unwrap();
+        let dek = generate_dek().unwrap();
+        let (member, key_id) = ("bob", b"k0");
+        // A dead wrap to a DIFFERENT key, listed FIRST; then the live wrap to bob's real key.
+        let other = generate_hpke_keypair().unwrap();
+        let dead = member_wrap_epoch(&other.public, &dek, tree, member, key_id).unwrap();
+        let live = member_wrap_epoch(&root.hpke_public, &dek, tree, member, key_id).unwrap();
+        let ep = SealedEpoch { key_id: key_id.to_vec(), epoch: 0, wraps: vec![dead, live] };
+        let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret).unwrap();
+        assert_eq!(deks.len(), 1, "the epoch opens via the live wrap despite a dead wrap first");
+    }
+
     /// OPE-287: a garbage epoch (a malicious member could append one) whose RRK wrap won't open is SKIPPED
     /// by `epoch_deks`, not fatal — so one junk epoch can't brick unlock for the owner, who still reaches
     /// every legitimate epoch.
@@ -1322,6 +1428,7 @@ mod tests {
                 wrapped_dek: vec![9u8; 48],
                 kdf: None,
                 ephemeral_public_key: vec![9u8; 32],
+                recipient_public_key: vec![],
             }],
         };
         let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret).unwrap();

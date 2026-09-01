@@ -259,8 +259,22 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
 #[deny(unused_variables)]
 fn put_wrap(out: &mut Vec<u8>, w: &KeyWrap) {
     // Exhaustive destructure (no `..`) + deny(unused): a new KeyWrap/KdfParams field can't slip out of
-    // the signed/AAD wrap encoding. Byte order UNCHANGED.
-    let KeyWrap { member_id, wrap_method, nonce, wrapped_dek, kdf_params, ephemeral_public_key } = w;
+    // the signed/AAD wrap encoding by accident. Byte order UNCHANGED.
+    //
+    // `recipient_public_key` is DELIBERATELY excluded: it is a dag-only, unauthenticated coverage HINT
+    // (OPE-290), not part of the chain's signed wrap encoding. The chain never reads it, and on the dag the
+    // sealing payload is already integrity-protected by the op's content address — so signing it here would
+    // buy nothing and would falsely imply it is authenticated (a wrap's real addressing is enforced by HPKE,
+    // not this field). Keeping it out also leaves the signing byte order unchanged.
+    let KeyWrap {
+        member_id,
+        wrap_method,
+        nonce,
+        wrapped_dek,
+        kdf_params,
+        ephemeral_public_key,
+        recipient_public_key: _,
+    } = w;
     put_bytes(out, member_id.as_bytes());
     put_u32(out, *wrap_method as u32);
     put_bytes(out, nonce);
@@ -570,6 +584,7 @@ mod tests {
                     wrapped_dek: vec![9; 48],
                     kdf_params: None,
                     ephemeral_public_key: vec![],
+                    recipient_public_key: vec![],
                 }],
             }],
             ..Default::default()
@@ -620,6 +635,7 @@ mod tests {
                         parallelism: 1,
                     }),
                     ephemeral_public_key: vec![],
+                    recipient_public_key: vec![],
                 }],
             }],
             ..Default::default()

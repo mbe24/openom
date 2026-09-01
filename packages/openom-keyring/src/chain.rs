@@ -834,6 +834,7 @@ mod tests {
             wrapped_dek: vec![1],
             kdf_params: None,
             ephemeral_public_key: vec![],
+            recipient_public_key: vec![],
         }
     }
 

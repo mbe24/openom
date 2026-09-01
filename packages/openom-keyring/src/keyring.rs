@@ -186,6 +186,7 @@ mod tests {
                     wrapped_dek: vec![9; 48],
                     kdf_params: None,
                     ephemeral_public_key: vec![],
+                    recipient_public_key: vec![],
                 }],
             }],
             ..Default::default()
