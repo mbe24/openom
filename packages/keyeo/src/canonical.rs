@@ -131,6 +131,10 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 out.extend_from_slice(new_author_public_key.as_ref());
                 out.extend_from_slice(new_hpke_public_key);
             }
+            // Membership-inert; the reseal delta rides the op's `sealing` envelope, not the action bytes.
+            MembershipAction::Reseal => {
+                out.push(10);
+            }
         }
     }
 }

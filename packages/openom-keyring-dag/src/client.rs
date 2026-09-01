@@ -272,6 +272,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
 fn origin_of(action: &KeyringAction) -> SealingOrigin {
     match action {
         MembershipAction::Remove { .. } => SealingOrigin::Remove,
+        MembershipAction::Reseal => SealingOrigin::Reseal,
         _ => SealingOrigin::Other,
     }
 }
@@ -343,6 +344,23 @@ fn hex32(id: &[u8; 32]) -> String {
     id[..8].iter().map(|b| format!("{b:02x}")).collect::<String>() + "…"
 }
 
+/// Merge two anchors of the same tree into their causal union — the op closures unioned, deduplicated by
+/// op-id, keeping `a`'s pinned genesis config. Concurrent branches both survive and resolve deterministically
+/// (the op-DAG is a set-union CRDT). A direct convenience over the store-based anti-entropy in `blob_sync`.
+pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
+    let mut a: DagAnchor =
+        serde_json::from_slice(anchor_a).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let b: DagAnchor =
+        serde_json::from_slice(anchor_b).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let mut seen: HashSet<[u8; 32]> = anchor_ops(anchor_a)?.iter().map(|o| o.id).collect();
+    for (blob, op) in b.ops.iter().zip(anchor_ops(anchor_b)?) {
+        if seen.insert(op.id) {
+            a.ops.push(blob.clone());
+        }
+    }
+    Ok(serde_json::to_vec(&a).expect("DagAnchor serialization is infallible"))
+}
+
 /// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
 /// (RVK), carrying the re-escrow in its opaque `sealing` envelope. Parents = the current frontier. Returns
 /// the new anchor bytes.
@@ -381,6 +399,18 @@ pub fn append_retarget(
         new_hpke_public_key,
     };
     append(anchor_bytes, member_id, action, sealing, current_signing_key)
+}
+
+/// Append a **Reseal** op (OPE-282) — a membership-inert forward-secrecy repair authored by active
+/// `member_id`, carrying a fresh DEK epoch (wrapped to the resolved membership) in its opaque `sealing`.
+/// Parents = the current frontier. Signed by the author's current key. Returns the new anchor bytes.
+pub fn append_reseal(
+    anchor_bytes: &[u8],
+    member_id: &str,
+    sealing: Vec<u8>,
+    signing_key: &openom_sign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
 }
 
 #[cfg(test)]

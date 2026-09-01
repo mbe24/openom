@@ -159,6 +159,9 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             state.reset_authority = Some(new_reset_authority.clone());
             Ok((state, events))
         }
+        // A forward-secrecy reseal (OPE-282): membership-inert — the fresh epoch rides the op's `sealing`,
+        // and the sealer validates its coverage. There is nothing to apply to the membership graph.
+        MembershipAction::Reseal => Ok((state, events)),
         // Quorum-protocol ops (v2) don't directly mutate membership: a Propose/Approve records intent,
         // and a Commit's *target* is applied by the quorum resolver at the Commit's position, not here.
         // Folding one of these is a no-op; the effect enters via the resolver, not `apply_action`.

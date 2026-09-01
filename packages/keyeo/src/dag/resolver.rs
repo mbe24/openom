@@ -125,6 +125,13 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
         new_author_public_key: <S as SignatureScheme>::PublicKey,
         new_hpke_public_key: [u8; 32],
     },
+    /// A membership-INERT carrier for a fresh sealing delta (openom's forward-secrecy reseal, OPE-282): it
+    /// changes no member, signer, governance, or recovery authority — the payload rides the op's opaque
+    /// `sealing` envelope, which keyeo never interprets. `apply_action` is a no-op; it is NOT privileged (it
+    /// auto-merges, never voided by the reset-merge carve-out); and it is authorized for any active member
+    /// (ordinary D3 — the author's current registered key signs it). The empty body carries no discretionary
+    /// authority: what the sealing may legitimately contain is the domain layer's concern, not keyeo's.
+    Reseal,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

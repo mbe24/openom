@@ -210,6 +210,7 @@ enum ActionDto {
         new_author_public_key: [u8; 32],
         new_hpke_public_key: [u8; 32],
     },
+    Reseal,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -305,6 +306,7 @@ fn action_to_dto(a: &KeyringAction) -> ActionDto {
             new_author_public_key: *new_author_public_key,
             new_hpke_public_key: *new_hpke_public_key,
         },
+        MembershipAction::Reseal => ActionDto::Reseal,
     }
 }
 
@@ -365,6 +367,7 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
             new_author_public_key: *new_author_public_key,
             new_hpke_public_key: *new_hpke_public_key,
         },
+        ActionDto::Reseal => MembershipAction::Reseal,
     })
 }
 

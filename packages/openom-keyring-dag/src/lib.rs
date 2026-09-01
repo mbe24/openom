@@ -211,6 +211,11 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             // check ensures the author's CURRENT registered key signs it; the only domain rule is self-only
             // — you can't rekey another member. Any active member may rekey themselves.
             MembershipAction::Retarget { member, .. } => member == author,
+            // A forward-secrecy reseal (OPE-282): any active member may author one — minting a fresh DEK
+            // needs only public keys, so a member locked out of the current write epoch can still repair it.
+            // The engine's D3 check binds it to the author's current key; the sealer's coverage check binds
+            // WHAT it may contain, so no role gate is needed here.
+            MembershipAction::Reseal => true,
         }
     }
 
@@ -236,6 +241,9 @@ impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
             // Retargeting a signer's key touches the authority structure (privileged); an ordinary
             // member's self-rekey does not.
             MembershipAction::Retarget { member, .. } => Self::role_of(state, member).is_signer(),
+            // A reseal changes no signer/governance/recovery structure — a routine forward-secrecy repair,
+            // so it auto-merges (never carve-out-voided by a concurrent recovery).
+            MembershipAction::Reseal => false,
             MembershipAction::Create { .. } => false,
         }
     }

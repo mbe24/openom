@@ -152,6 +152,14 @@ struct FoldedSealing {
     needs_reseal: bool,
 }
 
+/// The result of [`DagVault::reseal`]: the (possibly unchanged) anchor to publish + its watermark, and
+/// whether a repair was actually appended (`false` = nothing was stale, a no-op).
+pub struct Resealed {
+    pub anchor: Vec<u8>,
+    pub watermark: Vec<u8>,
+    pub resealed: bool,
+}
+
 /// Whether `epoch`'s wraps exactly serve the resolved membership: an RRK wrap for the owner, plus an HPKE
 /// member wrap for each — and ONLY each — resolved non-owner member. A mismatch means the epoch is stale vs
 /// the merged membership — a concurrently-removed member still wrapped (a leak) or a concurrently-added
@@ -688,6 +696,112 @@ impl DagVault {
         .to_bytes();
         dag_client::append_remove(anchor, owner_id, remove_member_id, sealing, &root.identity)
             .map_err(|e| SealerError::BadKeyring(e.to_string()))
+    }
+
+    /// Repair a stale write epoch (OPE-282): if the resolved keyring `needs_reseal` — a concurrent
+    /// membership merge left the write epoch wrapping a removed member (a leak) or missing an added one (a
+    /// lockout) — mint a FRESH DEK wrapped to the RRK (owner) + each resolved ordinary member and append a
+    /// membership-inert `Reseal` op. Idempotent: a no-op (anchor unchanged, `resealed = false`) when nothing
+    /// is stale, so racing devices converge (a covering reseal makes `needs_reseal` false everywhere).
+    /// Owner-authored via passphrase (a locked-out member's self-heal via `member_kdf` is a follow-up).
+    /// Enforces the anti-rollback `floor`; returns the new anchor + watermark.
+    pub fn reseal(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        floor: &[u8],
+    ) -> Result<Resealed, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let owner_id = ctx.member_id.as_str();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let FoldedSealing {
+            epochs,
+            escrow,
+            needs_reseal,
+            ..
+        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+
+        // Idempotent: nothing stale → return the anchor unchanged, no op appended.
+        if !needs_reseal {
+            return Ok(Resealed {
+                watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+                anchor: anchor.to_vec(),
+                resealed: false,
+            });
+        }
+
+        // The owner authorizes via their passphrase-derived identity (anti-substitution); the fresh DEK is
+        // wrapped to the RRK PUBLIC, so no RRK secret is needed to reseal.
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(SealerError::MissingWrap)?;
+        let kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+
+        // A fresh DEK wrapped to the RRK (owner) + EVERY resolved ordinary member — exactly the resolved
+        // membership, so the new epoch COVERS and future writes exclude any concurrently-removed member.
+        let new_dek = generate_dek()?;
+        let new_key_id = generate_salt()?.to_vec();
+        let new_epoch = epochs
+            .iter()
+            .map(|e| e.epoch)
+            .max()
+            .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
+        let mut wraps = vec![rrk_wrap_epoch(
+            &escrow.public_key,
+            &new_dek,
+            tree_id,
+            owner_id,
+            &new_key_id,
+        )?];
+        for m in &resolved.members.members {
+            if m.is_owner() {
+                continue; // the owner reaches the DEK via the RRK wrap
+            }
+            wraps.push(member_wrap_epoch(
+                &m.hpke_public_key,
+                &new_dek,
+                tree_id,
+                &m.member_id,
+                &new_key_id,
+            )?);
+        }
+        let sealing = SealingPayload {
+            new_epochs: vec![SealedEpoch {
+                key_id: new_key_id,
+                epoch: new_epoch,
+                wraps,
+            }],
+            added_wraps: vec![],
+            escrow: None,
+        }
+        .to_bytes();
+        let new_anchor = dag_client::append_reseal(anchor, owner_id, sealing, &root.identity)
+            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        Ok(Resealed {
+            anchor: new_anchor,
+            watermark,
+            resealed: true,
+        })
     }
 }
 
@@ -1228,6 +1342,85 @@ mod tests {
             u.sealer.open_entry(EntryKind::Snapshot, &post).unwrap(),
             b"post-removal"
         );
+    }
+
+    /// End-to-end OPE-282: two CONCURRENT removals leave the merged write epoch stale (it still wraps the
+    /// member the losing branch removed); unlock flags `needs_reseal`; `reseal` mints a covering fresh epoch
+    /// so the flag clears and the owner keeps working; and a second reseal is an idempotent no-op.
+    #[test]
+    fn reseal_repairs_a_stale_write_epoch_after_concurrent_removals() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"owner passphrase");
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+
+        // Add bob + carol as editors.
+        let bob = new_owner_secrets(Passphrase::new(b"bob pass").expose()).unwrap();
+        let carol = new_owner_secrets(Passphrase::new(b"carol pass").expose()).unwrap();
+        let a1 = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                "acct-bob",
+                KeyringRole::EDITOR,
+                bob.root.identity.verifying_key().to_bytes(),
+                bob.root.hpke_public,
+            )
+            .unwrap();
+        let a2 = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &a1,
+                &owner_pass,
+                "acct-carol",
+                KeyringRole::EDITOR,
+                carol.root.identity.verifying_key().to_bytes(),
+                carol.root.hpke_public,
+            )
+            .unwrap();
+
+        // Two CONCURRENT removals from a2 (both parent on the same frontier): A removes bob, B removes carol.
+        let branch_a = DagVault
+            .remove_member(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &a2, &owner_pass, "acct-bob")
+            .unwrap();
+        let branch_b = DagVault
+            .remove_member(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &a2, &owner_pass, "acct-carol")
+            .unwrap();
+        let merged = dag_client::merge(&branch_a, &branch_b).unwrap();
+
+        // The merged write epoch is stale — it still wraps whichever member the losing branch removed.
+        let u = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &merged, &owner_pass)
+            .unwrap();
+        assert!(u.needs_reseal, "concurrent removals leave the write epoch stale");
+
+        // Reseal mints a covering fresh epoch; the flag clears and the owner writes + reads under it.
+        let r = DagVault
+            .reseal(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &merged, &owner_pass, &[])
+            .unwrap();
+        assert!(r.resealed, "a stale write epoch is repaired");
+        let u2 = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &r.anchor, &owner_pass)
+            .unwrap();
+        assert!(!u2.needs_reseal, "after reseal the write epoch covers the resolved membership");
+        let sealed = u2
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"after reseal")
+            .unwrap()
+            .envelope;
+        assert_eq!(
+            u2.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
+            b"after reseal"
+        );
+
+        // Idempotent: a second reseal finds nothing stale and is a no-op.
+        let r2 = DagVault
+            .reseal(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &r.anchor, &owner_pass, &[])
+            .unwrap();
+        assert!(!r2.resealed, "nothing stale -> reseal is a no-op");
     }
 
     #[test]
