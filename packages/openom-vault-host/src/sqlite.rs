@@ -20,8 +20,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
        bytes    BLOB NOT NULL
      );
      CREATE TABLE IF NOT EXISTS watermarks (
-       tree_key         TEXT PRIMARY KEY,
-       keyring_revision INTEGER NOT NULL
+       tree_key  TEXT PRIMARY KEY,
+       watermark BLOB NOT NULL
      );";
 
 pub struct SqliteVaultStore {
@@ -70,47 +70,36 @@ impl VaultStore for SqliteVaultStore {
             })
     }
 
-    fn keyring_watermark(&self, tree_key: &str) -> Result<u32, String> {
+    fn watermark(&self, tree_key: &str) -> Result<Vec<u8>, String> {
+        // Engine-OPAQUE bytes (the anti-rollback order check lives inside the engine); read + return.
         self.conn()
             .query_row(
-                "SELECT keyring_revision FROM watermarks WHERE tree_key = ?1",
+                "SELECT watermark FROM watermarks WHERE tree_key = ?1",
                 params![tree_key],
-                |r| r.get::<_, i64>(0),
+                |r| r.get::<_, Vec<u8>>(0),
             )
-            .map(|v| v as u32)
             .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(0),
+                rusqlite::Error::QueryReturnedNoRows => Ok(Vec::new()),
                 other => Err(other.to_string()),
             })
     }
 
-    fn observe_keyring_revision(&self, tree_key: &str, revision: u32) -> Result<(), String> {
-        // Monotonic: MAX with the stored floor, so a lower value can never lower it.
-        self.conn()
-            .execute(
-                "INSERT INTO watermarks (tree_key, keyring_revision) VALUES (?1, ?2)
-                 ON CONFLICT(tree_key) DO UPDATE SET keyring_revision = MAX(keyring_revision, excluded.keyring_revision)",
-                params![tree_key, revision as i64],
-            )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
-
-    fn commit_keyring(&self, tree_key: &str, bytes: &[u8], revision: u32) -> Result<(), String> {
-        // One transaction: the keyring write and the floor advance land together or not at all,
-        // so a crash can never leave a saved keyring with a stale floor (or vice versa).
+    fn commit_keyring(&self, tree_key: &str, anchor: &[u8], watermark: &[u8]) -> Result<(), String> {
+        // One transaction: the keyring write and the watermark advance land together or not at all,
+        // so a crash can never leave a saved keyring with a stale cursor (or vice versa). The cursor
+        // is write-through opaque bytes (the engine owns the order), so no MAX here.
         let mut guard = self.conn();
         let tx = guard.transaction().map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO keyrings (tree_key, bytes) VALUES (?1, ?2)
              ON CONFLICT(tree_key) DO UPDATE SET bytes = excluded.bytes",
-            params![tree_key, bytes],
+            params![tree_key, anchor],
         )
         .map_err(|e| e.to_string())?;
         tx.execute(
-            "INSERT INTO watermarks (tree_key, keyring_revision) VALUES (?1, ?2)
-             ON CONFLICT(tree_key) DO UPDATE SET keyring_revision = MAX(keyring_revision, excluded.keyring_revision)",
-            params![tree_key, revision as i64],
+            "INSERT INTO watermarks (tree_key, watermark) VALUES (?1, ?2)
+             ON CONFLICT(tree_key) DO UPDATE SET watermark = excluded.watermark",
+            params![tree_key, watermark],
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())
@@ -130,8 +119,10 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let s = SqliteVaultStore::open(&path).unwrap();
-            s.commit_keyring("my-tree", b"kr-bytes", 3).unwrap();
-            s.commit_keyring("my-tree", b"kr-bytes", 1).unwrap(); // lower revision — must not lower the floor
+            // The watermark is engine-opaque write-through bytes — last write wins (the engine, not the
+            // store, owns anti-rollback), and the keyring + its cursor land in one transaction.
+            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 1]).unwrap();
+            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 3]).unwrap();
         }
         {
             let s = SqliteVaultStore::open(&path).unwrap();
@@ -139,9 +130,9 @@ mod tests {
                 s.load_keyring("my-tree").unwrap().as_deref(),
                 Some(&b"kr-bytes"[..])
             );
-            assert_eq!(s.keyring_watermark("my-tree").unwrap(), 3);
+            assert_eq!(s.watermark("my-tree").unwrap(), vec![0, 0, 0, 3]);
             assert_eq!(s.load_keyring("absent").unwrap(), None);
-            assert_eq!(s.keyring_watermark("absent").unwrap(), 0);
+            assert!(s.watermark("absent").unwrap().is_empty());
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));

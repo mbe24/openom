@@ -3788,6 +3788,7 @@ version = "0.1.0"
 dependencies = [
  "openom-crypto",
  "openom-keyring",
+ "openom-keyring-seam",
  "openom-protocol",
  "openom-sealer",
  "rusqlite",

@@ -11,6 +11,8 @@ openom-sealer = { path = "../openom-sealer" }
 openom-crypto.workspace = true
 # Keyring chain verification (verify_walk/verify_transition/verify_reset) the host re-checks on sync.
 openom-keyring.workspace = true
+# EngineKind — the deployment's keyring engine preset the host builds an AppVault from (OPE-278).
+openom-keyring-seam.workspace = true
 openom-protocol.workspace = true
 serde = { workspace = true }
 zeroize.workspace = true
