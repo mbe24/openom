@@ -162,6 +162,44 @@ fn fold_sealing(
     })
 }
 
+/// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
+/// (owner) + every resolved ordinary member. Minting needs only PUBLIC keys — the RRK public in the escrow
+/// + each member's HPKE key — so both the owner (passphrase) and any active member (member_kdf) can produce
+/// it; the caller appends it under their OWN identity (OPE-290). The RRK wrap's AAD is keyed to `owner_id`
+/// (the RRK belongs to the owner) whoever authors the op.
+fn covering_reseal_sealing(
+    tree_id: &[u8],
+    owner_id: &str,
+    escrow: &RecoveryEscrow,
+    members: &MembershipView,
+    epochs: &[SealedEpoch],
+) -> Result<Vec<u8>, SealerError> {
+    let new_dek = generate_dek()?;
+    let new_key_id = generate_salt()?.to_vec();
+    let new_epoch = epochs
+        .iter()
+        .map(|e| e.epoch)
+        .max()
+        .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
+    let mut wraps = vec![rrk_wrap_epoch(&escrow.public_key, &new_dek, tree_id, owner_id, &new_key_id)?];
+    for m in &members.members {
+        if m.is_owner() {
+            continue; // the owner reaches the DEK via the RRK wrap
+        }
+        wraps.push(member_wrap_epoch(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?);
+    }
+    Ok(SealingPayload {
+        new_epochs: vec![SealedEpoch {
+            key_id: new_key_id,
+            epoch: new_epoch,
+            wraps,
+        }],
+        added_wraps: vec![],
+        escrow: None,
+    }
+    .to_bytes())
+}
+
 /// Whether some RETAINED epoch lacks an HPKE wrap for a resolved non-owner member (OPE-288) — that member
 /// can't READ history sealed under that epoch, the symptom of a concurrent add on a branch that never saw a
 /// sibling branch's epochs. Unlike `needs_reseal` (the WRITE epoch must wrap EXACTLY the resolved set — both
@@ -788,7 +826,6 @@ impl DagVault {
         floor: &[u8],
     ) -> Result<Resealed, SealerError> {
         let tree_id = ctx.tree_id.as_bytes();
-        let owner_id = ctx.member_id.as_str();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
@@ -831,45 +868,80 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        // A fresh DEK wrapped to the RRK (owner) + EVERY resolved ordinary member — exactly the resolved
-        // membership, so the new epoch COVERS and future writes exclude any concurrently-removed member.
-        let new_dek = generate_dek()?;
-        let new_key_id = generate_salt()?.to_vec();
-        let new_epoch = epochs
-            .iter()
-            .map(|e| e.epoch)
-            .max()
-            .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
-        let mut wraps = vec![rrk_wrap_epoch(
-            &escrow.public_key,
-            &new_dek,
-            tree_id,
-            owner_id,
-            &new_key_id,
-        )?];
-        for m in &resolved.members.members {
-            if m.is_owner() {
-                continue; // the owner reaches the DEK via the RRK wrap
-            }
-            wraps.push(member_wrap_epoch(
-                &m.hpke_public_key,
-                &new_dek,
-                tree_id,
-                &m.member_id,
-                &new_key_id,
-            )?);
-        }
-        let sealing = SealingPayload {
-            new_epochs: vec![SealedEpoch {
-                key_id: new_key_id,
-                epoch: new_epoch,
-                wraps,
-            }],
-            added_wraps: vec![],
-            escrow: None,
-        }
-        .to_bytes();
+        // Mint a covering epoch; the OWNER both authors and signs it (author == owner).
+        let owner_id = founder.member_id.as_str();
+        let sealing = covering_reseal_sealing(tree_id, owner_id, &escrow, &resolved.members, &epochs)?;
         let new_anchor = dag_client::append_reseal(anchor, owner_id, sealing, &root.identity)
+            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        Ok(Resealed {
+            anchor: new_anchor,
+            watermark,
+            resealed: true,
+        })
+    }
+
+    /// Member-authored self-heal of a stale write epoch (OPE-290). Identical repair to [`reseal`], but any
+    /// ACTIVE member — not just the owner — can drive it: minting a covering epoch needs only PUBLIC keys
+    /// (the RRK public in the escrow + each resolved member's HPKE key), and keyeo authorizes a Reseal by any
+    /// member, so a member locked out by a stale merge no longer has to wait for the owner's device to come
+    /// online. Authorizes via the member's `passphrase` + account `member_kdf` (their identity signs the op),
+    /// mirroring [`unlock_as_member`]. The RRK wrap stays keyed to the OWNER (its holder). Idempotent + floor
+    /// enforced, exactly like the owner path.
+    pub fn reseal_as_member(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        passphrase: &Passphrase,
+        member_kdf: &KdfParams,
+        floor: &[u8],
+    ) -> Result<Resealed, SealerError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let member_id = ctx.member_id.as_str();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        let owner_id = resolved
+            .members
+            .owner()
+            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?
+            .member_id
+            .clone();
+        let me = resolved
+            .members
+            .members
+            .iter()
+            .find(|m| m.member_id == member_id)
+            .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
+        let FoldedSealing {
+            epochs,
+            escrow,
+            needs_reseal,
+            ..
+        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+
+        // Idempotent: nothing stale → return the anchor unchanged, no op appended.
+        if !needs_reseal {
+            return Ok(Resealed {
+                watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+                anchor: anchor.to_vec(),
+                resealed: false,
+            });
+        }
+
+        // The member authorizes via their passphrase + account kdf-derived identity (anti-substitution vs
+        // their resolved key). No RRK secret is needed — the fresh DEK is wrapped to the RRK PUBLIC.
+        validate_kdf(&CoreKdf::from(member_kdf))?;
+        let root = derive_root(passphrase.expose(), member_kdf)?;
+        if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+
+        // The member authors + signs the op; the RRK wrap stays keyed to the owner (its holder).
+        let sealing = covering_reseal_sealing(tree_id, &owner_id, &escrow, &resolved.members, &epochs)?;
+        let new_anchor = dag_client::append_reseal(anchor, member_id, sealing, &root.identity)
             .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Resealed {

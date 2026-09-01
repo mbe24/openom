@@ -1192,6 +1192,53 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         })
     }
 
+    /// Member-authored self-heal of a stale write epoch (OPE-290): the same repair as [`dag_reseal`], but any
+    /// ACTIVE member — authorizing with their own `passphrase` + account `member_kdf_params` — can drive it,
+    /// so a member locked out by a concurrent merge doesn't have to wait for the owner's device. Idempotent;
+    /// the stored watermark is the floor.
+    pub fn dag_reseal_as_member(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        member_kdf_params: &[u8],
+        member_id: &str,
+    ) -> Result<Resealed> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let kdf = KdfParams::decode(member_kdf_params).map_err(|e| {
+            VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
+        })?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let r = dag.reseal_as_member(
+            &ctx,
+            &anchor,
+            &Passphrase::new(passphrase.into_bytes()),
+            &kdf,
+            &floor,
+        )?;
+        if r.resealed {
+            self.store
+                .commit_keyring(tree_key, &r.anchor, &r.watermark)
+                .map_err(VaultError::storage)?;
+        }
+        Ok(Resealed {
+            watermark: r.watermark,
+            resealed: r.resealed,
+        })
+    }
+
     /// Backfill historical READ access (OPE-288) after a concurrent membership merge: if some retained epoch
     /// is missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
     /// Idempotent — a no-op (`backfilled=false`, nothing persisted) when nothing is missing. Owner-authored
@@ -1831,6 +1878,70 @@ mod tests {
         // A second reseal is an idempotent no-op — the replicas have converged.
         let re2 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(!re2.resealed, "nothing stale -> reseal is a no-op");
+    }
+
+    #[test]
+    fn a_member_self_heals_a_stale_write_epoch() {
+        // OPE-290 member-authored reseal. Owner devices A + B share {owner, bob}. A removes bob (mints
+        // epoch 1, wrapping the owner only); B concurrently ADDS carol. After merge the write epoch (1)
+        // doesn't cover carol — the tree needs a reseal, yet the owner may be offline. carol self-heals:
+        // with only her own passphrase + account kdf she mints a covering epoch (minting needs public keys
+        // + keyeo authorizes a Reseal by any member). No owner action.
+        let owner = "owner horse";
+        let a = dag_host();
+        a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let bob = a.provision_member("bob pass".into()).unwrap();
+        a.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public)
+            .unwrap();
+
+        let shared = a.store.load_keyring(KEY).unwrap().unwrap();
+        let shared_wm = a.store.watermark(KEY).unwrap();
+        let b = dag_host();
+        b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
+
+        // A removes bob (epoch 1, owner-only); B concurrently adds carol (wrapped only in epoch 0).
+        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
+        let carol = a.provision_member("carol pass".into()).unwrap();
+        b.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public)
+            .unwrap();
+        let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
+
+        // Device B merges A's branch (drive the repair through B, a NON-owner device). carol can unlock but
+        // her unlock reports the merged write epoch is stale — it doesn't cover her.
+        let a_branch = a.store.load_keyring(KEY).unwrap().unwrap();
+        b.dag_merge_remote(KEY, &a_branch).unwrap();
+        let u0 = b
+            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .unwrap();
+        assert!(u0.needs_reseal, "the merged write epoch doesn't cover the concurrently-added carol");
+        b.lock(&u0.sealer_id);
+
+        // carol self-heals with only her OWN credentials — no owner passphrase.
+        let re = b
+            .dag_reseal_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .unwrap();
+        assert!(re.resealed, "a member reseals a stale write epoch herself");
+
+        let u = b
+            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .unwrap();
+        assert!(!u.needs_reseal, "after the self-heal the write epoch covers carol");
+        b.lock(&u.sealer_id);
+
+        // The owner's device converges once it sees carol's covering epoch — nothing owner-side required.
+        let b_after = b.store.load_keyring(KEY).unwrap().unwrap();
+        a.dag_merge_remote(KEY, &b_after).unwrap();
+        let uo = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
+        assert!(!uo.needs_reseal, "the owner converges on the member's covering epoch");
+        a.lock(&uo.sealer_id);
+
+        // Idempotent: a second member reseal is a no-op.
+        assert!(
+            !b.dag_reseal_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+                .unwrap()
+                .resealed,
+            "nothing stale -> member reseal is a no-op"
+        );
     }
 
     #[test]

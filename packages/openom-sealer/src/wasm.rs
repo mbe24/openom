@@ -825,6 +825,42 @@ pub fn dag_reseal(
     })
 }
 
+/// Member-authored self-heal of a stale write epoch (OPE-290): the same repair as [`dag_reseal`], but any
+/// ACTIVE member can drive it, authorizing with their own `passphrase` + account `member_kdf_params` instead
+/// of the owner passphrase — so a member locked out by a concurrent merge doesn't wait for the owner.
+/// Idempotent; `floor` is the anti-rollback watermark.
+#[wasm_bindgen(js_name = dagResealAsMember)]
+pub fn dag_reseal_as_member(
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    floor: &[u8],
+) -> Result<ResealResult, JsError> {
+    let kdf = KdfParams::decode(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let (tree, member, rep) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &rep,
+    };
+    let r = DagVault
+        .reseal_as_member(&ctx, keyring, &Passphrase::new(passphrase.into_bytes()), &kdf, floor)
+        .map_err(to_js)?;
+    Ok(ResealResult {
+        keyring: r.anchor,
+        watermark: r.watermark,
+        resealed: r.resealed,
+    })
+}
+
 /// The result of [`dag_backfill`]: the (possibly unchanged) anchor + its watermark, and whether
 /// historical-read wraps were actually added (`false` = nothing was missing, an idempotent no-op).
 #[wasm_bindgen]
