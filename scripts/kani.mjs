@@ -13,13 +13,13 @@
 //
 // Runner selection — OPENOM_RUNNER = auto (default) | local | docker
 //   local  — run `cargo kani` on the host (you installed it: `cargo install --locked kani-verifier`)
-//   docker — run inside OPENOM_KANI_IMAGE (built from docker/kani.Dockerfile if missing)
+//   docker — run inside OPENOM_KANI_IMAGE (built from scripts/kani.Dockerfile if missing)
 //   auto   — use the host's `cargo kani` if it resolves, else Docker. Unlike a plain try-then-fall-back
 //            this checks `cargo kani --version` FIRST, so a genuine proof FAILURE on the host is NOT
 //            mistaken for "Kani absent" and needlessly re-run in Docker.
 //
 // OPENOM_KANI_IMAGE — the image tag for docker/auto (default openom-kani:latest). Built locally from
-//   docker/kani.Dockerfile on first use (it bakes in Kani + its CBMC bundle, ~1 GB, one-time).
+//   scripts/kani.Dockerfile on first use (it bakes in Kani + its CBMC bundle, ~1 GB, one-time).
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -52,7 +52,7 @@ loadEnv();
 
 const RUNNER = (process.env.OPENOM_RUNNER || 'auto').toLowerCase();
 const IMAGE = process.env.OPENOM_KANI_IMAGE || 'openom-kani:latest';
-const DOCKERFILE = path.join(REPO, 'docker', 'kani.Dockerfile');
+const DOCKERFILE = path.join(REPO, 'scripts', 'kani.Dockerfile');
 const REGISTRY_VOLUME = 'openom-cargo-registry'; // shared with cargo.mjs — the crate downloads overlap
 const TARGET_VOLUME = 'openom-kani-target'; // separate from the cargo target: Kani's goto-build differs
 
@@ -73,10 +73,10 @@ function imageExists() {
 }
 
 function buildImage() {
-  console.error(`[kani runner=docker] building ${IMAGE} from docker/kani.Dockerfile (one-time, ~1 GB)…`);
+  console.error(`[kani runner=docker] building ${IMAGE} from scripts/kani.Dockerfile (one-time, ~1 GB)…`);
   return spawnSync(
     'docker',
-    ['build', '-f', DOCKERFILE, '-t', IMAGE, path.join(REPO, 'docker')],
+    ['build', '-f', DOCKERFILE, '-t', IMAGE, path.join(REPO, 'scripts')],
     { stdio: 'inherit' },
   );
 }

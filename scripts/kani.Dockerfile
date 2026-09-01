@@ -5,11 +5,11 @@
 # the Kani driver + its CBMC/toolchain bundle so `cargo kani` runs offline afterwards.
 #
 # Build (scripts/kani.mjs does this automatically if the tag is missing):
-#   docker build -f docker/kani.Dockerfile -t openom-kani:latest docker
+#   docker build -f scripts/kani.Dockerfile -t openom-kani:latest scripts
 # Run a crate's proofs:
 #   node scripts/kani.mjs -p openom-claim
 #
-# The build context is `docker/` (this file is self-contained — it copies nothing from the repo; the
+# The build context is `scripts/` (this file is self-contained — it copies nothing from the repo; the
 # workspace is bind-mounted at run time).
 FROM rust:1-bookworm
 
