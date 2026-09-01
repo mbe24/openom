@@ -183,53 +183,21 @@ pub async fn put_keyring(
         .await
         .map_err(internal)?;
 
-    // Derive the ACL from the resolved membership view (engine-neutral): upsert everyone present, drop
-    // everyone gone. `MemberView.role` is already the shared i16 role axis.
-    let mut ids: Vec<Uuid> = Vec::with_capacity(admitted.view.members.len());
+    // Derive the advisory ACL from the resolved membership view via the SHARED writer — the same path the
+    // engine-neutral membership-summary endpoint (`access::put_access`) uses, so the chain (in-tx here,
+    // drift-free) and the dag (over `/access`) can never derive different ACLs. `MemberView.role` is already
+    // the shared i16 role axis. Departed members' transient state (proposals + rate bucket) is reclaimed
+    // inside `apply_membership`.
+    let mut members: Vec<(Uuid, i16)> = Vec::with_capacity(admitted.view.members.len());
     for m in &admitted.view.members {
         let id = Uuid::parse_str(&m.member_id)
             .map_err(|_| ApiError::BadRequest("keyring member_id is not a uuid".into()))?;
-        sqlx::query(
-            "INSERT INTO tree_access (tree_id, member_id, role) VALUES ($1, $2, $3)
-             ON CONFLICT (tree_id, member_id) DO UPDATE SET role = EXCLUDED.role",
-        )
-        .bind(tree_id)
-        .bind(id)
-        .bind(m.role)
-        .execute(&mut *tx)
-        .await
-        .map_err(internal)?;
-        ids.push(id);
+        members.push((id, m.role));
     }
-    // Remove everything belonging to members no longer in the keyring (guard the empty case — never nuke
-    // the ACL). Dropping the ACL row cuts their access; we also reclaim their transient state so a removed
-    // member leaves nothing behind: their open proposals and their rate bucket. Pending (un-attached)
-    // media uploads are left to the existing GC sweep (it releases the reservation + staging object);
-    // live/attached blobs stay — they're part of the tree now (bulk-detach of a departed member's media
-    // is a heavier policy, a follow-up).
-    if !ids.is_empty() {
-        sqlx::query("DELETE FROM tree_access WHERE tree_id = $1 AND member_id <> ALL($2)")
-            .bind(tree_id)
-            .bind(&ids)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal)?;
-        sqlx::query("DELETE FROM proposals WHERE tree_id = $1 AND proposer_member_id <> ALL($2)")
-            .bind(tree_id)
-            .bind(&ids)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal)?;
-        sqlx::query("DELETE FROM member_rate WHERE tree_id = $1 AND member_id <> ALL($2)")
-            .bind(tree_id)
-            .bind(&ids)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal)?;
-    }
+    crate::access::apply_membership(&mut tx, tree_id, owner, &members).await?;
 
     tx.commit().await.map_err(internal)?;
-    tracing::info!(event = "keyring_put", %tree_id, revision = candidate.revision, members = ids.len());
+    tracing::info!(event = "keyring_put", %tree_id, revision = candidate.revision, members = members.len());
     Ok((
         StatusCode::OK,
         Json(json!({ "revision": candidate.revision })),
@@ -299,39 +267,5 @@ pub async fn get_keyring(
     Ok((StatusCode::OK, Json(KeyringHistory { revisions, head })).into_response())
 }
 
-#[derive(Serialize)]
-struct AccessMember {
-    member_id: String,
-    role: i16,
-}
-
-/// `GET /trees/{tree_id}/access` — the current derived member list (id + role). A read convenience for a
-/// members/sharing UI; the authoritative source is the keyring, this is its derived projection.
-pub async fn get_access(
-    State(state): State<AppState>,
-    identity: Identity,
-    Path(tree_id): Path<Uuid>,
-) -> Result<Response, ApiError> {
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    let owner = owner.ok_or(ApiError::NotFound)?;
-    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
-
-    let rows: Vec<(Uuid, i16)> =
-        sqlx::query_as("SELECT member_id, role FROM tree_access WHERE tree_id = $1 ORDER BY role")
-            .bind(tree_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(internal)?;
-    let members: Vec<AccessMember> = rows
-        .into_iter()
-        .map(|(id, role)| AccessMember {
-            member_id: id.to_string(),
-            role,
-        })
-        .collect();
-    Ok((StatusCode::OK, Json(json!({ "members": members }))).into_response())
-}
+// The derived member list read endpoint (`GET /trees/{id}/access`) moved to `crate::access::get_access`,
+// alongside the membership-summary write path it now shares state with.

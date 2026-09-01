@@ -5,6 +5,7 @@
 //! the real routing + extractor + handler + DB + storage stack without a socket. The
 //! binary ([`main`](../main.rs)) is a thin shell: tracing + serve/Lambda selection.
 
+pub mod access;
 pub mod auth;
 pub mod authz;
 pub mod config;
@@ -97,8 +98,12 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/keyring",
             put(keyring::put_keyring).get(keyring::get_keyring),
         )
-        // The derived member list (id + role) — a read convenience for a sharing UI.
-        .route("/trees/{tree_id}/access", get(keyring::get_access))
+        // Advisory membership: PUT a client-asserted engine-neutral summary (OPE-278), GET the derived
+        // member list + the summary's generation/basis (sharing UI + the client's pre-push staleness check).
+        .route(
+            "/trees/{tree_id}/access",
+            get(access::get_access).put(access::put_access),
+        )
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))

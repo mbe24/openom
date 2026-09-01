@@ -1929,3 +1929,161 @@ async fn media_lifecycle_and_gc() {
     let (s, _, _) = send(&app, get(format!("/trees/{tree}/media/{blob}"))).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "gone after sweep");
 }
+
+// ---- membership summary (OPE-278 / server-keyring-decoupling) ----
+
+fn put_json_as(uri: String, json: Value, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::from(json.to_string()))
+        .unwrap()
+}
+
+/// A summary body: opaque basis tokens, the CAS `expected_generation`, and `(member_id, role)` pairs.
+fn summary_body(basis: &[&str], expected: Option<i64>, members: &[(Uuid, i16)]) -> Value {
+    serde_json::json!({
+        "basis": basis,
+        "expected_generation": expected,
+        "members": members
+            .iter()
+            .map(|(id, role)| serde_json::json!({ "member_id": id.to_string(), "role": role }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn new_tree(app: &Router, db: &sqlx::PgPool, owner: Uuid) -> Uuid {
+    seed_account(db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(app, put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner)).await;
+    tree
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn access_summary_derives_acl_generation_and_basis() {
+    // The client pushes an engine-neutral advisory summary; the server derives the ACL WITHOUT parsing a
+    // keyring, and GET returns members + the CAS generation + the opaque basis for the client's next push.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let editor = Uuid::new_v4();
+    let uri = format!("/trees/{tree}/access");
+
+    let (s, _, body) = send(
+        &app,
+        put_json_as(uri.clone(), summary_body(&["op:aa", "op:bb"], None, &[(owner, 1), (editor, 4)]), owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "owner pushes the first summary");
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["generation"].as_i64().unwrap(), 1);
+
+    assert_eq!(role_of(&db, tree, owner).await, Some(1), "owner in the ACL");
+    assert_eq!(role_of(&db, tree, editor).await, Some(4), "editor derived from the summary");
+
+    let (s, _, body) = send(&app, get_as(uri, owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["generation"].as_i64().unwrap(), 1);
+    assert_eq!(v["basis"], serde_json::json!(["op:aa", "op:bb"]), "the opaque basis round-trips");
+    assert_eq!(v["members"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn access_summary_cas_and_idempotent_reassert() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let editor = Uuid::new_v4();
+    let viewer = Uuid::new_v4();
+    let uri = format!("/trees/{tree}/access");
+    let g = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap()["generation"].as_i64().unwrap();
+
+    // First push (expects no summary yet) → generation 1.
+    let (_, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(owner, 1), (editor, 4)]), owner)).await;
+    assert_eq!(g(&b), 1);
+
+    // Idempotent re-assert (same members) → 200, generation NOT bumped.
+    let (s, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 4)]), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(g(&b), 1, "an identical re-assert does not bump the generation");
+    assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["unchanged"], serde_json::json!(true));
+
+    // A real change (add a viewer) → generation 2.
+    let (_, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:2"], Some(1), &[(owner, 1), (editor, 4), (viewer, 5)]), owner)).await;
+    assert_eq!(g(&b), 2);
+    assert_eq!(role_of(&db, tree, viewer).await, Some(5));
+
+    // A stale push (wrong expected generation) → 409, and it does not apply.
+    let (s, _, _) = send(&app, put_json_as(uri, summary_body(&["op:2"], Some(1), &[(owner, 1)]), owner)).await;
+    assert_eq!(s, StatusCode::CONFLICT, "a stale generation is a CAS conflict");
+    assert_eq!(role_of(&db, tree, viewer).await, Some(5), "the refused push did not drop the viewer");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn access_summary_signer_gate() {
+    // The summary has no crypto backstop, so the push is gated at SIGNER level (owner or co-owner). A
+    // Maintainer (role 3) and a stranger are refused; a co-owner is allowed.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let coowner = Uuid::new_v4();
+    let maint = Uuid::new_v4();
+    let editor = Uuid::new_v4();
+    let stranger = Uuid::new_v4();
+    let uri = format!("/trees/{tree}/access");
+
+    // Owner establishes the roster.
+    send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)]), owner)).await;
+
+    // A co-owner may push (adds a viewer).
+    let viewer = Uuid::new_v4();
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:2"], Some(1), &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4), (viewer, 5)]), coowner)).await;
+    assert_eq!(s, StatusCode::OK, "a co-owner may assert membership");
+
+    // A Maintainer (role 3) may NOT.
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:3"], Some(2), &[(owner, 1)]), maint)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a Maintainer is below the signer gate");
+
+    // A stranger with no role may NOT.
+    let (s, _, _) = send(&app, put_json_as(uri, summary_body(&["op:3"], Some(2), &[(owner, 1)]), stranger)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a non-member is refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn access_summary_owner_invariant_and_validation() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let editor = Uuid::new_v4();
+    let uri = format!("/trees/{tree}/access");
+
+    // A summary that OMITS the owner still keeps the owner in the ACL at role Owner (owner is invariant).
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(editor, 4)]), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(role_of(&db, tree, owner).await, Some(1), "the owner row is never dropped");
+    assert_eq!(role_of(&db, tree, editor).await, Some(4));
+
+    // An empty member list is refused (never nuke the ACL).
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&[], Some(1), &[]), owner)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "empty membership is refused");
+
+    // A non-UUID member_id is refused (the advisory layer keys on the account UUID).
+    let bad_id = serde_json::json!({ "basis": ["op:1"], "expected_generation": 1, "members": [{ "member_id": "not-a-uuid", "role": 4 }] });
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), bad_id, owner)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "member_id must be a uuid");
+
+    // A role outside 1..=5 is refused.
+    let bad_role = summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 9)]);
+    let (s, _, _) = send(&app, put_json_as(uri, bad_role, owner)).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "role out of range is refused");
+}
