@@ -1,16 +1,18 @@
-//! Keyring storage + ACL derivation (track B3, slice 2).
+//! Keyring storage + ACL derivation (track B3).
 //!
 //! The signed keyring is the AUTHORITATIVE membership/role list. The server stores every revision
-//! (append-only) so clients walk the hash chain hop-by-hop, verifies each candidate against the stored
-//! head (honest-server defense-in-depth — `openom_keyring::chain`), and DERIVES the advisory `tree_access`
-//! ACL from the keyring's non-secret `members` list. Zero-knowledge is intact: the server reads only the
-//! non-secret member ids/roles + the signatures it verifies; the wraps/keys stay opaque, never decrypted.
+//! (append-only) so clients walk the hash chain hop-by-hop, admits each candidate through the keyless
+//! verifier seam (`KeyringVerifier` — honest-server defense-in-depth, and engine-agnostic per OPE-278 so
+//! the dag engine admits through the same surface), and DERIVES the advisory `tree_access` ACL from the
+//! returned `MembershipView`. Zero-knowledge is intact: the server reads only the non-secret member
+//! ids/roles + the signatures it verifies; the wraps/keys stay opaque, never decrypted.
 //!
-//! Verification is the REAL authorization for a write here (`verify_transition` accepts only a prior
-//! signer's signature); the role gate on the endpoint is coarse cost-control. Genesis (revision 1) is
-//! checked with `verify_reset` (structure + self-signed + wrap-complete). A recovery/succession *reset*
-//! (a non-chaining keyring) is intentionally NOT accepted yet — that needs its own policy (slice 4), so a
-//! non-genesis keyring that doesn't chain onto the head is refused rather than silently trusted.
+//! Admission is the REAL authorization for a write here (a candidate is accepted only as a signed successor
+//! of the stored head, or a self-signed genesis at first sight); the role gate on the endpoint is coarse
+//! cost-control. A recovery/succession *reset* — a keyring that chains onto the head by hash + revision but
+//! re-founds the signer set unendorsed (the old signing key is presumed lost) — is admitted with the view's
+//! `reset_boundary` set; the CLIENT re-verifies the new signer set out-of-band (`is_reset` surfaces it), and
+//! a per-tree cooldown bounds abuse.
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -18,7 +20,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use openom_keyring::{keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor};
+use openom_keyring::keyring_hash;
+use openom_keyring::verifier::ChainVerifier;
+use openom_keyring_seam::{KeyringVerifier, VerifyError};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
@@ -45,12 +49,17 @@ fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
 
-/// A rejected keyring transition → HTTP. A rollback/fork is a *conflict* (the head moved — refetch and
-/// rebuild); everything else is a malformed/unauthorized candidate → 400.
-fn keyring_err(e: ChainError) -> ApiError {
+/// A rejected keyring update → HTTP. A rollback/fork/stale-head is a *conflict* (the head moved — refetch
+/// and rebuild); a malformed/unauthenticated/unauthorized candidate is a 400. Neutral `VerifyError` (from
+/// the keyless seam), so the mapping is engine-agnostic.
+fn verify_err(e: VerifyError) -> ApiError {
     match e {
-        ChainError::NonSequential | ChainError::Fork => ApiError::Conflict,
-        other => ApiError::BadRequest(format!("keyring rejected: {other}")),
+        VerifyError::Rollback | VerifyError::Stale => ApiError::Conflict,
+        VerifyError::Malformed => ApiError::BadRequest("keyring rejected: malformed".into()),
+        VerifyError::Unauthenticated => {
+            ApiError::BadRequest("keyring rejected: unauthenticated".into())
+        }
+        VerifyError::Unauthorized => ApiError::BadRequest("keyring rejected: unauthorized".into()),
     }
 }
 
@@ -97,49 +106,37 @@ pub async fn put_keyring(
     )
     .await?;
 
-    // Verify: genesis (no keyring yet) via verify_reset; otherwise a strict successor of the stored head,
-    // OR a recovery/succession RESET (slice 4).
-    let (anchor, is_reset) = if head_rev == 0 {
+    // Bind the keyless verifier seam (OPE-278): `ChainVerifier::admit` runs the SAME chain-walk this
+    // endpoint did inline — verify_transition, with a verify_reset fallback for a recovery/succession reset
+    // that re-founds the signer set unendorsed — and hands back the resolved membership `view` plus whether
+    // the candidate crossed a recovery/reset boundary. The ACL derivation and the reset-cooldown gate below
+    // now read from the engine-neutral `MembershipView`, not chain-specific fields, so the same surface will
+    // serve the dag engine once its admit arm lands. The server is not the security boundary: it trusts the
+    // founding keyring (first sight) and re-verifies every transition; the CLIENT re-verifies a reset's new
+    // signer set out-of-band (is_reset surfaces it).
+    let prior_state: Option<Vec<u8>> = if head_rev == 0 {
         if candidate.revision != 1 {
             return Err(ApiError::BadRequest(
                 "first keyring must be revision 1".into(),
             ));
         }
-        (verify_reset(None, &candidate).map_err(keyring_err)?, false)
+        None
     } else {
-        let prior_bytes: Vec<u8> = sqlx::query_scalar(
-            "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
+        Some(
+            sqlx::query_scalar(
+                "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
+            )
+            .bind(tree_id)
+            .bind(head_rev)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(internal)?,
         )
-        .bind(tree_id)
-        .bind(head_rev)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(internal)?;
-        let prior = Keyring::decode(prior_bytes.as_slice())
-            .map_err(|_| ApiError::Internal("stored keyring is corrupt".into()))?;
-        let prior_anchor = KeyringAnchor::from_keyring(&prior);
-        match verify_transition(&prior_anchor, &candidate) {
-            Ok(a) => (a, false),
-            // A recovery/succession reset: it chains onto our head by hash + revision (so it can't roll
-            // back or fork), but changes the authorized-signer set without the old set's endorsement
-            // (the old signing key is presumed lost) — which verify_transition reports as
-            // UnendorsedSetChange. verify_reset confirms it's a self-consistent, wrap-complete,
-            // self-signed keyring. The server can't tell a legitimate recovery from a founder-substitution
-            // attack; the CLIENT re-verifies the new signer set out-of-band (is_reset surfaces it). The
-            // revision + prev-hash guards are redundant with UnendorsedSetChange (which is only reached
-            // after those pass) but stated explicitly as the reset's defining shape.
-            Err(ChainError::UnendorsedSetChange)
-                if candidate.revision == head_rev as u32 + 1
-                    && candidate.prev_keyring_hash == keyring_hash(&prior) =>
-            {
-                // Continuity + RVK-authorization against the prior recovery authority (inert if none).
-                let prior_rvk = (!prior_anchor.recovery_verifying_key.is_empty())
-                    .then_some(prior_anchor.recovery_verifying_key.as_slice());
-                (verify_reset(prior_rvk, &candidate).map_err(keyring_err)?, true)
-            }
-            Err(e) => return Err(keyring_err(e)),
-        }
     };
+    let admitted = ChainVerifier
+        .admit(prior_state.as_deref(), body.as_ref())
+        .map_err(verify_err)?;
+    let is_reset = admitted.view.reset_boundary;
 
     // A reset bypasses the prior-signer signature gate, so rate-cap it per tree (a stolen Administer token
     // could otherwise spam resets, forking every member into an OOB-reverify prompt). Atomic in SQL: the
@@ -163,6 +160,7 @@ pub async fn put_keyring(
 
     // Persist append-only. The PK (tree_id, revision) is the CAS backstop: a racing PUT that verified
     // against the same head inserts 0 rows here and loses.
+    let kh = keyring_hash(&candidate);
     let inserted = sqlx::query(
         "INSERT INTO tree_keyrings (tree_id, revision, payload, keyring_hash, is_reset)
          VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tree_id, revision) DO NOTHING",
@@ -170,7 +168,7 @@ pub async fn put_keyring(
     .bind(tree_id)
     .bind(candidate.revision as i32)
     .bind(body.as_ref())
-    .bind(anchor.keyring_hash.as_slice())
+    .bind(kh.as_slice())
     .bind(is_reset)
     .execute(&mut *tx)
     .await
@@ -185,9 +183,10 @@ pub async fn put_keyring(
         .await
         .map_err(internal)?;
 
-    // Derive the ACL from the non-secret members list: upsert everyone present, drop everyone gone.
-    let mut ids: Vec<Uuid> = Vec::with_capacity(candidate.members.len());
-    for m in &candidate.members {
+    // Derive the ACL from the resolved membership view (engine-neutral): upsert everyone present, drop
+    // everyone gone. `MemberView.role` is already the shared i16 role axis.
+    let mut ids: Vec<Uuid> = Vec::with_capacity(admitted.view.members.len());
+    for m in &admitted.view.members {
         let id = Uuid::parse_str(&m.member_id)
             .map_err(|_| ApiError::BadRequest("keyring member_id is not a uuid".into()))?;
         sqlx::query(
@@ -196,7 +195,7 @@ pub async fn put_keyring(
         )
         .bind(tree_id)
         .bind(id)
-        .bind(m.role as i16)
+        .bind(m.role)
         .execute(&mut *tx)
         .await
         .map_err(internal)?;

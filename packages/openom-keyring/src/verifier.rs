@@ -13,7 +13,8 @@ use openom_protocol::Message;
 use openom_roles::SIGNER_FOUNDER;
 
 use crate::{
-    bootstrap_from_genesis, verify_reset, verify_transition, ChainError, KeyringAnchor, VerifyingKey,
+    bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor,
+    VerifyingKey,
 };
 
 /// The chain keyring's keyless verifier. Holds no secrets and no state.
@@ -94,16 +95,27 @@ impl KeyringVerifier for ChainVerifier {
                         })
                     }
                     // Not a valid ordinary transition — it may be a recovery reset (a fresh, deliberately
-                    // unendorsed founder identity). Try that path before refusing, gating on the prior
-                    // head's recovery authority (RVK) for continuity + authorization.
-                    Err(transition_err) => match verify_reset(prior_rvk(&anchor), &candidate) {
-                        Ok(_) => Ok(Admitted {
-                            state: candidate.encode_to_vec(),
-                            view: view_of(&candidate, true),
-                            changed: true,
-                        }),
-                        Err(_) => Err(classify(transition_err)),
-                    },
+                    // unendorsed founder identity). A reset re-founds the signer set WITHOUT the old set's
+                    // endorsement, but it must still CHAIN onto the head by revision + prev-hash, so it can
+                    // neither roll back nor fork — otherwise a fork (a divergent rev-N+1 with a bogus
+                    // prev-hash) would be smuggled in as a "reset". Gate the fallback on that continuity
+                    // first, then on the prior head's recovery authority (RVK, inert if none).
+                    Err(transition_err) => {
+                        let chains_on_head = candidate.revision == head.revision + 1
+                            && candidate.prev_keyring_hash == keyring_hash(&head);
+                        match chains_on_head
+                            .then(|| verify_reset(prior_rvk(&anchor), &candidate))
+                        {
+                            Some(Ok(_)) => Ok(Admitted {
+                                state: candidate.encode_to_vec(),
+                                view: view_of(&candidate, true),
+                                changed: true,
+                            }),
+                            // Not continuous, or not a valid reset: refuse with the original transition error
+                            // (a fork/rollback stays a fork/rollback, never a reset).
+                            _ => Err(classify(transition_err)),
+                        }
+                    }
                 }
             }
         }
@@ -206,11 +218,29 @@ mod tests {
         // garbage bytes → Malformed
         assert_eq!(v.admit(Some(&boot.state), b"not a keyring").unwrap_err(), VerifyError::Malformed);
 
-        // a self-signed re-founding under a fresh founder identity (seed 7) is not an ordinary
-        // successor of g, so it's admitted via verify_reset with reset_boundary set.
-        let reset = genesis(7);
+        // A self-signed re-founding under a fresh founder identity (seed 7) that still CHAINS onto the head
+        // (rev 2, prev-hash = hash(g)) is not an ordinary successor, so it's admitted via verify_reset with
+        // reset_boundary set.
+        let mut reset = genesis(7);
+        reset.revision = 2;
+        reset.prev_keyring_hash = keyring_hash(&g).to_vec();
+        reset.signatures.clear();
+        sign_keyring(&mut reset, &sk(7));
         let out = v.admit(Some(&boot.state), &reset.encode_to_vec()).unwrap();
         assert!(out.view.reset_boundary, "a re-founding is admitted as a reset");
         assert_eq!(out.view.owner().unwrap().author_public_key, pk(7), "owner re-keyed");
+
+        // But a FORK — a rev-2 re-founding with a BOGUS prev-hash — is refused as a rollback/fork, NOT
+        // smuggled in as a reset (the reset fallback is gated on head continuity).
+        let mut fork = genesis(7);
+        fork.revision = 2;
+        fork.prev_keyring_hash = vec![0u8; 32];
+        fork.signatures.clear();
+        sign_keyring(&mut fork, &sk(7));
+        assert_eq!(
+            v.admit(Some(&boot.state), &fork.encode_to_vec()).unwrap_err(),
+            VerifyError::Rollback,
+            "a fork is refused, never accepted as a reset"
+        );
     }
 }

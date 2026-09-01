@@ -3532,6 +3532,7 @@ dependencies = [
  "lambda_http",
  "openom-crypto",
  "openom-keyring",
+ "openom-keyring-seam",
  "openom-protocol",
  "openom-roles",
  "opentelemetry",
