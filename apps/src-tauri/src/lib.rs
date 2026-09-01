@@ -5,14 +5,28 @@ use std::sync::Arc;
 use journal::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
-    AcceptedKeyring, CoOwnerChanged, MemberAdded, MemberProvisioned, MemberRemoved, Provisioned,
-    Recovered, Rekeyed, Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
+    AcceptedKeyring, CoOwnerChanged, EngineKind, MemberAdded, MemberProvisioned, MemberRemoved,
+    Provisioned, Recovered, Rekeyed, Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 pub struct AppStore(pub Box<dyn DocStore>);
 type Vault = Arc<VaultHost<SqliteVaultStore>>;
+
+/// The keyring engine for newly provisioned trees (OPE-278), resolved at RUNTIME and owned by the
+/// custody host in Rust — never taken from the (less-trusted) webview. Runtime, not `cfg`, on purpose:
+/// one binary can reach more than one backend (managed Lambda, BYO Google Drive), so a future
+/// dual-engine world maps each backend to its engine here without a rebuild. This is the single plug
+/// point for that; existing trees already carry their own engine in the local head record, so this only
+/// picks what to stamp on a NEW tree. Today every backend uses the chain engine; the hidden
+/// `OPENOM_KEYRING_ENGINE=dag` override selects the dag keyring for bring-up.
+fn keyring_engine() -> EngineKind {
+    match std::env::var("OPENOM_KEYRING_ENGINE").as_deref() {
+        Ok("dag") => EngineKind::Dag,
+        _ => EngineKind::Chain,
+    }
+}
 
 // ----------------------------------------------------------------- doc store (opaque bytes)
 
@@ -440,7 +454,7 @@ pub fn run() {
             let tree = SqliteStore::open(dir.join("tree.sqlite")).expect("open tree store");
             app.manage(AppStore(Box::new(tree)));
             let vault = SqliteVaultStore::open(dir.join("vault.sqlite")).expect("open vault store");
-            app.manage(Arc::new(VaultHost::new(vault)));
+            app.manage(Arc::new(VaultHost::new(vault).with_engine(keyring_engine())));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
