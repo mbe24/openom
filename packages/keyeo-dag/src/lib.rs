@@ -36,26 +36,28 @@ impl SignatureScheme for OpenomSign {
 }
 
 /// A keyring role, power-descending (**lower is stronger**): `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
-/// matching openom's `MemberRole` access axis (openom-roles). Wraps the `i16` so a role can be a signed,
+/// bound to keyeo-api's engine-neutral role convention ([`keyeo_api::ROLE_OWNER`] …) — which openom's
+/// `openom-keyring::roles` drift-guard pins to the proto `MemberRole` values, so the engine never has to
+/// depend on openom-roles (and stays openom-free). Wraps the `i16` so a role can be a signed,
 /// content-addressed op field (keyeo requires `Role: Serialize`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct KeyringRole(pub i16);
 
 impl KeyringRole {
-    pub const OWNER: Self = Self(openom_roles::ROLE_OWNER);
-    pub const CO_OWNER: Self = Self(openom_roles::ROLE_CO_OWNER);
-    pub const MAINTAINER: Self = Self(openom_roles::ROLE_MAINTAINER);
-    pub const EDITOR: Self = Self(openom_roles::ROLE_EDITOR);
-    pub const VIEWER: Self = Self(openom_roles::ROLE_VIEWER);
+    pub const OWNER: Self = Self(keyeo_api::ROLE_OWNER);
+    pub const CO_OWNER: Self = Self(keyeo_api::ROLE_CO_OWNER);
+    pub const MAINTAINER: Self = Self(keyeo_api::ROLE_MAINTAINER);
+    pub const EDITOR: Self = Self(keyeo_api::ROLE_EDITOR);
+    pub const VIEWER: Self = Self(keyeo_api::ROLE_VIEWER);
 
     /// A signer (keyring administrative authority) is a `CoOwner` or stronger (`Owner`).
     fn is_signer(self) -> bool {
-        self.0 <= openom_roles::ROLE_CO_OWNER
+        self.0 <= keyeo_api::ROLE_CO_OWNER
     }
 
     /// The Owner (founder) — the unique keyring root.
     fn is_owner(self) -> bool {
-        self.0 == openom_roles::ROLE_OWNER
+        self.0 == keyeo_api::ROLE_OWNER
     }
 }
 

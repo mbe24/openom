@@ -9,12 +9,14 @@
 //! engine marshals these to its own persisted form: the chain via the `From` impls below (proto
 //! `KeyEpoch`/`KeyWrap`/`RecoveryKey`), the dag by serializing them into ops (OPE-273).
 //!
-//! It must never import `openom_keyring` or `keyeo` — it stays the engine-neutral sealing core BOTH engines'
-//! vaults share (a discipline kept by review; there is no CI grep for it, despite an earlier comment's
-//! claim). It DOES still touch `openom_protocol` for the `From` marshaling + the wrap AAD + the sealer's id
-//! types — that
-//! residual proto coupling (and openom-crypto's own) is what OPE-283 removes to make this crate
-//! standalone-publishable; it is a non-API-breaking follow-on, since these signatures are already proto-free.
+//! It must never import `openom_keyring` or `keyeo` — it stays the engine-neutral (as to *keyring engine*)
+//! sealing core BOTH engines' vaults share (a discipline kept by review; there is no CI grep for it, despite
+//! an earlier comment's claim). It DOES touch `openom_protocol` for the `From` marshaling + the wrap AAD +
+//! the sealer's id types, and `openom_crypto` for the KDF/AEAD. That is deliberate: OPE-283 scoped this
+//! coupling as load-bearing, not incidental — the wrap AAD binds the proto `Envelope` (a compile-time
+//! security control) and the KDF params are the proto's, so decoupling would re-derive the wire format and
+//! scatter the crypto. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and keep the
+//! `openom-` prefix; only the engine layer below them (keyeo / keyeo-api / keyeo-dag) is openom-free.
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,

@@ -1346,7 +1346,9 @@ name = "edsign"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hkdf 0.12.4",
  "proptest",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "zeroize",
 ]
@@ -2884,7 +2886,6 @@ dependencies = [
  "edsign",
  "keyeo",
  "keyeo-api",
- "openom-crypto",
  "openom-keyring",
  "openom-protocol",
  "openom-roles",

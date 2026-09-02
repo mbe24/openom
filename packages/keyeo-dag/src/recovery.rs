@@ -14,11 +14,16 @@
 //! This is the crypto primitive only; the `ReFound` op, its pinning, and the merge semantics land in the
 //! following OPE-269 slices.
 
-/// Derive the Recovery Verification Key from the RRK secret. Delegates to the SHARED derivation in
-/// openom-crypto, so the chain and dag keyrings produce a byte-identical RVK from the same secret (a
-/// recovery is verifiable identically whichever engine authored it). Deterministic + domain-separated.
+/// The frozen HKDF domain label for the recovery-verification key. Byte-identical to the chain's
+/// (`openom_crypto::derive_rvk`), so a tree provisioned by either engine pins the same RVK from the same
+/// secret — an openom-vault cross-check test guards the two copies against drift.
+const RVK_HKDF_INFO: &[u8] = b"keyeo:rvk:v1";
+
+/// Derive the Recovery Verification Key from the RRK secret via the shared generic HKDF→Ed25519 derivation
+/// ([`edsign::derive_signing_key`]) under [`RVK_HKDF_INFO`]. Deterministic + domain-separated; keeps this
+/// crate free of any openom dependency (it derives the RVK itself rather than borrowing openom-crypto's).
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> edsign::SigningKey {
-    openom_crypto::derive_rvk(rrk_secret)
+    edsign::derive_signing_key(rrk_secret, RVK_HKDF_INFO)
 }
 
 /// The public half of the RVK — the value pinned in genesis and checked against a `ReFound`'s carried

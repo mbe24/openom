@@ -21,6 +21,11 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 # For the compile-time ZeroizeOnDrop proof on the signing key.
 zeroize.workspace = true
 thiserror.workspace = true
+# `derive_signing_key`: HKDF-SHA256 a signing seed from key material under a caller-supplied domain label.
+# The generic derivation both keyring engines share for their recovery key (info label is the caller's, so
+# this crate stays domain-free).
+hkdf.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

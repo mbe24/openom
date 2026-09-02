@@ -1107,6 +1107,29 @@ mod tests {
         }
     }
 
+    /// The DAG vault provisions a tree's recovery-verification key via `openom_crypto::derive_rvk` (the
+    /// shared vault derivation, also used by the chain vault), but the DAG *engine* verifies a `ReFound`
+    /// against its own `keyeo_dag::recovery::derive_rvk`. Since OPE-279 those two live in different crates —
+    /// openom-crypto and the now-openom-free keyeo-dag — sharing only `edsign`'s HKDF and the frozen
+    /// `keyeo:rvk:v1` label. They MUST stay byte-identical or a validly recovered tree would fail admission;
+    /// this pins them against drift (the guard the recovery.rs / root.rs doc-comments point to).
+    #[test]
+    fn vault_and_engine_derive_the_same_recovery_key() {
+        for secret in [
+            [0u8; 32],
+            [7u8; 32],
+            [255u8; 32],
+            *b"a-32-byte-recovery-root-secret!!",
+        ] {
+            let vault_rvk = openom_crypto::derive_rvk(&secret).verifying_key().to_bytes();
+            let engine_rvk = keyeo_dag::recovery::rvk_public(&secret);
+            assert_eq!(
+                vault_rvk, engine_rvk,
+                "the vault's provisioning RVK and the dag engine's verifying RVK must match byte-for-byte"
+            );
+        }
+    }
+
     /// A member's deterministic HPKE public key, so `membership` (the resolved view) and `member_wrap` (the
     /// epoch wrap) agree on what "the current key" is for the coverage checks (OPE-290).
     fn hpke_key(member: &str) -> Vec<u8> {

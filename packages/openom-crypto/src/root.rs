@@ -33,18 +33,19 @@ const HKDF_IDENTITY_INFO: &[u8] = b"openom:identity:v1";
 const HKDF_HPKE_INFO: &[u8] = b"openom:hpke:v1";
 /// HKDF `info` label for the Recovery Verification Key. **Frozen.** Domain-separated from every other
 /// use of the recovery-root secret (never reuse a scalar across roles).
-const HKDF_RVK_INFO: &[u8] = b"openom:rvk:v1";
+// Byte-identical to keyeo_dag::recovery::RVK_HKDF_INFO — both engines derive the same RVK. (Rebranded from
+// "openom:rvk:v1" to the engine-neutral "keyeo:rvk:v1" when the derivation moved into edsign, OPE-279;
+// free pre-release.)
+const HKDF_RVK_INFO: &[u8] = b"keyeo:rvk:v1";
 
 /// Derive the **Recovery Verification Key** (RVK) — the Ed25519 key that authorizes a keyring
 /// reset/recovery — from the recovery-root (RRK) secret. BOTH keyring engines (chain + dag) call this, so
 /// a recovery is verifiable identically whichever engine authored it. Deterministic and domain-separated:
-/// HKDF-SHA256(rrk_secret) under the frozen RVK label, then an Ed25519 key from the 32-byte output.
+/// HKDF-SHA256(rrk_secret) under the frozen RVK label, then an Ed25519 key from the 32-byte output — via
+/// the shared [`edsign::derive_signing_key`], so this is byte-identical to `keyeo_dag::recovery::derive_rvk`
+/// (an openom-vault cross-check test guards the two).
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> SigningKey {
-    let hk = Hkdf::<Sha256>::new(None, rrk_secret);
-    let mut seed = Zeroizing::new([0u8; 32]);
-    hk.expand(HKDF_RVK_INFO, seed.as_mut_slice())
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
-    SigningKey::from_seed(&seed)
+    edsign::derive_signing_key(rrk_secret, HKDF_RVK_INFO)
 }
 
 /// The keys a passphrase unlocks: the DEK-wrapping KEK, the keyring-signing identity, and

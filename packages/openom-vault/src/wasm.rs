@@ -25,7 +25,6 @@ use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
-use crate::VaultError;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
 use keyeo_api::EngineKind;
 

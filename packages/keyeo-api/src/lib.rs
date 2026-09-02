@@ -63,9 +63,14 @@ impl std::error::Error for UnknownEngine {}
 /// strongest role and a signer is CoOwner-or-stronger. A consumer maps its own role enum onto these — for
 /// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
 /// them here, rather than depending on `openom-roles`, keeps this seam openom-free (openom-roles pulls in
-/// `openom-protocol`) so the crate is standalone-publishable (OPE-279).
+/// `openom-protocol`) so the crate — and every engine that binds its roles to these instead of to
+/// openom-roles — is standalone-publishable (OPE-279). openom's `openom-keyring::roles` drift-guard test
+/// pins these five to the proto `MemberRole` values.
 pub const ROLE_OWNER: i16 = 1;
 pub const ROLE_CO_OWNER: i16 = 2;
+pub const ROLE_MAINTAINER: i16 = 3;
+pub const ROLE_EDITOR: i16 = 4;
+pub const ROLE_VIEWER: i16 = 5;
 
 /// One member of the resolved keyring, engine-agnostic. Both engines fold to this: chain from
 /// `Keyring.members`, dag from the resolved `GroupState`.

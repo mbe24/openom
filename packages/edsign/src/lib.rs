@@ -63,6 +63,20 @@ impl SigningKey {
     }
 }
 
+/// Derive a [`SigningKey`] deterministically from 32 bytes of input key material via HKDF-SHA256 (empty
+/// extract salt) under a caller-supplied domain-separation `info` label, then [`SigningKey::from_seed`].
+/// The label domain-separates: the same `ikm` yields UNRELATED keys under different labels, so a signing
+/// capability derived here can never be confused with an encryption/identity key from the same secret —
+/// never reuse a scalar across roles. Generic: the `info` is the caller's, so this crate stays domain-free
+/// (both keyring engines derive their recovery-verification key through this one function).
+pub fn derive_signing_key(ikm: &[u8; 32], info: &[u8]) -> SigningKey {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, ikm);
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    hk.expand(info, seed.as_mut_slice())
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    SigningKey::from_seed(&seed)
+}
+
 // A redacted Debug so a struct that embeds a SigningKey (e.g. an author identity) can derive Debug
 // without ever printing the seed. Hand-written, not derived, so it never forwards to the inner type.
 impl core::fmt::Debug for SigningKey {
