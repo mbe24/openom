@@ -251,7 +251,7 @@ pub fn unlock(
         .find(|(k, _)| *k == write_key_id)
         .map(|(_, d)| dek_hash(&d[..]))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
-    let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
+    let attributed = crate::epoch_is_attributed(&keyring, &write_key_id);
     let mut sealer = SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),

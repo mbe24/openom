@@ -15,9 +15,9 @@ use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring::{
-    decode_governing_ref, epoch_is_attributed, keyring_hash, verify_entry, verify_reset,
-    verify_walk, GoverningKeyring, KeyringAnchor, VerifyingKey,
+    decode_governing_ref, keyring_hash, verify_reset, verify_walk, KeyringAnchor, VerifyingKey,
 };
+use crate::attribution::{epoch_is_attributed, verify_entry};
 use keyeo_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
@@ -1294,10 +1294,12 @@ pub fn verify_entry_wasm(
         .header
         .as_ref()
         .ok_or_else(|| JsError::new("envelope has no header"))?;
+    // The caller resolved + chain-verified this governing keyring (the chain-walk runs before this call);
+    // a JS-side verified handle is the documented future improvement. verify_entry takes the Keyring
+    // directly now (the attribution moved out of the chain engine, OPE-300).
     let kr = Keyring::decode(governing)
         .map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
-    let governing = GoverningKeyring::from_unverified_wasm_boundary(kr);
-    verify_entry(version, header, plaintext, &governing).map_err(|e| JsError::new(&e.to_string()))
+    verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// An entry's attribution coordinates, read from its (AAD-bound) header — enough for the client to decide

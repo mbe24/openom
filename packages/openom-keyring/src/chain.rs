@@ -84,16 +84,13 @@ impl KeyringAnchor {
     }
 }
 
-/// A **full keyring whose legitimacy has been established by the chain-walk** — the token
-/// [`verify_entry`](crate::verify_entry) requires. Unlike [`KeyringAnchor`] (which keeps only the trust
-/// state to persist), this carries the whole verified keyring, so entry verification can read its
-/// members / epochs / signers. The inner keyring is private and there is no public unchecked
-/// constructor: the only way to mint one is a verifying constructor below (each delegates to the
-/// matching chain check), so a raw, wire-decoded `Keyring` cannot be passed as the governing keyring by
-/// mistake — the "the caller chain-verified this" guarantee is a type, not a doc comment.
-///
-/// (The single deliberate exception, [`from_unverified_wasm_boundary`](Self::from_unverified_wasm_boundary),
-/// is the documented OPE-186 residual for the wasm boundary, where JS cannot yet hold a verified token.)
+/// A **full keyring whose legitimacy has been established by the chain-walk**. Unlike [`KeyringAnchor`]
+/// (which keeps only the trust state to persist), this carries the whole verified keyring, so a consumer
+/// can read its members / epochs / signers. The inner keyring is private and there is no public unchecked
+/// constructor: the only way to mint one is a verifying constructor below (each delegates to the matching
+/// chain check), so a raw, wire-decoded `Keyring` cannot be passed as a verified keyring by mistake — the
+/// "the caller chain-verified this" guarantee is a type, not a doc comment. (Entry-attribution — the
+/// former consumer — moved to openom-vault in OPE-300 and now takes a plain `Keyring` at the wasm boundary.)
 /// Chain engine: encode a governing keyring's **revision** as the entry's opaque `governing_ref` — 4
 /// big-endian bytes. The ref is opaque to every layer but this adapter; the verifier [`decodes`] it back
 /// to a revision, then walks the chain to that revision to mint the [`GoverningKeyring`]. (OPE-277
@@ -120,11 +117,6 @@ pub struct GoverningKeyring {
 }
 
 impl GoverningKeyring {
-    /// The verified keyring — read access for entry verification within the crate.
-    pub(crate) fn keyring(&self) -> &Keyring {
-        &self.keyring
-    }
-
     /// The revision this keyring governs.
     pub fn revision(&self) -> u32 {
         self.keyring.revision
@@ -177,22 +169,6 @@ impl GoverningKeyring {
         Ok(Self { keyring })
     }
 
-    /// **Unverified boundary shim — OPE-186 residual, do not use from native code.** Wraps a keyring the
-    /// *caller* promises it chain-verified, WITHOUT re-checking here. The sole sanctioned caller is the
-    /// wasm `verifyEntry` boundary (`openom-sealer`), where JS cannot yet hold the chain-walk's verified
-    /// token; OPE-186 replaces this with a JS-side verified handle. Named to stand out in a security
-    /// audit; native callers must use a verifying constructor instead.
-    #[doc(hidden)]
-    pub fn from_unverified_wasm_boundary(keyring: Keyring) -> Self {
-        Self { keyring }
-    }
-
-    /// Test-only wrap of a hand-built fixture keyring (the verifying constructors reject the minimal
-    /// non-genesis fixtures the entry tests use).
-    #[cfg(test)]
-    pub(crate) fn from_keyring_for_test(keyring: Keyring) -> Self {
-        Self { keyring }
-    }
 }
 
 /// Why a candidate keyring was refused as a successor. Distinct variants so the client can

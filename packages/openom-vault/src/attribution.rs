@@ -6,17 +6,16 @@
 //! guarantee rather than a server promise (the server is not the security boundary, §0): a curious or
 //! hostile server can serve any bytes, but it can't forge a member's Ed25519 author signature.
 //!
-//! The capability→role mapping mirrors the server's authz seam (both enforce; they must agree). B+
-//! epoch-consistency closes the "seal under the current key, stamp an old revision" forge; the
-//! retained-old-key variant is the documented residual left for the full-A log-frontier slice.
+//! Moved here from the chain keyring engine (OPE-300): entry-attribution is a *consumer* of the keyring,
+//! not the membership engine — and it's the proto-`Envelope`/`Header` + `openom_crypto::aad` coupling that
+//! kept the chain engine openom-bound. It lives in the vault, which holds both the keyring and the entries
+//! and is openom-coupled by design. (The equivalent for the dag engine is `keyeo::entry`.)
 
 use openom_crypto::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
 use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
 use edsign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
-
-use crate::GoverningKeyring;
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
 /// (retry vs alarm) and each gets a negative test.
@@ -39,13 +38,12 @@ pub enum EntryError {
 }
 
 /// Verify a landed entry's author attribution against `governing` — the keyring the caller resolved from
-/// `header.governing_ref` (for the chain, the revision it decodes to). Its type ([`GoverningKeyring`]) is
-/// the guarantee that it was chain-verified:
-/// it can only be minted by the chain-walk, never by decoding raw bytes, so a caller cannot pass an
-/// unverified keyring here by mistake. `plaintext` is the AEAD-opened payload (verification runs after
-/// open — the AEAD tag has already authenticated the header, including `author_signature`, against this
-/// exact ciphertext). `Ok(())` iff a member with sufficient role for `header.kind` validly signed the
-/// entry at the governing revision.
+/// `header.governing_ref` (for the chain, the revision it decodes to). The caller is responsible for
+/// having chain-verified that keyring (the wasm boundary does the chain-walk before calling this; a
+/// JS-side verified-handle is the documented future improvement). `plaintext` is the AEAD-opened payload
+/// (verification runs after open — the AEAD tag has already authenticated the header, including
+/// `author_signature`, against this exact ciphertext). `Ok(())` iff a member with sufficient role for
+/// `header.kind` validly signed the entry at the governing revision.
 ///
 /// The caller decides separately whether an *unattributed* entry (empty `author_signature`) is acceptable
 /// — that's a per-epoch property of the verified keyring, not something this function can judge from the
@@ -54,9 +52,8 @@ pub fn verify_entry(
     version: u32,
     header: &Header,
     plaintext: &[u8],
-    governing: &GoverningKeyring,
+    governing: &Keyring,
 ) -> Result<(), EntryError> {
-    let governing = governing.keyring();
     if header.author_signature.is_empty() {
         return Err(EntryError::Unattributed);
     }
@@ -132,7 +129,8 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{generate_identity, SigningKey};
+    use openom_keyring::{encode_governing_ref, generate_identity};
+    use edsign::SigningKey;
     use openom_protocol::v1::{KeyEpoch, Member, MemberRole, SignerRole};
 
     const KID: &[u8] = b"epoch-key-0";
@@ -147,12 +145,10 @@ mod tests {
         }
     }
 
-    /// A governing keyring whose newest epoch uses KID and whose members are as given. Wrapped as a
-    /// GoverningKeyring via the test-only constructor (these minimal fixtures aren't full genesis
-    /// keyrings, so the real chain-verifying constructors would reject them — that's a chain-walk
-    /// concern, exercised in chain.rs, not here).
-    fn governing(members: Vec<Member>) -> GoverningKeyring {
-        GoverningKeyring::from_keyring_for_test(Keyring {
+    /// A governing keyring whose newest epoch uses KID and whose members are as given. (Minimal fixtures,
+    /// not full genesis keyrings — the chain-walk verification is a chain.rs concern, exercised there.)
+    fn governing(members: Vec<Member>) -> Keyring {
+        Keyring {
             tree_id: vec![1; 16],
             revision: 3,
             layout_version: 1,
@@ -167,7 +163,7 @@ mod tests {
                 wraps: vec![],
             }],
             ..Default::default()
-        })
+        }
     }
 
     /// A header authored by `author_id` under KID, stamped at the governing revision, signed by `key`.
@@ -180,7 +176,7 @@ mod tests {
             replica_id: vec![2; 4],
             replica_counter: 1,
             author_member_id: author_id.into(),
-            governing_ref: crate::encode_governing_ref(3),
+            governing_ref: encode_governing_ref(3),
             ..Default::default()
         };
         let msg = author_signing_bytes(VERSION, &h, Sha256::digest(plaintext).as_slice());
@@ -225,7 +221,6 @@ mod tests {
     fn rejects_wrong_signer() {
         let real = generate_identity().unwrap();
         let mallory = generate_identity().unwrap();
-        // Keyring says m1's key is `real`, but the entry was signed by `mallory` claiming to be m1.
         let kr = governing(vec![member("m1", MemberRole::Admin, &real)]);
         let h = signed(Kind::Delta, "m1", &mallory, b"x");
         assert_eq!(
@@ -247,8 +242,6 @@ mod tests {
 
     #[test]
     fn rejects_epoch_mismatch_seal_under_current_key_stamp_old_revision() {
-        // The B+ core: a demoted member seals under a *different* (current) key but stamps this old
-        // governing revision, whose newest epoch is KID. The mismatch is caught before any role lookup.
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let mut h = signed(Kind::Delta, "m1", &k, b"x");
@@ -284,18 +277,14 @@ mod tests {
     #[test]
     fn seal_envelope_round_trips_through_verify_entry() {
         // The cross-crate round-trip: openom-crypto seals + signs the entry, this crate verifies it.
-        // (Lives here, not in openom-crypto, because verify_entry moved out and openom-keyring is the only
-        // crate that can depend on both directions.)
-        use openom_crypto::{
-            generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams,
-        };
+        use openom_crypto::{generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams};
         use openom_protocol::v1::{Aead, Compression, Format};
 
         let dek = generate_dek().unwrap();
         let author = AuthorIdentity {
             signing_key: generate_identity().unwrap(),
             member_id: "m1".into(),
-            governing_ref: crate::encode_governing_ref(3),
+            governing_ref: encode_governing_ref(3),
         };
         let params = SealParams {
             version: VERSION,
@@ -316,9 +305,8 @@ mod tests {
         let header = env.header.as_ref().unwrap();
         assert!(!header.author_signature.is_empty(), "signed");
         assert_eq!(header.author_member_id, "m1");
-        assert_eq!(header.governing_ref, crate::encode_governing_ref(3));
+        assert_eq!(header.governing_ref, encode_governing_ref(3));
 
-        // A governing keyring at rev 3 whose newest epoch is KID and where m1 is a Maintainer.
         let kr = governing(vec![member("m1", MemberRole::Admin, &author.signing_key)]);
         let plaintext = open_envelope(dek.expose(), &env).unwrap();
         assert_eq!(
@@ -326,7 +314,6 @@ mod tests {
             Ok(()),
             "the sealed entry verifies"
         );
-        // A different plaintext against the same signature → rejected (content binding).
         assert_eq!(
             verify_entry(VERSION, header, b"tampered", &kr),
             Err(EntryError::BadSignature)
@@ -366,14 +353,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        // Solo owner: the epoch's DEK is wrapped only to the founder → unattributed (V1 history stays valid).
         assert!(!epoch_is_attributed(&mk(vec![wrap("owner")]), KID));
-        // Shared: a wrap to any non-founder member → attributed (entries must be signed).
         assert!(epoch_is_attributed(
             &mk(vec![wrap("owner"), wrap("editor-1")]),
             KID
         ));
-        // An unknown key_id has no matching epoch → not attributed.
         assert!(!epoch_is_attributed(
             &mk(vec![wrap("owner"), wrap("editor-1")]),
             b"no-such-key"

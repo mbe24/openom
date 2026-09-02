@@ -17,6 +17,8 @@ openom-protocol.workspace = true
 openom-crypto.workspace = true
 # H(write DEK) commits the recover watermark to key MATERIAL (OPE-286); the chain vault lives here now.
 sha2.workspace = true
+# Author-signature verification for the entry-attribution moved here from the chain engine (OPE-300).
+edsign.workspace = true
 # The two keyring engines the vaults drive.
 openom-keyring.workspace = true
 keyeo-dag.workspace = true
