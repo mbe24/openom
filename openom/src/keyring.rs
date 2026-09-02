@@ -20,10 +20,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
-use openom_keyring::keyring_hash;
+use openom_keyring::decode_governing_ref;
 use openom_keyring::verifier::ChainVerifier;
-use keyeo_api::{KeyringVerifier, VerifyError};
-use openom_protocol::v1::Keyring;
+use keyeo_api::{EngineKind, KeyringVerifier, VerifyError};
+use openom_protocol::v1::KeyringUpdate;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -41,6 +41,21 @@ const MAX_KEYRING_BYTES: usize = 512 * 1024;
 const HISTORY_MAX: i64 = 512;
 /// Per-tree cooldown between recovery/succession resets (a reset is a rare life event; this bounds abuse).
 const RESET_COOLDOWN_SECS: f64 = 3600.0;
+/// The `KeyringUpdate` wire version this server understands; a higher one is refused, not misparsed.
+const KEYRING_UPDATE_VERSION: u32 = 1;
+
+/// The server's keyring-engine registry: an engine tag → its keyless verifier. This is the ONE dispatch
+/// point — a new **sequencer-backed** engine is one arm here and nothing else changes. Sequencer-free
+/// engines (the dag) never reach this endpoint (they sync via content-addressed blobs and push an advisory
+/// `MembershipView` over `/access`), so an unknown/dag tag is refused. The `engine` field is only a routing
+/// hint anyway: the dispatched verifier re-checks the inner `MembershipEnvelope`'s own engine tag, so a
+/// lying hint can't make the wrong verifier accept a body.
+fn verifier_for(engine: &str) -> Option<Box<dyn KeyringVerifier + Send + Sync>> {
+    match engine.parse::<EngineKind>() {
+        Ok(EngineKind::Chain) => Some(Box::new(ChainVerifier)),
+        _ => None,
+    }
+}
 
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
@@ -78,13 +93,18 @@ pub async fn put_keyring(
             "keyring exceeds the size limit".into(),
         ));
     }
-    let candidate = Keyring::decode(body.as_ref())
-        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring: {e}")))?;
-    if candidate.tree_id.as_slice() != tree_id.as_bytes() {
+    // Parse ONLY the engine-agnostic outer envelope — never a keyring body. Its `engine` tag routes to a
+    // verifier; its `payload` is the opaque membership update the verifier admits; its tree_id/update_ref
+    // are hints the server will cross-check against the VERIFIED facts `admit` returns (never trusts alone).
+    let update = KeyringUpdate::decode(body.as_ref())
+        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring update: {e}")))?;
+    if update.version != KEYRING_UPDATE_VERSION {
         return Err(ApiError::BadRequest(
-            "keyring tree_id does not match the url".into(),
+            "unsupported keyring update version".into(),
         ));
     }
+    let verifier = verifier_for(&update.engine)
+        .ok_or_else(|| ApiError::BadRequest("unknown or unsupported keyring engine".into()))?;
 
     let mut tx = state.db.begin().await.map_err(internal)?;
     // Serialize concurrent keyring PUTs on this tree; read the owner + current head revision.
@@ -115,11 +135,8 @@ pub async fn put_keyring(
     // founding keyring (first sight) and re-verifies every transition; the CLIENT re-verifies a reset's new
     // signer set out-of-band (is_reset surfaces it).
     let prior_state: Option<Vec<u8>> = if head_rev == 0 {
-        if candidate.revision != 1 {
-            return Err(ApiError::BadRequest(
-                "first keyring must be revision 1".into(),
-            ));
-        }
+        // "First keyring is revision 1" is enforced inside the verifier's bootstrap (it verifies the signed
+        // genesis), so the server no longer re-checks a body field it no longer parses.
         None
     } else {
         Some(
@@ -133,9 +150,20 @@ pub async fn put_keyring(
             .map_err(internal)?,
         )
     };
-    let admitted = ChainVerifier
-        .admit(prior_state.as_deref(), body.as_ref())
+    let admitted = verifier
+        .admit(prior_state.as_deref(), &update.payload)
         .map_err(verify_err)?;
+    // Cross-check the VERIFIED tree id (from the signed body) against the URL — never the update's own hint.
+    if admitted.tree_id != tree_id.as_bytes() {
+        return Err(ApiError::BadRequest(
+            "keyring tree_id does not match the url".into(),
+        ));
+    }
+    // The canonical position, from the VERIFIED body: the chain encodes its revision as the governing-ref.
+    // The server keys storage / CAS / head-advance on THIS, never on the unauthenticated update hint.
+    let revision = decode_governing_ref(&admitted.update_ref)
+        .ok_or_else(|| ApiError::BadRequest("keyring update_ref is not a chain revision".into()))?
+        as i32;
     let is_reset = admitted.view.reset_boundary;
 
     // A reset bypasses the prior-signer signature gate, so rate-cap it per tree (a stolen Administer token
@@ -155,20 +183,19 @@ pub async fn put_keyring(
             tracing::info!(event = "rate_rejected", resource = "keyring_reset", %tree_id);
             return Err(ApiError::TooManyRequests(RESET_COOLDOWN_SECS as u64));
         }
-        tracing::info!(event = "keyring_reset", %tree_id, revision = candidate.revision);
+        tracing::info!(event = "keyring_reset", %tree_id, revision);
     }
 
-    // Persist append-only. The PK (tree_id, revision) is the CAS backstop: a racing PUT that verified
-    // against the same head inserts 0 rows here and loses.
-    let kh = keyring_hash(&candidate);
+    // Persist append-only, storing the ENGINE-OPAQUE `Admitted.state` (never a parsed body). The PK
+    // (tree_id, revision) is the CAS backstop: a racing PUT that verified against the same head inserts 0
+    // rows here and loses — and the revision-only governing-ref makes two same-revision successors collide.
     let inserted = sqlx::query(
-        "INSERT INTO tree_keyrings (tree_id, revision, payload, keyring_hash, is_reset)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tree_id, revision) DO NOTHING",
+        "INSERT INTO tree_keyrings (tree_id, revision, payload, is_reset)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (tree_id, revision) DO NOTHING",
     )
     .bind(tree_id)
-    .bind(candidate.revision as i32)
-    .bind(body.as_ref())
-    .bind(kh.as_slice())
+    .bind(revision)
+    .bind(admitted.state.as_slice())
     .bind(is_reset)
     .execute(&mut *tx)
     .await
@@ -177,7 +204,7 @@ pub async fn put_keyring(
         return Err(ApiError::Conflict); // another PUT won this revision
     }
     sqlx::query("UPDATE trees SET keyring_revision = $1, updated_at = now() WHERE id = $2")
-        .bind(candidate.revision as i32)
+        .bind(revision)
         .bind(tree_id)
         .execute(&mut *tx)
         .await
@@ -197,12 +224,8 @@ pub async fn put_keyring(
     crate::access::apply_membership(&mut tx, tree_id, owner, &members).await?;
 
     tx.commit().await.map_err(internal)?;
-    tracing::info!(event = "keyring_put", %tree_id, revision = candidate.revision, members = members.len());
-    Ok((
-        StatusCode::OK,
-        Json(json!({ "revision": candidate.revision })),
-    )
-        .into_response())
+    tracing::info!(event = "keyring_put", %tree_id, revision, members = members.len());
+    Ok((StatusCode::OK, Json(json!({ "revision": revision }))).into_response())
 }
 
 #[derive(Deserialize)]

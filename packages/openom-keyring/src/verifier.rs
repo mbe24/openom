@@ -1,13 +1,15 @@
 //! The chain keyring's [`KeyringVerifier`] adapter (OPE-277) — the keyless server-side seam.
 //!
-//! The chain is already pure bytes→bytes + keyless, so this is a thin re-labeling: the opaque trust
-//! `state` is the accepted head `Keyring` bytes, an `update` is a candidate `Keyring`, and `admit`
-//! rebuilds the anchor from the head and runs `verify_transition` (falling back to `verify_reset` for a
-//! recovery). `changed` is the honest membership diff; `reset_boundary` is set when the candidate was
+//! The chain is already pure bytes→bytes + keyless, so this is a thin adapter: an `update` (and the
+//! persisted `state`) is a keyeo-api `MembershipEnvelope` wrapping the candidate/head `Keyring`; `admit`
+//! unwraps it, rebuilds the anchor from the head, and runs `verify_transition` (falling back to
+//! `verify_reset` for a recovery). It exports the verified `tree_id` + `update_ref` the server keys on. `changed` is the honest membership diff; `reset_boundary` is set when the candidate was
 //! admitted as a reset. The chain's rich `ChainError` taxonomy is classed into the neutral
 //! [`VerifyError`] (the full detail stays available inside the chain layer for diagnostics).
 
-use keyeo_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
+use keyeo_api::{
+    Admitted, EngineKind, KeyringVerifier, MemberView, MembershipEnvelope, MembershipView, VerifyError,
+};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 use openom_roles::SIGNER_FOUNDER;
@@ -20,6 +22,18 @@ use crate::{
 /// The chain keyring's keyless verifier. Holds no secrets and no state.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ChainVerifier;
+
+/// Unwrap the shared [`MembershipEnvelope`] to the chain's `Keyring` body. Both the incoming `update` and
+/// the persisted `prior_state` are envelopes, so the seam sees ONE wire regardless of transport (the
+/// managed endpoint's `KeyringUpdate.payload`, or the head we stored last time). Refuses a non-chain
+/// envelope — the engine tag is a hint, but a wrong body here is malformed, not misparsed.
+fn unwrap_keyring(bytes: &[u8]) -> Result<Keyring, VerifyError> {
+    let env = MembershipEnvelope::decode(bytes).map_err(|_| VerifyError::Malformed)?;
+    if env.engine_kind() != Ok(EngineKind::Chain) {
+        return Err(VerifyError::Malformed);
+    }
+    Keyring::decode(env.body.as_slice()).map_err(|_| VerifyError::Malformed)
+}
 
 fn view_of(k: &Keyring, reset_boundary: bool) -> MembershipView {
     let members = k
@@ -68,7 +82,7 @@ fn founder_key(k: &Keyring) -> Option<VerifyingKey> {
 
 impl KeyringVerifier for ChainVerifier {
     fn admit(&self, prior_state: Option<&[u8]>, update: &[u8]) -> Result<Admitted, VerifyError> {
-        let candidate = Keyring::decode(update).map_err(|_| VerifyError::Malformed)?;
+        let candidate = unwrap_keyring(update)?;
         // The verified facts the seam exports (the server keys on these, never on the outer framing): the
         // tree id from the (signature-covered) keyring, and the canonical position — the chain's revision,
         // encoded as its opaque governing-ref (revision-only, which is what makes two racing same-revision
@@ -83,7 +97,7 @@ impl KeyringVerifier for ChainVerifier {
                 let founder = founder_key(&candidate).ok_or(VerifyError::Malformed)?;
                 bootstrap_from_genesis(&candidate, &founder).map_err(classify)?;
                 Ok(Admitted {
-                    state: candidate.encode_to_vec(),
+                    state: update.to_vec(),
                     view: view_of(&candidate, false),
                     changed: true,
                     tree_id,
@@ -91,13 +105,13 @@ impl KeyringVerifier for ChainVerifier {
                 })
             }
             Some(prior) => {
-                let head = Keyring::decode(prior).map_err(|_| VerifyError::Malformed)?;
+                let head = unwrap_keyring(prior)?;
                 let anchor = KeyringAnchor::from_keyring(&head);
                 match verify_transition(&anchor, &candidate) {
                     Ok(_) => {
                         let changed = candidate.members != head.members;
                         Ok(Admitted {
-                            state: candidate.encode_to_vec(),
+                            state: update.to_vec(),
                             view: view_of(&candidate, false),
                             changed,
                             tree_id,
@@ -117,7 +131,7 @@ impl KeyringVerifier for ChainVerifier {
                             .then(|| verify_reset(prior_rvk(&anchor), &candidate))
                         {
                             Some(Ok(_)) => Ok(Admitted {
-                                state: candidate.encode_to_vec(),
+                                state: update.to_vec(),
                                 view: view_of(&candidate, true),
                                 changed: true,
                                 tree_id,
@@ -140,6 +154,11 @@ mod tests {
     use crate::{keyring_hash, sign_keyring, SigningKey};
     use openom_protocol::v1::{AuthorizedSigner, KeyEpoch, KeyWrap, Member, MemberRole, WrapMethod};
     use openom_roles::{MEMBER_OWNER, SIGNER_FOUNDER as SF};
+
+    /// Wrap a keyring in the shared MembershipEnvelope (chain engine) — the wire `admit` now receives.
+    fn env(k: &Keyring) -> Vec<u8> {
+        MembershipEnvelope::wrap(EngineKind::Chain, k.encode_to_vec()).encode()
+    }
 
     fn sk(seed: u8) -> SigningKey {
         SigningKey::from_seed(&[seed; 32])
@@ -211,13 +230,13 @@ mod tests {
     fn chain_verifier_bootstraps_a_genesis_then_admits_a_transition() {
         let v = ChainVerifier;
         let g = genesis(1);
-        let boot = v.admit(None, &g.encode_to_vec()).unwrap();
+        let boot = v.admit(None, &env(&g)).unwrap();
         assert!(boot.changed);
         assert_eq!(boot.view.owner().unwrap().member_id, "owner");
         assert!(!boot.view.reset_boundary);
 
         let next = add_carol(&g);
-        let step = v.admit(Some(&boot.state), &next.encode_to_vec()).unwrap();
+        let step = v.admit(Some(&boot.state), &env(&next)).unwrap();
         assert!(step.changed, "adding carol changes the view");
         assert!(step.view.members.iter().any(|m| m.member_id == "carol"));
     }
@@ -226,7 +245,7 @@ mod tests {
     fn chain_verifier_refuses_a_non_successor_and_flags_a_reset() {
         let v = ChainVerifier;
         let g = genesis(1);
-        let boot = v.admit(None, &g.encode_to_vec()).unwrap();
+        let boot = v.admit(None, &env(&g)).unwrap();
 
         // garbage bytes → Malformed
         assert_eq!(v.admit(Some(&boot.state), b"not a keyring").unwrap_err(), VerifyError::Malformed);
@@ -239,7 +258,7 @@ mod tests {
         reset.prev_keyring_hash = keyring_hash(&g).to_vec();
         reset.signatures.clear();
         sign_keyring(&mut reset, &sk(7));
-        let out = v.admit(Some(&boot.state), &reset.encode_to_vec()).unwrap();
+        let out = v.admit(Some(&boot.state), &env(&reset)).unwrap();
         assert!(out.view.reset_boundary, "a re-founding is admitted as a reset");
         assert_eq!(out.view.owner().unwrap().author_public_key, pk(7), "owner re-keyed");
 
@@ -251,7 +270,7 @@ mod tests {
         fork.signatures.clear();
         sign_keyring(&mut fork, &sk(7));
         assert_eq!(
-            v.admit(Some(&boot.state), &fork.encode_to_vec()).unwrap_err(),
+            v.admit(Some(&boot.state), &env(&fork)).unwrap_err(),
             VerifyError::Rollback,
             "a fork is refused, never accepted as a reset"
         );
