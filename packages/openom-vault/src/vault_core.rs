@@ -9,7 +9,7 @@
 //! engine marshals these to its own persisted form: the chain via the `From` impls below (proto
 //! `KeyEpoch`/`KeyWrap`/`RecoveryKey`), the dag by serializing them into ops (OPE-273).
 //!
-//! It must never import `keyeo_chain` or `keyeo` — it stays the engine-neutral sealing core BOTH engines'
+//! It must never import `openom_keyring` or `keyeo` — it stays the engine-neutral sealing core BOTH engines'
 //! vaults share (a discipline kept by review; there is no CI grep for it, despite an earlier comment's
 //! claim). It DOES still touch `openom_protocol` for the `From` marshaling + the wrap AAD + the sealer's id
 //! types — that

@@ -14,12 +14,12 @@ crate-type = ["rlib"]
 openom-protocol.workspace = true
 openom-crypto.workspace = true
 # The author signing-key type threaded into a sealed entry's attribution. Named directly (was reached via
-# an keyeo-chain re-export) so the lean sealer carries NO keyring-engine dependency (OPE-279).
-openom-sign.workspace = true
+# an openom-keyring re-export) so the lean sealer carries NO keyring-engine dependency (OPE-279).
+edsign.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-# lib.rs tests mint an ad-hoc author identity via keyeo_chain::generate_identity (test-util gated). A
+# lib.rs tests mint an ad-hoc author identity via openom_keyring::generate_identity (test-util gated). A
 # dev-dependency, so it never enters a downstream consumer's build graph.
-keyeo-chain = { workspace = true, features = ["test-util"] }
+openom-keyring = { workspace = true, features = ["test-util"] }

@@ -27,7 +27,7 @@ fn append(
     author: &str,
     action: KeyringAction,
     sealing: Vec<u8>,
-    signing_key: &openom_sign::SigningKey,
+    signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let mut anchor: DagAnchor =
         serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -53,7 +53,7 @@ pub fn append_add(
     new_author_public_key: [u8; 32],
     new_hpke_public_key: [u8; 32],
     sealing: Vec<u8>,
-    author_signing_key: &openom_sign::SigningKey,
+    author_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Add {
         member: member_id.to_string(),
@@ -73,7 +73,7 @@ pub fn append_remove(
     author: &str,
     member_id: &str,
     sealing: Vec<u8>,
-    author_signing_key: &openom_sign::SigningKey,
+    author_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Remove {
         member: member_id.to_string(),
@@ -126,7 +126,7 @@ fn mint(
     author: String,
     action: KeyringAction,
     sealing: Vec<u8>,
-    signing_key: &openom_sign::SigningKey,
+    signing_key: &edsign::SigningKey,
 ) -> KeyringOp {
     let canonical = keyeo::canonical_encode(&parents, &author, &action, &sealing);
     let signature = signing_key.sign(&canonical).to_bytes();
@@ -146,7 +146,7 @@ pub fn provision_anchor(
     hpke_public_key: [u8; 32],
     reset_authority: [u8; 32],
     sealing: Vec<u8>,
-    signing_key: &openom_sign::SigningKey,
+    signing_key: &edsign::SigningKey,
 ) -> Vec<u8> {
     let founder = KeyringMemberInit {
         id: founder_id.to_string(),
@@ -371,7 +371,7 @@ pub fn append_refound(
     new_hpke_public_key: [u8; 32],
     era: u64,
     sealing: Vec<u8>,
-    rvk_signing_key: &openom_sign::SigningKey,
+    rvk_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::ReFound {
         member: owner_id.to_string(),
@@ -391,7 +391,7 @@ pub fn append_retarget(
     new_author_public_key: [u8; 32],
     new_hpke_public_key: [u8; 32],
     sealing: Vec<u8>,
-    current_signing_key: &openom_sign::SigningKey,
+    current_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Retarget {
         member: member_id.to_string(),
@@ -408,7 +408,7 @@ pub fn append_reseal(
     anchor_bytes: &[u8],
     member_id: &str,
     sealing: Vec<u8>,
-    signing_key: &openom_sign::SigningKey,
+    signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
 }
@@ -422,7 +422,7 @@ pub fn append_backfill(
     anchor_bytes: &[u8],
     member_id: &str,
     sealing: Vec<u8>,
-    signing_key: &openom_sign::SigningKey,
+    signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
 }
@@ -432,8 +432,8 @@ mod tests {
     use super::*;
     use crate::recovery;
 
-    fn sk(seed: u8) -> openom_sign::SigningKey {
-        openom_sign::SigningKey::from_seed(&[seed; 32])
+    fn sk(seed: u8) -> edsign::SigningKey {
+        edsign::SigningKey::from_seed(&[seed; 32])
     }
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()

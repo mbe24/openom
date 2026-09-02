@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(
             our_vk.verify(b"any message", &Signature::from_bytes(&sig_bytes)),
             Err(SignError::BadSignature),
-            "openom-sign must reject a small-order public key (verify_strict)"
+            "edsign must reject a small-order public key (verify_strict)"
         );
     }
 

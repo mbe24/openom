@@ -10,7 +10,7 @@
 
 use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 use sha2::{Digest, Sha256};
 
 use crate::{open, seal, CryptoError, KEY_LEN};
@@ -18,7 +18,7 @@ use crate::{open, seal, CryptoError, KEY_LEN};
 /// Optional author attribution for a shared-tree entry (§B3 launch gate). When present, the member's
 /// Ed25519 author key signs the entry — naming them (`member_id`) and the opaque, engine-produced
 /// `governing_ref` (the keyring state that governs it) — so peers can verify authorship + role via
-/// `keyeo_chain::verify_entry`. This crate treats `governing_ref` as opaque bytes: the caller (the
+/// `openom_keyring::verify_entry`. This crate treats `governing_ref` as opaque bytes: the caller (the
 /// engine adapter) encodes it. `None` seals an *unattributed* entry (empty `author_signature`), the V1
 /// communal-DEK model.
 pub struct AuthorIdentity {
@@ -205,7 +205,7 @@ mod tests {
         assert_ne!(a.ciphertext, b.ciphertext); // different nonce → different ciphertext
     }
 
-    // (The seal→verify_entry round-trip lives in keyeo-chain's entry tests, which can depend on both
+    // (The seal→verify_entry round-trip lives in openom-keyring's entry tests, which can depend on both
     // this crate's seal_envelope and its own verify_entry.)
 
     #[test]

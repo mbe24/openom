@@ -1,5 +1,5 @@
 //! Keyring signing and verification.
-//! Adapted from keyeo-chain::keyring (MIT).
+//! Adapted from openom-keyring::keyring (MIT).
 
 use crate::CryptoError;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

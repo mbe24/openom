@@ -19,7 +19,7 @@ use openom_crypto::{
     HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_did::DidKey;
-use keyeo_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
+use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
@@ -251,7 +251,7 @@ pub fn unlock(
         .find(|(k, _)| *k == write_key_id)
         .map(|(_, d)| dek_hash(&d[..]))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
-    let attributed = keyeo_chain::epoch_is_attributed(&keyring, &write_key_id);
+    let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
     let mut sealer = SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
@@ -261,7 +261,7 @@ pub fn unlock(
     if attributed {
         // The chain encodes the member's watermarked keyring head (`revision`) as the entry's opaque
         // governing_ref; every entry this sealer signs stamps it (OPE-277 GoverningRef).
-        let governing_ref = keyeo_chain::encode_governing_ref(revision);
+        let governing_ref = openom_keyring::encode_governing_ref(revision);
         sealer = sealer.with_author(identity, member_id.to_string(), governing_ref);
     }
     Ok(Unlocked {
@@ -1464,7 +1464,7 @@ mod tests {
     use crate::VaultError;
     use openom_sealer::{EntryKind, SealContext, SealerSet};
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
-    use keyeo_chain::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
+    use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
     use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole};
     use openom_protocol::Message;
@@ -1524,7 +1524,7 @@ mod tests {
 
     #[test]
     fn rotate_recovery_mints_a_new_authority_authorized_by_the_old() {
-        use keyeo_chain::{verify_transition, KeyringAnchor};
+        use openom_keyring::{verify_transition, KeyringAnchor};
         use openom_protocol::Message;
         let pass = Passphrase::new(b"correct horse");
         let p = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-A")).unwrap();
@@ -1629,7 +1629,7 @@ mod tests {
         // bytes -> bytes lifecycle, so every op's output publishes through keyring/head. Two replicas,
         // one dumb local-FS backend.
         use blobstore::{BlobStore, FsBlob, Precondition};
-        use keyeo_chain::blob_sync::{KeyringChainBlobSync, PullError};
+        use openom_keyring::blob_sync::{KeyringChainBlobSync, PullError};
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();

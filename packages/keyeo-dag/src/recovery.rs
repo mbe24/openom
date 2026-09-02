@@ -17,7 +17,7 @@
 /// Derive the Recovery Verification Key from the RRK secret. Delegates to the SHARED derivation in
 /// openom-crypto, so the chain and dag keyrings produce a byte-identical RVK from the same secret (a
 /// recovery is verifiable identically whichever engine authored it). Deterministic + domain-separated.
-pub fn derive_rvk(rrk_secret: &[u8; 32]) -> openom_sign::SigningKey {
+pub fn derive_rvk(rrk_secret: &[u8; 32]) -> edsign::SigningKey {
     openom_crypto::derive_rvk(rrk_secret)
 }
 
@@ -43,7 +43,7 @@ mod tests {
         // HKDF + dedicated label is exactly what separates the recovery-authority role from every other
         // use of the same secret.
         let secret = [7u8; 32];
-        let direct = openom_sign::SigningKey::from_seed(&secret).verifying_key().to_bytes();
+        let direct = edsign::SigningKey::from_seed(&secret).verifying_key().to_bytes();
         assert_ne!(rvk_public(&secret), direct, "the RVK must be domain-separated, not the raw seed key");
     }
 
@@ -53,14 +53,14 @@ mod tests {
     }
 
     #[test]
-    fn rvk_signs_and_the_openom_sign_seam_verifies() {
+    fn rvk_signs_and_the_edsign_seam_verifies() {
         // A ReFound will be signed by the RVK and verified by every replica via the same OpenomSign seam
-        // (openom-sign verify_strict) the engine authenticates all ops with.
+        // (edsign verify_strict) the engine authenticates all ops with.
         let secret = [9u8; 32];
         let rvk = derive_rvk(&secret);
         let msg = b"a refound op's canonical bytes";
         let sig = rvk.sign(msg);
-        let vk = openom_sign::VerifyingKey::from_bytes(&rvk_public(&secret)).unwrap();
+        let vk = edsign::VerifyingKey::from_bytes(&rvk_public(&secret)).unwrap();
         assert!(vk.verify(msg, &sig).is_ok(), "the pinned rvk_public verifies an RVK signature");
     }
 }

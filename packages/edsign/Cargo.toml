@@ -5,7 +5,7 @@
 # `cargo build`, not by a lint. Pure + RNG-free + serde-free (identities are minted by callers via
 # `from_seed`), so it is deterministic and wasm-trivial. See OPE-205.
 [package]
-name = "openom-sign"
+name = "edsign"
 description = "The single Ed25519 dependency edge: newtype SigningKey/VerifyingKey/Signature whose only verify is verify_strict, so the weak Verifier::verify path is uncallable outside this crate (compile-time signature-verification policy)."
 version.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ rust-version.workspace = true
 # The only place this appears in the workspace. `zeroize` feature = the signing seed scrubs on drop.
 # The ONE ed25519-dalek edge in the workspace: a direct, explicit-version dep (NOT a
 # [workspace.dependencies] entry), so no other crate can casually draw `ed25519-dalek.workspace = true`
-# and roll its own plain verify. openom-sign is the sole, auditable Ed25519 dependency (OPE-215).
+# and roll its own plain verify. edsign is the sole, auditable Ed25519 dependency (OPE-215).
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 # For the compile-time ZeroizeOnDrop proof on the signing key.
 zeroize.workspace = true

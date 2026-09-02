@@ -14,7 +14,7 @@
 use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
-use keyeo_chain::{
+use openom_keyring::{
     decode_governing_ref, epoch_is_attributed, keyring_hash, verify_entry, verify_reset,
     verify_walk, GoverningKeyring, KeyringAnchor, VerifyingKey,
 };
@@ -1348,7 +1348,7 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 #[wasm_bindgen(js_name = moderatorsFromKeyring)]
 pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
-    Ok(keyeo_chain::moderators(&kr).into_iter().collect())
+    Ok(openom_keyring::moderators(&kr).into_iter().collect())
 }
 
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —

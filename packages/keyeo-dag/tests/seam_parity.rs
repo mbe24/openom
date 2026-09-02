@@ -8,7 +8,7 @@
 //! EFFECT (no membership change) reached by different mechanisms.
 
 use keyeo::{MemberInit, MembershipAction};
-use keyeo_chain::verifier::ChainVerifier;
+use openom_keyring::verifier::ChainVerifier;
 use keyeo_dag::verifier::{bootstrap_update, op_update, DagVerifier};
 use keyeo_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
 use keyeo_api::{KeyringVerifier, MembershipView, VerifyError};
@@ -17,7 +17,7 @@ use openom_protocol::v1::{
 };
 use openom_protocol::Message;
 use openom_roles::{MEMBER_OWNER, SIGNER_FOUNDER};
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 
 fn sk(seed: u8) -> SigningKey {
     SigningKey::from_seed(&[seed; 32])
@@ -74,7 +74,7 @@ fn chain_genesis() -> Keyring {
         }],
         ..Default::default()
     };
-    keyeo_chain::sign_keyring(&mut g, &sk(1));
+    openom_keyring::sign_keyring(&mut g, &sk(1));
     g
 }
 /// Add a Maintainer "dave" (seed 4) — a MEMBER but NOT a signer — to a genesis, founder re-signed.
@@ -87,14 +87,14 @@ fn with_maintainer_dave(mut g: Keyring) -> Keyring {
     });
     g.epochs[0].wraps.push(wrap("dave", WrapMethod::X25519Hpke));
     g.signatures.clear();
-    keyeo_chain::sign_keyring(&mut g, &sk(1));
+    openom_keyring::sign_keyring(&mut g, &sk(1));
     g
 }
 /// A rev-2 successor adding ordinary editor "carol", signed by `signer_seed`.
 fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
     let mut k = prior.clone();
     k.revision = 2;
-    k.prev_keyring_hash = keyeo_chain::keyring_hash(prior).to_vec();
+    k.prev_keyring_hash = openom_keyring::keyring_hash(prior).to_vec();
     k.members.push(Member {
         member_id: "carol".into(),
         role: MemberRole::Editor as i32,
@@ -103,7 +103,7 @@ fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
     });
     k.epochs[0].wraps.push(wrap("carol", WrapMethod::X25519Hpke));
     k.signatures.clear();
-    keyeo_chain::sign_keyring(&mut k, &sk(signer_seed));
+    openom_keyring::sign_keyring(&mut k, &sk(signer_seed));
     k
 }
 

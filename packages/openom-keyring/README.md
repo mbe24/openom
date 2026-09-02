@@ -1,4 +1,4 @@
-# keyeo-chain
+# openom-keyring
 
 > Keyring chain verification, landed-entry authorship, and keyring signing — the multi-member membership mechanism an E2EE tree's clients trust.
 
@@ -41,13 +41,13 @@ keyless hostile server could downgrade an attributed epoch to skip the check.
 | **KEYRING-8** | An entry with an empty `author_signature` is rejected by `verify_entry`; whether an epoch tolerates that at all (`epoch_is_attributed`) is derived from the verified keyring's key-wrap membership, never from the entry's own claim. | An entry can't assert its own unattributed status — only the DEK's wrap targets in the verified keyring can. | `entry::tests::rejects_unattributed`, `entry::tests::epoch_attribution_tracks_who_the_dek_is_wrapped_to` |
 | **KEYRING-9** | A keyring's signatures cover its full content (revision, signer set, members, wraps) but exclude the `signatures` field itself: any tampering after signing — role, wrapped key, revision — invalidates every signature, and the chain hash tracks content the same way. | The signature and the chain hash are exactly as tamper-evident as the fields they cover, no more and no less. | `keyring::tests::tampering_after_signing_is_detected`, `keyring::tests::keyring_hash_changes_with_content_and_ignores_signatures` |
 
-Run: `node scripts/cargo.mjs test -p keyeo-chain` (from the repo root; on Windows cargo runs under
+Run: `node scripts/cargo.mjs test -p openom-keyring` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage
 
 ```rust
-use keyeo_chain::{bootstrap_from_genesis, keyring_hash, sign_keyring, verify_transition, SigningKey};
+use openom_keyring::{bootstrap_from_genesis, keyring_hash, sign_keyring, verify_transition, SigningKey};
 use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, Keyring, KeyWrap, Member, MemberRole, SignerRole, WrapMethod,
 };

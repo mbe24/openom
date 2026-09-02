@@ -23,7 +23,7 @@ build and a WASM/JS build must reproduce identically, since it is what the AEAD 
 signatures actually authenticate.
 
 It is **not** where anything gets decided or enforced: no CRDT causality, no client wall-clock, no
-crypto operations (`openom-crypto`), no keyring policy or chain verification (`keyeo-chain`), no
+crypto operations (`openom-crypto`), no keyring policy or chain verification (`openom-keyring`), no
 role authorization (`openom-roles`). This crate only defines the wire shapes and the canonical byte
 strings derived from them — every consumer above it decides what those bytes mean.
 
@@ -53,5 +53,5 @@ cd packages/openom-protocol/proto && buf generate
 
 A foundation crate (no domain knowledge, depends on nothing above it): everything that seals, syncs,
 or administers a tree sits on top of its wire types and canonical byte strings — directly
-`openom-crypto`, `keyeo-chain`, `openom-roles`, `openom-sealer`, `openom-sync`, `openom-vault-host`,
+`openom-crypto`, `openom-keyring`, `openom-roles`, `openom-sealer`, `openom-sync`, `openom-vault-host`,
 and the server crate. Full dependency graph: see `packages/README.md`.

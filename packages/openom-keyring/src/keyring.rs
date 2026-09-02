@@ -26,7 +26,7 @@ use openom_crypto::CryptoError;
 // whose only verify is verify_strict. Downstream (openom-sealer, openom-vault-host) consume these
 // through this re-export, not ed25519-dalek directly, so retargeting it here migrates them for free.
 // Load-bearing: keep these names resolving here.
-pub use openom_sign::{Signature, SigningKey, VerifyingKey};
+pub use edsign::{Signature, SigningKey, VerifyingKey};
 
 /// Ed25519 signature length in bytes.
 const SIG_LEN: usize = 64;

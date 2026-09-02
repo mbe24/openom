@@ -10,7 +10,7 @@ rust-version.workspace = true
 keyeo.workspace = true
 blobstore.workspace = true
 keyeo-api.workspace = true
-openom-sign.workspace = true
+edsign.workspace = true
 openom-roles.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,7 +20,7 @@ openom-crypto.workspace = true
 [dev-dependencies]
 # The differential-oracle test drives the legacy CAS keyring (chain.rs) alongside the DAG one and
 # asserts they agree ("CAS = degenerate DAG"). Test-only — keyeo and the keyring layer stay clean.
-keyeo-chain.workspace = true
+openom-keyring.workspace = true
 openom-protocol.workspace = true
 proptest.workspace = true
 tempfile = "3"

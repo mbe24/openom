@@ -9,12 +9,12 @@ members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
     "packages/openom-roles",
-    "packages/keyeo-chain",
+    "packages/openom-keyring",
     "packages/keyeo-api",
     "packages/openom-model",
     "packages/openom-jcs",
     "packages/openom-did",
-    "packages/openom-sign",
+    "packages/edsign",
     "packages/openom-edtf",
     "packages/openom-claim",
     "packages/openom-projection",
@@ -53,12 +53,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-roles = { path = "packages/openom-roles" }
-keyeo-chain = { path = "packages/keyeo-chain" }
+openom-keyring = { path = "packages/openom-keyring" }
 keyeo-dag = { path = "packages/keyeo-dag" }
 keyeo-api = { path = "packages/keyeo-api" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }
-openom-sign = { path = "packages/openom-sign" }
+edsign = { path = "packages/edsign" }
 openom-edtf = { path = "packages/openom-edtf" }
 openom-claim = { path = "packages/openom-claim" }
 openom-projection = { path = "packages/openom-projection" }
@@ -110,7 +110,7 @@ aes-gcm = "0.11"
 chacha20poly1305 = "0.11"
 argon2 = "0.5"
 # Ed25519 is deliberately NOT a workspace dependency: the raw ed25519-dalek edge lives only in
-# openom-sign (by explicit version there), so the verify_strict-only seam can't be bypassed by a
+# edsign (by explicit version there), so the verify_strict-only seam can't be bypassed by a
 # crate drawing its own `ed25519-dalek.workspace = true` (OPE-215).
 # Best-effort scrub of key material (KEK/DEK buffers) on drop.
 zeroize = { version = "1", features = ["derive"] }

@@ -8,7 +8,7 @@
 //!   change is authorized by the founder alone OR by unanimity of the co-owners, decomposed into
 //!   Propose/Approve/Commit ops that keyeo's quorum resolver tallies at the proposal's causal position.
 //!
-//! This crate deliberately depends on `openom-sign` (not `ed25519-dalek`) so keyeo's own dalek edge is
+//! This crate deliberately depends on `edsign` (not `ed25519-dalek`) so keyeo's own dalek edge is
 //! replaced by openom's `verify_strict` seam (OPE-215).
 
 use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role, SigError, SignatureScheme};
@@ -20,7 +20,7 @@ pub mod recovery;
 pub mod verifier;
 
 /// openom's Ed25519 plugged into keyeo's `SignatureScheme` seam, so the engine verifies with
-/// openom-sign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
+/// edsign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
 /// rather than keyeo's built-in dalek path.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpenomSign;
@@ -29,8 +29,8 @@ impl SignatureScheme for OpenomSign {
     type PublicKey = [u8; 32];
     type Signature = [u8; 64];
     fn verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SigError> {
-        let vk = openom_sign::VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
-        vk.verify(msg, &openom_sign::Signature::from_bytes(sig))
+        let vk = edsign::VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
+        vk.verify(msg, &edsign::Signature::from_bytes(sig))
             .map_err(|_| SigError)
     }
 }
@@ -79,14 +79,14 @@ pub type KeyringEngine = keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRem
 pub type KeyringQuorumEngine =
     keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove, KeyringQuorum>;
 
-/// Sign a membership op with an openom-sign key. keyeo's `Op::sign` is dalek-specific; this signs over
-/// keyeo's canonical encoding with the openom-sign seam instead, so the adapter never touches dalek.
+/// Sign a membership op with an edsign key. keyeo's `Op::sign` is dalek-specific; this signs over
+/// keyeo's canonical encoding with the edsign seam instead, so the adapter never touches dalek.
 pub fn sign_op(
     id: [u8; 32],
     parents: Vec<[u8; 32]>,
     author: impl Into<String>,
     action: KeyringAction,
-    key: &openom_sign::SigningKey,
+    key: &edsign::SigningKey,
 ) -> KeyringOp {
     let author = author.into();
     // No sealing on these ops — sign_op is the id-supplied constructor used across tests + the keyless
@@ -386,8 +386,8 @@ mod tests {
     use super::*;
     use keyeo::{ApplyOutcome, Keyeo, StrongRemove};
 
-    fn sk(seed: u8) -> openom_sign::SigningKey {
-        openom_sign::SigningKey::from_seed(&[seed; 32])
+    fn sk(seed: u8) -> edsign::SigningKey {
+        edsign::SigningKey::from_seed(&[seed; 32])
     }
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()
@@ -1054,9 +1054,9 @@ mod tests {
     }
 
     #[test]
-    fn the_openom_sign_seam_rejects_a_forged_signature() {
+    fn the_edsign_seam_rejects_a_forged_signature() {
         // A structurally-valid op whose signature is over the wrong bytes must be rejected by the
-        // engine's authenticate step, i.e. by OpenomSign::verify (openom-sign verify_strict).
+        // engine's authenticate step, i.e. by OpenomSign::verify (edsign verify_strict).
         let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
         let action = MembershipAction::Remove {
             member: "founder".to_string(),

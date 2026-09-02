@@ -40,7 +40,7 @@ mod tests {
     use super::*;
     use crate::envelope::{AttestTarget, Claim, Verdict, TYPE_PERSON};
     use crate::Hlc;
-    use openom_sign::SigningKey;
+    use edsign::SigningKey;
     use serde_json::json;
 
     fn did() -> String {

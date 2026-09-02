@@ -12,7 +12,7 @@ Owner and Maintainer) — and the fixed mapping from a **capability** (`Access::
 `StageMedia`, `Commit`, `Administer`) or an **entry kind** (`Kind::Snapshot`, `Delta`, `Proposal`,
 `Media`) to the weakest role allowed to exercise it. Two call sites depend on this crate and must
 agree: the server's advisory ACL gate (`openom::authz`, which re-exports `Access` directly) and the
-client's landed-entry verification (`keyeo-chain`'s `verify_entry`, via `required_role_for_kind`).
+client's landed-entry verification (`openom-keyring`'s `verify_entry`, via `required_role_for_kind`).
 The server is defense-in-depth; the client is the real boundary — but both apply the same matrix, so
 it is defined once here instead of duplicated in two crates and drifting silently. Roles are numeric,
 power **descending** (`Owner` strongest, lower value), mirroring the keyring's `MemberRole`; a gate is
@@ -31,7 +31,7 @@ as an `Access` variant here.
 | id | guarantee | why it matters | verified by |
 |----|-----------|-----------------|-------------|
 | **ROLES-1** | The capability→role matrix is fixed: `Read`→Viewer, `Propose`/`StageMedia`→Editor, `Commit`/`Administer`→Maintainer. | This is the one matrix the server ACL and client verify both apply; a silent change here silently changes both sides at once. | `tests::capability_min_roles_match_the_matrix` |
-| **ROLES-2** | The entry-kind→role matrix is fixed: `Snapshot`/`Delta`→Maintainer, `Proposal`/`Media`→Editor, `Unspecified`→`None`. | This is exactly the mapping `keyeo-chain::verify_entry` uses to authorize a landed entry by its kind. | `tests::kind_required_roles_match_the_matrix` |
+| **ROLES-2** | The entry-kind→role matrix is fixed: `Snapshot`/`Delta`→Maintainer, `Proposal`/`Media`→Editor, `Unspecified`→`None`. | This is exactly the mapping `openom-keyring::verify_entry` uses to authorize a landed entry by its kind. | `tests::kind_required_roles_match_the_matrix` |
 | **ROLES-3** | Roles are power-descending and totally ordered: `Owner` < `Co-owner` < `Maintainer` < `Editor` < `Viewer`. | The `member_role <= required` gate used by every caller only works if "weaker" always means "numerically greater." | `tests::roles_are_power_descending` |
 
 Run: `node scripts/cargo.mjs test -p openom-roles` (from the repo root; on Windows cargo runs under
@@ -60,5 +60,5 @@ constants (`ROLE_OWNER`, `ROLE_CO_OWNER`, `ROLE_MAINTAINER`, `ROLE_EDITOR`, `ROL
 ## Position
 
 Sits on `openom-protocol` (for the `MemberRole` / `Kind` vocabulary) and nothing else; the server's
-`openom::authz` (which re-exports `Access`) and the client's `keyeo-chain` (`verify_entry`,
+`openom::authz` (which re-exports `Access`) and the client's `openom-keyring` (`verify_entry`,
 via `required_role_for_kind`) both sit on top of it. Full dependency graph: see `packages/README.md`.

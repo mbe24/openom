@@ -20,7 +20,7 @@ advance land in one durable transaction, and key custody shares the ciphertext's
 rather than the evictable webview one. The passphrase lifecycle (provision/unlock/recover/change)
 routes through the engine-dispatch `AppVault` (chain or dag, an install-fixed preset), so its
 anti-rollback and endorsement checks live inside the engine. The host still re-runs the
-`keyeo-chain` chain-walk itself for the sharing flows: once as a self-check before persisting a
+`openom-keyring` chain-walk itself for the sharing flows: once as a self-check before persisting a
 keyring its own membership flow just produced (`commit_transition`), and once against genuinely
 untrusted network bytes (`accept_remote_keyring`) — those two paths are deliberately kept distinct
 (see the Invariants below).
@@ -35,7 +35,7 @@ before it is ever registered, so it never becomes reachable through any handle a
 It is **not** a Tauri crate: no `tauri` dependency, no `#[command]`s, no webview code — those live
 in `apps/src-tauri` and just call this crate. It is **not** the crypto or chain-verification
 primitives: AEAD/HPKE/KDF sealing is `openom-sealer`'s, and chain-walk verification
-(`verify_transition` / `verify_reset` / `verify_walk`) is `keyeo-chain`'s — this crate is the
+(`verify_transition` / `verify_reset` / `verify_walk`) is `openom-keyring`'s — this crate is the
 orchestration and storage-transaction layer above both. And it does not implement the snapshot/delta
 replay-window (a separate sync-layer concern); the `VaultStore` seam here carries only the keyring
 bytes and an engine-opaque watermark (chain = a 4-byte revision, dag = a frontier; the store never
@@ -123,7 +123,7 @@ Tauri-side implementation.
 ## Position
 
 Sits in the access-control/identity/custody layer, directly above `openom-sealer` (the live
-session + passphrase lifecycle it drives) and `keyeo-chain` (the chain-walk it re-runs both as
+session + passphrase lifecycle it drives) and `openom-keyring` (the chain-walk it re-runs both as
 a self-check and against the network); it is the Tauri-side counterpart to the web app's
 `vault.js` + the worker's sealer registry, cut one level higher so the DEK stays out of the
 webview entirely. Full dependency graph: see `packages/README.md`.

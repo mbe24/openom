@@ -47,7 +47,7 @@ hashing/verifying an arbitrary envelope must never panic, OOM, or hang.
 ## Usage
 
 ```rust
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 use openom_claim::{claim_id, fingerprint, sign, verify, SigCheck};
 use openom_did::encode_ed25519;
 use serde_json::json;

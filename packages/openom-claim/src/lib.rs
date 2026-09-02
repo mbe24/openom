@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use openom_sign::{Signature, SigningKey, VerifyingKey};
+use edsign::{Signature, SigningKey, VerifyingKey};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -176,7 +176,7 @@ impl ContentAddressed for envelope::Claim {}
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use openom_sign::SigningKey;
+    use edsign::SigningKey;
     use proptest::prelude::*;
 
     /// Arbitrary float-free JSON objects for a claim's `value`.
@@ -226,7 +226,7 @@ mod tests {
     // The registry of per-purpose Ed25519 signing-domain tags across the crates. Every signed message is
     // prefixed with one so a signature in one context can never verify in another. `SIGN_DOMAIN` is this
     // crate's real constant; the rest are the literals used at their signing sites (openom-protocol's
-    // author_signing_bytes, the keyeo-chain chain) — keep this list in sync when adding a signed
+    // author_signing_bytes, the openom-keyring chain) — keep this list in sync when adding a signed
     // message type. No tag may equal or be a prefix of another (a prefix would let a longer domain's
     // signature be truncated-replayed against the shorter one).
     #[test]
@@ -234,7 +234,7 @@ mod tests {
         let domains: &[&[u8]] = &[
             SIGN_DOMAIN,         // openom-claim: claim signatures ("openom-claim-v1")
             b"openom:author:v1", // openom-protocol::aad::author_signing_bytes (shared-tree entries)
-            b"openom:keyring",   // keyeo-chain: keyring-chain signatures
+            b"openom:keyring",   // openom-keyring: keyring-chain signatures
         ];
         for (i, a) in domains.iter().enumerate() {
             for (j, b) in domains.iter().enumerate() {

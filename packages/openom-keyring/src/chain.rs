@@ -618,7 +618,7 @@ fn rule_is_satisfiable(k: &Keyring) -> bool {
 }
 
 /// Kani proof harnesses for the keyring's structural gate — compiled only under `cargo kani`
-/// (`--cfg kani`), never the normal build. Run: `node scripts/kani.mjs -p keyeo-chain`. These are
+/// (`--cfg kani`), never the normal build. Run: `node scripts/kani.mjs -p openom-keyring`. These are
 /// OPE-238 Step B: `check_structure`'s crypto-FREE checks, proven exhaustively. The one crypto call in
 /// `check_structure` is `signer_key` (an Ed25519 point-decode Kani can't model) inside the per-signer
 /// loop; the checks proven here (`list too large`, `exactly one founder`) all run BEFORE that loop, so
@@ -682,7 +682,7 @@ mod structure_verification {
 /// (`signer_keys`, line ~208) are reachable here.
 ///
 /// These harnesses use `#[kani::stub]`, an UNSTABLE Kani feature — run with `-Z stubbing`:
-///   `node scripts/kani.mjs -p keyeo-chain -Z stubbing`
+///   `node scripts/kani.mjs -p openom-keyring -Z stubbing`
 #[cfg(kani)]
 mod transition_verification {
     use super::*;
@@ -1181,7 +1181,7 @@ mod tests {
         // check_structure's `len != 32 || signer_key.is_none()` -> `&&` (which would let a 32-byte
         // non-point slip past to a different, later error).
         let mut bad = [0u8; 32];
-        bad[0] = 2; // y = 2 has no matching x on the curve (see openom-sign)
+        bad[0] = 2; // y = 2 has no matching x on the curve (see edsign)
         let mut k = genesis(&key(), &[], &[]);
         k.authorized_signers[0].public_key = bad.to_vec();
         assert_eq!(

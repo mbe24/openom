@@ -1,5 +1,5 @@
 //! Differential oracle: the DAG keyring (keyeo-dag / keyeo) vs the legacy CAS keyring
-//! (keyeo-chain / chain.rs), on a fork-free sequence — the "CAS = degenerate DAG" acceptance gate.
+//! (openom-keyring / chain.rs), on a fork-free sequence — the "CAS = degenerate DAG" acceptance gate.
 //!
 //! For a shared cast + a single logical mutation, we drive BOTH systems and compare — chain.rs builds
 //! the successor `Keyring` + `verify_transition` (accept/reject), keyeo `sign_op`s the equivalent
@@ -8,7 +8,7 @@
 //! *expected* divergences so the oracle stays honest.
 
 use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use keyeo_chain::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
+use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
 use keyeo_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
@@ -16,7 +16,7 @@ use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
 };
 use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER, SIGNER_CO_OWNER, SIGNER_FOUNDER};
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 
 const TREE: &[u8] = b"tree-uuid-16byte";
 const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;

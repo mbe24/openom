@@ -1342,6 +1342,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "edsign"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "proptest",
+ "thiserror 2.0.20",
+ "zeroize",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2867,34 +2877,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyeo-chain"
-version = "0.1.0"
-dependencies = [
- "blobstore",
- "getrandom 0.3.4",
- "keyeo-api",
- "openom-crypto",
- "openom-did",
- "openom-protocol",
- "openom-roles",
- "openom-sign",
- "proptest",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "keyeo-dag"
 version = "0.1.0"
 dependencies = [
  "blobstore",
+ "edsign",
  "keyeo",
  "keyeo-api",
- "keyeo-chain",
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
  "openom-roles",
- "openom-sign",
  "proptest",
  "serde",
  "serde_json",
@@ -3573,9 +3566,9 @@ dependencies = [
  "base64 0.22.1",
  "jsonwebtoken",
  "keyeo-api",
- "keyeo-chain",
  "lambda_http",
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
  "openom-roles",
  "opentelemetry",
@@ -3602,10 +3595,10 @@ dependencies = [
 name = "openom-claim"
 version = "0.1.0"
 dependencies = [
+ "edsign",
  "jsonschema",
  "openom-did",
  "openom-jcs",
- "openom-sign",
  "proptest",
  "serde",
  "serde_json",
@@ -3633,13 +3626,13 @@ dependencies = [
  "argon2",
  "chacha20poly1305 0.11.0",
  "data-encoding",
+ "edsign",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "hkdf 0.12.4",
  "hpke",
  "openom-protocol",
- "openom-sign",
  "proptest",
  "rand_core 0.6.4",
  "sha2 0.10.9",
@@ -3670,6 +3663,23 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-keyring"
+version = "0.1.0"
+dependencies = [
+ "blobstore",
+ "edsign",
+ "getrandom 0.3.4",
+ "keyeo-api",
+ "openom-crypto",
+ "openom-did",
+ "openom-protocol",
+ "openom-roles",
+ "proptest",
  "sha2 0.10.9",
  "thiserror 2.0.20",
 ]
@@ -3716,22 +3726,12 @@ dependencies = [
 name = "openom-sealer"
 version = "0.1.0"
 dependencies = [
- "keyeo-chain",
+ "edsign",
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
- "openom-sign",
  "proptest",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-sign"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "proptest",
- "thiserror 2.0.20",
- "zeroize",
 ]
 
 [[package]]
@@ -3779,10 +3779,10 @@ version = "0.1.0"
 dependencies = [
  "blobstore",
  "keyeo-api",
- "keyeo-chain",
  "keyeo-dag",
  "openom-crypto",
  "openom-did",
+ "openom-keyring",
  "openom-protocol",
  "openom-roles",
  "openom-sealer",
@@ -3801,8 +3801,8 @@ name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
  "keyeo-api",
- "keyeo-chain",
  "openom-crypto",
+ "openom-keyring",
  "openom-protocol",
  "openom-sealer",
  "openom-vault",

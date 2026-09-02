@@ -1,5 +1,5 @@
 //! Entry author verification.
-//! Adapted from keyeo-chain::entry (MIT).
+//! Adapted from openom-keyring::entry (MIT).
 
 use crate::keyring_mod::Keyring;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};

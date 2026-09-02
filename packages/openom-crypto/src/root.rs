@@ -16,7 +16,7 @@
 //!   fed to the KEM's DeriveKeyPair (`derive_hpke_keypair`).
 
 use hkdf::Hkdf;
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -87,7 +87,7 @@ pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, Cr
     })
 }
 
-// The owner identity's seed scrubs on drop — proven at compile time inside `openom-sign` (the crate
+// The owner identity's seed scrubs on drop — proven at compile time inside `edsign` (the crate
 // that owns the key type), so there is no dalek `zeroize` bound to restate here.
 
 #[cfg(test)]
@@ -112,7 +112,7 @@ mod tests {
         let a = derive_root(b"correct horse", &params()).unwrap();
         let b = derive_root(b"correct horse", &params()).unwrap();
         assert_eq!(a.kek.expose(), b.kek.expose());
-        // The identity's seed is not readable (openom-sign holds it opaquely); its public key is a
+        // The identity's seed is not readable (edsign holds it opaquely); its public key is a
         // faithful proxy for "same identity" — a deterministic function of the seed.
         assert_eq!(
             a.identity.verifying_key().to_bytes(),

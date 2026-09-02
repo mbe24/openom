@@ -1,5 +1,5 @@
 [package]
-name = "keyeo-chain"
+name = "openom-keyring"
 description = "openom — the keyring/membership mechanism: keyring chain verification, entry authorship, signing"
 version.workspace = true
 license.workspace = true
@@ -21,7 +21,7 @@ openom-crypto.workspace = true
 # The capability→role policy verify_entry enforces.
 openom-roles.workspace = true
 # Ed25519 key types + the verify_strict-only verify (the raw ed25519-dalek edge lives only there).
-openom-sign.workspace = true
+edsign.workspace = true
 # did:key encoding of a member's public key — for the moderator role feed the claim fold consumes.
 openom-did.workspace = true
 thiserror.workspace = true

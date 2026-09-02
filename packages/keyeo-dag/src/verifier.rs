@@ -188,8 +188,8 @@ mod tests {
     use crate::{recovery, sign_op, KeyringMemberInit, KeyringRole};
     use keyeo::MemberInit;
 
-    fn sk(seed: u8) -> openom_sign::SigningKey {
-        openom_sign::SigningKey::from_seed(&[seed; 32])
+    fn sk(seed: u8) -> edsign::SigningKey {
+        edsign::SigningKey::from_seed(&[seed; 32])
     }
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()

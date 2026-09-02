@@ -18,7 +18,7 @@ openom-crypto.workspace = true
 # H(write DEK) commits the recover watermark to key MATERIAL (OPE-286); the chain vault lives here now.
 sha2.workspace = true
 # The two keyring engines the vaults drive.
-keyeo-chain.workspace = true
+openom-keyring.workspace = true
 keyeo-dag.workspace = true
 # The keyless seam's MembershipView — the engine-neutral resolved membership the dag vault checks coverage
 # against (OPE-282/288/290).
@@ -45,8 +45,8 @@ optional = true
 
 [dev-dependencies]
 proptest.workspace = true
-# Tests mint ad-hoc signer identities via keyeo_chain::generate_identity (test-util gated).
-keyeo-chain = { workspace = true, features = ["test-util"] }
+# Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
+openom-keyring = { workspace = true, features = ["test-util"] }
 # The Blob transport lifecycle test drives the vault's keyring output through the keyring/head store.
 blobstore.workspace = true
 tempfile = "3"

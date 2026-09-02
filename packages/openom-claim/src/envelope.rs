@@ -17,7 +17,7 @@
 //! signature are derived by the crate-root seam ([`crate::claim_id`] etc.); the bridge methods here
 //! ([`Claim::compute_id`], …) route the typed value through it, so there is one canonicalization path.
 
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

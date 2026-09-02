@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
-use keyeo_chain::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
+use openom_keyring::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 // Re-exported: `with_engine` takes an `EngineKind`, so callers select the engine preset without a
 // direct keyeo-api dependency.
 pub use keyeo_api::EngineKind;
@@ -945,7 +945,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             })
             .collect::<Result<_>>()?;
         let new_anchor =
-            keyeo_chain::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+            openom_keyring::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
                 .map_err(remote_chain_err)?;
         // Persist the validated head (the last hop) + advance the floor, atomically. This path doesn't
         // open the DEK, so it can't compute a fresh pin — carry the stored one forward (never erase it; a
@@ -2354,7 +2354,7 @@ mod tests {
 
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
-        use keyeo_chain::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
         use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
 
         let h = host();
@@ -2485,7 +2485,7 @@ mod tests {
 
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
-        use keyeo_chain::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
         use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
 
         let a = host();

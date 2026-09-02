@@ -13,7 +13,7 @@
 use openom_protocol::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
 use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
-use openom_sign::{Signature, VerifyingKey};
+use edsign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::GoverningKeyring;
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn seal_envelope_round_trips_through_verify_entry() {
         // The cross-crate round-trip: openom-crypto seals + signs the entry, this crate verifies it.
-        // (Lives here, not in openom-crypto, because verify_entry moved out and keyeo-chain is the only
+        // (Lives here, not in openom-crypto, because verify_entry moved out and openom-keyring is the only
         // crate that can depend on both directions.)
         use openom_crypto::{
             generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams,

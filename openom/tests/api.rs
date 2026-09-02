@@ -25,7 +25,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
-use keyeo_chain::{generate_identity, keyring_hash, sign_keyring, SigningKey};
+use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use openom_protocol::v1::{
     Aead, AuthorizedSigner, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole,
     SignerRole, WrapMethod,

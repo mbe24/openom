@@ -1,4 +1,4 @@
-//! Feature-parity capability matrix: the linear chain keyring (keyeo-chain / chain.rs) vs the DAG
+//! Feature-parity capability matrix: the linear chain keyring (openom-keyring / chain.rs) vs the DAG
 //! keyring (keyeo-dag / keyeo), across both backend classes (OPE-267).
 //!
 //! The honest answer to "what does each version actually offer" is a MATRIX, not prose. Both keyrings
@@ -40,7 +40,7 @@ use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
 use keyeo_dag::{
     sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
-use openom_sign::SigningKey;
+use edsign::SigningKey;
 
 fn sk(seed: u8) -> SigningKey {
     SigningKey::from_seed(&[seed; 32])
