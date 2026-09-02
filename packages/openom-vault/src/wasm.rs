@@ -14,11 +14,11 @@
 use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
-use openom_keyring::{
+use keyeo_chain::{
     decode_governing_ref, epoch_is_attributed, keyring_hash, verify_entry, verify_reset,
     verify_walk, GoverningKeyring, KeyringAnchor, VerifyingKey,
 };
-use openom_keyring_dag::client as dag_client;
+use keyeo_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
@@ -27,7 +27,7 @@ use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
 use crate::VaultError;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
-use openom_keyring_seam::EngineKind;
+use keyeo_api::EngineKind;
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -210,7 +210,7 @@ fn to_js(e: impl std::fmt::Display) -> JsError {
 /// Parse the deployment's configured engine tag (a backend preset, never a per-tree user choice — OPE-278).
 /// The tag mapping is [`EngineKind`]'s own `FromStr`, so this host and the Tauri host can't drift apart.
 fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
-    s.parse().map_err(|e: openom_keyring_seam::UnknownEngine| JsError::new(&e.to_string()))
+    s.parse().map_err(|e: keyeo_api::UnknownEngine| JsError::new(&e.to_string()))
 }
 
 // ---- the keyring vault (passphrase lifecycle) ----
@@ -1348,7 +1348,7 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 #[wasm_bindgen(js_name = moderatorsFromKeyring)]
 pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
-    Ok(openom_keyring::moderators(&kr).into_iter().collect())
+    Ok(keyeo_chain::moderators(&kr).into_iter().collect())
 }
 
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —

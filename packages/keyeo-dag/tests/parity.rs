@@ -1,5 +1,5 @@
-//! Feature-parity capability matrix: the linear chain keyring (openom-keyring / chain.rs) vs the DAG
-//! keyring (openom-keyring-dag / keyeo), across both backend classes (OPE-267).
+//! Feature-parity capability matrix: the linear chain keyring (keyeo-chain / chain.rs) vs the DAG
+//! keyring (keyeo-dag / keyeo), across both backend classes (OPE-267).
 //!
 //! The honest answer to "what does each version actually offer" is a MATRIX, not prose. Both keyrings
 //! ride the same `blobstore::Blob` seam, so the backend axis is {managed-CAS, BYO-dumb} — and because
@@ -37,7 +37,7 @@
 //! tests, not claims.
 
 use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use openom_keyring_dag::{
+use keyeo_dag::{
     sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
 use openom_sign::SigningKey;
@@ -59,7 +59,7 @@ fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
 fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
     Keyeo::new(KeyringState::create(members), KeyringAccess, StrongRemove)
 }
-fn add(member: &str, role: KeyringRole, seed: u8) -> MembershipAction<String, KeyringRole, openom_keyring_dag::OpenomSign> {
+fn add(member: &str, role: KeyringRole, seed: u8) -> MembershipAction<String, KeyringRole, keyeo_dag::OpenomSign> {
     MembershipAction::Add {
         member: member.to_string(),
         role,
@@ -117,7 +117,7 @@ fn dag_merges_non_conflicting_concurrent_edits_where_the_chain_would_serialize()
 /// competing head revision forces a re-propose; the DAG merges the approvals across the fork.
 #[test]
 fn dag_tallies_quorum_approvals_that_arrive_on_a_fork() {
-    use openom_keyring_dag::{KeyringQuorum, KeyringQuorumEngine};
+    use keyeo_dag::{KeyringQuorum, KeyringQuorumEngine};
     let cast = [
         minit("founder", KeyringRole::OWNER, 1),
         minit("bob", KeyringRole::CO_OWNER, 2),

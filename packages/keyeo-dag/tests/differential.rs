@@ -1,5 +1,5 @@
-//! Differential oracle: the DAG keyring (openom-keyring-dag / keyeo) vs the legacy CAS keyring
-//! (openom-keyring / chain.rs), on a fork-free sequence — the "CAS = degenerate DAG" acceptance gate.
+//! Differential oracle: the DAG keyring (keyeo-dag / keyeo) vs the legacy CAS keyring
+//! (keyeo-chain / chain.rs), on a fork-free sequence — the "CAS = degenerate DAG" acceptance gate.
 //!
 //! For a shared cast + a single logical mutation, we drive BOTH systems and compare — chain.rs builds
 //! the successor `Keyring` + `verify_transition` (accept/reject), keyeo `sign_op`s the equivalent
@@ -8,8 +8,8 @@
 //! *expected* divergences so the oracle stays honest.
 
 use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
-use openom_keyring_dag::{
+use keyeo_chain::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
+use keyeo_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
 use openom_protocol::v1::{

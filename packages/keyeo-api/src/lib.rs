@@ -1,4 +1,4 @@
-//! openom-keyring-seam — the engine-agnostic vocabulary for swapping openom's two keyring engines
+//! keyeo-api — the engine-agnostic vocabulary for swapping openom's two keyring engines
 //! (the linear chain and the DAG), per the OPE-276 decision (plan/keyring-dag/design.swap-seam-decision.md).
 //!
 //! Deliberately **not** one `KeyringEngine` trait. This crate holds the two low-level, engine-agnostic
@@ -59,12 +59,20 @@ impl std::fmt::Display for UnknownEngine {
 
 impl std::error::Error for UnknownEngine {}
 
+/// keyeo-api's own generic role convention (`i16`, **lower is stronger**): the Owner is the single
+/// strongest role and a signer is CoOwner-or-stronger. A consumer maps its own role enum onto these — for
+/// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
+/// them here, rather than depending on `openom-roles`, keeps this seam openom-free (openom-roles pulls in
+/// `openom-protocol`) so the crate is standalone-publishable (OPE-279).
+pub const ROLE_OWNER: i16 = 1;
+pub const ROLE_CO_OWNER: i16 = 2;
+
 /// One member of the resolved keyring, engine-agnostic. Both engines fold to this: chain from
 /// `Keyring.members`, dag from the resolved `GroupState`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberView {
     pub member_id: String,
-    /// An openom-roles value (`ROLE_OWNER` = 1 … `ROLE_VIEWER` = 5); **lower is stronger**.
+    /// A role in keyeo-api's convention ([`ROLE_OWNER`] = 1 … Viewer = 5); **lower is stronger**.
     pub role: i16,
     pub author_public_key: Vec<u8>,
     pub hpke_public_key: Vec<u8>,
@@ -72,13 +80,13 @@ pub struct MemberView {
 
 impl MemberView {
     /// A **signer** (keyring-write authority) is a CoOwner or stronger — the single-axis mapping both
-    /// engines already use (`openom_roles::ROLE_CO_OWNER`).
+    /// engines use.
     pub fn is_signer(&self) -> bool {
-        self.role <= openom_roles::ROLE_CO_OWNER
+        self.role <= ROLE_CO_OWNER
     }
     /// The unique Owner / founder.
     pub fn is_owner(&self) -> bool {
-        self.role == openom_roles::ROLE_OWNER
+        self.role == ROLE_OWNER
     }
 }
 

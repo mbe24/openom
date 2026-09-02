@@ -21,7 +21,7 @@
 //! the dag lifecycle — OPE-273 — exists and its authoring model is concrete.)
 //!
 //! **Why this lives in openom-vault, not the seam crate.** Every result carries a [`SealerSet`] plus
-//! `RecoveryCode` / `DidKey` (client secret-handling types). The keyless `openom-keyring-seam` is the
+//! `RecoveryCode` / `DidKey` (client secret-handling types). The keyless `keyeo-api` is the
 //! *server's* binding surface (roles only today) — putting these there would poison it with client crypto
 //! deps. So the trait's home is openom-vault: above both keyring engines and above the lean DEK-session
 //! sealer, which it uses only for [`SealerSet`] (OPE-279 extraction).

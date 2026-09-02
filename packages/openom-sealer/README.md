@@ -27,7 +27,7 @@ It is **not** the source of truth for the log chain: the caller (JS `SealedStore
 command) owns `replica_counter`, `prev_ciphertext_hash`, `covers_through_seq` and passes them in
 per call — retry means re-uploading the already-sealed bytes verbatim, never re-sealing, because a
 fresh seal mints a fresh nonce under the same counter slot. It is not the keyring wire format or
-its chain-verification primitives (`openom-keyring` owns `sign_keyring` / `verify_keyring_any` /
+its chain-verification primitives (`keyeo-chain` owns `sign_keyring` / `verify_keyring_any` /
 `verify_walk`); this crate drives that mechanism through passphrase flows. And on the web tier the
 unlocked DEK lives in wasm linear memory for the session's lifetime — a documented
 weaker-isolation trade-off against native, where `openom-vault-host` keeps the session in Rust so
@@ -95,6 +95,6 @@ by `apps/app/src/core/sealer/`.
 ## Position
 
 Sits directly above the two foundation crates it wraps: `openom-crypto` (AEAD/KDF/HPKE
-primitives) and `openom-keyring` (chain verification, signing). Consumed by the web app through
+primitives) and `keyeo-chain` (chain verification, signing). Consumed by the web app through
 the `wasm` feature and by the Tauri native app directly. Full dependency graph: see
 `packages/README.md`.

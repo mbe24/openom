@@ -226,7 +226,7 @@ mod tests {
     // The registry of per-purpose Ed25519 signing-domain tags across the crates. Every signed message is
     // prefixed with one so a signature in one context can never verify in another. `SIGN_DOMAIN` is this
     // crate's real constant; the rest are the literals used at their signing sites (openom-protocol's
-    // author_signing_bytes, the openom-keyring chain) — keep this list in sync when adding a signed
+    // author_signing_bytes, the keyeo-chain chain) — keep this list in sync when adding a signed
     // message type. No tag may equal or be a prefix of another (a prefix would let a longer domain's
     // signature be truncated-replayed against the shorter one).
     #[test]
@@ -234,7 +234,7 @@ mod tests {
         let domains: &[&[u8]] = &[
             SIGN_DOMAIN,         // openom-claim: claim signatures ("openom-claim-v1")
             b"openom:author:v1", // openom-protocol::aad::author_signing_bytes (shared-tree entries)
-            b"openom:keyring",   // openom-keyring: keyring-chain signatures
+            b"openom:keyring",   // keyeo-chain: keyring-chain signatures
         ];
         for (i, a) in domains.iter().enumerate() {
             for (j, b) in domains.iter().enumerate() {

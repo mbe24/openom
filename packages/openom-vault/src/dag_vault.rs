@@ -1,6 +1,6 @@
 //! The DAG keyring's vault (OPE-273) — the dag-engine counterpart to [`crate::vault`], producing the same
 //! [`SealerSet`] through the shared sealing core ([`crate::vault_core`]) while resolving membership +
-//! recovery authority through the DAG keyring's client facade (`openom_keyring_dag::client`).
+//! recovery authority through the DAG keyring's client facade (`keyeo_dag::client`).
 //!
 //! The trust anchor is engine-opaque bytes: the dag's pinned genesis config + op closure, with the DEK
 //! epochs + recovery escrow riding the ops' `sealing` payloads (the design pass converged on this — one
@@ -19,7 +19,7 @@ use openom_crypto::{
     RrkSecret,
 };
 use openom_did::DidKey;
-use openom_keyring_dag::{client as dag_client, KeyringRole};
+use keyeo_dag::{client as dag_client, KeyringRole};
 use openom_protocol::v1::KdfParams;
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ use crate::vault_core::{
     rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap, RecoveryEscrow,
     SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
 };
-use openom_keyring_seam::MembershipView;
+use keyeo_api::MembershipView;
 use crate::VaultError;
 
 /// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
@@ -1093,7 +1093,7 @@ impl DagVault {
 mod tests {
     use super::*;
     use openom_sealer::{EntryKind, SealContext};
-    use openom_keyring_seam::MemberView;
+    use keyeo_api::MemberView;
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
     const TREE: &[u8] = b"tree-uuid-16byte";
@@ -1371,7 +1371,7 @@ mod tests {
     /// neither wrapped nor matched, so it must not wedge `needs_reseal`/`needs_backfill` permanently true.
     #[test]
     fn coverage_excludes_an_empty_keyed_member() {
-        use openom_keyring_seam::MemberView;
+        use keyeo_api::MemberView;
         let members = MembershipView::new(
             vec![
                 MemberView { member_id: "owner".into(), role: 1, author_public_key: vec![], hpke_public_key: hpke_key("owner") },

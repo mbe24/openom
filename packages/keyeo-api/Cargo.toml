@@ -1,0 +1,13 @@
+[package]
+name = "keyeo-api"
+description = "The engine-agnostic keyring swap seam: MembershipView + its own generic role convention + the keyless KeyringVerifier trait, shared by the chain (keyeo-chain) and dag (keyeo-dag) keyrings. openom-free / standalone-publishable (OPE-276/277/279)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json.workspace = true

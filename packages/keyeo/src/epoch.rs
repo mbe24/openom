@@ -3,7 +3,7 @@
 //! ## Model B: the epoch is a DAG-resolved artifact, not a derivation
 //!
 //! A group's data key (DEK) rotates on membership change. This module implements the **crypto core**
-//! of that rotation the way openom-keyring does, adapted to keyeo's multi-writer DAG:
+//! of that rotation the way keyeo-chain does, adapted to keyeo's multi-writer DAG:
 //!
 //! - Each epoch carries a **fresh random DEK** (never re-derived, never shared as plaintext).
 //! - That DEK is **wrapped individually to each active member's HPKE public key** (`DekWrap`).

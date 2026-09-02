@@ -7,7 +7,7 @@
 //! admitted as a reset. The chain's rich `ChainError` taxonomy is classed into the neutral
 //! [`VerifyError`] (the full detail stays available inside the chain layer for diagnostics).
 
-use openom_keyring_seam::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
+use keyeo_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 use openom_roles::SIGNER_FOUNDER;

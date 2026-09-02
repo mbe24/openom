@@ -90,5 +90,5 @@ public-key wrap). Recovery: `generate_recovery_code` / `parse_recovery_code`.
 
 A foundation crate: pure, no domain knowledge, depends only on `openom-protocol` (for the `Header`
 type and its canonical AAD encoder). Everything that seals or shares tree data sits on top of it —
-`openom-sealer`, `openom-keyring`, `openom-vault-host`, and the `openom` server. Full dependency graph:
+`openom-sealer`, `keyeo-chain`, `openom-vault-host`, and the `openom` server. Full dependency graph:
 see `packages/README.md`.

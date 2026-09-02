@@ -48,7 +48,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-sealer** — the client sealer: a stateful session holding the unlocked DEK, sealing/opening envelopes (wasm veneer + Tauri).
 
 **Access control / identity / custody**
-- **openom-keyring** — the keyring/membership mechanism: chain verification, entry authorship, signing.
+- **keyeo-chain** — the keyring/membership mechanism: chain verification, entry authorship, signing.
 - **openom-roles** — the authorization role model + capability→role policy (Viewer / Editor / Maintainer / Owner).
 - **openom-vault-host** — the native (Tauri) key-custody host: keeps Sealer sessions + keyring storage in Rust so the DEK never enters the webview.
 

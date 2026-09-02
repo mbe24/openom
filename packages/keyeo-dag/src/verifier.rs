@@ -12,7 +12,7 @@
 //! the SAME `blob_sync` codec the transport publishes, so an op verifies identically however it arrived.
 
 use keyeo::{ApplyOutcome, Error as KeyeoError, Keyeo, MembershipAction, SignedOp, StrongRemove};
-use openom_keyring_seam::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
+use keyeo_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
 use serde::{Deserialize, Serialize};
 
 use crate::blob_sync::{decode_op, dto_to_minit, minit_to_dto, MemberInitDto};

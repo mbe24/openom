@@ -9,8 +9,8 @@ members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
     "packages/openom-roles",
-    "packages/openom-keyring",
-    "packages/openom-keyring-seam",
+    "packages/keyeo-chain",
+    "packages/keyeo-api",
     "packages/openom-model",
     "packages/openom-jcs",
     "packages/openom-did",
@@ -26,7 +26,7 @@ members = [
     "packages/journal",
     "packages/openom-sync",
     "packages/keyeo",
-    "packages/openom-keyring-dag",
+    "packages/keyeo-dag",
     "packages/docsync",
     "packages/blobstore",
     "openom",
@@ -53,9 +53,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 openom-roles = { path = "packages/openom-roles" }
-openom-keyring = { path = "packages/openom-keyring" }
-openom-keyring-dag = { path = "packages/openom-keyring-dag" }
-openom-keyring-seam = { path = "packages/openom-keyring-seam" }
+keyeo-chain = { path = "packages/keyeo-chain" }
+keyeo-dag = { path = "packages/keyeo-dag" }
+keyeo-api = { path = "packages/keyeo-api" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }
 openom-sign = { path = "packages/openom-sign" }
@@ -67,7 +67,7 @@ openom-tree = { path = "packages/openom-tree" }
 journal = { path = "packages/journal" }
 blobstore = { path = "packages/blobstore" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
-# roles/signing/keys onto keyeo's seams in openom-keyring-dag; keyeo itself never gains an openom dep.
+# roles/signing/keys onto keyeo's seams in keyeo-dag; keyeo itself never gains an openom dep.
 keyeo = { path = "packages/keyeo" }
 
 # Protocol / serialization.

@@ -14,7 +14,7 @@
 //! the dag does not), so each host dispatches those with its own `match` on the enum arm (OPE-277 gate).
 
 use openom_crypto::{Passphrase, RecoveryCode};
-use openom_keyring_seam::EngineKind;
+use keyeo_api::EngineKind;
 
 use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,

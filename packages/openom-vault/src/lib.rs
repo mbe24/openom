@@ -3,7 +3,7 @@
 //! This crate owns the passphrase-driven lifecycle over a keyring — provision / unlock / recover /
 //! change-passphrase + membership authoring — for BOTH engines (the linear chain and the dag), behind the
 //! [`KeyringLifecycle`] trait, with [`AppVault`] dispatching on the deployment's [`KeyringRole`]-carrying
-//! engine. It sits ABOVE the two keyring engines (`openom-keyring`, `openom-keyring-dag`) and above
+//! engine. It sits ABOVE the two keyring engines (`keyeo-chain`, `keyeo-dag`) and above
 //! [`openom_sealer`] — which it uses purely for the DEK session ([`Sealer`](openom_sealer::Sealer) /
 //! [`SealerSet`](openom_sealer::SealerSet) / seal-open / [`SealerError`](openom_sealer::SealerError)).
 //!
@@ -23,8 +23,8 @@ pub mod dag_vault;
 pub use dag_vault::{Backfilled, DagVault, Resealed};
 
 // Re-exported: the dag membership methods take a KeyringRole, so callers name it through openom-vault
-// without a direct openom-keyring-dag dependency.
-pub use openom_keyring_dag::KeyringRole;
+// without a direct keyeo-dag dependency.
+pub use keyeo_dag::KeyringRole;
 
 pub mod app_vault;
 pub use app_vault::AppVault;

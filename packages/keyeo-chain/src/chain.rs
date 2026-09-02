@@ -618,7 +618,7 @@ fn rule_is_satisfiable(k: &Keyring) -> bool {
 }
 
 /// Kani proof harnesses for the keyring's structural gate — compiled only under `cargo kani`
-/// (`--cfg kani`), never the normal build. Run: `node scripts/kani.mjs -p openom-keyring`. These are
+/// (`--cfg kani`), never the normal build. Run: `node scripts/kani.mjs -p keyeo-chain`. These are
 /// OPE-238 Step B: `check_structure`'s crypto-FREE checks, proven exhaustively. The one crypto call in
 /// `check_structure` is `signer_key` (an Ed25519 point-decode Kani can't model) inside the per-signer
 /// loop; the checks proven here (`list too large`, `exactly one founder`) all run BEFORE that loop, so
@@ -682,7 +682,7 @@ mod structure_verification {
 /// (`signer_keys`, line ~208) are reachable here.
 ///
 /// These harnesses use `#[kani::stub]`, an UNSTABLE Kani feature — run with `-Z stubbing`:
-///   `node scripts/kani.mjs -p openom-keyring -Z stubbing`
+///   `node scripts/kani.mjs -p keyeo-chain -Z stubbing`
 #[cfg(kani)]
 mod transition_verification {
     use super::*;

@@ -1,5 +1,5 @@
 [package]
-name = "openom-keyring"
+name = "keyeo-chain"
 description = "openom — the keyring/membership mechanism: keyring chain verification, entry authorship, signing"
 version.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ openom-protocol.workspace = true
 # The storage swap seam — the Blob transport for the keyring document (OPE-265).
 blobstore.workspace = true
 # The engine-agnostic swap seam — this crate provides the CHAIN KeyringVerifier adapter (OPE-277).
-openom-keyring-seam.workspace = true
+keyeo-api.workspace = true
 # Primitives layer — the shared CryptoError this crate returns (keyring/membership builds on crypto).
 openom-crypto.workspace = true
 # The capability→role policy verify_entry enforces.

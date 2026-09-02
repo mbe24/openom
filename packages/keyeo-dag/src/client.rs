@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use keyeo::{Keyeo, MembershipAction, StrongRemove};
-use openom_keyring_seam::MembershipView;
+use keyeo_api::MembershipView;
 use serde::{Deserialize, Serialize};
 
 use crate::blob_sync::{decode_op, dto_to_minit, encode_op, minit_to_dto, MemberInitDto};

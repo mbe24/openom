@@ -1,4 +1,4 @@
-//! openom-keyring-dag — openom's keyring layer over the generic `keyeo` group-membership DAG (the
+//! keyeo-dag — openom's keyring layer over the generic `keyeo` group-membership DAG (the
 //! sequencer-free keyring, OPE-137). keyeo stays domain-free and publishable; every openom specific — the
 //! Ed25519 seam, the role model, the authority policy, and the quorum policy — lives here.
 //!

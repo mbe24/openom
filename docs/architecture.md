@@ -23,7 +23,7 @@ The Rust workspace lives in `packages/`, the server in `openom/`, and the shells
 | `openom-protocol` | the wire model — protobuf, shared by client and server |
 | `openom-crypto` | symmetric primitives — AEAD seal/open, Argon2id KDF, HPKE key-wrap |
 | `openom-roles` | the capability→role policy — one source of truth for the server ACL and client verify |
-| `openom-keyring` | the membership mechanism — signed keyring chain + landed-entry authorship |
+| `keyeo-chain` | the membership mechanism — signed keyring chain + landed-entry authorship |
 | `openom-sealer` | the client seal/open session (WebAssembly on web, native in Tauri) |
 | `openom-vault-host` | the native key-custody host — the data key stays in Rust |
 | `openom-sync` | the client sync loop — seal local deltas, merge peers' deltas back |
