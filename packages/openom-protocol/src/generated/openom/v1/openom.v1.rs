@@ -75,10 +75,12 @@ pub struct Header {
     /// entry). Names whose key verifies author_signature. Empty on unattributed trees.
     #[prost(string, tag="16")]
     pub author_member_id: ::prost::alloc::string::String,
-    /// Opaque, engine-produced reference to the keyring state that governed this entry when
-    /// authored — resolved (via the engine adapter) to the governing keyring for the role lookup.
-    /// Chain: (revision, keyring_hash); dag: (era, history_commitment). Signed in
-    /// author_signing_bytes; empty on unattributed trees. (§B3; OPE-277 GoverningRef.)
+    /// Opaque, ENGINE-PRODUCED reference to the keyring state that GOVERNED this entry when
+    /// authored — the verifier resolves it (via the engine adapter) to the governing keyring to
+    /// look up the author's role. Chain encodes (revision, keyring_hash); dag encodes
+    /// (era, history_commitment). Signed (in author_signing_bytes) so it can't be tampered;
+    /// empty on unattributed trees. Distinct from the client's keyring watermark (a sync-layer
+    /// anti-rollback cursor, engine-owned, NOT in the header). (§B3; OPE-277 GoverningRef.)
     #[prost(bytes="vec", tag="17")]
     pub governing_ref: ::prost::alloc::vec::Vec<u8>,
     /// KIND_MEDIA only: the blob's random remote id, bound into the AAD so the server
@@ -136,14 +138,41 @@ pub struct Keyring {
     /// recovery code, never shared with members). V1: exactly one, the founder's.
     #[prost(message, repeated, tag="11")]
     pub recovery_keys: ::prost::alloc::vec::Vec<RecoveryKey>,
-    /// Governance: the quorum to change the authorized-signer set (and this rule itself).
-    /// `governance_kind`: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
-    /// 3 = threshold. `governance_threshold` is the m for the threshold kinds. Part of the signed bytes
+    /// Governance: the quorum to change the authorized-signer set (and to change this rule itself).
+    /// governance_kind: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
+    /// 3 = threshold. governance_threshold is the m for the threshold kinds. Part of the signed bytes
     /// (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
     #[prost(uint32, tag="12")]
     pub governance_kind: u32,
     #[prost(uint32, tag="13")]
     pub governance_threshold: u32,
+}
+/// The managed keyring-endpoint transport envelope: the ONE message the server parses for
+/// `PUT /trees/{id}/keyring`. It carries only ROUTING metadata the server uses WITHOUT understanding any
+/// keyring implementation, plus an opaque `payload`. The server dispatches on `engine` to a KeyringVerifier,
+/// keys storage on the VERIFIED `Admitted.update_ref` (never the hints below), and never decodes `payload`.
+/// Sequencer-free engines (the dag) sync via content-addressed blobs and never use this endpoint.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KeyringUpdate {
+    /// Wire-layout selector; a reader refuses a version it doesn't understand rather than misparsing.
+    #[prost(uint32, tag="1")]
+    pub version: u32,
+    /// Routing HINT (equals the URL path). The authoritative value is `Admitted.tree_id`, read from the
+    /// verified body — the server equality-checks this against it.
+    #[prost(bytes="vec", tag="2")]
+    pub tree_id: ::prost::alloc::vec::Vec<u8>,
+    /// Routing HINT: which engine's verifier to dispatch to ("chain" / …). Cross-checked against the tree's
+    /// pinned engine; never trusted alone.
+    #[prost(string, tag="3")]
+    pub engine: ::prost::alloc::string::String,
+    /// Position HINT (chain: the revision's governing-ref). A fast-fail equality check only — the server keys
+    /// storage / CAS / head-advance on the VERIFIED `Admitted.update_ref`, never on this.
+    #[prost(bytes="vec", tag="4")]
+    pub update_ref: ::prost::alloc::vec::Vec<u8>,
+    /// The opaque membership update — a keyeo-api `MembershipEnvelope` wrapping the engine's signed body
+    /// (chain: a Keyring). The server never decodes it; it hands it to the dispatched verifier's `admit`.
+    #[prost(bytes="vec", tag="5")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
 }
 /// The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
 /// construction: the private key exists only under the two founder-credential wraps in
@@ -166,8 +195,11 @@ pub struct RecoveryKey {
     #[prost(message, repeated, tag="3")]
     pub wraps: ::prost::alloc::vec::Vec<KeyWrap>,
     /// The Recovery Verification Key: an Ed25519 public key HKDF-derived from the recovery-root
-    /// secret. Covered by the keyring signature; a reset must carry the same one (continuity) and be
-    /// signed by it (authorization). Empty on pre-RVK keyrings.
+    /// secret (openom_crypto::derive_rvk, domain-separated from public_key's ECDH use). Covered by
+    /// the keyring signature, so the untrusted server can't substitute it. A reset/recovery keyring
+    /// must carry the SAME recovery_verifying_key as the prior keyring (continuity) and be signed by
+    /// it (authorization) — this is what makes a chain reset cryptographically verifiable rather than
+    /// OOB-trusted. Empty on pre-RVK keyrings (then verify_reset falls back to the OOB self-check).
     #[prost(bytes="vec", tag="4")]
     pub recovery_verifying_key: ::prost::alloc::vec::Vec<u8>,
 }
@@ -252,9 +284,10 @@ pub struct KeyWrap {
     /// Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
     #[prost(bytes="vec", tag="6")]
     pub ephemeral_public_key: ::prost::alloc::vec::Vec<u8>,
-    /// Set for the HPKE wrap methods: the RECIPIENT's public key this wrap addresses. An UNAUTHENTICATED
-    /// hint (op-author-written, not tied to the ciphertext) for the dag's epoch-coverage heuristic to detect
-    /// a stale-key wrap after a rekey race — never a proof of decryptability (OPE-290).
+    /// Set for the HPKE wrap methods (WRAP_METHOD_X25519_HPKE, WRAP_METHOD_RRK_HPKE): the RECIPIENT's public
+    /// key this wrap addresses. An UNAUTHENTICATED hint (the op author writes it; it is not cryptographically
+    /// tied to the ciphertext) used by the dag's epoch-coverage heuristic to detect a wrap addressed to a
+    /// member's STALE key after a rekey race — never a proof of decryptability (OPE-290).
     #[prost(bytes="vec", tag="7")]
     pub recipient_public_key: ::prost::alloc::vec::Vec<u8>,
 }

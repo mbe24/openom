@@ -168,6 +168,31 @@ message Keyring {
   uint32 governance_threshold = 13;
 }
 
+// The managed keyring-endpoint transport envelope: the ONE message the server parses for
+// `PUT /trees/{id}/keyring`. It carries only ROUTING metadata the server uses WITHOUT understanding any
+// keyring implementation, plus an opaque `payload`. The server dispatches on `engine` to a KeyringVerifier,
+// keys storage on the VERIFIED `Admitted.update_ref` (never the hints below), and never decodes `payload`.
+// Sequencer-free engines (the dag) sync via content-addressed blobs and never use this endpoint.
+message KeyringUpdate {
+  // Wire-layout selector; a reader refuses a version it doesn't understand rather than misparsing.
+  uint32 version = 1;
+  // Routing HINT (equals the URL path). The authoritative value is `Admitted.tree_id`, read from the
+  // verified body — the server equality-checks this against it.
+  bytes tree_id = 2;
+  // Routing HINT: which engine's verifier to dispatch to ("chain" / …). Cross-checked against the tree's
+  // pinned engine; never trusted alone.
+  string engine = 3;
+  // Position HINT (chain: the revision's governing-ref). A fast-fail equality check only — the server keys
+  // storage / CAS / head-advance on the VERIFIED `Admitted.update_ref`, never on this.
+  bytes update_ref = 4;
+  // The opaque membership update — a keyeo-api `MembershipEnvelope` wrapping the engine's signed body
+  // (chain: a Keyring). The server never decodes it; it hands it to the dispatched verifier's `admit`.
+  bytes payload = 5;
+  // 6..15 reserved for engine-neutral transport additions — any future field a server acts on must arrive
+  // NAMED and paired with a verified twin in `Admitted`, never as an anonymous opaque slot.
+  reserved 6 to 15;
+}
+
 // The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
 // construction: the private key exists only under the two founder-credential wraps in
 // `wraps`; every other party (co-owner rotations included) touches only `public_key`. A
