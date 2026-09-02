@@ -32,7 +32,7 @@ use crate::vault_core::{
     SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
 };
 use openom_keyring_seam::MembershipView;
-use openom_sealer::SealerError;
+use crate::VaultError;
 
 /// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
 /// order) into the current sealing state: `new_epochs` are inserted (genesis's epoch-0; a member removal's
@@ -80,7 +80,7 @@ impl SealingPayload {
 fn fold_sealing(
     sealing: &[dag_client::SealingEntry],
     members: &MembershipView,
-) -> Result<FoldedSealing, SealerError> {
+) -> Result<FoldedSealing, VaultError> {
     use dag_client::SealingOrigin;
     // Each retained epoch tagged with (origin, minting op-id). Only Genesis/Remove/Reseal ops may MINT an
     // epoch — a new_epoch from any Other op is anomalous (a self-Retarget/self-Remove smuggling a self-only
@@ -92,7 +92,7 @@ fn fold_sealing(
     let mut minting_ops: u32 = 0;
     for entry in sealing {
         let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
-            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         if matches!(
             entry.origin,
             SealingOrigin::Genesis | SealingOrigin::Remove | SealingOrigin::Reseal
@@ -119,7 +119,7 @@ fn fold_sealing(
         }
     }
     let escrow =
-        escrow.ok_or_else(|| SealerError::BadKeyring("dag keyring has no recovery escrow".into()))?;
+        escrow.ok_or_else(|| VaultError::BadKeyring("dag keyring has no recovery escrow".into()))?;
 
     // Sanitize epoch ordinals (OPE-289). A legitimately-minted ordinal is `max(existing)+1`, so after M
     // epoch-minting ops the greatest possible ordinal is M-1; drop any epoch whose ordinal is >= M. A
@@ -149,7 +149,7 @@ fn fold_sealing(
             winner = Some((ep.epoch, *op_id, ep.key_id.clone(), covers));
         }
     }
-    let (_, _, write_key_id, winner_covers) = winner.ok_or(SealerError::MissingWrap)?;
+    let (_, _, write_key_id, winner_covers) = winner.ok_or(VaultError::MissingWrap)?;
 
     let epochs: Vec<SealedEpoch> = tagged.into_iter().map(|(e, _, _)| e).collect();
     let needs_backfill = any_epoch_missing_a_member(&epochs, members);
@@ -173,14 +173,14 @@ fn covering_reseal_sealing(
     escrow: &RecoveryEscrow,
     members: &MembershipView,
     epochs: &[SealedEpoch],
-) -> Result<Vec<u8>, SealerError> {
+) -> Result<Vec<u8>, VaultError> {
     let new_dek = generate_dek()?;
     let new_key_id = generate_salt()?.to_vec();
     let new_epoch = epochs
         .iter()
         .map(|e| e.epoch)
         .max()
-        .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
+        .map_or(Ok(0), |m| m.checked_add(1).ok_or(VaultError::RevisionOverflow))?;
     let mut wraps = vec![rrk_wrap_epoch(&escrow.public_key, &new_dek, tree_id, owner_id, &new_key_id)?];
     for m in &members.members {
         // The owner reaches the DEK via the RRK wrap; a member with an empty/malformed key can't be wrapped
@@ -300,11 +300,11 @@ fn epoch_covers(epoch: &SealedEpoch, members: &MembershipView) -> bool {
 /// Map a facade anti-rollback failure onto the sealer's error vocabulary: a rolled-back anchor and a
 /// corrupt floor stay distinct (mirroring the chain's `RevisionRollback` / `MalformedWatermark`); anything
 /// else (a bad anchor) is a `BadKeyring`.
-fn map_floor_err(e: dag_client::ClientError) -> SealerError {
+fn map_floor_err(e: dag_client::ClientError) -> VaultError {
     match e {
-        dag_client::ClientError::RolledBack(detail) => SealerError::WatermarkRollback { detail },
-        dag_client::ClientError::BadWatermark(_) => SealerError::MalformedWatermark,
-        other => SealerError::BadKeyring(other.to_string()),
+        dag_client::ClientError::RolledBack(detail) => VaultError::WatermarkRollback { detail },
+        dag_client::ClientError::BadWatermark(_) => VaultError::MalformedWatermark,
+        other => VaultError::BadKeyring(other.to_string()),
     }
 }
 
@@ -321,7 +321,7 @@ impl KeyringLifecycle for DagVault {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
-    ) -> Result<Provisioned, SealerError> {
+    ) -> Result<Provisioned, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
@@ -381,17 +381,17 @@ impl KeyringLifecycle for DagVault {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
-    ) -> Result<Unlocked, SealerError> {
+    ) -> Result<Unlocked, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
 
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
@@ -400,11 +400,11 @@ impl KeyringLifecycle for DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(kdf)?;
         let root = derive_root(passphrase.expose(), &KdfParams::from(kdf))?;
 
@@ -430,7 +430,7 @@ impl KeyringLifecycle for DagVault {
             .author_public_key
             .as_slice()
             .try_into()
-            .map_err(|_| SealerError::BadKeyring("owner key is not 32 bytes".into()))?;
+            .map_err(|_| VaultError::BadKeyring("owner key is not 32 bytes".into()))?;
         Ok(Unlocked {
             sealer,
             // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor —
@@ -454,7 +454,7 @@ impl KeyringLifecycle for DagVault {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Recovered, SealerError> {
+    ) -> Result<Recovered, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
@@ -465,17 +465,17 @@ impl KeyringLifecycle for DagVault {
 
         // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
         let rec_wrap = escrow
             .wraps
             .iter()
             .find(|w| w.wrap_method == RECOVERY)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let rec_kdf = rec_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow recovery wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow recovery wrap missing kdf".into()))?;
         validate_kdf(rec_kdf)?;
         let entropy = parse_recovery_code(recovery_code)?;
         let rec_kek = derive_kek(entropy.as_slice(), &KdfParams::from(rec_kdf))?;
@@ -508,7 +508,7 @@ impl KeyringLifecycle for DagVault {
             sealing,
             &rvk,
         )
-        .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
 
         // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
@@ -538,18 +538,18 @@ impl KeyringLifecycle for DagVault {
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Rekeyed, SealerError> {
+    ) -> Result<Rekeyed, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let FoldedSealing { escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
@@ -557,11 +557,11 @@ impl KeyringLifecycle for DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let old_kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(old_kdf)?;
         let old_root = derive_root(old_passphrase.expose(), &KdfParams::from(old_kdf))?;
         if old_root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
@@ -593,7 +593,7 @@ impl KeyringLifecycle for DagVault {
             sealing,
             &old_root.identity,
         )
-        .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
 
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Rekeyed {
@@ -609,13 +609,13 @@ impl DagVault {
     /// (the op-DAG is a set-union CRDT), so concurrent membership branches both survive and resolve
     /// deterministically. The host calls this to fold in a peer's anchor before persisting + re-watermarking;
     /// a following `unlock` reports `needs_reseal` if the merged write epoch is stale (see [`Self::reseal`]).
-    pub fn merge(&self, local: &[u8], remote: &[u8]) -> Result<Vec<u8>, SealerError> {
-        dag_client::merge(local, remote).map_err(|e| SealerError::BadKeyring(e.to_string()))
+    pub fn merge(&self, local: &[u8], remote: &[u8]) -> Result<Vec<u8>, VaultError> {
+        dag_client::merge(local, remote).map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
     /// alongside the anchor and passes back as the floor on the next mutation. Opaque bytes to every caller.
-    pub fn watermark(&self, anchor: &[u8]) -> Result<Vec<u8>, SealerError> {
+    pub fn watermark(&self, anchor: &[u8]) -> Result<Vec<u8>, VaultError> {
         dag_client::watermark(anchor).map_err(map_floor_err)
     }
 
@@ -633,16 +633,16 @@ impl DagVault {
         role: KeyringRole,
         new_member_author_public: [u8; 32],
         new_member_hpke_public: [u8; 32],
-    ) -> Result<Vec<u8>, SealerError> {
+    ) -> Result<Vec<u8>, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let owner_id = ctx.member_id.as_str();
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let FoldedSealing { epochs, escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
@@ -650,11 +650,11 @@ impl DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(kdf)?;
         let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
@@ -698,7 +698,7 @@ impl DagVault {
             sealing,
             &root.identity,
         )
-        .map_err(|e| SealerError::BadKeyring(e.to_string()))
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// Unlock as an ORDINARY member (not the owner): resolve the keyring, find `ctx.member_id`, derive their
@@ -711,19 +711,19 @@ impl DagVault {
         anchor: &[u8],
         passphrase: &Passphrase,
         member_kdf: &KdfParams,
-    ) -> Result<Unlocked, SealerError> {
+    ) -> Result<Unlocked, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let me = resolved
             .members
             .members
             .iter()
             .find(|m| m.member_id == member_id)
-            .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
         let FoldedSealing { epochs, write_key_id, needs_reseal, needs_backfill, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         validate_kdf(&CoreKdf::from(member_kdf))?;
@@ -738,7 +738,7 @@ impl DagVault {
             .author_public_key
             .as_slice()
             .try_into()
-            .map_err(|_| SealerError::BadKeyring("member key is not 32 bytes".into()))?;
+            .map_err(|_| VaultError::BadKeyring("member key is not 32 bytes".into()))?;
         Ok(Unlocked {
             sealer,
             // A member unlock reports the same frontier watermark as the owner path (anti-rollback is not
@@ -760,16 +760,16 @@ impl DagVault {
         anchor: &[u8],
         owner_passphrase: &Passphrase,
         remove_member_id: &str,
-    ) -> Result<Vec<u8>, SealerError> {
+    ) -> Result<Vec<u8>, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let owner_id = ctx.member_id.as_str();
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let FoldedSealing { epochs, escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
@@ -778,11 +778,11 @@ impl DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(kdf)?;
         let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
@@ -796,7 +796,7 @@ impl DagVault {
             .iter()
             .map(|e| e.epoch)
             .max()
-            .map_or(Ok(0), |m| m.checked_add(1).ok_or(SealerError::RevisionOverflow))?;
+            .map_or(Ok(0), |m| m.checked_add(1).ok_or(VaultError::RevisionOverflow))?;
         let mut wraps = vec![rrk_wrap_epoch(
             &escrow.public_key,
             &new_dek,
@@ -827,7 +827,7 @@ impl DagVault {
         }
         .to_bytes();
         dag_client::append_remove(anchor, owner_id, remove_member_id, sealing, &root.identity)
-            .map_err(|e| SealerError::BadKeyring(e.to_string()))
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// Repair a stale write epoch (OPE-282): if the resolved keyring `needs_reseal` — a concurrent
@@ -843,17 +843,17 @@ impl DagVault {
         anchor: &[u8],
         owner_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Resealed, SealerError> {
+    ) -> Result<Resealed, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let FoldedSealing {
             epochs,
             escrow,
@@ -876,11 +876,11 @@ impl DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(kdf)?;
         let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
@@ -891,7 +891,7 @@ impl DagVault {
         let owner_id = founder.member_id.as_str();
         let sealing = covering_reseal_sealing(tree_id, owner_id, &escrow, &resolved.members, &epochs)?;
         let new_anchor = dag_client::append_reseal(anchor, owner_id, sealing, &root.identity)
-            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Resealed {
             anchor: new_anchor,
@@ -914,18 +914,18 @@ impl DagVault {
         passphrase: &Passphrase,
         member_kdf: &KdfParams,
         floor: &[u8],
-    ) -> Result<Resealed, SealerError> {
+    ) -> Result<Resealed, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let owner_id = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?
             .member_id
             .clone();
         let me = resolved
@@ -933,7 +933,7 @@ impl DagVault {
             .members
             .iter()
             .find(|m| m.member_id == member_id)
-            .ok_or_else(|| SealerError::BadKeyring("not a member of this tree".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
         let FoldedSealing {
             epochs,
             escrow,
@@ -961,7 +961,7 @@ impl DagVault {
         // The member authors + signs the op; the RRK wrap stays keyed to the owner (its holder).
         let sealing = covering_reseal_sealing(tree_id, &owner_id, &escrow, &resolved.members, &epochs)?;
         let new_anchor = dag_client::append_reseal(anchor, member_id, sealing, &root.identity)
-            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Resealed {
             anchor: new_anchor,
@@ -983,18 +983,18 @@ impl DagVault {
         anchor: &[u8],
         owner_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Backfilled, SealerError> {
+    ) -> Result<Backfilled, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let owner_id = ctx.member_id.as_str();
 
         dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
 
         let resolved =
-            dag_client::resolve(anchor).map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let founder = resolved
             .members
             .owner()
-            .ok_or_else(|| SealerError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
         let FoldedSealing {
             epochs,
             escrow,
@@ -1003,7 +1003,7 @@ impl DagVault {
         } = fold_sealing(&resolved.sealing, &resolved.members)?;
 
         // Idempotent: every retained epoch already wraps every resolved member → nothing to do.
-        let unchanged = || -> Result<Backfilled, SealerError> {
+        let unchanged = || -> Result<Backfilled, VaultError> {
             Ok(Backfilled {
                 watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
                 anchor: anchor.to_vec(),
@@ -1020,11 +1020,11 @@ impl DagVault {
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = pass_wrap
             .kdf
             .as_ref()
-            .ok_or_else(|| SealerError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
         validate_kdf(kdf)?;
         let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
@@ -1079,7 +1079,7 @@ impl DagVault {
         }
         .to_bytes();
         let new_anchor = dag_client::append_backfill(anchor, owner_id, sealing, &root.identity)
-            .map_err(|e| SealerError::BadKeyring(e.to_string()))?;
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Backfilled {
             anchor: new_anchor,
@@ -1622,7 +1622,7 @@ mod tests {
             &re.watermark,
         );
         assert!(
-            matches!(rolled_back, Err(SealerError::WatermarkRollback { .. })),
+            matches!(rolled_back, Err(VaultError::WatermarkRollback { .. })),
             "a stale anchor below the floor is refused"
         );
 
@@ -1635,7 +1635,7 @@ mod tests {
             &[1, 2, 3],
         );
         assert!(
-            matches!(bad_floor, Err(SealerError::MalformedWatermark)),
+            matches!(bad_floor, Err(VaultError::MalformedWatermark)),
             "a corrupt floor is refused"
         );
     }

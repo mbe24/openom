@@ -25,7 +25,8 @@ use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
-use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
+use crate::VaultError;
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
 use openom_keyring_seam::EngineKind;
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
@@ -200,7 +201,9 @@ fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
     Ok(n as u64)
 }
 
-fn to_js(e: SealerError) -> JsError {
+// Generic over Display so it maps BOTH the vault flows' `VaultError` and a running sealer's lean
+// `SealerError` (seal/open) — the veneer surfaces either as an opaque JS error string.
+fn to_js(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
 

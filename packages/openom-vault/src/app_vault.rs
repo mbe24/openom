@@ -20,8 +20,7 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::lifecycle::ChainVault;
-use crate::DagVault;
-use openom_sealer::SealerError;
+use crate::{DagVault, VaultError};
 
 /// The two keyring engines behind one dispatch point. Zero-sized selectors, so an `AppVault` is just its
 /// discriminant — the engine choice carried by the type, not held state.
@@ -64,7 +63,7 @@ impl KeyringLifecycle for AppVault {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
-    ) -> Result<Provisioned, SealerError> {
+    ) -> Result<Provisioned, VaultError> {
         match self {
             AppVault::Chain(v) => v.provision(ctx, passphrase),
             AppVault::Dag(v) => v.provision(ctx, passphrase),
@@ -76,7 +75,7 @@ impl KeyringLifecycle for AppVault {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
-    ) -> Result<Unlocked, SealerError> {
+    ) -> Result<Unlocked, VaultError> {
         match self {
             AppVault::Chain(v) => v.unlock(ctx, anchor, passphrase),
             AppVault::Dag(v) => v.unlock(ctx, anchor, passphrase),
@@ -90,7 +89,7 @@ impl KeyringLifecycle for AppVault {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Recovered, SealerError> {
+    ) -> Result<Recovered, VaultError> {
         match self {
             AppVault::Chain(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
             AppVault::Dag(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
@@ -104,7 +103,7 @@ impl KeyringLifecycle for AppVault {
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Rekeyed, SealerError> {
+    ) -> Result<Rekeyed, VaultError> {
         match self {
             AppVault::Chain(v) => {
                 v.change_passphrase(ctx, anchor, old_passphrase, new_passphrase, floor)

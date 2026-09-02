@@ -39,7 +39,8 @@ use crate::vault_core::{
     owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealed_epochs,
     sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, HPKE, PASSPHRASE, RECOVERY,
 };
-use openom_sealer::{SealerError, SealerSet};
+use crate::VaultError;
+use openom_sealer::SealerSet;
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
@@ -58,11 +59,11 @@ fn dek_hash(dek: &[u8]) -> Vec<u8> {
 /// the recover watermark's epoch pin (OPE-286). The DEKs come from a VERIFIED open, so this witnesses the
 /// real key material. Used by the membership flows so a chain add/remove carries the pin forward (an add
 /// leaves the write epoch unchanged; a removal mints a fresh one that this then commits to).
-fn write_epoch_pin(deks: &[(Vec<u8>, u32, Dek)]) -> Result<(Vec<u8>, Vec<u8>), SealerError> {
+fn write_epoch_pin(deks: &[(Vec<u8>, u32, Dek)]) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
     deks.iter()
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
-        .ok_or(SealerError::MissingWrap)
+        .ok_or(VaultError::MissingWrap)
 }
 
 
@@ -135,7 +136,7 @@ pub fn provision(
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
-) -> Result<Provisioned, SealerError> {
+) -> Result<Provisioned, VaultError> {
     let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
@@ -219,7 +220,7 @@ pub fn unlock(
     tree_id: &TreeId,
     member_id: &MemberId,
     replica_id: &ReplicaId,
-) -> Result<Unlocked, SealerError> {
+) -> Result<Unlocked, VaultError> {
     let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
@@ -249,7 +250,7 @@ pub fn unlock(
         .iter()
         .find(|(k, _)| *k == write_key_id)
         .map(|(_, d)| dek_hash(&d[..]))
-        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
     let attributed = openom_keyring::epoch_is_attributed(&keyring, &write_key_id);
     let mut sealer = SealerSet::new(
         TreeId::new(tree_id),
@@ -296,18 +297,18 @@ pub fn recover(
     // epoch set (OPE-286).
     expected_write_key_id: &[u8],
     expected_dek_hash: &[u8],
-) -> Result<Recovered, SealerError> {
+) -> Result<Recovered, VaultError> {
     let new_passphrase = new_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
     let mut keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
-        return Err(SealerError::TreeMismatch);
+        return Err(VaultError::TreeMismatch);
     }
     // Refuse a rollback BEFORE unwrapping (recovery has no signature to catch it).
     if keyring.revision < min_revision {
-        return Err(SealerError::RevisionRollback {
+        return Err(VaultError::RevisionRollback {
             have: min_revision,
             got: keyring.revision,
         });
@@ -319,9 +320,9 @@ pub fn recover(
             .wraps
             .iter()
             .find(|w| w.wrap_method == RECOVERY)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = w.kdf_params.clone().ok_or_else(|| {
-            SealerError::BadKeyring("rrk recovery wrap missing kdf_params".into())
+            VaultError::BadKeyring("rrk recovery wrap missing kdf_params".into())
         })?;
         (
             rk.public_key.clone(),
@@ -345,7 +346,7 @@ pub fn recover(
     let new_revision = min_revision
         .max(keyring.revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
     let prev_hash = keyring_hash(&keyring).to_vec();
     let secrets = new_owner_secrets(new_passphrase)?;
 
@@ -371,7 +372,7 @@ pub fn recover(
         let mut seen = std::collections::HashSet::new();
         for (k, _, _) in &deks {
             if !seen.insert(k.clone()) {
-                return Err(SealerError::BadKeyring("duplicate epoch key_id".into()));
+                return Err(VaultError::BadKeyring("duplicate epoch key_id".into()));
             }
         }
     }
@@ -388,7 +389,7 @@ pub fn recover(
         let (k, _, d) = deks
             .iter()
             .max_by_key(|(_, e, _)| *e)
-            .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?;
         (k.clone(), dek_hash(d.expose()))
     } else {
         deks.iter()
@@ -397,7 +398,7 @@ pub fn recover(
                     && dek_hash(d.expose()).as_slice() == expected_dek_hash
             })
             .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
-            .ok_or_else(|| SealerError::WatermarkRollback {
+            .ok_or_else(|| VaultError::WatermarkRollback {
                 detail: "the watermarked write epoch (key_id + DEK material) is absent from the served keyring"
                     .into(),
             })?
@@ -440,7 +441,7 @@ pub fn change_passphrase(
     tree_id: &TreeId,
     member_id: &MemberId,
     min_revision: u32,
-) -> Result<Rekeyed, SealerError> {
+) -> Result<Rekeyed, VaultError> {
     let old_passphrase = old_passphrase.expose();
     let new_passphrase = new_passphrase.expose();
     let tree_id = tree_id.as_bytes();
@@ -457,7 +458,7 @@ pub fn change_passphrase(
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
     let secrets = new_owner_secrets(new_passphrase)?;
 
     let rrk_public = recovery_key_for(&keyring, member_id)?.public_key.clone();
@@ -478,7 +479,7 @@ pub fn change_passphrase(
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
-        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
     Ok(Rekeyed {
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
@@ -500,7 +501,7 @@ pub fn rotate_recovery(
     tree_id: &TreeId,
     member_id: &MemberId,
     min_revision: u32,
-) -> Result<Rekeyed, SealerError> {
+) -> Result<Rekeyed, VaultError> {
     let passphrase = passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
@@ -515,14 +516,14 @@ pub fn rotate_recovery(
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
     // Commit the (unchanged) write epoch's key MATERIAL for the watermark, opened via the OLD RRK before the
     // epochs are re-wrapped onto the new one (the DEKs themselves are untouched by a rotation) (OPE-286).
     let write_dek_hash = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &old_rrk)?
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
-        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
 
     // The OLD recovery authority signs the rotation (proof of possession of the current recovery secret).
     let old_rvk = openom_crypto::derive_rvk(old_rrk.expose());
@@ -541,7 +542,7 @@ pub fn rotate_recovery(
         .iter()
         .find(|w| w.wrap_method == PASSPHRASE)
         .and_then(|w| w.kdf_params.clone())
-        .ok_or_else(|| SealerError::BadKeyring("recovery key has no passphrase wrap".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("recovery key has no passphrase wrap".into()))?;
     let secrets = owner_secrets_reusing_pass_kdf(passphrase, CoreKdf::from(&current_pass_kdf))?;
 
     // Move the founder's cross-epoch access onto the new RRK, then swap in the new RecoveryKey (new RRK
@@ -579,7 +580,7 @@ pub struct MemberProvision {
 /// Provision a member identity from a passphrase: derive the account's signing + HPKE
 /// keypairs and return the public keys (to share OOB) plus the KDF params (to persist).
 /// The secrets are never returned — they re-derive from the passphrase on unlock.
-pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, SealerError> {
+pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, VaultError> {
     let passphrase = passphrase.expose();
     let kdf = default_kdf_params(generate_salt()?.to_vec());
     let root = derive_root(passphrase, &kdf)?;
@@ -616,7 +617,7 @@ pub fn add_member(
     role: MemberRole,
     member_hpke_public: &[u8],
     member_author_public: &[u8],
-) -> Result<MemberAdded, SealerError> {
+) -> Result<MemberAdded, VaultError> {
     let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
@@ -634,12 +635,12 @@ pub fn add_member(
     if new_member_id == owner_member_id
         || keyring.members.iter().any(|m| m.member_id == new_member_id)
     {
-        return Err(SealerError::MemberExists);
+        return Err(VaultError::MemberExists);
     }
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     // The owner reaches every epoch's DEK via the RRK; wrap them all for the new member so
     // they see the full history.
@@ -675,7 +676,7 @@ pub fn add_member_as_co_owner(
     role: MemberRole,
     member_hpke_public: &[u8],
     member_author_public: &[u8],
-) -> Result<MemberAdded, SealerError> {
+) -> Result<MemberAdded, VaultError> {
     let co_owner_passphrase = co_owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let co_owner_member_id = co_owner_member_id.as_str();
@@ -696,12 +697,12 @@ pub fn add_member_as_co_owner(
             .iter()
             .any(|m| m.member_id == new_member_id)
     {
-        return Err(SealerError::MemberExists);
+        return Err(VaultError::MemberExists);
     }
     let new_revision = min_revision
         .max(acc.revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
     let deks =
         member_epoch_deks(&sealed_epochs(&acc.keyring.epochs), tree_id, co_owner_member_id, &acc.hpke_secret)?;
     do_add_member(
@@ -732,17 +733,17 @@ pub fn unlock_as_member(
     trusted_signers: &[VerifyingKey],
     replica_id: &ReplicaId,
     min_revision: u32,
-) -> Result<Unlocked, SealerError> {
+) -> Result<Unlocked, VaultError> {
     let member_passphrase = member_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let member_id = member_id.as_str();
     let replica_id = replica_id.as_bytes();
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
-        return Err(SealerError::TreeMismatch);
+        return Err(VaultError::TreeMismatch);
     }
     if keyring.revision < min_revision {
-        return Err(SealerError::RevisionRollback {
+        return Err(VaultError::RevisionRollback {
             have: min_revision,
             got: keyring.revision,
         });
@@ -762,7 +763,7 @@ pub fn unlock_as_member(
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
-        .ok_or_else(|| SealerError::BadKeyring("write epoch not in the reachable set".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
@@ -803,7 +804,7 @@ pub fn remove_member(
     min_revision: u32,
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
-) -> Result<MemberRemoved, SealerError> {
+) -> Result<MemberRemoved, VaultError> {
     let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
@@ -819,19 +820,19 @@ pub fn remove_member(
     } = open_with_passphrase(keyring_bytes, owner_passphrase, tree_id, owner_member_id)?;
 
     if remove_member_id == owner_member_id {
-        return Err(SealerError::CannotRemoveOwner);
+        return Err(VaultError::CannotRemoveOwner);
     }
     if !keyring
         .members
         .iter()
         .any(|m| m.member_id == remove_member_id)
     {
-        return Err(SealerError::MemberNotFound);
+        return Err(VaultError::MemberNotFound);
     }
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     let (keyring, _new_key_id) = do_remove_member(
         keyring,
@@ -873,7 +874,7 @@ pub fn remove_member_as_co_owner(
     min_revision: u32,
     remove_member_id: &MemberId,
     replica_id: &ReplicaId,
-) -> Result<MemberRemoved, SealerError> {
+) -> Result<MemberRemoved, VaultError> {
     let co_owner_passphrase = co_owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let co_owner_member_id = co_owner_member_id.as_str();
@@ -893,7 +894,7 @@ pub fn remove_member_as_co_owner(
         .iter()
         .any(|m| m.member_id == remove_member_id)
     {
-        return Err(SealerError::MemberNotFound);
+        return Err(VaultError::MemberNotFound);
     }
     // A co-owner can't remove a signer (co-owner/founder) — that's a founder-gated set change.
     if acc
@@ -902,12 +903,12 @@ pub fn remove_member_as_co_owner(
         .iter()
         .any(|s| s.member_id == remove_member_id)
     {
-        return Err(SealerError::NotAuthorized);
+        return Err(VaultError::NotAuthorized);
     }
     let new_revision = min_revision
         .max(acc.revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     let (keyring, _new_key_id) = do_remove_member(
         acc.keyring,
@@ -951,7 +952,7 @@ pub fn add_co_owner(
     founder_member_id: &MemberId,
     min_revision: u32,
     target_member_id: &MemberId,
-) -> Result<CoOwnerChanged, SealerError> {
+) -> Result<CoOwnerChanged, VaultError> {
     let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
@@ -975,16 +976,16 @@ pub fn add_co_owner(
         .iter()
         .any(|s| s.member_id == target_member_id)
     {
-        return Err(SealerError::MemberExists);
+        return Err(VaultError::MemberExists);
     }
     let author_pub = {
         let m = keyring
             .members
             .iter()
             .find(|m| m.member_id == target_member_id)
-            .ok_or(SealerError::MemberNotFound)?;
+            .ok_or(VaultError::MemberNotFound)?;
         if m.author_public_key.is_empty() {
-            return Err(SealerError::BadKeyring(
+            return Err(VaultError::BadKeyring(
                 "member has no author key to sign with".into(),
             ));
         }
@@ -993,7 +994,7 @@ pub fn add_co_owner(
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     if let Some(m) = keyring
         .members
@@ -1031,7 +1032,7 @@ pub fn remove_co_owner(
     min_revision: u32,
     target_member_id: &MemberId,
     new_role: MemberRole,
-) -> Result<CoOwnerChanged, SealerError> {
+) -> Result<CoOwnerChanged, VaultError> {
     let founder_passphrase = founder_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let founder_member_id = founder_member_id.as_str();
@@ -1040,7 +1041,7 @@ pub fn remove_co_owner(
         new_role,
         MemberRole::Unspecified | MemberRole::Owner | MemberRole::CoOwner
     ) {
-        return Err(SealerError::BadKeyring(
+        return Err(VaultError::BadKeyring(
             "demote target must be admin/editor/viewer".into(),
         ));
     }
@@ -1058,19 +1059,19 @@ pub fn remove_co_owner(
     )?;
 
     if target_member_id == founder_member_id {
-        return Err(SealerError::CannotRemoveOwner);
+        return Err(VaultError::CannotRemoveOwner);
     }
     let is_co_owner = keyring
         .authorized_signers
         .iter()
         .any(|s| s.member_id == target_member_id && s.role == CO_OWNER_SIGNER);
     if !is_co_owner {
-        return Err(SealerError::MemberNotFound);
+        return Err(VaultError::MemberNotFound);
     }
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     keyring
         .authorized_signers
@@ -1118,10 +1119,10 @@ fn open_with_passphrase(
     passphrase: &[u8],
     tree_id: &[u8],
     member_id: &str,
-) -> Result<Opened, SealerError> {
+) -> Result<Opened, VaultError> {
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
-        return Err(SealerError::TreeMismatch);
+        return Err(VaultError::TreeMismatch);
     }
     // The owner reaches DEKs through the recovery root key: find its passphrase wrap.
     let (kdf, nonce, wrapped) = {
@@ -1130,9 +1131,9 @@ fn open_with_passphrase(
             .wraps
             .iter()
             .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(SealerError::MissingWrap)?;
+            .ok_or(VaultError::MissingWrap)?;
         let kdf = w.kdf_params.clone().ok_or_else(|| {
-            SealerError::BadKeyring("rrk passphrase wrap missing kdf_params".into())
+            VaultError::BadKeyring("rrk passphrase wrap missing kdf_params".into())
         })?;
         (kdf, w.nonce.clone(), w.wrapped_dek.clone())
     };
@@ -1160,7 +1161,7 @@ fn open_with_passphrase(
         .epochs
         .iter()
         .max_by_key(|e| e.epoch)
-        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?
+        .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?
         .key_id
         .clone();
     let prev_hash = keyring_hash(&keyring).to_vec();
@@ -1175,21 +1176,21 @@ fn open_with_passphrase(
     })
 }
 
-fn decode_keyring(bytes: &[u8]) -> Result<Keyring, SealerError> {
+fn decode_keyring(bytes: &[u8]) -> Result<Keyring, VaultError> {
     if bytes.len() > MAX_KEYRING_BYTES {
-        return Err(SealerError::BadKeyring("too large".into()));
+        return Err(VaultError::BadKeyring("too large".into()));
     }
-    Keyring::decode(bytes).map_err(|e| SealerError::BadKeyring(e.to_string()))
+    Keyring::decode(bytes).map_err(|e| VaultError::BadKeyring(e.to_string()))
 }
 
 /// `add_member` may only create an *ordinary* member — owner and co-owner are signer roles,
 /// reached via provision / `add_co_owner`.
-fn guard_ordinary_role(role: MemberRole) -> Result<(), SealerError> {
+fn guard_ordinary_role(role: MemberRole) -> Result<(), VaultError> {
     if matches!(
         role,
         MemberRole::Unspecified | MemberRole::Owner | MemberRole::CoOwner
     ) {
-        return Err(SealerError::BadKeyring(
+        return Err(VaultError::BadKeyring(
             "member role must be admin/editor/viewer".into(),
         ));
     }
@@ -1217,10 +1218,10 @@ fn open_as_co_owner(
     tree_id: &[u8],
     member_id: &str,
     trusted_signers: &[VerifyingKey],
-) -> Result<CoOwnerAccess, SealerError> {
+) -> Result<CoOwnerAccess, VaultError> {
     let keyring = decode_keyring(keyring_bytes)?;
     if keyring.tree_id != tree_id {
-        return Err(SealerError::TreeMismatch);
+        return Err(VaultError::TreeMismatch);
     }
     // Anti-substitution anchor: the keyring's founder entry must match a key the co-owner
     // pinned out-of-band, so the server can't swap the whole signer set. The revision itself
@@ -1245,7 +1246,7 @@ fn open_as_co_owner(
         .iter()
         .any(|s| s.member_id == member_id && s.role == CO_OWNER_SIGNER && s.public_key == my_pub);
     if !authorized {
-        return Err(SealerError::NotAuthorized);
+        return Err(VaultError::NotAuthorized);
     }
     let prev_hash = keyring_hash(&keyring).to_vec();
     let revision = keyring.revision;
@@ -1275,13 +1276,13 @@ fn authorized_verify_keys(keyring: &Keyring) -> Vec<VerifyingKey> {
 
 /// Founder identity's member id (needed to locate the RRK wrap and skip the founder — who
 /// has no per-epoch member wrap — when re-wrapping a new epoch).
-fn founder_member_id(keyring: &Keyring) -> Result<String, SealerError> {
+fn founder_member_id(keyring: &Keyring) -> Result<String, VaultError> {
     keyring
         .authorized_signers
         .iter()
         .find(|s| s.role == FOUNDER)
         .map(|s| s.member_id.clone())
-        .ok_or_else(|| SealerError::BadKeyring("no founder".into()))
+        .ok_or_else(|| VaultError::BadKeyring("no founder".into()))
 }
 
 /// The core of adding a member: HPKE-wrap each reachable epoch's DEK to them, record them in
@@ -1299,7 +1300,7 @@ fn do_add_member(
     role: MemberRole,
     member_hpke_public: &[u8],
     member_author_public: &[u8],
-) -> Result<MemberAdded, SealerError> {
+) -> Result<MemberAdded, VaultError> {
     for (key_id, epoch, dek) in deks {
         let info = wrap_aad(tree_id, key_id, new_member_id, HPKE);
         let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
@@ -1307,7 +1308,7 @@ fn do_add_member(
             .epochs
             .iter_mut()
             .find(|e| e.epoch == *epoch)
-            .ok_or_else(|| SealerError::BadKeyring("epoch vanished".into()))?;
+            .ok_or_else(|| VaultError::BadKeyring("epoch vanished".into()))?;
         ep.wraps.push(KeyWrap {
             member_id: new_member_id.to_string(),
             wrap_method: HPKE,
@@ -1351,19 +1352,19 @@ fn do_remove_member(
     identity: &SigningKey,
     prev_hash: Vec<u8>,
     new_revision: u32,
-) -> Result<(Keyring, Vec<u8>), SealerError> {
+) -> Result<(Keyring, Vec<u8>), VaultError> {
     let founder_id = founder_member_id(&keyring)?;
     let old_epoch = keyring
         .epochs
         .iter()
         .map(|e| e.epoch)
         .max()
-        .ok_or_else(|| SealerError::BadKeyring("no epochs".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?;
     let new_dek = generate_dek()?;
     let new_key_id = generate_salt()?.to_vec();
     let new_epoch = old_epoch
         .checked_add(1)
-        .ok_or(SealerError::RevisionOverflow)?;
+        .ok_or(VaultError::RevisionOverflow)?;
 
     let rrk_public = recovery_key_for(&keyring, &founder_id)?.public_key.clone();
     let mut wraps = vec![KeyWrap::from(&rrk_wrap_epoch(
@@ -1413,12 +1414,12 @@ fn do_remove_member(
 fn recovery_key_for<'a>(
     keyring: &'a Keyring,
     member_id: &str,
-) -> Result<&'a RecoveryKey, SealerError> {
+) -> Result<&'a RecoveryKey, VaultError> {
     keyring
         .recovery_keys
         .iter()
         .find(|r| r.member_id == member_id)
-        .ok_or(SealerError::MissingWrap)
+        .ok_or(VaultError::MissingWrap)
 }
 
 /// Replace the founder's recovery key entry in place (used by change_passphrase / recover).
@@ -1460,7 +1461,8 @@ mod tests {
         provision_member, recover, remove_co_owner, remove_member, remove_member_as_co_owner,
         rotate_recovery, unlock, unlock_as_member,
     };
-    use openom_sealer::{EntryKind, SealContext, SealerError, SealerSet};
+    use crate::VaultError;
+    use openom_sealer::{EntryKind, SealContext, SealerSet};
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
     use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
@@ -1735,7 +1737,7 @@ mod tests {
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::TreeMismatch)
+            Err(VaultError::TreeMismatch)
         ));
     }
 
@@ -1853,7 +1855,7 @@ mod tests {
             &[],
             &[],
         ),
-            Err(SealerError::RevisionRollback { .. })
+            Err(VaultError::RevisionRollback { .. })
         ));
     }
 
@@ -1897,13 +1899,13 @@ mod tests {
         // check is symmetric to an attacker forging a DEK under the pinned key_id — the served DEK's hash
         // won't match either way; here we express it as a watermark committing a different H(DEK).)
         assert!(
-            matches!(rec(&p.keyring, &u.write_key_id, &[0xFFu8; 32]), Err(SealerError::WatermarkRollback { .. })),
+            matches!(rec(&p.keyring, &u.write_key_id, &[0xFFu8; 32]), Err(VaultError::WatermarkRollback { .. })),
             "an epoch whose DEK doesn't match the committed hash is refused",
         );
 
         // (3) TRUNCATION: the pinned key_id is absent from the served keyring → refused.
         assert!(
-            matches!(rec(&p.keyring, &[0u8; 16], &u.write_dek_hash), Err(SealerError::WatermarkRollback { .. })),
+            matches!(rec(&p.keyring, &[0u8; 16], &u.write_dek_hash), Err(VaultError::WatermarkRollback { .. })),
             "an absent pinned write epoch is refused",
         );
 
@@ -1913,7 +1915,7 @@ mod tests {
         let e0 = dup.epochs[0].clone();
         dup.epochs.push(e0);
         assert!(
-            matches!(rec(&dup.encode_to_vec(), &u.write_key_id, &u.write_dek_hash), Err(SealerError::BadKeyring(_))),
+            matches!(rec(&dup.encode_to_vec(), &u.write_key_id, &u.write_dek_hash), Err(VaultError::BadKeyring(_))),
             "a duplicate epoch key_id is refused",
         );
 
@@ -1946,7 +1948,7 @@ mod tests {
             &[],
             &[],
         ),
-            Err(SealerError::RevisionOverflow)
+            Err(VaultError::RevisionOverflow)
         ));
     }
 
@@ -2059,7 +2061,7 @@ mod tests {
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::BadKdfParams)
+            Err(VaultError::BadKdfParams)
         ));
     }
 
@@ -2272,7 +2274,7 @@ mod tests {
                 &m.hpke_public,
                 &m.author_public
             ),
-            Err(SealerError::MemberExists)
+            Err(VaultError::MemberExists)
         ));
         // ...and the owner can't be re-added under their own id either.
         assert!(matches!(
@@ -2287,7 +2289,7 @@ mod tests {
                 &m.hpke_public,
                 &m.author_public
             ),
-            Err(SealerError::MemberExists)
+            Err(VaultError::MemberExists)
         ));
     }
 
@@ -2385,7 +2387,7 @@ mod tests {
                 &ReplicaId::new(b"r"),
                 0
             ),
-            Err(SealerError::MissingWrap)
+            Err(VaultError::MissingWrap)
         ));
 
         // B (remaining) unlocks the new epoch and reads the owner's post-removal content.
@@ -2819,7 +2821,7 @@ mod tests {
                 0,
                 &MemberId::new(MEMBER2)
             ),
-            Err(SealerError::MemberExists)
+            Err(VaultError::MemberExists)
         ));
         assert!(matches!(
             add_co_owner(
@@ -2830,7 +2832,7 @@ mod tests {
                 0,
                 &MemberId::new("nobody")
             ),
-            Err(SealerError::MemberNotFound)
+            Err(VaultError::MemberNotFound)
         ));
 
         // Demote back to viewer: removed from signers, role changed.
@@ -2861,7 +2863,7 @@ mod tests {
                 &MemberId::new(MEMBER2),
                 MemberRole::Viewer
             ),
-            Err(SealerError::MemberNotFound)
+            Err(VaultError::MemberNotFound)
         ));
     }
 
@@ -3011,7 +3013,7 @@ mod tests {
                 &ReplicaId::new(b"r"),
                 0
             ),
-            Err(SealerError::MissingWrap)
+            Err(VaultError::MissingWrap)
         ));
         let ou = unlock(
             &removed.keyring,
@@ -3066,7 +3068,7 @@ mod tests {
                 &m3.hpke_public,
                 &m3.author_public
             ),
-            Err(SealerError::NotAuthorized)
+            Err(VaultError::NotAuthorized)
         ));
         assert!(matches!(
             remove_member_as_co_owner(
@@ -3080,7 +3082,7 @@ mod tests {
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::NotAuthorized)
+            Err(VaultError::NotAuthorized)
         ));
     }
 
@@ -3151,7 +3153,7 @@ mod tests {
                 &MemberId::new(MEMBER3),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::NotAuthorized)
+            Err(VaultError::NotAuthorized)
         ));
         assert!(matches!(
             remove_member_as_co_owner(
@@ -3165,7 +3167,7 @@ mod tests {
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::NotAuthorized)
+            Err(VaultError::NotAuthorized)
         ));
     }
 
@@ -3276,7 +3278,7 @@ mod tests {
                 &MemberId::new(MEMBER),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::CannotRemoveOwner)
+            Err(VaultError::CannotRemoveOwner)
         ));
         assert!(matches!(
             remove_member(
@@ -3288,7 +3290,7 @@ mod tests {
                 &MemberId::new("nobody"),
                 &ReplicaId::new(b"r")
             ),
-            Err(SealerError::MemberNotFound)
+            Err(VaultError::MemberNotFound)
         ));
     }
 

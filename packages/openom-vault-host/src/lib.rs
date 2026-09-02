@@ -117,16 +117,33 @@ impl std::fmt::Display for VaultError {
 }
 impl std::error::Error for VaultError {}
 
+/// The lean DEK-session (envelope) errors — from a running sealer's seal/open.
 impl From<SealerError> for VaultError {
     fn from(e: SealerError) -> Self {
-        use SealerError as E;
+        VaultError::new(sealer_code(&e), e.to_string())
+    }
+}
+
+fn sealer_code(e: &SealerError) -> VaultErrorCode {
+    use SealerError as E;
+    use VaultErrorCode as C;
+    match e {
+        E::Crypto(_) => C::CryptoOpen,
+        E::Decode(_) | E::NoHeader => C::BadEnvelope,
+        E::WrongScope => C::WrongScope,
+        E::EpochUnreachable => C::EpochUnreachable,
+        E::WrongKind => C::WrongKind,
+    }
+}
+
+/// The keyring / membership / anti-rollback errors — from the vault flows (openom-vault, OPE-279).
+impl From<openom_vault::VaultError> for VaultError {
+    fn from(e: openom_vault::VaultError) -> Self {
+        use openom_vault::VaultError as E;
         use VaultErrorCode as C;
         let code = match &e {
             E::Crypto(_) => C::CryptoOpen,
-            E::Decode(_) | E::NoHeader => C::BadEnvelope,
-            E::WrongScope => C::WrongScope,
-            E::EpochUnreachable => C::EpochUnreachable,
-            E::WrongKind => C::WrongKind,
+            E::Sealer(inner) => sealer_code(inner),
             E::BadKeyring(_) => C::BadKeyring,
             E::BadKdfParams => C::BadKdfParams,
             E::MissingWrap => C::MissingWrap,

@@ -20,19 +20,19 @@
 //! a trait method. (Gate amendment, recorded in the decision doc; revisit promoting `author` alone once
 //! the dag lifecycle — OPE-273 — exists and its authoring model is concrete.)
 //!
-//! **Why this lives in openom-sealer, not the seam crate.** Every result carries a [`SealerSet`] plus
+//! **Why this lives in openom-vault, not the seam crate.** Every result carries a [`SealerSet`] plus
 //! `RecoveryCode` / `DidKey` (client secret-handling types). The keyless `openom-keyring-seam` is the
 //! *server's* binding surface (roles only today) — putting these there would poison it with client crypto
-//! deps. So the trait lives with the sealer for now; its permanent home is a future `openom-vault` crate
-//! above both engines (OPE-279 extraction, after the dag vault lands — deliberately not now, to avoid
-//! moving the wasm cdylib in front of OPE-273 while the trait shape is still settling).
+//! deps. So the trait's home is openom-vault: above both keyring engines and above the lean DEK-session
+//! sealer, which it uses only for [`SealerSet`] (OPE-279 extraction).
 
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_did::DidKey;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
 use crate::vault;
-use openom_sealer::{SealerError, SealerSet};
+use crate::VaultError;
+use openom_sealer::SealerSet;
 
 /// The tree + member context every lifecycle call needs: which tree is being operated on and who is
 /// acting. These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
@@ -105,7 +105,7 @@ pub trait KeyringLifecycle {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
-    ) -> Result<Provisioned, SealerError>;
+    ) -> Result<Provisioned, VaultError>;
 
     /// Re-open an existing tree from its trusted `anchor` + passphrase (returning / a new device).
     fn unlock(
@@ -113,7 +113,7 @@ pub trait KeyringLifecycle {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
-    ) -> Result<Unlocked, SealerError>;
+    ) -> Result<Unlocked, VaultError>;
 
     /// Recover with the recovery code, re-establishing owner access under `new_passphrase`, preserving
     /// members + epochs. `floor` is the caller's opaque anti-rollback watermark (the served anchor is
@@ -125,7 +125,7 @@ pub trait KeyringLifecycle {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Recovered, SealerError>;
+    ) -> Result<Recovered, VaultError>;
 
     /// Change the passphrase: re-wrap under a new KEK. The DEKs (and any running sealer) are unchanged, so
     /// the tree is not re-sealed. `floor` is the opaque anti-rollback watermark.
@@ -136,7 +136,7 @@ pub trait KeyringLifecycle {
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Rekeyed, SealerError>;
+    ) -> Result<Rekeyed, VaultError>;
 }
 
 /// The linear-chain engine's lifecycle — openom's shipping keyring. Its anchor is the signed `Keyring`
@@ -168,8 +168,8 @@ impl ChainVault {
     /// Decode an opaque `floor` to `(min_revision, expected_write_key_id, expected_dek_hash)`. Empty ⇒ no
     /// floor. 4 bytes ⇒ revision only (no epoch pin). The full `4 + KEY_ID_LEN + DEK_HASH_LEN` (52) form
     /// carries the pin. Any other length is a corrupt watermark and is refused
-    /// ([`SealerError::MalformedWatermark`]) — never silently dropped, which would drop protection.
-    fn floor(bytes: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>), SealerError> {
+    /// ([`VaultError::MalformedWatermark`]) — never silently dropped, which would drop protection.
+    fn floor(bytes: &[u8]) -> Result<(u32, Vec<u8>, Vec<u8>), VaultError> {
         if bytes.is_empty() {
             return Ok((0, Vec::new(), Vec::new()));
         }
@@ -181,7 +181,7 @@ impl ChainVault {
             let rev = u32::from_be_bytes(bytes[..4].try_into().expect("len checked"));
             return Ok((rev, bytes[4..4 + KEY_ID_LEN].to_vec(), bytes[4 + KEY_ID_LEN..].to_vec()));
         }
-        Err(SealerError::MalformedWatermark)
+        Err(VaultError::MalformedWatermark)
     }
 }
 
@@ -190,7 +190,7 @@ impl KeyringLifecycle for ChainVault {
         &self,
         ctx: &VaultContext,
         passphrase: &Passphrase,
-    ) -> Result<Provisioned, SealerError> {
+    ) -> Result<Provisioned, VaultError> {
         let p = vault::provision(passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Provisioned {
             anchor: p.keyring,
@@ -206,7 +206,7 @@ impl KeyringLifecycle for ChainVault {
         ctx: &VaultContext,
         anchor: &[u8],
         passphrase: &Passphrase,
-    ) -> Result<Unlocked, SealerError> {
+    ) -> Result<Unlocked, VaultError> {
         let u = vault::unlock(anchor, passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
         Ok(Unlocked {
             sealer: u.sealer,
@@ -224,7 +224,7 @@ impl KeyringLifecycle for ChainVault {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Recovered, SealerError> {
+    ) -> Result<Recovered, VaultError> {
         let (min_rev, expected_key_id, expected_dek_hash) = Self::floor(floor)?;
         let r = vault::recover(
             anchor,
@@ -255,7 +255,7 @@ impl KeyringLifecycle for ChainVault {
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
         floor: &[u8],
-    ) -> Result<Rekeyed, SealerError> {
+    ) -> Result<Rekeyed, VaultError> {
         let (min_rev, _, _) = Self::floor(floor)?;
         let re = vault::change_passphrase(
             anchor,
@@ -358,7 +358,7 @@ mod tests {
         assert_eq!(ChainVault::floor(&7u32.to_be_bytes()).unwrap().0, 7);
         assert!(matches!(
             ChainVault::floor(&[1, 2, 3]),
-            Err(SealerError::MalformedWatermark)
+            Err(VaultError::MalformedWatermark)
         ));
     }
 

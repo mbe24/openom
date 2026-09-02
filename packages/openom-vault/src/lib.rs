@@ -10,6 +10,9 @@
 //! Keeping this out of openom-sealer lets envelope-only consumers (e.g. openom-sync) depend on the lean
 //! sealer without transitively rebuilding both keyring engines.
 
+mod error;
+pub use error::VaultError;
+
 pub mod vault;
 mod vault_core;
 

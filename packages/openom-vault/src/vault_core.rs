@@ -9,8 +9,10 @@
 //! engine marshals these to its own persisted form: the chain via the `From` impls below (proto
 //! `KeyEpoch`/`KeyWrap`/`RecoveryKey`), the dag by serializing them into ops (OPE-273).
 //!
-//! It must never import `openom_keyring` or `keyeo` (a one-line CI grep enforces the neutrality). It DOES
-//! still touch `openom_protocol` for the `From` marshaling + the wrap AAD + the sealer's id types — that
+//! It must never import `openom_keyring` or `keyeo` — it stays the engine-neutral sealing core BOTH engines'
+//! vaults share (a discipline kept by review; there is no CI grep for it, despite an earlier comment's
+//! claim). It DOES still touch `openom_protocol` for the `From` marshaling + the wrap AAD + the sealer's id
+//! types — that
 //! residual proto coupling (and openom-crypto's own) is what OPE-283 removes to make this crate
 //! standalone-publishable; it is a non-API-breaking follow-on, since these signatures are already proto-free.
 
@@ -24,7 +26,8 @@ use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, KeyEpoch, KeyWrap, RecoveryKey, WrapMethod};
 use serde::{Deserialize, Serialize};
 
-use openom_sealer::{SealerError, SealerSet};
+use crate::VaultError;
+use openom_sealer::SealerSet;
 
 pub(crate) const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 pub(crate) const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
@@ -185,7 +188,7 @@ pub(crate) struct NewOwnerSecrets {
     pub(crate) recovery_kdf: CoreKdf,
 }
 
-pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, SealerError> {
+pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, VaultError> {
     let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
     let root = derive_root(new_passphrase, &pass_kdf)?;
     let recovery_code = generate_recovery_code()?;
@@ -208,7 +211,7 @@ pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets
 pub(crate) fn owner_secrets_reusing_pass_kdf(
     passphrase: &[u8],
     pass_kdf: CoreKdf,
-) -> Result<NewOwnerSecrets, SealerError> {
+) -> Result<NewOwnerSecrets, VaultError> {
     let root = derive_root(passphrase, &KdfParams::from(&pass_kdf))?;
     let recovery_code = generate_recovery_code()?;
     let entropy = parse_recovery_code(&recovery_code)?;
@@ -232,7 +235,7 @@ pub(crate) fn build_recovery_escrow(
     tree_id: &[u8],
     member_id: &str,
     s: &NewOwnerSecrets,
-) -> Result<RecoveryEscrow, SealerError> {
+) -> Result<RecoveryEscrow, VaultError> {
     let pass = wrap_rrk_secret(&s.root.kek, rrk_secret, tree_id, member_id, PASSPHRASE)?;
     let rec = wrap_rrk_secret(&s.recovery_kek, rrk_secret, tree_id, member_id, RECOVERY)?;
     Ok(RecoveryEscrow {
@@ -278,7 +281,7 @@ pub(crate) fn rrk_wrap_epoch(
     tree_id: &[u8],
     founder_id: &str,
     key_id: &[u8],
-) -> Result<CoreWrap, SealerError> {
+) -> Result<CoreWrap, VaultError> {
     let info = wrap_aad(tree_id, key_id, founder_id, RRK_HPKE);
     let w = hpke_wrap_dek(rrk_public, dek, &info)?;
     Ok(CoreWrap {
@@ -300,7 +303,7 @@ pub(crate) fn member_wrap_epoch(
     tree_id: &[u8],
     member_id: &str,
     key_id: &[u8],
-) -> Result<CoreWrap, SealerError> {
+) -> Result<CoreWrap, VaultError> {
     let info = wrap_aad(tree_id, key_id, member_id, HPKE);
     let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
     Ok(CoreWrap {
@@ -320,12 +323,12 @@ pub(crate) fn open_epoch_dek(
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
-) -> Result<Dek, SealerError> {
+) -> Result<Dek, VaultError> {
     let w = epoch
         .wraps
         .iter()
         .find(|w| w.wrap_method == RRK_HPKE)
-        .ok_or_else(|| SealerError::BadKeyring("epoch missing rrk wrap".into()))?;
+        .ok_or_else(|| VaultError::BadKeyring("epoch missing rrk wrap".into()))?;
     let info = wrap_aad(tree_id, &epoch.key_id, founder_id, RRK_HPKE);
     Ok(hpke_unwrap_dek(
         rrk_secret.expose(),
@@ -348,7 +351,7 @@ pub(crate) fn epoch_deks(
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
+) -> Result<Vec<(Vec<u8>, u32, Dek)>, VaultError> {
     Ok(epochs
         .iter()
         .filter_map(|ep| {
@@ -369,7 +372,7 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
     founder_id: &str,
     old_rrk: &RrkSecret,
     new_rrk_public: &[u8],
-) -> Result<Vec<SealedEpoch>, SealerError> {
+) -> Result<Vec<SealedEpoch>, VaultError> {
     epochs
         .iter()
         .map(|ep| {
@@ -400,7 +403,7 @@ pub(crate) fn member_epoch_deks(
     tree_id: &[u8],
     member_id: &str,
     hpke_secret: &HpkePrivate,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, SealerError> {
+) -> Result<Vec<(Vec<u8>, u32, Dek)>, VaultError> {
     let mut out = Vec::new();
     for ep in epochs {
         let info = wrap_aad(tree_id, &ep.key_id, member_id, HPKE);
@@ -428,7 +431,7 @@ pub(crate) fn sealer_set_from_deks(
     replica_id: &[u8],
     deks: Vec<(Vec<u8>, u32, Dek)>,
     write_key_id: Vec<u8>,
-) -> Result<SealerSet, SealerError> {
+) -> Result<SealerSet, VaultError> {
     // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
     let epochs = deks
         .into_iter()
@@ -446,17 +449,17 @@ pub(crate) fn sealer_set_from_deks(
 /// sequence, so ordinals never collide — no tiebreak is needed (unlike the dag, which breaks concurrent
 /// same-ordinal ties by minting op-id). Choosing the write epoch is the ENGINE's call, not the neutral
 /// core's, so it is threaded into [`sealer_set_from_deks`].
-pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u32, Dek)]) -> Result<Vec<u8>, SealerError> {
+pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u32, Dek)]) -> Result<Vec<u8>, VaultError> {
     deks.iter()
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, _)| k.clone())
-        .ok_or(SealerError::MissingWrap)
+        .ok_or(VaultError::MissingWrap)
 }
 
 /// Reject Argon2id `kdf` outside the window this build will run — a hostile keyring could otherwise
 /// OOM/CPU-burn the client before any verification. Rejects rather than clamps (clamping could silently
 /// weaken).
-pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), SealerError> {
+pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), VaultError> {
     let ok = (MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&p.memory_kib)
         && (1..=MAX_ITERATIONS).contains(&p.iterations)
         && (1..=MAX_PARALLELISM).contains(&p.parallelism)
@@ -464,6 +467,6 @@ pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), SealerError> {
     if ok {
         Ok(())
     } else {
-        Err(SealerError::BadKdfParams)
+        Err(VaultError::BadKdfParams)
     }
 }
