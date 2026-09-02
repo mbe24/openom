@@ -11,7 +11,7 @@ use keyeo::{MemberInit, MembershipAction};
 use openom_keyring::verifier::ChainVerifier;
 use keyeo_dag::verifier::{bootstrap_update, op_update, DagVerifier};
 use keyeo_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
-use keyeo_api::{KeyringVerifier, MembershipView, VerifyError};
+use keyeo_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
 use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
 };
@@ -117,6 +117,11 @@ fn dag_minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
         hpke_public_key: [seed; 32],
     }
 }
+/// Frame a chain keyring as the wire `ChainVerifier::admit` now receives: a MembershipEnvelope(chain).
+fn chain_env(k: &Keyring) -> Vec<u8> {
+    MembershipEnvelope::wrap(EngineKind::Chain, k.encode_to_vec()).encode()
+}
+
 fn dag_add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
     MembershipAction::Add {
         member: member.to_string(),
@@ -135,8 +140,8 @@ fn both_engines_resolve_the_same_membership_for_equivalent_authorized_ops() {
 
     // chain
     let cg = chain_genesis();
-    let c_boot = cv.admit(None, &cg.encode_to_vec()).unwrap();
-    let c_next = cv.admit(Some(&c_boot.state), &chain_add_carol(&cg, 1).encode_to_vec()).unwrap();
+    let c_boot = cv.admit(None, &chain_env(&cg)).unwrap();
+    let c_next = cv.admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 1))).unwrap();
 
     // dag
     let gm = vec![dag_minit("owner", KeyringRole::OWNER, 1)];
@@ -163,8 +168,8 @@ fn both_engines_refuse_a_permanently_unauthorized_change() {
 
     // chain: a rev-2 adding carol, signed by dave (seed 4) — an unendorsed ordinary change.
     let cg = with_maintainer_dave(chain_genesis());
-    let c_boot = cv.admit(None, &cg.encode_to_vec()).unwrap();
-    let c_out = cv.admit(Some(&c_boot.state), &chain_add_carol(&cg, 4).encode_to_vec());
+    let c_boot = cv.admit(None, &chain_env(&cg)).unwrap();
+    let c_out = cv.admit(Some(&c_boot.state), &chain_env(&chain_add_carol(&cg, 4)));
     assert_eq!(c_out.unwrap_err(), VerifyError::Unauthorized, "chain refuses an unauthorized change");
 
     // dag: dave (a member, not a signer) authors Add(carol) — unauthorized at its causal position.
