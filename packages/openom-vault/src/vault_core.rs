@@ -21,7 +21,7 @@ use openom_crypto::{
     hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code, recovery_kdf_params, wrap_rrk_secret, Dek,
     HpkePrivate, Kek, RecoveryCode, RootKeys, RrkSecret,
 };
-use openom_protocol::aad::wrap_aad;
+use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, KeyEpoch, KeyWrap, RecoveryKey, WrapMethod};
 use serde::{Deserialize, Serialize};

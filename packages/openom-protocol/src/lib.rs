@@ -9,7 +9,6 @@ pub mod v1 {
 
 /// Canonical, length-prefixed AAD encoding of a `Header` (data-format spec §5) — the
 /// byte string a Rust and a WASM/JS build must produce identically.
-pub mod aad;
 
 /// Identity newtypes (`TreeId` / `ReplicaId` / `MemberId`) so the vault surface can't confuse one
 /// opaque id byte-string for another at a call site. Wrap the proto's own fields; no wire change.

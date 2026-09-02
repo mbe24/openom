@@ -6,6 +6,9 @@ mod chain;
 mod entry;
 mod keyring;
 mod roles;
+mod signing_bytes;
+
+pub use signing_bytes::keyring_signing_bytes;
 
 pub use chain::{
     bootstrap_from_genesis, bootstrap_from_oob, decode_governing_ref, encode_governing_ref,

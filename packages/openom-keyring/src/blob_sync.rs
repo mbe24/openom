@@ -14,7 +14,7 @@
 //! [`KeyringChainBlobSync::accept_reset`], never silently walked.
 
 use blobstore::{BlobError, BlobStore, Etag, Precondition};
-use openom_protocol::aad::keyring_signing_bytes;
+use crate::keyring_signing_bytes;
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
 

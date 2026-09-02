@@ -20,7 +20,7 @@ use openom_crypto::{
 };
 use openom_did::DidKey;
 use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
-use openom_protocol::aad::wrap_aad;
+use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
     AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,

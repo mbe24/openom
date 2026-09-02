@@ -10,7 +10,7 @@
 //! epoch-consistency closes the "seal under the current key, stamp an old revision" forge; the
 //! retained-old-key variant is the documented residual left for the full-A log-frontier slice.
 
-use openom_protocol::aad::author_signing_bytes;
+use openom_crypto::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
 use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
 use edsign::{Signature, VerifyingKey};

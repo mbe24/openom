@@ -7,7 +7,7 @@
 //! that lets the passphrase change, and lets a tree be shared, without re-encrypting
 //! the data: only the small wrap is re-made, never the payloads.
 
-use openom_protocol::aad::{rrk_wrap_aad, wrap_aad};
+use crate::aad::{rrk_wrap_aad, wrap_aad};
 use zeroize::Zeroizing;
 
 use crate::seal::{xchacha_open, xchacha_seal};

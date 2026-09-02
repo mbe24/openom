@@ -1,7 +1,7 @@
 //! Signer identities + keyring signing (§4, multi-signer).
 //!
 //! An authorized signer's Ed25519 key signs the whole keyring (canonically encoded and
-//! domain-separated, see [`openom_protocol::aad::keyring_signing_bytes`]) so the
+//! domain-separated, see [`crate::keyring_signing_bytes`]) so the
 //! partly-untrusted server can't substitute a member's wrapped key, role, or public key
 //! undetectably. A keyring carries **one or more** signatures (any-of / 1-of-N in V1);
 //! each signs the *same* bytes (the `signatures` field is excluded from them), so
@@ -16,7 +16,7 @@
 //! client watermark concern (the caller persists the highest `revision`/last hash + the
 //! trusted signer set, and rejects a regression or an unendorsed set change, §4/§10).
 
-use openom_protocol::aad::keyring_signing_bytes;
+use crate::keyring_signing_bytes;
 use openom_protocol::v1::{Keyring, KeyringSignature};
 use sha2::{Digest, Sha256};
 

@@ -9,7 +9,7 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::Aes256Gcm;
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use openom_protocol::aad::header_aad;
+use crate::aad::header_aad;
 use openom_protocol::v1::{Aead as AeadAlg, Header};
 
 use crate::{CryptoError, KEY_LEN};
@@ -20,7 +20,7 @@ const AES_GCM_NONCE_LEN: usize = 12;
 /// Seal `plaintext` under the DEK `key` for `header`, binding the whole header as AAD
 /// (§5). The AEAD and nonce come from `header` (`aead` + `nonce`). Returns the
 /// ciphertext with the AEAD tag appended; the caller then sets `header.ciphertext_hash
-/// = sha256(ciphertext)` (excluded from the AAD — see [`openom_protocol::aad`]).
+/// = sha256(ciphertext)` (excluded from the AAD — see [`crate::aad`]).
 pub fn seal(
     version: u32,
     header: &Header,

@@ -44,6 +44,7 @@ pub fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 
+pub mod aad;
 mod envelope;
 mod hpke_wrap;
 mod kdf;
