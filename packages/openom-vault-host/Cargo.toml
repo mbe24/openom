@@ -7,6 +7,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The vault layer: KeyringLifecycle + ChainVault/DagVault/AppVault + the vault flows (OPE-279).
+openom-vault = { path = "../openom-vault" }
+# The DEK session types the host still holds directly (Sealer/SealerSet/SealerError/EntryKind/SealContext).
 openom-sealer = { path = "../openom-sealer" }
 openom-crypto.workspace = true
 # Keyring chain verification (verify_walk/verify_transition/verify_reset) the host re-checks on sync.

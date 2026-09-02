@@ -1,5 +1,5 @@
 // Build openom-tree to WebAssembly — the claim-model family-tree engine for the web app. Same
-// two-stage flow as build-sealer.mjs (Rust→wasm in Docker because the host can't run cargo build
+// two-stage flow as build-vault.mjs (Rust→wasm in Docker because the host can't run cargo build
 // scripts; wasm-bindgen glue on the host), just for this crate. Output: apps/app/src/vendor/tree/
 // (gitignored).
 import { spawnSync } from 'node:child_process';

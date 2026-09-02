@@ -1,0 +1,52 @@
+[package]
+name = "openom-vault"
+description = "openom — the keyring VAULT layer: the KeyringLifecycle trait + both engines' vault impls (chain + dag) + the AppVault engine dispatch + the wasm cdylib veneer. Sits above the keyring engines and above openom-sealer (which it uses for the DEK session)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+# rlib for native (Tauri) + cargo test; cdylib for the wasm-bindgen build (the web veneer lives here).
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# The DEK session layer this builds on: Sealer/SealerSet/seal/open + SealerError + the entry vocab.
+openom-sealer = { path = "../openom-sealer" }
+openom-protocol.workspace = true
+openom-crypto.workspace = true
+# H(write DEK) commits the recover watermark to key MATERIAL (OPE-286); the chain vault lives here now.
+sha2.workspace = true
+# The two keyring engines the vaults drive.
+openom-keyring.workspace = true
+openom-keyring-dag.workspace = true
+# The keyless seam's MembershipView — the engine-neutral resolved membership the dag vault checks coverage
+# against (OPE-282/288/290).
+openom-keyring-seam.workspace = true
+# Role constants the vault compares against.
+openom-roles.workspace = true
+# did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).
+openom-did.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+# The sealing core's records serialize into the dag vault's anchor + op sealing payloads.
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+# The web binding (wasm.rs). Off by default so native builds (Tauri, cargo test) never pull the
+# wasm-bindgen glue. Build with: --no-default-features --features wasm --target wasm32-...
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dev-dependencies]
+proptest.workspace = true
+# Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
+openom-keyring = { workspace = true, features = ["test-util"] }
+# The Blob transport lifecycle test drives the vault's keyring output through the keyring/head store.
+blobstore.workspace = true
+tempfile = "3"

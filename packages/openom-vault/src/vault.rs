@@ -39,7 +39,7 @@ use crate::vault_core::{
     owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealed_epochs,
     sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, HPKE, PASSPHRASE, RECOVERY,
 };
-use crate::{SealerError, SealerSet};
+use openom_sealer::{SealerError, SealerSet};
 
 /// The epoch key id length (matches `Header.key_id`); 16 CSPRNG bytes.
 const KEY_ID_LEN: usize = 16;
@@ -1460,7 +1460,7 @@ mod tests {
         provision_member, recover, remove_co_owner, remove_member, remove_member_as_co_owner,
         rotate_recovery, unlock, unlock_as_member,
     };
-    use crate::{EntryKind, SealContext, SealerError, SealerSet};
+    use openom_sealer::{EntryKind, SealContext, SealerError, SealerSet};
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
     use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};

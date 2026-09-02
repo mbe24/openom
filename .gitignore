@@ -7,9 +7,10 @@ apps/src-tauri/gen/
 # WASM sealer build artifacts (scripts/build-sealer.mjs): the on-mount cargo target
 # dir, the downloaded CLI, and the generated wasm-bindgen package (emitted under the
 # web app's served root so the browser can fetch it without a bundler).
-packages/openom-sealer/target-wasm/
+packages/openom-vault/target-wasm/
+packages/openom-vault/tools/
 packages/openom-sealer/tools/
-apps/app/src/vendor/sealer/
+apps/app/src/vendor/vault/
 packages/openom-tree/target-wasm/
 apps/app/src/vendor/tree/
 

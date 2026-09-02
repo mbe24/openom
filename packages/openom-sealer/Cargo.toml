@@ -1,56 +1,25 @@
 [package]
 name = "openom-sealer"
-description = "openom — the client sealer: a stateful session that holds the unlocked DEK and seals/opens envelopes. Pure-Rust core + wasm-bindgen veneer (web) + used directly by Tauri (native)."
+description = "openom — the client DEK session: a stateful sealer that holds the unlocked DEK and seals/opens wire envelopes. The passphrase-driven keyring vault + wasm veneer live in openom-vault (OPE-279); this crate is engine-free so envelope-only consumers don't rebuild the keyring engines."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-# rlib for native (Tauri) + cargo test; cdylib for the wasm-bindgen build.
-crate-type = ["rlib", "cdylib"]
+# rlib only — the wasm cdylib veneer moved to openom-vault with wasm.rs (OPE-279).
+crate-type = ["rlib"]
 
 [dependencies]
 openom-protocol.workspace = true
 openom-crypto.workspace = true
-# H(write DEK) commits the recover watermark to key MATERIAL, not a forgeable key_id label (OPE-286).
-sha2.workspace = true
-# The keyring/membership mechanism (chain verify, entry authorship, keyring signing) the vault drives.
-openom-keyring.workspace = true
-# The DAG keyring engine (keyeo membership + recovery). openom-sealer is the both-engines convergence
-# point: chain vault (vault.rs) + dag vault (dag_vault.rs), each behind KeyringLifecycle (OPE-273 gate
-# Q1.3=a). No cycle — the dag crate does not depend on the sealer.
-openom-keyring-dag.workspace = true
-# The keyless seam's MembershipView — the engine-neutral resolved membership the dag vault checks epoch
-# coverage against (OPE-282). Re-exported through the dag facade's Resolved; named here for the fold.
-openom-keyring-seam.workspace = true
-# The single home for the role constants (SIGNER_FOUNDER, MEMBER_OWNER, …) the vault compares against.
-openom-roles.workspace = true
-# did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).
-openom-did.workspace = true
-zeroize.workspace = true
+# The author signing-key type threaded into a sealed entry's attribution. Named directly (was reached via
+# an openom-keyring re-export) so the lean sealer carries NO keyring-engine dependency (OPE-279).
+openom-sign.workspace = true
 thiserror.workspace = true
-# The sealing core's records serialize into the dag vault's anchor + op sealing payloads.
-serde.workspace = true
-serde_json.workspace = true
-
-[features]
-# The web binding. Off by default so native builds (Tauri, cargo test) never pull the
-# wasm-bindgen glue. Build with: --no-default-features --features wasm --target wasm32-...
-# The veneer marshals with plain wasm-bindgen (string enums, explicit params, Vec<u8> ↔
-# Uint8Array) — no serde-wasm-bindgen, so no u64-as-BigInt or byte-array serialization
-# quirks to reason about.
-default = []
-wasm = ["dep:wasm-bindgen"]
-
-[dependencies.wasm-bindgen]
-version = "0.2"
-optional = true
 
 [dev-dependencies]
 proptest.workspace = true
-# Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
+# lib.rs tests mint an ad-hoc author identity via openom_keyring::generate_identity (test-util gated). A
+# dev-dependency, so it never enters a downstream consumer's build graph.
 openom-keyring = { workspace = true, features = ["test-util"] }
-# The Blob transport lifecycle test drives the vault's keyring output through the keyring/head store.
-blobstore.workspace = true
-tempfile = "3"

@@ -1,5 +1,5 @@
 //! The **web binding** for the sealer — a thin `wasm-bindgen` veneer over the pure
-//! [`Sealer`](crate::Sealer) core. Only compiled with `--features wasm --target wasm32-*`;
+//! [`Sealer`](openom_sealer::Sealer) core. Only compiled with `--features wasm --target wasm32-*`;
 //! native (Tauri) callers use the core directly, so this file is the *only* web-specific
 //! code and the crypto path stays identical across web and native.
 //!
@@ -24,7 +24,8 @@ use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyrin
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
-use crate::{vault, AppVault, DagVault, EntryKind, KeyringRole, SealContext, Sealer, SealerError, SealerSet};
+use crate::{vault, AppVault, DagVault, KeyringRole};
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use openom_keyring_seam::EngineKind;
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives

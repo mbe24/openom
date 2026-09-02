@@ -1,23 +1,26 @@
 # openom-sealer
 
-> The client sealer — a stateful session holding the unlocked DEK, plus the passphrase-driven
-> keyring lifecycle that unlocks it.
+> The client DEK session — a stateful sealer holding the unlocked DEK, turning plaintext into
+> wire-ready envelopes and back.
 
 **Status:** built · client key-custody/session layer, load-bearing · plan/SERVER-DATA-FORMAT.md
 §3, §16 + plan/design.sharing.md §4, §B3
 
-**Last updated:** 2026-08-25
+**Last updated:** 2026-09-03
 
 ## What it is — and is not
 
-The client-side sealer: a stateful session holding the *unlocked* DEK, turning plaintext into
-wire-ready `Envelope` bytes and back (`Sealer` / `SealerSet`), plus the full passphrase-driven
-keyring lifecycle that produces that unlocked DEK (`vault`: provision, unlock, recover,
-change_passphrase, add/remove member, promote/demote co-owner). It wraps `openom-crypto` — the
-AEAD/KDF/HPKE primitives — with the scope binding, chain-state threading, and multi-signer keyring
-mechanics those primitives don't know about. One pure-Rust core runs natively inside Tauri and,
-compiled to wasm32 with the `wasm` feature, inside the browser through the `wasm` veneer
-(`WasmSealer`, `provision`, `unlock`, …) — one implementation, two bindings, so a web and a native
+The client-side DEK session: a stateful sealer holding the *unlocked* DEK, turning plaintext into
+wire-ready `Envelope` bytes and back (`Sealer` / `SealerSet`). It wraps `openom-crypto` — the
+AEAD/KDF/HPKE primitives — with the scope binding and chain-state threading those primitives don't
+know about. **This crate is engine-free** (no keyring dependency), so envelope-only consumers like
+`openom-sync` don't transitively rebuild the keyring engines.
+
+The passphrase-driven keyring lifecycle that PRODUCES an unlocked DEK — `vault` (provision, unlock,
+recover, change_passphrase, add/remove member, promote/demote co-owner), both engines' vaults, the
+`AppVault` dispatch, and the browser `wasm` veneer — was extracted to the **`openom-vault`** crate
+(OPE-279). That crate compiles to wasm32 with its `wasm` feature for the browser and runs natively
+inside Tauri — one implementation, two bindings, so a web and a native
 client can never disagree on how a blob was sealed.
 
 It is **not** the source of truth for the log chain: the caller (JS `SealedStore` / the Tauri

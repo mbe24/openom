@@ -5,23 +5,9 @@ use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
 
-pub mod vault;
-mod vault_core;
-
-pub mod lifecycle;
-pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
-
-pub mod dag_vault;
-pub use dag_vault::{DagVault, Resealed};
-// Re-exported: the dag membership host methods (add_member) take a KeyringRole, so callers name it
-// through the sealer without a direct openom-keyring-dag dependency.
-pub use openom_keyring_dag::KeyringRole;
-
-pub mod app_vault;
-pub use app_vault::AppVault;
-
-#[cfg(feature = "wasm")]
-pub mod wasm;
+// The keyring VAULT layer (KeyringLifecycle + ChainVault/DagVault/AppVault + the wasm veneer) was
+// extracted to the `openom-vault` crate (OPE-279), so envelope-only consumers depend on this lean sealer
+// without transitively rebuilding both keyring engines. This crate is now just the DEK session.
 
 /// The kind of log entry being sealed — the sealer's view of `Kind` (§3), without the
 /// proto's `Unspecified` zero value that must never reach the wire.
@@ -229,7 +215,7 @@ impl Sealer {
     /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
     pub fn with_author(
         mut self,
-        signing_key: openom_keyring::SigningKey,
+        signing_key: openom_sign::SigningKey,
         member_id: String,
         governing_ref: Vec<u8>,
     ) -> Self {
@@ -241,7 +227,7 @@ impl Sealer {
     /// inside a collection (see [`SealerSet::with_author`]).
     pub fn set_author(
         &mut self,
-        signing_key: openom_keyring::SigningKey,
+        signing_key: openom_sign::SigningKey,
         member_id: String,
         governing_ref: Vec<u8>,
     ) {
@@ -397,7 +383,7 @@ impl SealerSet {
     /// no author. Set at unlock, gated on the write epoch being attributed (shared).
     pub fn with_author(
         mut self,
-        signing_key: openom_keyring::SigningKey,
+        signing_key: openom_sign::SigningKey,
         member_id: String,
         governing_ref: Vec<u8>,
     ) -> Self {

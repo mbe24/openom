@@ -21,6 +21,7 @@ members = [
     "packages/openom-crdt",
     "packages/openom-tree",
     "packages/openom-sealer",
+    "packages/openom-vault",
     "packages/openom-vault-host",
     "packages/journal",
     "packages/openom-sync",

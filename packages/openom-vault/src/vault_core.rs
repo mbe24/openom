@@ -24,7 +24,7 @@ use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, KeyEpoch, KeyWrap, RecoveryKey, WrapMethod};
 use serde::{Deserialize, Serialize};
 
-use crate::{SealerError, SealerSet};
+use openom_sealer::{SealerError, SealerSet};
 
 pub(crate) const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 pub(crate) const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;

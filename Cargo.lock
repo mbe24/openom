@@ -3717,22 +3717,12 @@ dependencies = [
 name = "openom-sealer"
 version = "0.1.0"
 dependencies = [
- "blobstore",
  "openom-crypto",
- "openom-did",
  "openom-keyring",
- "openom-keyring-dag",
- "openom-keyring-seam",
  "openom-protocol",
- "openom-roles",
+ "openom-sign",
  "proptest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.20",
- "wasm-bindgen",
- "zeroize",
 ]
 
 [[package]]
@@ -3785,6 +3775,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-vault"
+version = "0.1.0"
+dependencies = [
+ "blobstore",
+ "openom-crypto",
+ "openom-did",
+ "openom-keyring",
+ "openom-keyring-dag",
+ "openom-keyring-seam",
+ "openom-protocol",
+ "openom-roles",
+ "openom-sealer",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "wasm-bindgen",
+ "zeroize",
+]
+
+[[package]]
 name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
@@ -3793,6 +3806,7 @@ dependencies = [
  "openom-keyring-seam",
  "openom-protocol",
  "openom-sealer",
+ "openom-vault",
  "rusqlite",
  "serde",
  "zeroize",

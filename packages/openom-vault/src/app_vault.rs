@@ -20,7 +20,8 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::lifecycle::ChainVault;
-use crate::{DagVault, SealerError};
+use crate::DagVault;
+use openom_sealer::SealerError;
 
 /// The two keyring engines behind one dispatch point. Zero-sized selectors, so an `AppVault` is just its
 /// discriminant — the engine choice carried by the type, not held state.

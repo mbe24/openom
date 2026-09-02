@@ -28,7 +28,7 @@ const TYPES = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.woff2': 'font/woff2',
-  // The WASM sealer module (src/vendor/sealer); streaming instantiation needs this exact type.
+  // The WASM vault module (src/vendor/vault); streaming instantiation needs this exact type.
   '.wasm': 'application/wasm'
 };
 

@@ -1,5 +1,6 @@
-// Build the openom-sealer crate to WebAssembly, on this Windows host, in two stages that
-// mirror the native Docker convention (scripts/cargo.mjs) with ONE deliberate difference.
+// Build the openom-vault crate (the keyring vault layer + wasm veneer, OPE-279) to WebAssembly, on this
+// Windows host, in two stages that mirror the native Docker convention (scripts/cargo.mjs) with ONE
+// deliberate difference.
 //
 //   1. Rust → wasm, in Docker (the host cannot execute freshly-compiled cargo build
 //      scripts — company policy "Access is denied (os error 5)" — the same reason cargo.mjs
@@ -19,8 +20,8 @@
 //      version is read FROM Cargo.lock so it always matches the resolved `wasm-bindgen`
 //      crate — a skew between the two is the classic silent-broken-glue bug.
 //
-// Output: packages/openom-sealer/pkg/ (openom_sealer.js + .d.ts + _bg.wasm), consumed by
-// the web sealer shim (apps/app/src/core/sealer/wasm.js). All artifacts are gitignored.
+// Output: apps/app/src/vendor/vault/ (openom_vault.js + .d.ts + _bg.wasm), consumed by the web sealer
+// shim (apps/app/src/core/sealer/sealer.worker.js). All artifacts are gitignored.
 //
 // Experiment hooks: WASM_PROFILE (default `wasm-release`), WASM_RUSTFLAGS (appended after
 // the mandatory getrandom cfg).
@@ -32,25 +33,25 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CRATE = path.join(REPO, 'packages', 'openom-sealer');
+const CRATE = path.join(REPO, 'packages', 'openom-vault');
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 const TRIPLE = 'x86_64-pc-windows-msvc'; // host triple for the wasm-bindgen CLI download
 const TARGET_SUBDIR = 'target-wasm'; // on the mount, so host wasm-bindgen reads the .wasm
-const CONTAINER_TARGET = `/work/packages/openom-sealer/${TARGET_SUBDIR}`;
+const CONTAINER_TARGET = `/work/packages/openom-vault/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
 // getrandom's wasm_js backend is mandatory (the CSPRNG on wasm32); extra flags append.
 const RUSTFLAGS = ['--cfg getrandom_backend="wasm_js"', process.env.WASM_RUSTFLAGS || '']
   .filter(Boolean)
   .join(' ');
 
-const WASM = path.join(CRATE, TARGET_SUBDIR, 'wasm32-unknown-unknown', PROFILE, 'openom_sealer.wasm');
+const WASM = path.join(CRATE, TARGET_SUBDIR, 'wasm32-unknown-unknown', PROFILE, 'openom_vault.wasm');
 const TOOLS_DIR = path.join(CRATE, 'tools');
 // Output under the web app's served root (no bundler — serve.mjs hands out files directly),
 // alongside the other vendored module (src/vendor). The web sealer binding imports from here
 // and the .wasm is fetched over HTTP relative to it; Tauri bundles the same tree.
-const PKG_DIR = path.join(REPO, 'apps', 'app', 'src', 'vendor', 'sealer');
+const PKG_DIR = path.join(REPO, 'apps', 'app', 'src', 'vendor', 'vault');
 
 function run(cmd, args, opts = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: 'inherit', ...opts });
@@ -87,7 +88,7 @@ run('docker', [
   '-c',
   'rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true; ' +
     `cargo build --profile ${PROFILE} --target wasm32-unknown-unknown ` +
-    '-p openom-sealer --no-default-features --features wasm',
+    '-p openom-vault --no-default-features --features wasm',
 ]);
 if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the Docker build; not found`);
 console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).size / 1024).toFixed(0)} kb)`);

@@ -19,7 +19,7 @@ import init, {
   epochIsAttributed as wasmEpochIsAttributed,
   entryAttribution as wasmEntryAttribution,
   WasmSealer,
-} from '../../vendor/sealer/openom_sealer.js';
+} from '../../vendor/vault/openom_vault.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());

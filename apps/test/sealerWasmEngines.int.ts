@@ -14,7 +14,7 @@ import init, {
   dagReseal as wasmDagReseal,
   keyringSummary as wasmKeyringSummary,
   keyringCovers as wasmKeyringCovers,
-} from '../app/src/vendor/sealer/openom_sealer.js';
+} from '../app/src/vendor/vault/openom_vault.js';
 import { pushMembershipSummary } from '../app/src/core/membershipSummary.js';
 
 // The REAL wasm sealer, driven directly (no fake worker): loads the vendored openom_sealer_bg.wasm and
@@ -51,7 +51,7 @@ function sealSnapshot(sealer: any, plaintext: string): Uint8Array {
 }
 
 beforeAll(async () => {
-  const wasmUrl = new URL('../app/src/vendor/sealer/openom_sealer_bg.wasm', import.meta.url);
+  const wasmUrl = new URL('../app/src/vendor/vault/openom_vault_bg.wasm', import.meta.url);
   let bytes: Buffer;
   try {
     bytes = readFileSync(fileURLToPath(wasmUrl));

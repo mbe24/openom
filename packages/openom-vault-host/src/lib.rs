@@ -11,8 +11,8 @@ pub use openom_keyring_seam::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::Message;
-use openom_sealer::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_sealer::{vault, AppVault, DagVault, KeyringRole};
+use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+use openom_vault::{vault, AppVault, DagVault, KeyringRole};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use serde::Serialize;
 

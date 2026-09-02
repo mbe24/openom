@@ -32,8 +32,8 @@ build-script check fatal; a container's pnpm has no such policy. Docker Desktop 
 
 Two things this app *depends on* but does not itself build:
 
-- **The wasm engines** (`src/vendor/sealer/`, `src/vendor/tree/`) are generated, gitignored
-  output — `node scripts/build-sealer.mjs` / `node scripts/build-tree.mjs` **from the repo
+- **The wasm engines** (`src/vendor/vault/`, `src/vendor/tree/`) are generated, gitignored
+  output — `node scripts/build-vault.mjs` / `node scripts/build-tree.mjs` **from the repo
   root**. Both compile Rust→wasm inside Docker (the host can't run cargo build scripts under
   company policy — same reason `scripts/cargo.mjs` uses Docker/WSL2 for native crate tests), then
   run `wasm-bindgen` on the host. Run these once before `pnpm serve` if `src/vendor/{sealer,tree}/`
@@ -122,8 +122,8 @@ src/views/             one file per screen, composed from ui/ + core/ read helpe
                        onboarding.js, people.js, settings.js, transfer.js.
 
 src/vendor/            generated + third-party, never hand-edited.
-  sealer/, tree/          wasm-bindgen output for openom-sealer / openom-tree — gitignored,
-                          rebuilt by scripts/build-sealer.mjs / build-tree.mjs (repo root).
+  vault/, tree/           wasm-bindgen output for openom-vault / openom-tree — gitignored,
+                          rebuilt by scripts/build-vault.mjs / build-tree.mjs (repo root).
   sqlite/                 vendored sqlite-wasm (OPFS-SAHPool) bundle, checked in — the persistent
                           browser-SQLite spike (apps/e2e/sqlite*.e2e.ts exercises it).
   comlink.js, fluent.js   vendored third-party libraries (worker RPC, Fluent i18n runtime).

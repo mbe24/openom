@@ -11,7 +11,7 @@
     "android:init": "node scripts/tauri.mjs android init",
     "android:dev": "node scripts/tauri.mjs android dev",
     "ios:init": "node scripts/tauri.mjs ios init",
-    "build:sealer": "node ../scripts/build-sealer.mjs",
+    "build:vault": "node ../scripts/build-vault.mjs",
     "test:store": "node ../scripts/cargo.mjs test -p journal -p openom",
     "test:core": "node ../scripts/vitest.mjs",
     "test:e2e": "playwright test --grep-invert @integration",

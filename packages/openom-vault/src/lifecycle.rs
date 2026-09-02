@@ -32,7 +32,7 @@ use openom_did::DidKey;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
 use crate::vault;
-use crate::{SealerError, SealerSet};
+use openom_sealer::{SealerError, SealerSet};
 
 /// The tree + member context every lifecycle call needs: which tree is being operated on and who is
 /// acting. These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
@@ -377,7 +377,7 @@ mod tests {
         assert!(!p.watermark.is_empty(), "provision reports a genesis watermark, not a stub");
         let sealed = p
             .sealer
-            .seal_entry(&crate::SealContext::snapshot(0, Vec::new(), 0), b"parity data")
+            .seal_entry(&openom_sealer::SealContext::snapshot(0, Vec::new(), 0), b"parity data")
             .unwrap()
             .envelope;
 
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(u.did_key, p.did_key);
         assert!(!u.watermark.is_empty(), "unlock reports an anti-rollback watermark, not a stub");
         assert_eq!(
-            u.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            u.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
             b"parity data"
         );
 
@@ -409,7 +409,7 @@ mod tests {
             .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rC")), &re.anchor, &new_pass)
             .unwrap();
         assert_eq!(
-            u2.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            u2.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
             b"parity data"
         );
 
@@ -426,7 +426,7 @@ mod tests {
             .unwrap();
         assert!(!r.watermark.is_empty(), "recovery reports an advanced watermark");
         assert_eq!(
-            r.sealer.open_entry(crate::EntryKind::Snapshot, &sealed).unwrap(),
+            r.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
             b"parity data"
         );
     }

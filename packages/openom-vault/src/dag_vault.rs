@@ -32,7 +32,7 @@ use crate::vault_core::{
     SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
 };
 use openom_keyring_seam::MembershipView;
-use crate::SealerError;
+use openom_sealer::SealerError;
 
 /// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
 /// order) into the current sealing state: `new_epochs` are inserted (genesis's epoch-0; a member removal's
@@ -1092,7 +1092,7 @@ impl DagVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EntryKind, SealContext};
+    use openom_sealer::{EntryKind, SealContext};
     use openom_keyring_seam::MemberView;
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
