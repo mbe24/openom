@@ -13,6 +13,8 @@ keyeo-api.workspace = true
 edsign.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The op body wire: a compact postcard encoding wrapped in keyeo-api's MembershipEnvelope (no JSON).
+postcard = { version = "1", features = ["use-std"] }
 
 [dev-dependencies]
 # The differential-oracle + seam-parity tests drive the openom chain keyring (openom-keyring) alongside

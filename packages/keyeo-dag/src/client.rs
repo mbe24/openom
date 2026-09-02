@@ -30,7 +30,7 @@ fn append(
     signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let mut anchor: DagAnchor =
-        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
     let ops: Vec<KeyringOp> = anchor
         .ops
         .iter()
@@ -40,7 +40,7 @@ fn append(
     let group_id = keyeo::GroupId::new(anchor.group_id.clone());
     let op = mint(&group_id, frontier(&ops), author.to_string(), action, sealing, signing_key);
     anchor.ops.push(encode_op(&op));
-    Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
+    Ok(postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible"))
 }
 
 /// Append an **Add** op — an authorized signer (`author`) adds `member_id` at `role`, carrying the
@@ -176,7 +176,7 @@ pub fn provision_anchor(
         genesis_op_id: op.id,
         ops: vec![encode_op(&op)],
     };
-    serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible")
+    postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible")
 }
 
 /// A resolved dag keyring: the membership view + the effective ops' `sealing` payloads (genesis-first) for
@@ -222,7 +222,7 @@ pub enum SealingOrigin {
 /// at its causal position, and for a `Commit` its quorum met — folded in resolved topological order.
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
-        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
     let genesis: Vec<KeyringMemberInit> = anchor
         .genesis
         .iter()
@@ -306,7 +306,7 @@ fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
 /// Decode an anchor's op closure (shared by [`watermark`] and [`check_floor`]).
 fn anchor_ops(anchor_bytes: &[u8]) -> Result<Vec<KeyringOp>, ClientError> {
     let anchor: DagAnchor =
-        serde_json::from_slice(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
     anchor
         .ops
         .iter()
@@ -362,16 +362,16 @@ fn hex32(id: &[u8; 32]) -> String {
 /// (the op-DAG is a set-union CRDT). A direct convenience over the store-based anti-entropy in `blob_sync`.
 pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
     let mut a: DagAnchor =
-        serde_json::from_slice(anchor_a).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        postcard::from_bytes(anchor_a).map_err(|e| ClientError::Malformed(e.to_string()))?;
     let b: DagAnchor =
-        serde_json::from_slice(anchor_b).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        postcard::from_bytes(anchor_b).map_err(|e| ClientError::Malformed(e.to_string()))?;
     let mut seen: HashSet<[u8; 32]> = anchor_ops(anchor_a)?.iter().map(|o| o.id).collect();
     for (blob, op) in b.ops.iter().zip(anchor_ops(anchor_b)?) {
         if seen.insert(op.id) {
             a.ops.push(blob.clone());
         }
     }
-    Ok(serde_json::to_vec(&a).expect("DagAnchor serialization is infallible"))
+    Ok(postcard::to_allocvec(&a).expect("DagAnchor serialization is infallible"))
 }
 
 /// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
@@ -521,7 +521,7 @@ mod tests {
                 encode_op(&recovery_op),
             ],
         };
-        let resolved = resolve(&serde_json::to_vec(&anchor).unwrap()).unwrap();
+        let resolved = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap();
 
         let has = |needle: &[u8]| resolved.sealing.iter().any(|s| s.bytes.as_slice() == needle);
         assert!(has(b"GENESIS-SEALING"), "the pinned genesis op always contributes");

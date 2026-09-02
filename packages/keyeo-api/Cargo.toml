@@ -8,6 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+# The generic membership-envelope wire (`MembershipEnvelope`) — a hand-written `#[derive(prost::Message)]`
+# struct, so keyeo-api OWNS an efficient protobuf wire of its own (no borrowed openom proto, no buf/protoc
+# codegen tooling). prost is generic, so the crate stays standalone-publishable.
+prost.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

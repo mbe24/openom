@@ -45,6 +45,78 @@ impl std::fmt::Display for UnknownEngine {
 
 impl std::error::Error for UnknownEngine {}
 
+/// The current [`MembershipEnvelope`] wire version. Bump on a breaking layout change; a reader that sees a
+/// version it doesn't understand refuses rather than misparsing.
+pub const MEMBERSHIP_ENVELOPE_VERSION: u32 = 1;
+
+/// The **generic membership-update envelope** — the single wire both keyring engines emit, owned by
+/// keyeo-api (a real protobuf message via `prost`, so it is efficient AND self-owned — the crate borrows no
+/// openom proto). It is a thin frame: a `version`, the producing `engine` tag ([`EngineKind::as_tag`]), and
+/// an OPAQUE `body` — the chain's signed `Keyring`, or a dag op — that only that engine parses. The op/
+/// keyring content id is computed over the inner `body`, BEFORE this framing, so wrapping never changes it.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MembershipEnvelope {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    /// The engine whose `body` this is — [`EngineKind::as_tag`] (`"chain"` / `"dag"`). A routing HINT: the
+    /// authoritative engine is the tree's pinned selection, and the body is self-authenticating.
+    #[prost(string, tag = "2")]
+    pub engine: String,
+    /// The engine-specific, opaque update bytes. keyeo-api never parses it.
+    #[prost(bytes = "vec", tag = "3")]
+    pub body: Vec<u8>,
+}
+
+impl MembershipEnvelope {
+    /// Frame an engine's opaque update bytes at the current version.
+    pub fn wrap(engine: EngineKind, body: Vec<u8>) -> Self {
+        Self {
+            version: MEMBERSHIP_ENVELOPE_VERSION,
+            engine: engine.as_tag().to_string(),
+            body,
+        }
+    }
+
+    /// Encode to protobuf bytes (the blob/transport form).
+    pub fn encode(&self) -> Vec<u8> {
+        ::prost::Message::encode_to_vec(self)
+    }
+
+    /// Decode from protobuf bytes, refusing a future/unknown `version` (fail closed, never misparse).
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeError> {
+        let env = <Self as ::prost::Message>::decode(bytes).map_err(|_| EnvelopeError::Malformed)?;
+        if env.version != MEMBERSHIP_ENVELOPE_VERSION {
+            return Err(EnvelopeError::UnsupportedVersion(env.version));
+        }
+        Ok(env)
+    }
+
+    /// The producing engine, parsed from the tag — [`EngineKind`], or an `UnknownEngine`.
+    pub fn engine_kind(&self) -> Result<EngineKind, UnknownEngine> {
+        self.engine.parse()
+    }
+}
+
+/// Why a [`MembershipEnvelope`] wouldn't decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnvelopeError {
+    /// The bytes weren't a valid envelope message.
+    Malformed,
+    /// A `version` this build doesn't understand — refused rather than misparsed.
+    UnsupportedVersion(u32),
+}
+
+impl std::fmt::Display for EnvelopeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnvelopeError::Malformed => write!(f, "malformed membership envelope"),
+            EnvelopeError::UnsupportedVersion(v) => write!(f, "unsupported membership envelope version: {v}"),
+        }
+    }
+}
+
+impl std::error::Error for EnvelopeError {}
+
 /// keyeo-api's own generic role convention (`i16`, **lower is stronger**): the Owner is the single
 /// strongest role and a signer is CoOwner-or-stronger. A consumer maps its own role enum onto these — for
 /// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
@@ -126,6 +198,14 @@ pub struct Admitted {
     /// (a signed op the resolver gives no effect) and idempotent re-serves. **Mandatory** so that
     /// "acceptance ⇒ change" is never baked into a consumer (e.g. the server always advancing a revision).
     pub changed: bool,
+    /// The tree id read from the **verified** body — the value the server equality-checks against the tree
+    /// it is operating on (the routing hint from the outer envelope is only that, a hint). Because it comes
+    /// from the authenticated update, the server can trust it without parsing the keyring itself.
+    pub tree_id: Vec<u8>,
+    /// The canonical **position** of this update, derived from the verified body — the server's storage /
+    /// CAS key and head-advance value (chain: the revision bytes; dag: the op id). The server keys ONLY on
+    /// this, never on the unauthenticated outer-envelope hint, so no lie in the framing can steer storage.
+    pub update_ref: Vec<u8>,
 }
 
 /// Why an update was refused — neutral vocabulary, neither chain's `ChainError` nor the DAG's op errors.
@@ -206,6 +286,27 @@ mod tests {
             UnknownEngine("mosaic".to_string())
         );
         assert_eq!("dag".parse::<EngineKind>().unwrap().as_tag(), "dag");
+    }
+
+    #[test]
+    fn membership_envelope_round_trips_and_rejects_a_future_version() {
+        let env = MembershipEnvelope::wrap(EngineKind::Dag, b"opaque-op-bytes".to_vec());
+        let bytes = env.encode();
+        let back = MembershipEnvelope::decode(&bytes).unwrap();
+        assert_eq!(back, env);
+        assert_eq!(back.engine_kind().unwrap(), EngineKind::Dag);
+        assert_eq!(back.body, b"opaque-op-bytes");
+
+        // A future version is refused (fail closed), never misparsed as the current layout.
+        let future = MembershipEnvelope {
+            version: MEMBERSHIP_ENVELOPE_VERSION + 1,
+            engine: "dag".into(),
+            body: vec![],
+        };
+        assert_eq!(
+            MembershipEnvelope::decode(&future.encode()).unwrap_err(),
+            EnvelopeError::UnsupportedVersion(MEMBERSHIP_ENVELOPE_VERSION + 1),
+        );
     }
 
     #[test]

@@ -107,27 +107,31 @@ fn classify(outcome: Result<ApplyOutcome<String, [u8; 32]>, KeyeoError<String>>)
 }
 
 fn encode_state(state: &DagTrustState) -> Vec<u8> {
-    serde_json::to_vec(state).expect("DagTrustState serialization is infallible")
+    postcard::to_allocvec(state).expect("DagTrustState serialization is infallible")
 }
 
 impl KeyringVerifier for DagVerifier {
     fn admit(&self, prior_state: Option<&[u8]>, update: &[u8]) -> Result<Admitted, VerifyError> {
-        let upd: UpdateDto = serde_json::from_slice(update).map_err(|_| VerifyError::Malformed)?;
+        let upd: UpdateDto = postcard::from_bytes(update).map_err(|_| VerifyError::Malformed)?;
         match (prior_state, upd) {
             // First sight: seed the pinned config + the (inert, per OPE-271) genesis op as the root.
             (None, UpdateDto::Bootstrap { pinned, genesis_op }) => {
                 let mut engine = DagVerifier::build(&pinned)?;
                 let op = decode_op(&genesis_op).map_err(|_| VerifyError::Malformed)?;
+                let update_ref = op.id().to_vec();
                 classify(engine.apply(op))?;
                 engine.flush().map_err(|_| VerifyError::Malformed)?;
                 let view = view_of(engine.state(), false);
+                // The tree id from the VERIFIED resolved state (bound into every op's signature; survives the
+                // genesis Create fold), never from an unsigned side channel.
+                let tree_id = engine.state().group_id.0.clone();
                 let state = encode_state(&DagTrustState { pinned, ops: vec![genesis_op] });
-                Ok(Admitted { state, view, changed: true })
+                Ok(Admitted { state, view, changed: true, tree_id, update_ref })
             }
             // Every subsequent op: replay the closure, resolve before + after, diff the membership.
             (Some(prior), UpdateDto::Op { op: op_bytes }) => {
                 let st: DagTrustState =
-                    serde_json::from_slice(prior).map_err(|_| VerifyError::Malformed)?;
+                    postcard::from_bytes(prior).map_err(|_| VerifyError::Malformed)?;
                 let mut engine = DagVerifier::build(&st.pinned)?;
                 DagVerifier::replay(&mut engine, &st.ops)?;
                 let before = view_of(engine.state(), false).members;
@@ -151,10 +155,12 @@ impl KeyringVerifier for DagVerifier {
 
                 let view = view_of(engine.state(), is_reset);
                 let changed = view.members != before;
+                let tree_id = engine.state().group_id.0.clone();
+                let update_ref = op_id.to_vec();
                 let mut ops = st.ops;
                 ops.push(op_bytes);
                 let state = encode_state(&DagTrustState { pinned: st.pinned, ops });
-                Ok(Admitted { state, view, changed })
+                Ok(Admitted { state, view, changed, tree_id, update_ref })
             }
             // A bootstrap against existing state, or an op with no prior state — malformed sequencing.
             _ => Err(VerifyError::Malformed),
@@ -180,7 +186,7 @@ pub fn bootstrap_update(
         },
         genesis_op: crate::blob_sync::encode_op(genesis_op),
     };
-    serde_json::to_vec(&dto).expect("UpdateDto serialization is infallible")
+    postcard::to_allocvec(&dto).expect("UpdateDto serialization is infallible")
 }
 
 /// Build an `Op` update from a signed op — every non-genesis admission.
@@ -188,7 +194,7 @@ pub fn op_update(op: &crate::KeyringOp) -> Vec<u8> {
     let dto = UpdateDto::Op {
         op: crate::blob_sync::encode_op(op),
     };
-    serde_json::to_vec(&dto).expect("UpdateDto serialization is infallible")
+    postcard::to_allocvec(&dto).expect("UpdateDto serialization is infallible")
 }
 
 #[cfg(test)]

@@ -69,6 +69,12 @@ fn founder_key(k: &Keyring) -> Option<VerifyingKey> {
 impl KeyringVerifier for ChainVerifier {
     fn admit(&self, prior_state: Option<&[u8]>, update: &[u8]) -> Result<Admitted, VerifyError> {
         let candidate = Keyring::decode(update).map_err(|_| VerifyError::Malformed)?;
+        // The verified facts the seam exports (the server keys on these, never on the outer framing): the
+        // tree id from the (signature-covered) keyring, and the canonical position — the chain's revision,
+        // encoded as its opaque governing-ref (revision-only, which is what makes two racing same-revision
+        // successors collide on the CAS key).
+        let tree_id = candidate.tree_id.clone();
+        let update_ref = crate::encode_governing_ref(candidate.revision);
         match prior_state {
             // First sight: accept a self-signed genesis (revision 1, signed by its own founder). The
             // server is not the security boundary — it trusts the founding keyring and re-verifies every
@@ -80,6 +86,8 @@ impl KeyringVerifier for ChainVerifier {
                     state: candidate.encode_to_vec(),
                     view: view_of(&candidate, false),
                     changed: true,
+                    tree_id,
+                    update_ref,
                 })
             }
             Some(prior) => {
@@ -92,6 +100,8 @@ impl KeyringVerifier for ChainVerifier {
                             state: candidate.encode_to_vec(),
                             view: view_of(&candidate, false),
                             changed,
+                            tree_id,
+                            update_ref,
                         })
                     }
                     // Not a valid ordinary transition — it may be a recovery reset (a fresh, deliberately
@@ -110,6 +120,8 @@ impl KeyringVerifier for ChainVerifier {
                                 state: candidate.encode_to_vec(),
                                 view: view_of(&candidate, true),
                                 changed: true,
+                                tree_id,
+                                update_ref,
                             }),
                             // Not continuous, or not a valid reset: refuse with the original transition error
                             // (a fork/rollback stays a fork/rollback, never a reset).

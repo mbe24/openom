@@ -26,7 +26,7 @@ const OP_PREFIX: &str = "op/";
 #[derive(Debug)]
 pub enum BlobSyncError {
     Store(BlobError),
-    Decode(serde_json::Error),
+    Decode(String),
     Malformed(&'static str),
     Engine(String),
 }
@@ -237,11 +237,20 @@ pub(crate) fn encode_op(op: &KeyringOp) -> Vec<u8> {
         author_public_key: op.author_public_key,
         sealing: op.sealing.clone(),
     };
-    serde_json::to_vec(&dto).expect("op DTO serialization is infallible")
+    // The op body is a compact postcard encoding (no JSON), framed in keyeo-api's generic
+    // MembershipEnvelope tagged as the dag engine — the shared wire both engines emit.
+    let body = postcard::to_allocvec(&dto).expect("op DTO postcard serialization is infallible");
+    keyeo_api::MembershipEnvelope::wrap(keyeo_api::EngineKind::Dag, body).encode()
 }
 
 pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
-    let dto: OpDto = serde_json::from_slice(bytes).map_err(BlobSyncError::Decode)?;
+    let env = keyeo_api::MembershipEnvelope::decode(bytes)
+        .map_err(|e| BlobSyncError::Decode(e.to_string()))?;
+    if env.engine_kind() != Ok(keyeo_api::EngineKind::Dag) {
+        return Err(BlobSyncError::Malformed("membership envelope is not a dag op"));
+    }
+    let dto: OpDto =
+        postcard::from_bytes(&env.body).map_err(|e| BlobSyncError::Decode(e.to_string()))?;
     let mut op = keyeo::Op::new(
         dto.id,
         keyeo::GroupId::new(dto.group_id),
