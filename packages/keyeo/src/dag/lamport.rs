@@ -46,10 +46,12 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
     let mut events = Vec::new();
     match action {
         MembershipAction::Create { initial_members } => {
-            // Preserve any pinned recovery authority across a (re)genesis fold: in openom's seeded
-            // construction the authority lives on the base state and the in-DAG Create is inert, so this
-            // keeps `reset_authority` from being reset to None if a Create is ever folded.
-            let mut created = GroupState::create(initial_members);
+            // Preserve the pinned recovery authority AND the group_id across a (re)genesis fold: in openom's
+            // seeded construction both live on the base state and the in-DAG Create is inert, so this keeps
+            // them from being reset if a Create is ever folded. Dropping group_id here would leave the
+            // RESOLVED state's group_id empty after any folded Create — and that resolved value is exactly
+            // what the seam exports as the verified `Admitted.tree_id`, so it must survive the fold.
+            let mut created = GroupState::create(state.group_id.clone(), initial_members);
             created.reset_authority = state.reset_authority.clone();
             Ok((created, events))
         }

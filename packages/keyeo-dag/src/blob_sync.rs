@@ -156,6 +156,11 @@ fn op_key(id: &[u8; 32]) -> String {
 #[derive(Serialize, Deserialize)]
 struct OpDto {
     id: [u8; 32],
+    /// The op's group id (openom: the tree id) — carried round-trip so the signature (which covers it)
+    /// verifies after decode and the engine's group gate sees the authentic value. Defaulted (empty =
+    /// unscoped) so single-group / test ops stay compact.
+    #[serde(default)]
+    group_id: Vec<u8>,
     parents: Vec<[u8; 32]>,
     author: String,
     action: ActionDto,
@@ -224,6 +229,7 @@ pub(crate) struct MemberInitDto {
 pub(crate) fn encode_op(op: &KeyringOp) -> Vec<u8> {
     let dto = OpDto {
         id: op.id,
+        group_id: op.group_id.0.clone(),
         parents: op.parents.clone(),
         author: op.author.clone(),
         action: action_to_dto(&op.action),
@@ -238,6 +244,7 @@ pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
     let dto: OpDto = serde_json::from_slice(bytes).map_err(BlobSyncError::Decode)?;
     let mut op = keyeo::Op::new(
         dto.id,
+        keyeo::GroupId::new(dto.group_id),
         dto.parents,
         dto.author,
         dto_to_action(&dto.action)?,
@@ -412,7 +419,7 @@ mod tests {
         }
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-        Keyeo::new(KeyringState::create(members), KeyringAccess, StrongRemove)
+        Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
     }
     fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {

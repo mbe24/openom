@@ -26,6 +26,33 @@ impl MemberId for String {}
 impl MemberId for u64 {}
 impl MemberId for u32 {}
 
+/// An opaque group identifier — the group (openom: the tree) an op belongs to. A one-level newtype over
+/// `Vec<u8>` (the OPE-211 house style, no generics): keyeo stays domain-free while the type is
+/// **non-swappable** with the equally-`Vec<u8>`-shaped `sealing` payload it sits beside in constructors.
+/// Bound into every op's signed + content-addressed bytes and enforced by the engine (an op whose group id
+/// differs from the group being resolved is refused). Construct real ids with [`GroupId::new`]; use the
+/// explicit [`GroupId::unscoped`] marker for keyeo's own single-group / test callers so an EMPTY group id is
+/// always a conscious choice, never an accident.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct GroupId(pub Vec<u8>);
+
+impl GroupId {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+    /// The explicit "no group scope" marker — a single-group or test context. Distinct in intent from a
+    /// forgotten binding: a caller writes `GroupId::unscoped()` on purpose.
+    pub fn unscoped() -> Self {
+        Self(Vec::new())
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+    pub fn is_unscoped(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub trait SignedOp: Debug + Clone + Eq + std::hash::Hash + Ord {
     type S: SignatureScheme;
     type OpId: self::OpId;
@@ -42,6 +69,13 @@ pub trait SignedOp: Debug + Clone + Eq + std::hash::Hash + Ord {
     fn sealing(&self) -> &[u8] {
         &[]
     }
+    /// The group this op belongs to — an opaque, caller-assigned identifier (openom: the tree id), bound
+    /// into the signed + content-addressed bytes ([`crate::canonical::canonical_encode`]) and enforced by
+    /// the engine: an op whose `group_id` differs from the group being resolved is refused, never merged.
+    /// **Required** (no default): a group binding that silently defaulted to empty would be a hole. Ops in a
+    /// single-group / test context use the same value on both sides (commonly [`GroupId::unscoped`]), so
+    /// the check is a no-op there and a hard guarantee once a caller assigns real group ids.
+    fn group_id(&self) -> &GroupId;
 }
 
 // Not `derive(Serialize)`: these embed crypto byte-arrays (incl. `[u8; 64]` sigs, which serde won't
@@ -188,6 +222,11 @@ pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::signatu
     /// every replica against the authority the group was founded with. `None` = no recovery authority (a
     /// group that cannot be re-founded).
     pub reset_authority: Option<<S as SignatureScheme>::PublicKey>,
+    /// This group's opaque identifier (openom: the tree id). Pinned at genesis (via [`Self::with_group_id`])
+    /// and preserved across every op; the engine refuses to admit an op whose `group_id` differs from it, so
+    /// an op minted for another group can never resolve into this one. Empty (`&[]`) = an unassigned group
+    /// (keyeo's own tests, single-group callers) — then the match is vacuous, by design.
+    pub group_id: GroupId,
     _phantom: PhantomData<S>,
 }
 
@@ -199,6 +238,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             history_commitment: [0u8; 32],
             dek_wraps: Vec::new(),
             reset_authority: None,
+            group_id: GroupId::unscoped(),
             _phantom: PhantomData,
         }
     }
@@ -211,8 +251,9 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> Default for GroupState<Id, R, S>
 }
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
-    pub fn create(initial: &[MemberInit<Id, R, S>]) -> Self {
+    pub fn create(group_id: GroupId, initial: &[MemberInit<Id, R, S>]) -> Self {
         let mut state = Self::new();
+        state.group_id = group_id;
         for init in initial {
             state.members.insert(
                 init.id.clone(),
@@ -236,8 +277,17 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             history_commitment: commitment,
             dek_wraps: wraps,
             reset_authority: self.reset_authority.clone(),
+            group_id: self.group_id.clone(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Pin the group's [`group_id`](Self::group_id) — the opaque identifier every op in this group must
+    /// carry. openom sets this on the engine's construction base (the genesis) to the tree id, so the engine
+    /// refuses any op minted for a different tree from first sight, exactly as it trusts the genesis members.
+    pub fn with_group_id(mut self, group_id: GroupId) -> Self {
+        self.group_id = group_id;
+        self
     }
 
     /// Pin the group's [`recovery authority`](Self::reset_authority) — the only key that may authorize a
@@ -369,6 +419,9 @@ pub enum Error<Id: Debug + Clone> {
     /// stale fork / equivocation-rollback vector past the compaction frontier, rejected rather than merged
     /// (OPE-270).
     StaleFork,
+    /// The op's `group_id` does not match the group being resolved — an op minted for a different group
+    /// (openom: a different tree). Refused at admission, never stored or merged.
+    WrongGroup,
 }
 
 impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
@@ -382,6 +435,7 @@ impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
             Error::DagCycle => write!(f, "DAG cycle detected"),
             Error::Crypto(msg) => write!(f, "crypto: {}", msg),
             Error::StaleFork => write!(f, "op branches from before the merge horizon"),
+            Error::WrongGroup => write!(f, "op belongs to a different group"),
         }
     }
 }

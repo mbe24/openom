@@ -355,6 +355,7 @@ impl KeyringLifecycle for DagVault {
         }
         .to_bytes();
         let anchor = dag_client::provision_anchor(
+            tree_id,
             member_id,
             author_public,
             secrets.root.hpke_public,

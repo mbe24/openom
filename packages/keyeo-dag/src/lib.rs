@@ -82,10 +82,13 @@ pub fn sign_op(
     let author = author.into();
     // No sealing on these ops — sign_op is the id-supplied constructor used across tests + the keyless
     // paths; the sealing-carrying, content-addressed minting lives in the DagKeyring client facade (OPE-273).
-    let canonical = keyeo::canonical_encode(&parents, &author, &action, &[]);
+    // Group id is UNSCOPED here: sign_op is single-group (tests / keyless fixtures); the production minting
+    // path (`client::mint`) binds the real group id (openom: the tree id).
+    let group_id = keyeo::GroupId::unscoped();
+    let canonical = keyeo::canonical_encode(&group_id, &parents, &author, &action, &[]);
     let signature = key.sign(&canonical).to_bytes();
     let author_public_key = key.verifying_key().to_bytes();
-    keyeo::Op::new(id, parents, author, action, signature, author_public_key)
+    keyeo::Op::new(id, group_id, parents, author, action, signature, author_public_key)
 }
 
 /// openom keyring authority — v1, founder-signed governance (multi-signer quorum is v2).
@@ -392,11 +395,11 @@ mod tests {
         }
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-        Keyeo::new(KeyringState::create(members), KeyringAccess, StrongRemove)
+        Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
     }
     fn engine_with_rvk(members: &[KeyringMemberInit], rvk_pub: [u8; 32]) -> KeyringEngine {
         Keyeo::new(
-            KeyringState::create(members).with_reset_authority(Some(rvk_pub)),
+            KeyringState::create(keyeo::GroupId::unscoped(), members).with_reset_authority(Some(rvk_pub)),
             KeyringAccess,
             StrongRemove,
         )
@@ -1053,14 +1056,14 @@ mod tests {
             member: "founder".to_string(),
         };
         let bad_sig = sk(1).sign(b"not the canonical op bytes").to_bytes();
-        let op = keyeo::Op::new([1; 32], vec![], "founder".to_string(), action, bad_sig, vk(1));
+        let op = keyeo::Op::new([1; 32], keyeo::GroupId::unscoped(), vec![], "founder".to_string(), action, bad_sig, vk(1));
         assert!(matches!(k.apply(op).unwrap_err(), keyeo::Error::BadSignature));
     }
 
     // ---- v2 multi-signer quorum (FounderOrUnanimity) ----
 
     fn quorum_engine_with(members: &[KeyringMemberInit], quorum: KeyringQuorum) -> KeyringQuorumEngine {
-        Keyeo::with_quorum(KeyringState::create(members), KeyringAccess, StrongRemove, quorum)
+        Keyeo::with_quorum(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove, quorum)
     }
     fn quorum_engine(members: &[KeyringMemberInit]) -> KeyringQuorumEngine {
         quorum_engine_with(members, KeyringQuorum::founder_or_unanimity())

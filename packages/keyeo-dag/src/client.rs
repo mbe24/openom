@@ -37,7 +37,8 @@ fn append(
         .map(|b| decode_op(b))
         .collect::<Result<_, _>>()
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let op = mint(frontier(&ops), author.to_string(), action, sealing, signing_key);
+    let group_id = keyeo::GroupId::new(anchor.group_id.clone());
+    let op = mint(&group_id, frontier(&ops), author.to_string(), action, sealing, signing_key);
     anchor.ops.push(encode_op(&op));
     Ok(serde_json::to_vec(&anchor).expect("DagAnchor serialization is infallible"))
 }
@@ -112,6 +113,11 @@ impl std::error::Error for ClientError {}
 /// vault persists + publishes it opaquely; only this module reads it.
 #[derive(Serialize, Deserialize)]
 struct DagAnchor {
+    /// The group (openom: the tree) id every op in this anchor is bound to, pinned at provision. It is the
+    /// value the engine's genesis is scoped to on resolve, and the id every appended op carries — so an op
+    /// minted for a different tree is refused (`keyeo::Error::WrongGroup`). A hint the SIGNED ops must
+    /// agree with: tampering it makes resolution fail closed, since the signed ops won't match.
+    group_id: Vec<u8>,
     genesis: Vec<MemberInitDto>,
     reset_authority: Option<[u8; 32]>,
     genesis_op_id: [u8; 32],
@@ -122,17 +128,19 @@ struct DagAnchor {
 /// scheme (keyeo's `Op::content_addressed` is Ed25519/`ContentId`-specific; openom's `KeyringOp` uses
 /// `[u8; 32]` ids + `OpenomSign`, so we derive the content id via the generic `keyeo::content_id`).
 fn mint(
+    group_id: &keyeo::GroupId,
     parents: Vec<[u8; 32]>,
     author: String,
     action: KeyringAction,
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> KeyringOp {
-    let canonical = keyeo::canonical_encode(&parents, &author, &action, &sealing);
+    let canonical = keyeo::canonical_encode(group_id, &parents, &author, &action, &sealing);
     let signature = signing_key.sign(&canonical).to_bytes();
     let author_public_key = signing_key.verifying_key().to_bytes();
-    let id = keyeo::content_id(&parents, &author, &action, &sealing, &signature, &author_public_key).0;
-    let mut op = KeyringOp::new(id, parents, author, action, signature, author_public_key);
+    let id =
+        keyeo::content_id(group_id, &parents, &author, &action, &sealing, &signature, &author_public_key).0;
+    let mut op = KeyringOp::new(id, group_id.clone(), parents, author, action, signature, author_public_key);
     op.sealing = sealing;
     op
 }
@@ -140,7 +148,9 @@ fn mint(
 /// Create a brand-new dag keyring anchor: a content-addressed genesis `Create` op naming `founder_id` as
 /// the sole Owner, carrying the opaque `sealing` payload (the vault's epoch-0 + recovery escrow), with the
 /// recovery authority (RVK) pinned. Returns the serialized anchor bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn provision_anchor(
+    tree_id: &[u8],
     founder_id: &str,
     author_public_key: [u8; 32],
     hpke_public_key: [u8; 32],
@@ -148,6 +158,7 @@ pub fn provision_anchor(
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> Vec<u8> {
+    let group_id = keyeo::GroupId::new(tree_id.to_vec());
     let founder = KeyringMemberInit {
         id: founder_id.to_string(),
         role: KeyringRole::OWNER,
@@ -157,8 +168,9 @@ pub fn provision_anchor(
     let action = MembershipAction::Create {
         initial_members: vec![founder.clone()],
     };
-    let op = mint(vec![], founder_id.to_string(), action, sealing, signing_key);
+    let op = mint(&group_id, vec![], founder_id.to_string(), action, sealing, signing_key);
     let anchor = DagAnchor {
+        group_id: tree_id.to_vec(),
         genesis: vec![minit_to_dto(&founder)],
         reset_authority: Some(reset_authority),
         genesis_op_id: op.id,
@@ -217,7 +229,8 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         .map(dto_to_minit)
         .collect::<Result<_, _>>()
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let base = KeyringState::create(&genesis).with_reset_authority(anchor.reset_authority);
+    let base = KeyringState::create(keyeo::GroupId::new(anchor.group_id.clone()), &genesis)
+        .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
     // Pass 1: decode + replay every op (authorization resolves only once the whole closure is applied).
     let mut ops = Vec::with_capacity(anchor.ops.len());
@@ -458,7 +471,7 @@ mod tests {
         let rvk_pub = rvk.verifying_key().to_bytes();
 
         // Genesis {founder Owner, bob CoOwner}, RVK pinned; carries a genesis sealing.
-        let genesis_op = mint(
+        let genesis_op = mint(&keyeo::GroupId::unscoped(),
             vec![],
             "founder".to_string(),
             MembershipAction::Create {
@@ -471,7 +484,7 @@ mod tests {
 
         // (A) the compromised founder key adds a co-owner (a signer = privileged), concurrent with (B) an
         // RVK-signed recovery ReFound. Both are children of genesis. Each carries a sealing delta.
-        let thief = mint(
+        let thief = mint(&keyeo::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::Add {
@@ -484,7 +497,7 @@ mod tests {
             b"THIEF-SEALING".to_vec(),
             &sk(1),
         );
-        let recovery_op = mint(
+        let recovery_op = mint(&keyeo::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::ReFound {
@@ -498,6 +511,7 @@ mod tests {
         );
 
         let anchor = DagAnchor {
+            group_id: Vec::new(),
             genesis: vec![minit_to_dto(&founder), minit_to_dto(&bob)],
             reset_authority: Some(rvk_pub),
             genesis_op_id: genesis_id,
@@ -527,7 +541,7 @@ mod tests {
     /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
     #[test]
     fn watermark_advances_and_check_floor_catches_rollback() {
-        let a0 = provision_anchor("founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        let a0 = provision_anchor(b"tree-1", "founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
         let w0 = watermark(&a0).unwrap();
         assert_eq!(w0.len(), 32, "a single tip (the genesis op) encodes to 32 bytes");
         assert!(check_floor(&a0, &w0).is_ok(), "the current frontier satisfies its own floor");

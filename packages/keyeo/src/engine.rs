@@ -158,13 +158,28 @@ where
         // signature over THAT — never trust a caller-supplied `canonical` blob.
         // This binds the signature to (id, parents, author, action), so a valid
         // (canonical, signature) pair can't be replayed onto a different action.
-        let canonical =
-            crate::canonical::canonical_encode(op.parents(), op.author(), op.action(), op.sealing());
+        let canonical = crate::canonical::canonical_encode(
+            op.group_id(),
+            op.parents(),
+            op.author(),
+            op.action(),
+            op.sealing(),
+        );
         <Op::S as SignatureScheme>::verify(pk, &canonical, op.signature())
             .map_err(|_| Error::BadSignature)
     }
 
     pub fn apply(&mut self, op: Op) -> ApplyResult<Op> {
+        // 0. Group binding (first-class, resolver-enforced): refuse an op minted for a different group
+        //    OUTRIGHT — never buffer or store it. The `group_id` is bound into the op's signed +
+        //    content-addressed bytes, so this is a guarantee (an op for group A can never resolve into
+        //    group B), not the incidental "foreign parents don't resolve". Checked against the immutable
+        //    construction genesis, whose group_id is pinned at first sight. Vacuous when both are empty
+        //    (keyeo's single-group / test callers), a hard gate once a caller assigns real group ids.
+        if op.group_id() != &self.genesis.group_id {
+            return Err(Error::WrongGroup);
+        }
+
         // 1. Parents present? Otherwise buffer (bounded).
         let mut missing = Vec::new();
         for parent in op.parents() {
@@ -571,6 +586,19 @@ where
     ) -> Result<(), Error<Op::MemberId>> {
         if !crate::epoch::verify_epoch::<Op::OpId, Op::MemberId, Op::S>(&epoch) {
             return Err(Error::BadSignature);
+        }
+        // Group gate: an epoch authored for a different group is refused before it can enter the candidate
+        // set. Its `group_id` is part of the signed bytes (verified just above), so this checks an authentic
+        // value — closing the cross-group DEK-transplant vector (two groups with an identical active
+        // membership share a membership_commitment; the group gate is what keeps A's epoch out of B).
+        if epoch.group_id != self.genesis.group_id {
+            return Err(Error::WrongGroup);
+        }
+        // Structural: an epoch's parents must be ops this engine holds. `forge_epoch` tie-breaks candidates
+        // by `parents.len()`, so an unchecked/forged parent set could steer reconciliation; requiring
+        // parents ⊆ ops removes that lever.
+        if !epoch.parents.iter().all(|p| self.ops.contains_key(p)) {
+            return Err(Error::InvalidAction("epoch parents not in the DAG".into()));
         }
         if !self.replica_epochs.iter().any(|e| e.id == epoch.id) {
             self.replica_epochs.push(epoch);

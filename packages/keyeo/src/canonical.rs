@@ -14,7 +14,7 @@
 
 use serde::Serialize;
 
-use crate::dag::resolver::{DekWrap, MemberId, MemberInit, MembershipAction, OpId};
+use crate::dag::resolver::{DekWrap, GroupId, MemberId, MemberInit, MembershipAction, OpId};
 use crate::roles::Role;
 use crate::signature::SignatureScheme;
 
@@ -172,14 +172,22 @@ impl<Id: MemberId> CanonicalBytes for DekWrap<Id> {
 /// function (and hence the block-id / signature machinery) is payload-agnostic and testable with any
 /// `CanonicalBytes` action.
 pub fn canonical_encode<OId: OpId, MId: MemberId, A: CanonicalBytes>(
+    group_id: &GroupId,
     parents: &[OId],
     author: &MId,
     action: &A,
     sealing: &[u8],
 ) -> Vec<u8> {
-    // v2 adds the trailing length-prefixed `sealing` payload (OPE-273). Bumped from v1 so the two layouts
-    // are byte-disjoint — pre-release, no persisted ops, so no migration.
-    let mut buf = b"keyeo:op:v2".to_vec();
+    let group_id = group_id.as_bytes();
+    // v3 adds the leading length-prefixed `group_id` — a first-class binding of every op to its group, so
+    // the resolver can REFUSE an op minted for a different group (an op for group A can never resolve into
+    // group B) rather than relying on the incidental "foreign parents don't resolve". Placed first (right
+    // after the version tag) and covered by both the signature and the content-id. keyeo stays domain-free:
+    // `group_id` is an opaque identifier the caller assigns (openom sets it to the tree id). v2→v3 keeps the
+    // layouts byte-disjoint — pre-release, no persisted ops, so no migration. (v2 added trailing `sealing`.)
+    let mut buf = b"keyeo:op:v3".to_vec();
+    buf.extend_from_slice(&(group_id.len() as u64).to_le_bytes());
+    buf.extend_from_slice(group_id);
     buf.extend_from_slice(&(parents.len() as u64).to_le_bytes());
     for p in parents {
         Postcard(p).write_canonical(&mut buf);
@@ -197,12 +205,20 @@ pub fn canonical_encode<OId: OpId, MId: MemberId, A: CanonicalBytes>(
 /// ([`crate::epoch::verify_epoch`]) call this over the epoch's own fields, so a signature binds to
 /// exactly this content and can't be transplanted to a different frontier, membership, or wrap set.
 pub fn canonical_encode_epoch<OId: OpId, MId: MemberId>(
+    group_id: &GroupId,
     parents: &[OId],
     commitment: &[u8; 32],
     epoch: u64,
     wraps: &[DekWrap<MId>],
 ) -> Vec<u8> {
-    let mut buf = b"keyeo:epoch:v1".to_vec();
+    // v2 adds the leading length-prefixed group_id — an epoch artifact is signature-bound to its group, so
+    // an epoch authored for group A can never be admitted into group B (two groups with an identical active
+    // membership have an identical membership_commitment; without this, group A's signed epoch could be
+    // transplanted into B and win reconciliation — a cross-tree DEK collapse). Matches the op layout (v3).
+    let group_id = group_id.as_bytes();
+    let mut buf = b"keyeo:epoch:v2".to_vec();
+    buf.extend_from_slice(&(group_id.len() as u64).to_le_bytes());
+    buf.extend_from_slice(group_id);
     buf.extend_from_slice(&(parents.len() as u64).to_le_bytes());
     for p in parents {
         Postcard(p).write_canonical(&mut buf);

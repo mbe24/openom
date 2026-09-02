@@ -242,9 +242,12 @@ mod tests {
             }
         }
         let (parents, author) = ([1u64, 2u64], [9u8; 32]);
-        let a = canonical_encode(&parents, &author, &Payload(7), &[]);
-        assert_eq!(a, canonical_encode(&parents, &author, &Payload(7), &[]), "deterministic");
-        assert_ne!(a, canonical_encode(&parents, &author, &Payload(8), &[]), "the payload binds");
-        assert_ne!(a, canonical_encode(&[1u64], &author, &Payload(7), &[]), "parents bind");
+        let gid = crate::GroupId::unscoped();
+        let a = canonical_encode(&gid, &parents, &author, &Payload(7), &[]);
+        assert_eq!(a, canonical_encode(&gid, &parents, &author, &Payload(7), &[]), "deterministic");
+        assert_ne!(a, canonical_encode(&gid, &parents, &author, &Payload(8), &[]), "the payload binds");
+        assert_ne!(a, canonical_encode(&gid, &[1u64], &author, &Payload(7), &[]), "parents bind");
+        let other = crate::GroupId::new(b"other-group".to_vec());
+        assert_ne!(a, canonical_encode(&other, &parents, &author, &Payload(7), &[]), "group binds");
     }
 }

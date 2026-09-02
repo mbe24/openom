@@ -26,7 +26,7 @@ pub use content::{content_id, verify_content_id, ContentId};
 pub use blocklace::Graph;
 pub use dag::lamport::LamportTiebreak;
 pub use dag::resolver::{
-    ApplyOutcome, DekWrap, Error, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
+    ApplyOutcome, DekWrap, Error, GroupId, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
     MembershipEvent, OpId, SignedOp,
 };
 pub use dag::strong_remove::StrongRemove;

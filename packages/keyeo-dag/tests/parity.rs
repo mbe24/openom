@@ -57,7 +57,7 @@ fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
     }
 }
 fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-    Keyeo::new(KeyringState::create(members), KeyringAccess, StrongRemove)
+    Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
 }
 fn add(member: &str, role: KeyringRole, seed: u8) -> MembershipAction<String, KeyringRole, keyeo_dag::OpenomSign> {
     MembershipAction::Add {
@@ -125,7 +125,7 @@ fn dag_tallies_quorum_approvals_that_arrive_on_a_fork() {
         minit("ed", KeyringRole::EDITOR, 6),
     ];
     let mut k: KeyringQuorumEngine = Keyeo::with_quorum(
-        KeyringState::create(&cast),
+        KeyringState::create(keyeo::GroupId::unscoped(), &cast),
         KeyringAccess,
         StrongRemove,
         KeyringQuorum::threshold(3),

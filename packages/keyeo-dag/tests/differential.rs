@@ -115,7 +115,7 @@ fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
             hpke_public_key: [c.seed; 32],
         })
         .collect();
-    Keyeo::new(KeyringState::create(&inits), KeyringAccess, StrongRemove)
+    Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), &inits), KeyringAccess, StrongRemove)
 }
 
 fn keyeo_has(k: &KeyringEngine, id: &str) -> bool {
@@ -134,7 +134,7 @@ fn keyeo_engine_with_rvk(cast: &[Cast], rvk_pub: [u8; 32]) -> KeyringEngine {
         })
         .collect();
     Keyeo::new(
-        KeyringState::create(&inits).with_reset_authority(Some(rvk_pub)),
+        KeyringState::create(keyeo::GroupId::unscoped(), &inits).with_reset_authority(Some(rvk_pub)),
         KeyringAccess,
         StrongRemove,
     )

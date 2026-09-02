@@ -39,7 +39,7 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-use crate::dag::resolver::{DekWrap, MemberId, OpId};
+use crate::dag::resolver::{DekWrap, GroupId, MemberId, OpId};
 use crate::hpke_wrap::{hpke_unwrap_dek, hpke_wrap_dek};
 use crate::kdf::{generate_dek, Key32};
 use crate::roles::Role;
@@ -49,11 +49,17 @@ use crate::CryptoError;
 const EPOCH_WRAP_INFO: &[u8] = b"flowcontrol:epoch:wraps:v1";
 const COMMITMENT_PREFIX: &[u8] = b"flowcontrol:epoch:members:v1";
 
-/// Deterministic bytes binding an epoch (number + membership commitment) — the HPKE `info` used for
-/// both wrapping and unwrapping, so the writer and reader agree without exchanging anything else.
-pub fn epoch_context(epoch: u64, commitment: &[u8; 32]) -> Vec<u8> {
+/// Deterministic bytes binding an epoch (group + number + membership commitment) — the HPKE `info` used
+/// for both wrapping and unwrapping, so the writer and reader agree without exchanging anything else. The
+/// leading, length-prefixed `group_id` makes a wrap **cryptographically** un-openable across groups: even
+/// if a signed epoch artifact were transplanted from another group, its wraps were sealed under that
+/// group's `info` and won't unwrap here — defence in depth beneath the `apply_epoch` group gate.
+pub fn epoch_context(group_id: &GroupId, epoch: u64, commitment: &[u8; 32]) -> Vec<u8> {
+    let group_id = group_id.as_bytes();
     let mut v = EPOCH_WRAP_INFO.to_vec();
     v.push(0);
+    v.extend_from_slice(&(group_id.len() as u64).to_le_bytes());
+    v.extend_from_slice(group_id);
     v.extend_from_slice(&epoch.to_le_bytes());
     v.extend_from_slice(commitment);
     v
@@ -91,12 +97,13 @@ pub fn membership_commitment<Id: MemberId, R: Role>(active: &[(Id, R, [u8; 32])]
 /// which the rotating caller keeps as the group's data key. Only the wraps are replicated; the DEK
 /// never leaves the holder except inside each member's wrap.
 pub fn generate_epoch<Id: MemberId>(
+    group_id: &GroupId,
     epoch: u64,
     commitment: &[u8; 32],
     active_hpke: &[(Id, [u8; 32])],
 ) -> Result<(Vec<DekWrap<Id>>, Key32), CryptoError> {
     let dek = generate_dek()?;
-    let info = epoch_context(epoch, commitment);
+    let info = epoch_context(group_id, epoch, commitment);
     let mut wraps: Vec<DekWrap<Id>> = Vec::with_capacity(active_hpke.len());
     for (id, hpke_public) in active_hpke {
         let w = hpke_wrap_dek(hpke_public, dek.as_slice(), info.as_slice())?;
@@ -123,6 +130,10 @@ pub fn generate_epoch<Id: MemberId>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Epoch<OId: OpId, MId: MemberId, S: SignatureScheme> {
     pub id: OId,
+    /// The group (openom: the tree) this epoch belongs to — signed, and gated by the engine's `apply_epoch`
+    /// against the group being resolved, so an epoch authored for another group is refused before it can
+    /// enter the candidate set.
+    pub group_id: GroupId,
     /// The membership op(s) this epoch causally follows — the DAG position it reconciles at.
     pub parents: Vec<OId>,
     pub author: MId,
@@ -145,8 +156,10 @@ impl<OId: OpId, MId: MemberId, S: SignatureScheme> Epoch<OId, MId, S> {
     ///
     /// `id` is caller-assigned (in practice a content hash of the signed content); `active_hpke` is
     /// the `(member, hpke_public_key)` pairs of the members this epoch is for.
+    #[allow(clippy::too_many_arguments)]
     pub fn author(
         id: OId,
+        group_id: GroupId,
         parents: Vec<OId>,
         author: MId,
         commitment: [u8; 32],
@@ -157,13 +170,14 @@ impl<OId: OpId, MId: MemberId, S: SignatureScheme> Epoch<OId, MId, S> {
     where
         S: SignatureScheme<PublicKey = [u8; 32], Signature = [u8; 64]>,
     {
-        let (wraps, _dek) = generate_epoch(epoch, &commitment, active_hpke)?;
-        let canon = epoch_signing_bytes::<OId, MId>(&parents, &commitment, epoch, &wraps);
+        let (wraps, _dek) = generate_epoch(&group_id, epoch, &commitment, active_hpke)?;
+        let canon = epoch_signing_bytes::<OId, MId>(&group_id, &parents, &commitment, epoch, &wraps);
         use ed25519_dalek::Signer;
         let signature = signing_key.sign(&canon).to_bytes();
         let author_public_key = signing_key.verifying_key().to_bytes();
         Ok(Epoch {
             id,
+            group_id,
             parents,
             author,
             commitment,
@@ -180,12 +194,13 @@ impl<OId: OpId, MId: MemberId, S: SignatureScheme> Epoch<OId, MId, S> {
 /// fields, so a signature binds to exactly this content and can't be transplanted. Delegates to the
 /// shared [`crate::canonical::CanonicalBytes`] seam (G-S5) — there is no second hand-rolled encoder.
 pub fn epoch_signing_bytes<OId: OpId, MId: MemberId>(
+    group_id: &GroupId,
     parents: &[OId],
     commitment: &[u8; 32],
     epoch: u64,
     wraps: &[DekWrap<MId>],
 ) -> Vec<u8> {
-    crate::canonical::canonical_encode_epoch::<OId, MId>(parents, commitment, epoch, wraps)
+    crate::canonical::canonical_encode_epoch::<OId, MId>(group_id, parents, commitment, epoch, wraps)
 }
 
 /// Verify an epoch's **author signature** over its canonical content (goal G-E1): proves the artifact
@@ -197,6 +212,7 @@ pub fn verify_epoch<OId: OpId, MId: MemberId, S: SignatureScheme>(
     epoch: &Epoch<OId, MId, S>,
 ) -> bool {
     let canon = epoch_signing_bytes::<OId, MId>(
+        &epoch.group_id,
         &epoch.parents,
         &epoch.commitment,
         epoch.epoch,
@@ -237,12 +253,13 @@ pub fn winner_members<OId: OpId, MId: MemberId, S: SignatureScheme>(
 /// `epoch`/`commitment` come from the shared resolved group state; reconstructing the same `info` is
 /// what makes recovery work even though the wrap is standalone data.
 pub fn recover_epoch_dek<Id: MemberId>(
+    group_id: &GroupId,
     hpke_secret: &[u8; 32],
     wrap: &DekWrap<Id>,
     epoch: u64,
     commitment: &[u8; 32],
 ) -> Result<Key32, CryptoError> {
-    let info = epoch_context(epoch, commitment);
+    let info = epoch_context(group_id, epoch, commitment);
     hpke_unwrap_dek(
         hpke_secret,
         wrap.encapped_key.as_slice(),
@@ -303,7 +320,7 @@ mod tests {
             ([1u8; 32], TRole::Admin, a_public),
             ([2u8; 32], TRole::Editor, b_public),
         ]);
-        let (wraps, _dek) = generate_epoch::<[u8; 32]>(
+        let (wraps, _dek) = generate_epoch::<[u8; 32]>(&GroupId::unscoped(), 
             0,
             &commitment,
             &[([1u8; 32], a_public), ([2u8; 32], b_public)],
@@ -313,8 +330,8 @@ mod tests {
 
         let a_wrap = wraps.iter().find(|w| w.member == [1u8; 32]).unwrap();
         let b_wrap = wraps.iter().find(|w| w.member == [2u8; 32]).unwrap();
-        let a_dek = recover_epoch_dek(&a_secret, a_wrap, 0, &commitment).unwrap();
-        let b_dek = recover_epoch_dek(&b_secret, b_wrap, 0, &commitment).unwrap();
+        let a_dek = recover_epoch_dek(&GroupId::unscoped(), &a_secret, a_wrap, 0, &commitment).unwrap();
+        let b_dek = recover_epoch_dek(&GroupId::unscoped(), &b_secret, b_wrap, 0, &commitment).unwrap();
         assert_eq!(&*a_dek, &*b_dek, "every member receives the same epoch DEK");
     }
 
@@ -326,18 +343,18 @@ mod tests {
         let commitment =
             membership_commitment::<[u8; 32], TRole>(&[([1u8; 32], TRole::Admin, a_public)]);
         let (wraps, _dek) =
-            generate_epoch::<[u8; 32]>(1, &commitment, &[([1u8; 32], a_public)]).unwrap();
+            generate_epoch::<[u8; 32]>(&GroupId::unscoped(), 1, &commitment, &[([1u8; 32], a_public)]).unwrap();
         assert_eq!(wraps.len(), 1, "only Alice has a wrap in the new epoch");
         assert!(wraps_complete(&wraps, &[[1u8; 32]]));
 
         let a_wrap = wraps.iter().find(|w| w.member == [1u8; 32]).unwrap();
-        let a_dek = recover_epoch_dek(&a_secret, a_wrap, 1, &commitment).unwrap();
+        let a_dek = recover_epoch_dek(&GroupId::unscoped(), &a_secret, a_wrap, 1, &commitment).unwrap();
         assert_eq!(a_dek.len(), 32);
 
         // Bob — removed — has no wrap, and trying to use another member's wrap fails.
         let b_wrap = wraps[0].clone();
         assert!(matches!(
-            recover_epoch_dek(&b_secret, &b_wrap, 1, &commitment),
+            recover_epoch_dek(&GroupId::unscoped(), &b_secret, &b_wrap, 1, &commitment),
             Err(CryptoError::Hpke)
         ));
     }
@@ -347,15 +364,15 @@ mod tests {
         let (secret, public) = hpke(&[1u8; 32]);
         let c1 = membership_commitment::<[u8; 32], TRole>(&[([1u8; 32], TRole::Admin, public)]);
         let c2 = membership_commitment::<[u8; 32], TRole>(&[([1u8; 32], TRole::Editor, public)]);
-        let (wraps, _dek) = generate_epoch::<[u8; 32]>(0, &c1, &[([1u8; 32], public)]).unwrap();
+        let (wraps, _dek) = generate_epoch::<[u8; 32]>(&GroupId::unscoped(), 0, &c1, &[([1u8; 32], public)]).unwrap();
         let wrap = wraps[0].clone();
         // Different membership commitment or different epoch -> wrong info -> cannot open.
         assert!(matches!(
-            recover_epoch_dek(&secret, &wrap, 0, &c2),
+            recover_epoch_dek(&GroupId::unscoped(), &secret, &wrap, 0, &c2),
             Err(CryptoError::Hpke)
         ));
         assert!(matches!(
-            recover_epoch_dek(&secret, &wrap, 1, &c1),
+            recover_epoch_dek(&GroupId::unscoped(), &secret, &wrap, 1, &c1),
             Err(CryptoError::Hpke)
         ));
     }
@@ -384,7 +401,7 @@ mod tests {
         let commitment =
             membership_commitment::<[u8; 32], TRole>(&[([1u8; 32], TRole::Admin, a_public)]);
         let (full, _dek) =
-            generate_epoch::<[u8; 32]>(0, &commitment, &[([1u8; 32], a_public)]).unwrap();
+            generate_epoch::<[u8; 32]>(&GroupId::unscoped(), 0, &commitment, &[([1u8; 32], a_public)]).unwrap();
 
         // A member missing a wrap (lockout).
         assert!(!wraps_complete(&[], &[[1u8; 32]]));
@@ -410,6 +427,7 @@ mod tests {
         // both candidates must pick the SAME one regardless of candidate order.
         let mk = |id: u64, parents: Vec<u64>| Epoch::<u64, [u8; 32], Ed25519> {
             id,
+            group_id: GroupId::unscoped(),
             parents,
             author: [1u8; 32],
             commitment: [7u8; 32],
@@ -459,6 +477,7 @@ mod tests {
         // Replica A authors an epoch; Replica B authors a DIFFERENT epoch (same frontier, high ids).
         let e_a = Epoch::<u64, [u8; 32], Ed25519>::author(
             500,
+            GroupId::unscoped(),
             vec![9u64],
             [1u8; 32],
             commitment,
@@ -469,6 +488,7 @@ mod tests {
         .unwrap();
         let e_b = Epoch::<u64, [u8; 32], Ed25519>::author(
             499,
+            GroupId::unscoped(),
             vec![9u64],
             [2u8; 32],
             commitment,
@@ -494,8 +514,8 @@ mod tests {
         // Every remaining member unwraps the SAME DEK from the winning epoch (single shared key).
         let wrap_a = w1.wraps.iter().find(|w| w.member == [1u8; 32]).unwrap();
         let wrap_b = w1.wraps.iter().find(|w| w.member == [2u8; 32]).unwrap();
-        let dek_a = recover_epoch_dek(&a_sec, wrap_a, w1.epoch, &w1.commitment).unwrap();
-        let dek_b = recover_epoch_dek(&b_sec, wrap_b, w1.epoch, &w1.commitment).unwrap();
+        let dek_a = recover_epoch_dek(&GroupId::unscoped(), &a_sec, wrap_a, w1.epoch, &w1.commitment).unwrap();
+        let dek_b = recover_epoch_dek(&GroupId::unscoped(), &b_sec, wrap_b, w1.epoch, &w1.commitment).unwrap();
         assert_eq!(
             &*dek_a, &*dek_b,
             "both members recover the same shared DEK from the winner"
@@ -512,6 +532,7 @@ mod tests {
             membership_commitment::<[u8; 32], TRole>(&[([1u8; 32], TRole::Admin, pubk)]);
         let e = Epoch::<u64, [u8; 32], Ed25519>::author(
             1,
+            GroupId::unscoped(),
             vec![9u64],
             [1u8; 32],
             commitment,

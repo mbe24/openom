@@ -12,7 +12,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::canonical::canonical_encode;
-use crate::dag::resolver::{MemberId, MembershipAction, OpId, SignedOp};
+use crate::dag::resolver::{GroupId, MemberId, MembershipAction, OpId, SignedOp};
 use crate::op::Op;
 use crate::roles::Role;
 use crate::signature::{Ed25519, SignatureScheme};
@@ -28,6 +28,7 @@ impl OpId for ContentId {}
 /// id (the whole op — including its opaque payload — is content-addressed).
 #[allow(clippy::too_many_arguments)]
 pub fn content_id<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
+    group_id: &GroupId,
     parents: &[OId],
     author: &MId,
     action: &MembershipAction<MId, R, S>,
@@ -36,7 +37,7 @@ pub fn content_id<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
     author_public_key: &<S as SignatureScheme>::PublicKey,
 ) -> ContentId {
     let mut h = Sha256::new();
-    h.update(canonical_encode(parents, author, action, sealing));
+    h.update(canonical_encode(group_id, parents, author, action, sealing));
     h.update(signature.as_ref());
     h.update(author_public_key.as_ref());
     ContentId(h.finalize().into())
@@ -47,6 +48,7 @@ impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
     /// action, sealing)`, then set `id = H(canonical ‖ signature ‖ author_public_key)`. The recommended
     /// constructor for a keyring. Pass an empty `sealing` for ops that carry none.
     pub fn content_addressed(
+        group_id: GroupId,
         parents: Vec<ContentId>,
         author: MId,
         action: MembershipAction<MId, R, Ed25519>,
@@ -54,12 +56,21 @@ impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
         use ed25519_dalek::Signer;
-        let canonical = canonical_encode(&parents, &author, &action, &sealing);
+        let canonical = canonical_encode(&group_id, &parents, &author, &action, &sealing);
         let signature = signing_key.sign(&canonical).to_bytes();
         let author_public_key = signing_key.verifying_key().to_bytes();
-        let id = content_id(&parents, &author, &action, &sealing, &signature, &author_public_key);
+        let id = content_id(
+            &group_id,
+            &parents,
+            &author,
+            &action,
+            &sealing,
+            &signature,
+            &author_public_key,
+        );
         Op {
             id,
+            group_id,
             parents,
             author,
             action,
@@ -79,6 +90,7 @@ pub fn verify_content_id<MId: MemberId, R: Role, S: SignatureScheme>(
     op: &Op<ContentId, MId, R, S>,
 ) -> bool {
     content_id(
+        op.group_id(),
         op.parents(),
         op.author(),
         op.action(),
@@ -105,7 +117,7 @@ mod tests {
     fn content_id_verifies_and_detects_tampering() {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
         let action = MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] };
-        let op = Op::content_addressed(vec![], [3u8; 32], action, Vec::new(), &sk);
+        let op = Op::content_addressed(GroupId::unscoped(), vec![], [3u8; 32], action, Vec::new(), &sk);
 
         // The id names this content; re-derivation matches.
         assert!(verify_content_id(&op));
@@ -120,6 +132,7 @@ mod tests {
         // Distinct content ⇒ distinct id (Merkle-DAG property).
         let sk2 = ed25519_dalek::SigningKey::from_bytes(&[6u8; 32]);
         let other = Op::content_addressed(
+            GroupId::unscoped(),
             vec![],
             [3u8; 32],
             MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] },

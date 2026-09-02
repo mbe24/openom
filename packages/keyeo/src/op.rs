@@ -12,7 +12,7 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-use crate::dag::resolver::{MemberId, MembershipAction, OpId, SignedOp};
+use crate::dag::resolver::{GroupId, MemberId, MembershipAction, OpId, SignedOp};
 use crate::roles::Role;
 use crate::signature::{Ed25519, SignatureScheme};
 
@@ -27,6 +27,10 @@ use crate::signature::{Ed25519, SignatureScheme};
 #[derive(Clone, Debug)]
 pub struct Op<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme = Ed25519> {
     pub id: OId,
+    /// The group this op belongs to (openom: the tree id) — a [`GroupId`] bound into the signed +
+    /// content-addressed bytes and enforced by the engine (an op whose `group_id` differs from the group
+    /// being resolved is refused). [`GroupId::unscoped`] for single-group / test callers.
+    pub group_id: GroupId,
     pub parents: Vec<OId>,
     pub author: MId,
     pub action: MembershipAction<MId, R, S>,
@@ -44,6 +48,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: OId,
+        group_id: GroupId,
         parents: Vec<OId>,
         author: MId,
         action: MembershipAction<MId, R, S>,
@@ -52,6 +57,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
     ) -> Self {
         Self {
             id,
+            group_id,
             parents,
             author,
             action,
@@ -79,6 +85,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
     {
         use ed25519_dalek::Signer;
         let canonical = crate::canonical::canonical_encode(
+            &self.group_id,
             &self.parents,
             &self.author,
             &self.action,
@@ -143,6 +150,9 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> SignedOp for Op<OId,
     fn sealing(&self) -> &[u8] {
         &self.sealing
     }
+    fn group_id(&self) -> &GroupId {
+        &self.group_id
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +174,7 @@ mod tests {
         let action = MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [1u8; 32] };
         let op = Op::new(
             42u64,
+            GroupId::unscoped(),
             vec![1u64, 2u64],
             [3u8; 32],
             action,
@@ -173,8 +184,13 @@ mod tests {
         .sign(&sk);
 
         // the signature verifies over the library's canonical encoding of the fields
-        let canonical =
-            crate::canonical::canonical_encode(&op.parents, &op.author, &op.action, &op.sealing);
+        let canonical = crate::canonical::canonical_encode(
+            &op.group_id,
+            &op.parents,
+            &op.author,
+            &op.action,
+            &op.sealing,
+        );
         assert_eq!(op.author_public_key, sk.verifying_key().to_bytes());
         assert!(<Ed25519 as SignatureScheme>::verify(
             &op.author_public_key,
@@ -184,6 +200,7 @@ mod tests {
         .is_ok());
         // a different action produces different canonical bytes (binding)
         let other = crate::canonical::canonical_encode(
+            &op.group_id,
             &op.parents,
             &op.author,
             &MembershipAction::<[u8; 32], TRole, Ed25519>::Remove { member: [2u8; 32] },

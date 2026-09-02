@@ -22,6 +22,11 @@ use crate::{KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringState};
 /// recovery authority. Both engines pin these; here they seed the resolver's construction base.
 #[derive(Serialize, Deserialize)]
 struct PinnedConfig {
+    /// The group (tree) id the engine's genesis is scoped to. Taken from the signed genesis op at
+    /// bootstrap, so every replayed op — whose signed group_id must match — is gated to this tree; a
+    /// tampered value fails closed (the signed ops won't match).
+    #[serde(default)]
+    group_id: Vec<u8>,
     genesis: Vec<MemberInitDto>,
     reset_authority: Option<[u8; 32]>,
 }
@@ -55,7 +60,8 @@ impl DagVerifier {
             .map(dto_to_minit)
             .collect::<Result<_, _>>()
             .map_err(|_| VerifyError::Malformed)?;
-        let base = KeyringState::create(&genesis).with_reset_authority(pinned.reset_authority);
+        let base = KeyringState::create(keyeo::GroupId::new(pinned.group_id.clone()), &genesis)
+            .with_reset_authority(pinned.reset_authority);
         Ok(Keyeo::new(base, KeyringAccess, StrongRemove))
     }
 
@@ -166,6 +172,9 @@ pub fn bootstrap_update(
 ) -> Vec<u8> {
     let dto = UpdateDto::Bootstrap {
         pinned: PinnedConfig {
+            // The group id comes from the signed genesis op — the authentic value every replayed op is
+            // gated against (never trusted from an unsigned side channel).
+            group_id: genesis_op.group_id.0.clone(),
             genesis: genesis.iter().map(minit_to_dto).collect(),
             reset_authority,
         },

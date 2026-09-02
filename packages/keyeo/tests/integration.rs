@@ -1,7 +1,7 @@
 use keyeo::{
     self, dag::lamport::LamportTiebreak, dag::strong_remove::StrongRemove, keyeo as keyeo_fn,
-    membership_commitment, ApplyOutcome, DefaultAccessControl, Ed25519, Epoch, Error, GroupState,
-    Keyeo, MemberInit, MembershipAction, Op, Role,
+    membership_commitment, ApplyOutcome, DefaultAccessControl, Ed25519, Epoch, Error, GroupId,
+    GroupState, Keyeo, MemberInit, MembershipAction, Op, Role,
 };
 use proptest::prelude::*;
 
@@ -38,7 +38,7 @@ fn cpk() -> [u8; 32] {
 
 fn alice_admin_state() -> GroupState<[u8; 32], TestRole, Ed25519> {
     let pk = alice_pk();
-    GroupState::create(&[MemberInit {
+    GroupState::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Admin,
         author_public_key: pk,
@@ -54,7 +54,7 @@ fn make_op(
 ) -> Op<u64, [u8; 32], TestRole, Ed25519> {
     let sk = make_keypair(seed);
     let pk = sk.verifying_key().to_bytes();
-    Op::new(id, parents, pk, action, [0u8; 64], pk).sign(&sk)
+    Op::new(id, GroupId::unscoped(), parents, pk, action, [0u8; 64], pk).sign(&sk)
 }
 
 type TestEngine =
@@ -73,7 +73,7 @@ fn minit(id: [u8; 32], role: TestRole, hpke: [u8; 32]) -> MemberInit<[u8; 32], T
 /// A `StrongRemove` engine seeded with `genesis` (constructor + a matching `Create` op at id 1).
 fn strong_remove_engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>]) -> TestEngine {
     let mut k = Keyeo::new(
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(genesis),
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), genesis),
         DefaultAccessControl::new(TestRole::Admin),
         StrongRemove,
     );
@@ -199,7 +199,7 @@ proptest! {
 #[test]
 fn test_genesis() {
     let pk = alice_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Admin,
         author_public_key: pk,
@@ -314,7 +314,7 @@ fn test_unauthorized_add_has_no_effect() {
     // then the causal rebuild drops it — so it has no effect and emits no event. (Authorization is
     // no longer a synchronous apply() error; only authentication — bad sig / unknown author — is.)
     let pk = alice_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Viewer,
         author_public_key: pk,
@@ -381,6 +381,7 @@ fn test_bad_signature() {
     // Craft an op with a wrong signature (not from the canonical encoding)
     let bad = Op::new(
         1u64,
+        GroupId::unscoped(),
         vec![],
         pk,
         MembershipAction::Create {
@@ -419,6 +420,7 @@ fn test_signature_bound_to_action() {
     // Forge: reuse Alice's signature + author, but swap in a different action.
     let forged = Op::new(
         1u64,
+        GroupId::unscoped(),
         vec![],
         alice_pk(),
         MembershipAction::Remove { member: bob_pk() },
@@ -426,6 +428,171 @@ fn test_signature_bound_to_action() {
         alice_pk(),
     );
     assert!(matches!(k.apply(forged).unwrap_err(), Error::BadSignature));
+}
+
+#[test]
+fn an_op_for_another_group_is_refused() {
+    // First-class group binding (Stage 1, keyeo:op:v3): the engine refuses an op whose `group_id` differs
+    // from the genesis group_id — BEFORE storing it — so an op minted for group B can never resolve into
+    // group A. A guarantee, not the incidental "foreign parents don't resolve": here both ops are otherwise
+    // valid (same alice author, same action, valid self-signature), differing ONLY in group_id.
+    let group_a = GroupId::new(b"tree-A".to_vec());
+    let mut k = keyeo_fn(
+        alice_admin_state().with_group_id(group_a.clone()),
+        TestRole::Admin,
+    );
+    let sk = make_keypair(&[1u8; 32]); // alice
+    let pk = alice_pk();
+    let add_bob = || MembershipAction::Add {
+        member: bob_pk(),
+        role: TestRole::Editor,
+        author_public_key: bob_pk(),
+        hpke_public_key: [0xbb; 32],
+        member_proof: None,
+    };
+    // In-group op: admitted (a valid self-signature by a known member).
+    let in_group = Op::new(1u64, group_a.clone(), vec![], pk, add_bob(), [0u8; 64], pk).sign(&sk);
+    assert!(k.apply(in_group).is_ok());
+    // Wrong-group op: identical but for group_id "tree-B" → refused as WrongGroup, never stored.
+    let wrong_group = Op::new(
+        2u64,
+        GroupId::new(b"tree-B".to_vec()),
+        vec![],
+        pk,
+        add_bob(),
+        [0u8; 64],
+        pk,
+    )
+    .sign(&sk);
+    assert!(matches!(k.apply(wrong_group).unwrap_err(), Error::WrongGroup));
+
+    // The group_id is inside the SIGNED bytes, not merely gate-checked: sign an op under a DIFFERENT group
+    // (tree-Z), then relabel its group_id field to the genesis group (so the group gate passes) WITHOUT
+    // re-signing. Authentication recomputes the canonical bytes over the presented group_id and must fail.
+    let signed_elsewhere = Op::new(
+        3u64,
+        GroupId::new(b"tree-Z".to_vec()),
+        vec![],
+        pk,
+        add_bob(),
+        [0u8; 64],
+        pk,
+    )
+    .sign(&sk);
+    let relabeled = Op {
+        group_id: group_a.clone(),
+        ..signed_elsewhere
+    };
+    assert!(matches!(k.apply(relabeled).unwrap_err(), Error::BadSignature));
+}
+
+#[test]
+fn a_cross_group_genesis_create_is_refused() {
+    // A `Create` op minted for another tree can't re-found THIS tree: the group gate refuses it before the
+    // OPE-271 empty-state Create gate even runs.
+    let mut k = keyeo_fn(
+        alice_admin_state().with_group_id(GroupId::new(b"tree-A".to_vec())),
+        TestRole::Admin,
+    );
+    let pk = alice_pk();
+    let create_b = Op::new(
+        9u64,
+        GroupId::new(b"tree-B".to_vec()),
+        vec![],
+        pk,
+        MembershipAction::Create {
+            initial_members: vec![minit(pk, TestRole::Admin, [0xaa; 32])],
+        },
+        [0u8; 64],
+        pk,
+    )
+    .sign(&make_keypair(&[1u8; 32]));
+    assert!(matches!(k.apply(create_b).unwrap_err(), Error::WrongGroup));
+}
+
+#[test]
+fn resolved_state_group_id_survives_a_create_fold() {
+    // Guard for the fold bug: a `Create` folded into the DAG (inert per OPE-271) must PRESERVE the resolved
+    // state's group_id — it is what the seam exports as the verified `Admitted.tree_id`. Before the fix,
+    // `apply_action(Create)` dropped it, leaving `state().group_id` empty after any Create fold.
+    let ga = GroupId::new(b"tree-A".to_vec());
+    let mut k = keyeo_fn(
+        alice_admin_state().with_group_id(ga.clone()),
+        TestRole::Admin,
+    );
+    let create = Op::new(
+        1u64,
+        ga.clone(),
+        vec![],
+        alice_pk(),
+        MembershipAction::Create {
+            initial_members: vec![minit(alice_pk(), TestRole::Admin, [0xaa; 32])],
+        },
+        [0u8; 64],
+        alice_pk(),
+    )
+    .sign(&make_keypair(&[1u8; 32]));
+    k.apply(create).unwrap();
+    assert_eq!(
+        k.state().group_id,
+        ga,
+        "the resolved state keeps its group_id across a Create fold"
+    );
+}
+
+#[test]
+fn a_cross_group_epoch_is_refused() {
+    // The epoch/DEK artifact is group-bound too (keyeo:epoch:v2): an epoch validly authored for another
+    // tree is refused by `apply_epoch` before it can enter the candidate set — closing the cross-tree
+    // DEK-transplant vector (two trees with an identical active membership share a membership_commitment).
+    let ga = GroupId::new(b"tree-A".to_vec());
+    let mut k: TestEngine = keyeo_fn(
+        alice_admin_state().with_group_id(ga.clone()),
+        TestRole::Admin,
+    );
+    let commitment = membership_commitment(&[(alice_pk(), TestRole::Admin, [0xaa; 32])]);
+    // Validly signed by alice, complete wraps — but authored for tree-B.
+    let foreign = Epoch::<u64, [u8; 32], Ed25519>::author(
+        1,
+        GroupId::new(b"tree-B".to_vec()),
+        vec![],
+        alice_pk(),
+        commitment,
+        1,
+        &[(alice_pk(), [0xaa; 32])],
+        &make_keypair(&[1u8; 32]),
+    )
+    .unwrap();
+    assert!(matches!(k.apply_epoch(foreign).unwrap_err(), Error::WrongGroup));
+}
+
+#[test]
+fn op_and_epoch_signing_domains_are_byte_disjoint() {
+    // Axis 4.1: the op and epoch canonical layouts carry distinct constant version tags (`keyeo:op:v3` vs
+    // `keyeo:epoch:v2`), so a signature over one can never verify as the other — the invariant that lets an
+    // unauthenticated engine/kind discriminant be safe. (openom's chain uses `openom:keyring`, also
+    // disjoint.) A cheap prefix check pins it against a future tag edit that accidentally collides.
+    let op_bytes = keyeo::canonical_encode(
+        &GroupId::unscoped(),
+        &[] as &[u64],
+        &[1u8; 32],
+        &MembershipAction::<[u8; 32], TestRole, Ed25519>::Reseal,
+        &[],
+    );
+    let epoch_bytes = keyeo::canonical::canonical_encode_epoch::<u64, [u8; 32]>(
+        &GroupId::unscoped(),
+        &[],
+        &[0u8; 32],
+        1,
+        &[],
+    );
+    assert!(op_bytes.starts_with(b"keyeo:op:v3"));
+    assert!(epoch_bytes.starts_with(b"keyeo:epoch:v2"));
+    assert_ne!(
+        &op_bytes[..op_bytes.len().min(14)],
+        &epoch_bytes[..epoch_bytes.len().min(14)],
+        "op and epoch signing domains must be byte-disjoint"
+    );
 }
 
 // ── Buffered ops ──
@@ -544,7 +711,7 @@ fn test_pending_buffer_bounded() {
 
 #[test]
 fn test_group_state_ops() {
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
         MemberInit {
             id: [1u8; 32],
             role: TestRole::Admin,
@@ -619,7 +786,7 @@ fn test_concurrent_ops_converge() {
     let pk = alice_pk();
     let bpk = bob_pk();
     let cpk = cpk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Admin,
         author_public_key: pk,
@@ -688,7 +855,7 @@ fn test_strong_remove_state_rebuild() {
     let cpk = cpk();
 
     // Replica A: apply ops in order 1, 2, 3
-    let state_a = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+    let state_a = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Admin,
         author_public_key: pk,
@@ -744,7 +911,7 @@ fn test_strong_remove_state_rebuild() {
         .unwrap();
 
     // Replica B: apply ops in reverse order 1, 3, 2
-    let state_b = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+    let state_b = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
         id: pk,
         role: TestRole::Admin,
         author_public_key: pk,
@@ -819,7 +986,7 @@ fn test_strong_remove_ignores_removed_author_ops() {
     let bpk = bob_pk();
     let cpk = make_keypair(&[3u8; 32]).verifying_key().to_bytes();
 
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
         MemberInit {
             id: pk,
             role: TestRole::Admin,
@@ -911,7 +1078,7 @@ fn strong_remove_transitively_invalidates_accomplice_chain() {
     let b = bob_pk();
     let c = cpk(); // Charlie's key == keypair seed [3;32]
     let d = make_keypair(&[4u8; 32]).verifying_key().to_bytes();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
         MemberInit {
             id: a,
             role: TestRole::Admin,
@@ -1015,7 +1182,7 @@ fn mutual_remove_resolves_by_tiebreak() {
     // Bob (op 3).
     let a = alice_pk();
     let b = bob_pk();
-    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(&[
+    let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
         MemberInit {
             id: a,
             role: TestRole::Admin,
@@ -1099,7 +1266,7 @@ fn test_epoch_rotation_follows_membership_and_is_forward_secret() {
     let a = alice_pk();
     let b = bob_pk();
     let genesis = |_rp: u64| {
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(&[
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
             MemberInit {
                 id: a,
                 role: TestRole::Admin,
@@ -1250,6 +1417,7 @@ fn test_epoch_rotation_follows_membership_and_is_forward_secret() {
     let active_hpke: Vec<([u8; 32], [u8; 32])> = vec![(a, [0xaa; 32]), (c, [0xcc; 32])];
     let epoch_art = Epoch::<u64, [u8; 32], Ed25519>::author(
         900,
+        GroupId::unscoped(),
         vec![4],
         a,
         active_keys,
@@ -1303,7 +1471,7 @@ fn rotation_is_stable_without_membership_change() {
     // the epoch key material is cached by commitment, so a stable group is deterministic (no churn).
     let a = alice_pk();
     let mut k = Keyeo::new(
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
             id: a,
             role: TestRole::Admin,
             author_public_key: a,
@@ -1332,6 +1500,7 @@ fn rotation_is_stable_without_membership_change() {
     let a_keys = membership_commitment(&[(a, TestRole::Admin, [0xaa; 32])]);
     let epoch_art = Epoch::<u64, [u8; 32], Ed25519>::author(
         100,
+        GroupId::unscoped(),
         vec![1],
         a,
         a_keys,
@@ -1395,7 +1564,7 @@ fn spoofed_author_key_epoch_does_not_reconcile() {
     // *registered* key. The spoof passes ingest but is filtered at reconcile, so no wraps settle.
     let a = alice_pk();
     let mut k = Keyeo::new(
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(&[MemberInit {
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
             id: a,
             role: TestRole::Admin,
             author_public_key: a,
@@ -1423,6 +1592,7 @@ fn spoofed_author_key_epoch_does_not_reconcile() {
     let commitment = membership_commitment(&[(a, TestRole::Admin, [0xaa; 32])]);
     let spoofed = Epoch::<u64, [u8; 32], Ed25519>::author(
         100,
+        GroupId::unscoped(),
         vec![1],
         a,
         commitment,
@@ -1463,7 +1633,7 @@ fn incomplete_wraps_epoch_does_not_reconcile() {
         },
     ];
     let mut k = Keyeo::new(
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(&members),
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &members),
         DefaultAccessControl::new(TestRole::Admin),
         StrongRemove,
     );
@@ -1484,6 +1654,7 @@ fn incomplete_wraps_epoch_does_not_reconcile() {
     ]);
     let incomplete = Epoch::<u64, [u8; 32], Ed25519>::author(
         100,
+        GroupId::unscoped(),
         vec![1],
         a,
         commitment,
@@ -1552,6 +1723,7 @@ fn readd_c1a_concurrent_readd_is_suppressed() {
     let commitment = membership_commitment(&[(a, TestRole::Admin, [0xaa; 32])]);
     let epoch = Epoch::<u64, [u8; 32], Ed25519>::author(
         900,
+        GroupId::unscoped(),
         vec![2],
         a,
         commitment,
@@ -1608,6 +1780,7 @@ fn readd_c2_causal_readd_rejoins() {
     ]);
     let epoch = Epoch::<u64, [u8; 32], Ed25519>::author(
         900,
+        GroupId::unscoped(),
         vec![3],
         a,
         commitment,
@@ -1766,7 +1939,7 @@ type QuorumEngine =
 
 fn quorum_engine(genesis: &[MemberInit<[u8; 32], TestRole, Ed25519>]) -> QuorumEngine {
     let mut k = Keyeo::with_quorum(
-        GroupState::<[u8; 32], TestRole, Ed25519>::create(genesis),
+        GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), genesis),
         DefaultAccessControl::new(TestRole::Admin),
         StrongRemove,
         AllAdmins,
