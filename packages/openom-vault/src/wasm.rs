@@ -26,7 +26,7 @@ use openom_protocol::{Message, ENVELOPE_VERSION};
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
-use keyeo_api::EngineKind;
+use keyeo_api::{EngineKind, MembershipEnvelope};
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -1203,6 +1203,18 @@ pub fn remove_co_owner(
 
 /// Accept a keyring run pulled from the **untrusted network** — the chain-walk read-side (its
 /// primary purpose). `anchor` is the caller's currently-trusted keyring (its stored head);
+/// Unwrap a served [`MembershipEnvelope`] to its chain `Keyring` body bytes. The server stores + returns
+/// the engine-opaque envelope; the client's chain walk + per-revision retention operate on the inner
+/// keyring. Refuses a non-chain envelope.
+fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    let env = MembershipEnvelope::decode(bytes)
+        .map_err(|_| JsError::new("served keyring is not a valid membership envelope"))?;
+    if env.engine_kind() != Ok(EngineKind::Chain) {
+        return Err(JsError::new("served keyring envelope is not a chain keyring"));
+    }
+    Ok(env.body)
+}
+
 /// `hops` is the concatenation of the successor revisions, each framed as a 4-byte big-endian
 /// length followed by its bytes, in ascending revision order with no gaps. Each is validated as
 /// a legitimate successor of the last ([`verify_walk`]); a fork, rollback, withheld hop,
@@ -1234,14 +1246,21 @@ pub fn accept_remote_keyring(
             sealer: None,
         });
     }
-    let decoded = raw
+    // Each served hop is now a MembershipEnvelope (the server's opaque stored payload); unwrap it to the
+    // chain's Keyring body once here, at ingest, so the rest of the client keeps working on raw Keyring
+    // bytes (what it stores + feeds §B3 verify).
+    let bodies = raw
         .iter()
-        .map(|b| Keyring::decode(*b).map_err(|e| JsError::new(&format!("bad served keyring: {e}"))))
+        .map(|b| unwrap_chain_keyring(b))
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let decoded = bodies
+        .iter()
+        .map(|b| Keyring::decode(b.as_slice()).map_err(|e| JsError::new(&format!("bad served keyring: {e}"))))
         .collect::<Result<Vec<_>, _>>()?;
     let new_anchor = verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
         .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(VaultResult {
-        keyring: raw.last().expect("non-empty run").to_vec(),
+        keyring: bodies.last().expect("non-empty run").clone(),
         recovery_code: String::new(),
         did_key: String::new(),
         watermark: new_anchor.revision.to_be_bytes().to_vec(),
