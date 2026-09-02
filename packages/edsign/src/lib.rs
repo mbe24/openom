@@ -1,29 +1,5 @@
 #![forbid(unsafe_code)]
-//! The Ed25519 sign/verify seam (§0, OPE-205).
-//!
-//! `ed25519-dalek` exposes **two** verify methods: `verify_strict` (rejects small-order / torsion
-//! public keys and non-canonical signatures) and the `Verifier` trait's plain `verify` (weaker). A
-//! signature over attacker-influenced key material — a keyring signer's key, a member's author key —
-//! must always use the strict one. Rather than trust every call site (and every future one) to import
-//! the right trait and pick the right method, this crate makes the weak path **impossible to write**:
-//!
-//! - It is the *only* crate in the workspace that depends on `ed25519-dalek`. Every other crate holds
-//!   these newtypes instead of the raw dalek types, so `use ed25519_dalek::Verifier` has nothing to
-//!   apply to and does not compile there.
-//! - [`VerifyingKey`] does **not** implement (nor expose, via `Deref`/`AsRef`/`into_inner`) the
-//!   `Verifier` trait. Its only verify is [`VerifyingKey::verify`], which is `verify_strict`.
-//!
-//! So the policy "always verify_strict" is enforced at `cargo build`, not by a CI lint. The dependency
-//! edge is half the guarantee: keep `ed25519-dalek` out of every other crate's `Cargo.toml` (and out of
-//! `[workspace.dependencies]` once the last excluded consumer is gone) so this stays true.
-//!
-//! The crate is deliberately **pure**: no RNG (identities are minted by callers — `openom-crypto`'s
-//! HKDF-derived owner identity, or a test helper — and handed in as a 32-byte seed via [`from_seed`]),
-//! no serde (every wire crossing is raw bytes, converted at the boundary via `to_bytes`/`from_bytes`),
-//! no `did:key` (that composes at call sites over the 32-byte public key). That keeps it deterministic
-//! and wasm-trivial — the one place to audit or upgrade the signature library.
-//!
-//! [`from_seed`]: SigningKey::from_seed
+#![doc = include_str!("../README.md")]
 
 use ed25519_dalek::Signer;
 

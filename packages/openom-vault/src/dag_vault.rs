@@ -1,5 +1,5 @@
 //! The DAG keyring's vault (OPE-273) — the dag-engine counterpart to [`crate::vault`], producing the same
-//! [`SealerSet`] through the shared sealing core ([`crate::vault_core`]) while resolving membership +
+//! [`openom_sealer::SealerSet`] through the shared sealing core (`vault_core`) while resolving membership +
 //! recovery authority through the DAG keyring's client facade (`keyeo_dag::client`).
 //!
 //! The trust anchor is engine-opaque bytes: the dag's pinned genesis config + op closure, with the DEK
@@ -900,12 +900,12 @@ impl DagVault {
         })
     }
 
-    /// Member-authored self-heal of a stale write epoch (OPE-290). Identical repair to [`reseal`], but any
+    /// Member-authored self-heal of a stale write epoch (OPE-290). Identical repair to [`Self::reseal`], but any
     /// ACTIVE member — not just the owner — can drive it: minting a covering epoch needs only PUBLIC keys
     /// (the RRK public in the escrow + each resolved member's HPKE key), and keyeo authorizes a Reseal by any
     /// member, so a member locked out by a stale merge no longer has to wait for the owner's device to come
     /// online. Authorizes via the member's `passphrase` + account `member_kdf` (their identity signs the op),
-    /// mirroring [`unlock_as_member`]. The RRK wrap stays keyed to the OWNER (its holder). Idempotent + floor
+    /// mirroring [`Self::unlock_as_member`]. The RRK wrap stays keyed to the OWNER (its holder). Idempotent + floor
     /// enforced, exactly like the owner path.
     pub fn reseal_as_member(
         &self,

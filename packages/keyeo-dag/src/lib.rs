@@ -1,15 +1,4 @@
-//! keyeo-dag — openom's keyring layer over the generic `keyeo` group-membership DAG (the
-//! sequencer-free keyring, OPE-137). keyeo stays domain-free and publishable; every openom specific — the
-//! Ed25519 seam, the role model, the authority policy, and the quorum policy — lives here.
-//!
-//! - **v1** (BYO / sequencer-free): ordinary members + **founder-signed** governance + rotation, via
-//!   [`KeyringAccess`] (signer-gated authority).
-//! - **v2** multi-signer **quorum** ("co-owners collectively"): [`FounderOrUnanimity`] — a privileged
-//!   change is authorized by the founder alone OR by unanimity of the co-owners, decomposed into
-//!   Propose/Approve/Commit ops that keyeo's quorum resolver tallies at the proposal's causal position.
-//!
-//! This crate deliberately depends on `edsign` (not `ed25519-dalek`) so keyeo's own dalek edge is
-//! replaced by openom's `verify_strict` seam (OPE-215).
+#![doc = include_str!("../README.md")]
 
 use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role, SigError, SignatureScheme};
 use std::collections::HashSet;

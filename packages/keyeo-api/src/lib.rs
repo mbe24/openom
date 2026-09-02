@@ -1,18 +1,4 @@
-//! keyeo-api — the engine-agnostic vocabulary for swapping openom's two keyring engines
-//! (the linear chain and the DAG), per the OPE-276 decision (plan/keyring-dag/design.swap-seam-decision.md).
-//!
-//! Deliberately **not** one `KeyringEngine` trait. This crate holds the two low-level, engine-agnostic
-//! pieces both engines share:
-//! - [`MembershipView`] — the resolved membership + roles, the shared value type the app (moderator/role
-//!   display) and the server (ACL derivation) both consume regardless of engine. It's essentially a
-//!   rename of code that already exists twice (chain's `roles::moderators`, dag's `active_members`).
-//! - [`KeyringVerifier`] — the **keyless** server-side seam: admit an update against prior trust state,
-//!   report the resolved view + whether it changed. The server binds only to this (plus its own
-//!   persistence of the opaque `state` bytes).
-//!
-//! The secret-holding **client lifecycle trait** (provision/unlock/recover/change-passphrase/author) is
-//! NOT here — it returns sealer/DEK material and lives with the sealer. **Sync** stays engine-owned over
-//! the `Blob` seam. See the decision doc for the full four-piece shape and the guardrails.
+#![doc = include_str!("../README.md")]
 
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +13,7 @@ pub enum EngineKind {
 impl EngineKind {
     /// The canonical config/wire tag for this engine — the single source of truth every host boundary maps
     /// through (the wasm veneer's `engine` argument, the Tauri `OPENOM_KEYRING_ENGINE` override, the web
-    /// `KEYRING_ENGINE` constant), so the tag strings can't drift apart. Paired with [`FromStr`].
+    /// `KEYRING_ENGINE` constant), so the tag strings can't drift apart. Paired with [`std::str::FromStr`].
     pub fn as_tag(self) -> &'static str {
         match self {
             EngineKind::Chain => "chain",

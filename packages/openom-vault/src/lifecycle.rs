@@ -1,5 +1,5 @@
 //! The engine-agnostic client keyring **lifecycle** — the shared menu the two lockstep host consumers
-//! (the web-worker RPC in [`crate::wasm`] and the Tauri invoke host in `openom-vault-host`) dispatch over
+//! (the web-worker RPC in the `wasm` module and the Tauri invoke host in `openom-vault-host`) dispatch over
 //! once, instead of hand-wiring 2 engines × 2 hosts. This is OPE-277 piece #1 of the swap seam
 //! (plan/keyring-dag/design.swap-seam-decision.md).
 //!

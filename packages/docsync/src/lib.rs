@@ -1,16 +1,4 @@
-//! `docsync` — a generic local-first client sync loop.
-//!
-//! The push / pull / compact / bootstrap loop over a [`journal::DocStore`], abstracted over a merge
-//! [`Engine`] and an envelope [`Sealer`] so it isn't tied to any one CRDT or crypto. A caller re-imports
-//! it by `impl Engine` for its CRDT (encode a local edit → delta bytes; merge delta/snapshot bytes;
-//! snapshot) and `impl Sealer` for its envelope format. All domain logic — the concrete op/state model,
-//! the encryption — stays caller-side behind those two seams; this crate carries none of it.
-//!
-//! The [`Engine`] seam is **delta-bytes-centric**, which fits both op-CRDTs (`encode(state.apply(op))`)
-//! and doc-CRDTs (`export(update, from = before)`). Because merges are idempotent/commutative, delivery
-//! order and at-least-once redelivery don't matter — re-pulling one's own pushes is a no-op. (Causally
-//! *dependent* workflows such as propose/approve are intentionally not generalized here: they only stay
-//! clean for causally-independent ops, so a caller layers them above this loop.)
+#![doc = include_str!("../README.md")]
 
 use journal::{DocStore, StoreError};
 

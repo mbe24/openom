@@ -1,10 +1,4 @@
-//! keyeo — decentralised group membership and access control.
-//!
-//! ## Quick start
-//! ```ignore
-//! let mut k = keyeo::Keyeo::new(state, access, resolver);
-//! let outcome = k.apply(my_op)?;
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod access;
 pub mod blocklace;

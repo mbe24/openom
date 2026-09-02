@@ -92,7 +92,7 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
     /// Recovery re-founding (OPE-269): retarget `member`'s (openom: the Owner's) signing + HPKE keys and
     /// carry re-wrapped recovery material. Authorized NOT by ordinary membership authority but by the
     /// group's pinned **recovery authority** — the op is signed by the recovery key whose public half is
-    /// [`GroupState::reset_authority`] (see [`key_matches_registration`]) — so a member who lost their
+    /// [`GroupState::reset_authority`] (see `key_matches_registration`) — so a member who lost their
     /// device can re-establish control without a prior member's cooperation. It removes no one and touches
     /// no other member: a forward-chained delta, not a re-genesis (contrast `Create`). `era` is a monotone
     /// re-founding generation (1 + max era in the causal past). Any re-wrapped recovery material rides the

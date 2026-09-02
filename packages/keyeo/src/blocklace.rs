@@ -34,7 +34,7 @@
 //! keyeo departs from Cordial Miners on one axis **on purpose**: it does not run the consensus ordering
 //! (the τ function / waves / leader blocks / supermajority ratification that totally-orders the
 //! blocklace). openom is convergent *without* consensus — Byzantine eventual consistency — so this
-//! blocklace is resolved by an authority-aware [`crate::Resolver`] to a converged set, never totally
+//! blocklace is resolved by an authority-aware resolver (see `dag::resolver`) to a converged set, never totally
 //! ordered. The shared idea we do take is the structure itself and its equivocation-tolerance: the DAG
 //! may *contain* equivocations; resolution excludes them rather than a reliable-broadcast layer
 //! preventing them.

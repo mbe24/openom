@@ -1,10 +1,10 @@
-//! The keyring vault — the passphrase lifecycle that turns a passphrase into a [`Sealer`].
+//! The keyring vault — the passphrase lifecycle that turns a passphrase into a [`openom_sealer::Sealer`].
 //! Four flows: **provision** (first time), **unlock** (returning / new device), **recover**
 //! (forgot passphrase, via the recovery code), **change_passphrase**. All fit the frozen
 //! `Keyring` proto; none add a field.
 //!
 //! ## Two invariants that carry the security (from the design review)
-//! - **Trusted context.** `tree_id` and `member_id` in every [`WrapContext`] come from the
+//! - **Trusted context.** `tree_id` and `member_id` in every [`openom_crypto::WrapContext`] come from the
 //!   caller's own expectation (the tree the app is operating on), NEVER from the parsed,
 //!   untrusted keyring. Otherwise the "the AEAD binds tree_id" argument is circular. The
 //!   keyring's `tree_id` is only *checked* against the expected one, never used as the AAD.

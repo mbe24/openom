@@ -1,20 +1,4 @@
-//! `blobstore` — the storage swap seam.
-//!
-//! A minimal content-addressable blob store with per-object compare-and-swap, sitting **below**
-//! `journal::DocStore`. It is the lowest layer at which openom's storage backends interchange: the
-//! managed backend (Lambda+R2) and a BYO dumb backend (Google Drive/Dropbox) are both just
-//! [`BlobStore`] impls — R2/Drive natively provide put/get/list + conditional writes (etag CAS) with no
-//! compute.
-//!
-//! `DocStore`'s `append -> seq` is deliberately **not** here: a store-assigned total order needs a
-//! sequencer no dumb backend has and nothing above needs (the data engine is order-independent
-//! set-union). Sequencing, anti-rollback, and metering are managed-only guarantees that attach *below* a
-//! `BlobStore` impl (inside its `put`), never as new verbs on this trait.
-//!
-//! The seam is content-addressed keys for immutable objects (op/entry/media blobs, keyed by their hash)
-//! plus a few CAS'd mutable pointers (a keyring `head`, per-replica log heads, a snapshot slot). Two
-//! reference impls ship here — [`MemoryBlob`] and [`FsBlob`] — and every impl must pass
-//! [`conformance::run`].
+#![doc = include_str!("../README.md")]
 
 use thiserror::Error;
 

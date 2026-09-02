@@ -59,7 +59,7 @@ pub struct SealContext {
     /// Monotonic per-replica sequence (§8). The caller advances it; the sealer records it.
     pub replica_counter: u64,
     /// `ciphertext_hash` of the previous entry in this replica's chain — empty for the
-    /// first. Returned by the prior [`seal_entry`]; the caller threads it through.
+    /// first. Returned by the prior [`Sealer::seal_entry`]; the caller threads it through.
     pub prev_ciphertext_hash: Vec<u8>,
     /// The snapshot coordinate this entry covers through (§10 watermark input).
     pub covers_through_seq: u64,

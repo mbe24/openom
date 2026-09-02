@@ -32,6 +32,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-edtf** — EDTF (ISO 8601-2) date parser/normalizer → sortable `[min,max]` bounds.
 - **openom-crypto** — shared symmetric crypto primitives (client & server, identical algorithms).
 - **openom-protocol** — shared protobuf data model (prost, generated via buf).
+- **edsign** — the single Ed25519 dependency edge: newtypes whose only verify is `verify_strict`, so the weak path is uncallable elsewhere (compile-time signature-verification policy). openom-free.
 
 **Family-tree data model**
 - **openom-claim** — claim-envelope hashing + signing: content-hash `id`, dedup `fingerprint`, domain-separated Ed25519 sign/verify. *(claim model — the direction)*
@@ -43,12 +44,18 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-tree** — the claim-model family-tree **engine**: composes `openom-crdt` (the fold) + `openom-projection` (the read model) into the app's read+write surface; owns the record set + author id, mints op batches for the transport to seal, and projects the read model. Key-less. *(claim model — the app's only family-tree engine; wasm veneer built)*
 
 **Storage / sync** (transport; opaque bytes)
+- **blobstore** — the storage swap seam: content-addressable blobs + per-object CAS, *below* `journal::DocStore`. The managed (R2) and BYO-dumb (Drive/Dropbox) backends are both just `BlobStore` impls. openom-free.
 - **journal** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.
+- **docsync** — a generic local-first client sync loop (push/pull/compact/bootstrap) over a `DocStore`, abstracted over a merge `Engine` + envelope `Sealer`; the vendored set-union sync-client skeleton. openom-free.
 - **openom-sync** — the client sync loop: seal local deltas to the store, merge peers' deltas back.
-- **openom-sealer** — the client sealer: a stateful session holding the unlocked DEK, sealing/opening envelopes (wasm veneer + Tauri).
+- **openom-sealer** — the client DEK session: a stateful sealer holding the unlocked DEK, sealing/opening envelopes. Engine-free (no keyring dep).
 
-**Access control / identity / custody**
-- **openom-keyring** — the keyring/membership mechanism: chain verification, entry authorship, signing.
+**Access control / identity / custody** — the keyring stack, two swappable engines behind one seam
+- **keyeo** — Layer 0: the generic, domain-free group-membership/access-control DAG engine (sequencer-free; resolves signed ops → members + shared keys). openom-free.
+- **keyeo-api** — Layer 1: the engine-agnostic seam — `MembershipView`, the keyless `KeyringVerifier`, `EngineKind`, the `ROLE_*` convention. openom-free.
+- **openom-keyring** — Layer 2, the **chain** engine: the linear signed keyring (protobuf wire), chain verification, entry authorship, signing. openom-coupled.
+- **keyeo-dag** — Layer 2, the **dag** engine: openom's roles/signing/recovery wired onto `keyeo`. openom-free (standalone-publishable).
+- **openom-vault** — the lifecycle layer over both engines: provision/unlock/recover/change-passphrase + membership authoring behind `KeyringLifecycle`, with `AppVault` dispatching on the tree's `EngineKind`; owns the engine-neutral sealing core + the browser wasm veneer. openom-coupled.
 - **openom-roles** — the authorization role model + capability→role policy (Viewer / Editor / Maintainer / Owner).
 - **openom-vault-host** — the native (Tauri) key-custody host: keeps Sealer sessions + keyring storage in Rust so the DEK never enters the webview.
 

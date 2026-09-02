@@ -1,4 +1,4 @@
-//! The engine selector (OPE-278): ONE enum both host consumers (the web-worker RPC in [`crate::wasm`] and
+//! The engine selector (OPE-278): ONE enum both host consumers (the web-worker RPC in the `wasm` module and
 //! the Tauri invoke host in `openom-vault-host`) dispatch through, so the chain-vs-dag choice is made once
 //! here rather than hand-wired at 2 hosts × 2 engines — OPE-276's "write once". It implements the shared
 //! client lifecycle [`KeyringLifecycle`] by delegating to the selected engine.

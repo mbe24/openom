@@ -1,4 +1,4 @@
-//! A backend-agnostic conformance suite. Every [`BlobStore`](crate::BlobStore) impl must pass it —
+//! A backend-agnostic conformance suite. Every [`crate::BlobStore`] impl must pass it —
 //! downstream backends (Google Drive, R2, …) call [`run`] to prove they honour the contract.
 
 use crate::{BlobError, BlobStore, Precondition};

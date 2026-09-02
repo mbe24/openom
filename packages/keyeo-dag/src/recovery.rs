@@ -20,7 +20,7 @@
 const RVK_HKDF_INFO: &[u8] = b"keyeo:rvk:v1";
 
 /// Derive the Recovery Verification Key from the RRK secret via the shared generic HKDF→Ed25519 derivation
-/// ([`edsign::derive_signing_key`]) under [`RVK_HKDF_INFO`]. Deterministic + domain-separated; keeps this
+/// ([`edsign::derive_signing_key`]) under the frozen `RVK_HKDF_INFO` label. Deterministic + domain-separated; keeps this
 /// crate free of any openom dependency (it derives the RVK itself rather than borrowing openom-crypto's).
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> edsign::SigningKey {
     edsign::derive_signing_key(rrk_secret, RVK_HKDF_INFO)
