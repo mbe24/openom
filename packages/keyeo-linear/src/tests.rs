@@ -1,5 +1,5 @@
 //! A concrete instantiation of the generic engine (`Id = String`, `R = TestRole`, `S = Ed25519`) plus a
-//! test suite mirroring openom-keyring `chain.rs`'s coverage — proving the engine standalone, over
+//! test suite mirroring openom-keyring-chain `chain.rs`'s coverage — proving the engine standalone, over
 //! primitive types, with no openom payload in sight.
 
 use super::*;

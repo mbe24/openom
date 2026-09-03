@@ -110,7 +110,7 @@ pub trait LinearDoc {
 
 /// Why a candidate doc was refused. Distinct variants so a caller can react differently (a fork/rollback
 /// is an attack; a gap is availability; an unendorsed change is tampering) and each guard gets a 1-to-1
-/// negative test. Generalizes openom-keyring's `ChainError`.
+/// negative test. Generalizes openom-keyring-chain's `ChainError`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LinearError {
     #[error("candidate is for a different group")]

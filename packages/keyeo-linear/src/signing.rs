@@ -1,6 +1,6 @@
 //! The engine's canonical, domain-separated signing bytes — the exact byte string a signer's key signs
 //! over a [`LinearDoc`](crate::LinearDoc). Same branchless, length-prefixed, fixed-width discipline as the
-//! chain's `keyring_signing_bytes` (openom-keyring) and the envelope AAD, so a Rust and a JS/WASM verifier
+//! chain's `keyring_signing_bytes` (openom-keyring-chain) and the envelope AAD, so a Rust and a JS/WASM verifier
 //! agree byte-for-byte.
 //!
 //! The whole point of the §4 layout: the ENGINE builds this message from the SAME accessor values it
@@ -146,7 +146,7 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-// ---- scheme-generic signature-quorum evaluation (generalizes openom-keyring's keyring.rs) ----
+// ---- scheme-generic signature-quorum evaluation (generalizes openom-keyring-chain's keyring.rs) ----
 
 /// Deduplicate keys by their raw bytes so a repeated key can't make a quorum easier to satisfy (the
 /// `verify_keyring_*` dedup discipline, made generic over `AsRef<[u8]>`).
