@@ -17,6 +17,14 @@ pub trait SignatureScheme: Debug + Clone + PartialEq + Eq + Send + Sync {
     type PublicKey: Debug + Clone + Eq + std::hash::Hash + Ord + Send + Sync + AsRef<[u8]>;
     type Signature: Debug + Clone + Eq + Hash + Ord + Send + Sync + AsRef<[u8]>;
     fn verify(pk: &Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> Result<(), SigError>;
+
+    /// A **structural** check that `pk` is a well-formed key of this scheme (e.g. a valid curve point),
+    /// independent of any signature. An engine uses it as a fail-closed structural gate so a signer whose
+    /// key could never verify is rejected early rather than silently contributing no authority. Default:
+    /// accept — a scheme with no cheap standalone check can rely on [`verify`](Self::verify) failing closed.
+    fn accepts_key(_pk: &Self::PublicKey) -> bool {
+        true
+    }
 }
 
 /// Ed25519 through the [`edsign`] seam: `verify` is `verify_strict`, so small-order / torsion keys and
@@ -31,5 +39,10 @@ impl SignatureScheme for Ed25519 {
         let vk = edsign::VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
         vk.verify(msg, &edsign::Signature::from_bytes(sig))
             .map_err(|_| SigError)
+    }
+    /// A 32-byte Ed25519 key is accepted iff it decodes as a valid curve point (`verify_strict`-grade
+    /// point validation via `edsign`); this is the structural gate the chain's `parse_vk` performed.
+    fn accepts_key(pk: &[u8; 32]) -> bool {
+        edsign::VerifyingKey::from_bytes(pk).is_ok()
     }
 }
