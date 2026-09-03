@@ -284,6 +284,15 @@ fn rule_is_satisfiable(g: Governance, signer_count: usize) -> bool {
     }
 }
 
+/// The revision-successor rule as a pure helper: a legitimate successor's revision is EXACTLY `prior + 1`.
+/// `u32::MAX` has no in-range successor (→ `None`, surfaced as [`LinearError::RevisionOverflow`]); every
+/// other prior maps to `Some(prior + 1)`. Extracted so the arithmetic is provable in isolation and so
+/// [`verify_transition`] and the proof share one definition — behaviour is identical to the inline
+/// `checked_add(1)` it replaced.
+fn next_revision(prior: u32) -> Option<u32> {
+    prior.checked_add(1)
+}
+
 fn anchor_from_doc<D: LinearDoc>(doc: &D, msg: &[u8]) -> Anchor<D::Id, D::R, Pk<D>> {
     Anchor {
         group_id: doc.group_id().clone(),
@@ -312,11 +321,7 @@ pub fn verify_transition<D: LinearDoc>(
     check_structure_generic(cand)?;
 
     // Exactly one past the anchor — never `>=`, so a withheld hop can't hide a set change.
-    let expected = prior
-        .revision
-        .0
-        .checked_add(1)
-        .ok_or(LinearError::RevisionOverflow)?;
+    let expected = next_revision(prior.revision.0).ok_or(LinearError::RevisionOverflow)?;
     if cand.revision().0 != expected {
         return Err(LinearError::NonSequential);
     }
@@ -487,6 +492,125 @@ pub fn bootstrap_pinned<D: LinearDoc>(
         return Err(LinearError::BadBootstrap);
     }
     Ok(anchor_from_doc(head, &msg))
+}
+
+/// Kani proof harnesses — bit-precise model checking (CBMC backend). Compiled ONLY under `cargo kani`
+/// (which sets `--cfg kani`); the normal build and `cargo test` never see them, so there is no `kani`
+/// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p keyeo-linear` (Docker image or a
+/// local Kani install).
+///
+/// keyeo-linear is a deliberate good-first Kani target: the policy predicates it decides on are pure and
+/// primitive-typed. These harnesses cover the branch-free, crypto-free core — the governance-satisfiability
+/// classifier, the revision-successor arithmetic, and the signer-set diff's set semantics — proving each
+/// property for ALL inputs in a bounded range at once (not sampled, as a proptest would). We deliberately do
+/// NOT prove `verify_transition`/`verify_walk` end-to-end, `bootstrap_*`/`verify_reset`, or the
+/// `check_structure_generic` path: those route through the `SignatureScheme` crypto (SHA-256 + Ed25519
+/// verify) and `LinearDoc` trait dispatch, which Kani cannot bit-blast tractably.
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    /// A tiny concrete signer over primitive fields — no crypto, no trait objects — so the set-diff
+    /// helpers (which are generic only over `Id: Eq`, `R: PartialEq`, `PK: AsRef<[u8]>`) can be exercised
+    /// with fully symbolic contents. `[u8; 1]` is the smallest `AsRef<[u8]>` public key.
+    type TinySigner = Signer<u8, i16, [u8; 1]>;
+
+    fn any_signer() -> TinySigner {
+        Signer {
+            id: kani::any(),
+            role: kani::any(),
+            public_key: [kani::any()],
+        }
+    }
+
+    /// Governance kind 3 (pure threshold, no founder path) is satisfiable IFF `threshold > 0` AND the
+    /// signer set is at least `threshold` large — a rule of `threshold(0)` or one needing more signers than
+    /// exist can never be met, so it would brick governance. Proven for every `(threshold, signer_count)`.
+    /// `threshold as usize` is lossless on Kani's 64-bit target, so the spec can read `threshold` directly.
+    #[kani::proof]
+    fn rule_kind3_satisfiable_iff_threshold_positive_and_enough_signers() {
+        let threshold: u32 = kani::any();
+        let signer_count: usize = kani::any();
+        let g = Governance { kind: 3, threshold };
+        let expected = threshold > 0 && signer_count >= threshold as usize;
+        assert_eq!(rule_is_satisfiable(g, signer_count), expected);
+    }
+
+    /// The founder-bearing kinds (0 = founder-or-unanimity, 1 = founder-only, 2 = founder-or-threshold) are
+    /// ALWAYS satisfiable — `check_structure_generic` guarantees a founder exists, so the founder path can
+    /// always be walked regardless of threshold or signer count. Proven for every threshold/count.
+    #[kani::proof]
+    fn rule_founder_kinds_are_always_satisfiable() {
+        let kind: u32 = kani::any();
+        kani::assume(kind <= 2);
+        let threshold: u32 = kani::any();
+        let signer_count: usize = kani::any();
+        assert!(rule_is_satisfiable(Governance { kind, threshold }, signer_count));
+    }
+
+    /// Fail-closed: any governance `kind` this build does not recognise (anything outside `0..=3`) is NEVER
+    /// treated as satisfiable — an unknown rule must not silently pass the lockout guard. Proven for every
+    /// unknown kind, threshold, and signer count.
+    #[kani::proof]
+    fn rule_unknown_kind_fails_closed() {
+        let kind: u32 = kani::any();
+        kani::assume(kind >= 4); // 0..=2 founder kinds, 3 the threshold kind; everything else is unknown
+        let threshold: u32 = kani::any();
+        let signer_count: usize = kani::any();
+        assert!(!rule_is_satisfiable(Governance { kind, threshold }, signer_count));
+    }
+
+    /// The revision-successor rule: exactly one prior (`u32::MAX`) has no in-range successor and is the only
+    /// value rejected; every other prior yields precisely `prior + 1`, which is strictly greater (so a
+    /// rollback or a skip can never be mistaken for the successor). Proven for every `u32` prior.
+    #[kani::proof]
+    fn next_revision_rejects_only_max_and_yields_exactly_prior_plus_one() {
+        let prior: u32 = kani::any();
+        match next_revision(prior) {
+            None => assert_eq!(prior, u32::MAX),
+            Some(next) => {
+                assert!(prior != u32::MAX);
+                assert_eq!(next, prior + 1);
+                assert!(next > prior);
+            }
+        }
+    }
+
+    /// `signer_set_differs` is reflexive: a set never differs from itself, whatever its (symbolic) members.
+    /// A false positive here would flag every no-op revision as a privileged signer-set change. Two members
+    /// with fully symbolic id/role/key is enough to exercise the cross-membership matching both ways.
+    #[kani::proof]
+    #[kani::unwind(3)] // the diff's `.any` loops run over a fixed 2-element slice
+    fn signer_set_differs_is_reflexive() {
+        let set: [TinySigner; 2] = [any_signer(), any_signer()];
+        assert!(!signer_set_differs(&set, &set));
+    }
+
+    /// A length change is always detected: sets of different sizes always differ (the `len()` short-circuit
+    /// — an added or removed signer can never be hidden). Proven for symbolic contents on both sides.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn signer_set_differs_detects_a_length_change() {
+        let shorter: [TinySigner; 1] = [any_signer()];
+        let longer: [TinySigner; 2] = [any_signer(), any_signer()];
+        assert!(signer_set_differs(&shorter, &longer));
+        assert!(signer_set_differs(&longer, &shorter));
+    }
+
+    /// An in-place key rotation (same length, one member's key changed) is detected as a set difference —
+    /// this is what forces a key rotation down the privileged `UnendorsedSetChange` path. Two singleton
+    /// sets whose sole members share id+role but hold DISTINCT keys must differ.
+    #[kani::proof]
+    #[kani::unwind(3)]
+    fn signer_set_differs_detects_a_key_rotation() {
+        let id: u8 = kani::any();
+        let role: i16 = kani::any();
+        let (k_old, k_new): (u8, u8) = (kani::any(), kani::any());
+        kani::assume(k_old != k_new);
+        let before: [TinySigner; 1] = [Signer { id, role, public_key: [k_old] }];
+        let after: [TinySigner; 1] = [Signer { id, role, public_key: [k_new] }];
+        assert!(signer_set_differs(&before, &after));
+    }
 }
 
 #[cfg(test)]
