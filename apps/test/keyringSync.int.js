@@ -228,7 +228,10 @@ describe('vault outbound keyring publish (OPE-301)', () => {
 
     // The local commit is durable …
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([1, 1]);
-    // … and the produced revision was published: PUT /trees/{uuid}/keyring with the WRAPPED bytes.
+    // … and the produced revision is published — but FIRE-AND-FORGET (off the gate's critical path), so
+    // let the detached publish settle before asserting it landed.
+    await new Promise((r) => setTimeout(r, 0));
+    // PUT /trees/{uuid}/keyring with the WRAPPED bytes.
     expect(puts).toHaveLength(1);
     expect(puts[0].id).toBe(treeIdToUuid(treeId));
     expect(Array.from(puts[0].bytes)).toEqual([0xff, 1, 1]);

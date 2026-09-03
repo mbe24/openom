@@ -96,18 +96,21 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
   // retention (for §B3 entry attribution), and the opaque watermark cursor. Then, for a locally-PRODUCED
   // chain revision (provision/recover/changePassphrase — NOT the inbound accept/reset paths, which take
   // their revisions FROM the server), publish it outbound so peers can pull (OPE-301). Publishing is
-  // best-effort AFTER the durable local commit: a failure (offline, no remote, or a losing CAS race) is
-  // swallowed — the local state stands and the next sync reconciles (the offline-safe sync-retry stance).
+  // FIRE-AND-FORGET after the durable local commit: it must never join the critical path, because these
+  // flows run behind the gate spinner and at first provision the PUT is EXPECTED to fail (the tree row
+  // doesn't exist yet — the bootstrap sequence creates it, then republishes). Awaiting it would let a
+  // black-holing network hang the gate indefinitely; the local state is already durable and the sync
+  // driver's bootstrap owns the reliable, retried republish, so a lost publish here is harmless.
   const persist = async (treeKey, treeId, anchor, watermark) => {
     await keyringStore.saveHead(treeKey, engine, anchor);
     if (engine === 'chain') await keyringStore.save(treeKey, chainRevision(watermark), anchor);
     watermarks.observe(treeKey, { keyringCursor: watermark });
     if (engine === 'chain' && publishKeyring) {
-      try {
-        await publishKeyring(treeId, anchor);
-      } catch {
-        // Best-effort: the produced revision is already durable locally; the next sync republishes/reconciles.
-      }
+      void Promise.resolve()
+        .then(() => publishKeyring(treeId, anchor))
+        .catch(() => {
+          // Best-effort: the produced revision is durable locally; the next sync republishes/reconciles.
+        });
     }
   };
   const floor = (treeKey) => watermarks.current(treeKey).keyringCursor;
