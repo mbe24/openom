@@ -12,10 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
-argon2 = "0.5"
-hkdf = "0.12"
 sha2 = "0.10"
-chacha20poly1305 = "0.11"
 getrandom = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = "0.6"
