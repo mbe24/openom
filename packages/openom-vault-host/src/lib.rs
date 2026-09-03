@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
-use openom_keyring::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
+use openom_keyring_chain::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 // Re-exported: `with_engine` takes an `EngineKind`, so callers select the engine preset without a
 // direct openom-keyring-api dependency.
 pub use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
+use openom_protocol::v1::{Compression, Format, KdfParams, MemberRole};
+use openom_keyring_chain::wire::Keyring;
 use openom_protocol::Message;
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
 use openom_vault::{vault, AppVault, DagVault, KeyringRole};
@@ -945,7 +946,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             })
             .collect::<Result<_>>()?;
         let new_anchor =
-            openom_keyring::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+            openom_keyring_chain::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
                 .map_err(remote_chain_err)?;
         // Persist the validated head (the last hop) + advance the floor, atomically. This path doesn't
         // open the DEK, so it can't compute a fresh pin — carry the stored one forward (never erase it; a
@@ -2187,7 +2188,8 @@ mod tests {
 
     /// The founder verify-key from the stored keyring, as a member would pin it OOB.
     fn founder_key(h: &VaultHost<MemStore>, tree_key: &str) -> Vec<u8> {
-        use openom_protocol::v1::{Keyring, MemberRole};
+        use openom_keyring_chain::wire::Keyring;
+        use openom_protocol::v1::MemberRole;
         let bytes = h.store.load_keyring(tree_key).unwrap().unwrap();
         // The founder is the OWNER-role member (the signer set is derived from members, OPE-309).
         Keyring::decode(bytes.as_slice())
@@ -2357,8 +2359,8 @@ mod tests {
 
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
-        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
-        use openom_protocol::v1::{KeyWrap, Member};
+        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring_chain::wire::{KeyWrap, Member};
 
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
@@ -2484,8 +2486,8 @@ mod tests {
 
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
-        use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
-        use openom_protocol::v1::{KeyWrap, Member};
+        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
+        use openom_keyring_chain::wire::{KeyWrap, Member};
 
         let a = host();
         let (rev1, _rev2, _rev3) = produce_three_revisions(&a);

@@ -12,8 +12,12 @@
 //! and is openom-coupled by design. (The equivalent for the dag engine is `keyeo_dag::entry`.)
 
 use openom_crypto::aad::author_signing_bytes;
-use openom_protocol::v1::{Header, Keyring, Kind};
-use openom_roles::{required_role_for_kind, MEMBER_OWNER};
+use openom_protocol::v1::{Header, Kind};
+// `epoch_is_attributed` still takes the chain `Keyring` (imported from openom-keyring-chain since the wire
+// moved there in OPE-300); `verify_entry` takes the engine-neutral `MembershipView` instead (OPE-333).
+use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
+use openom_keyring_api::MembershipView;
+use openom_roles::required_role_for_kind;
 use edsign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -52,7 +56,8 @@ pub fn verify_entry(
     version: u32,
     header: &Header,
     plaintext: &[u8],
-    governing: &Keyring,
+    view: &MembershipView,
+    newest_key_id: &[u8],
 ) -> Result<(), EntryError> {
     if header.author_signature.is_empty() {
         return Err(EntryError::Unattributed);
@@ -60,20 +65,15 @@ pub fn verify_entry(
     let kind = Kind::try_from(header.kind).map_err(|_| EntryError::UnsupportedKind)?;
     let required = required_role_for_kind(kind).ok_or(EntryError::UnsupportedKind)?;
 
-    // B+ epoch-consistency: the sealing epoch must be the newest at the governing revision. Closes the
-    // "seal under the CURRENT key, stamp an OLD revision" forge (the current key belongs to a newer epoch
-    // than any old revision, so it won't match that revision's newest epoch).
-    let newest = governing
-        .epochs
-        .iter()
-        .max_by_key(|e| e.epoch)
-        .ok_or(EntryError::EpochMismatch)?;
-    if newest.key_id != header.key_id {
+    // B+ epoch-consistency: the sealing epoch must be the newest at the governing revision (the caller
+    // computes `newest_key_id` from the resolved keyring). Closes the "seal under the CURRENT key, stamp an
+    // OLD revision" forge (the current key belongs to a newer epoch than any old revision).
+    if header.key_id != newest_key_id {
         return Err(EntryError::EpochMismatch);
     }
 
     // The claimed author must be a member at the governing revision; verify against THAT key + role.
-    let member = governing
+    let member = view
         .members
         .iter()
         .find(|m| m.member_id == header.author_member_id)
@@ -98,8 +98,9 @@ pub fn verify_entry(
     key.verify(&msg, &signature)
         .map_err(|_| EntryError::BadSignature)?;
 
-    // Role (numeric, lower = stronger): the author's role must be at least as strong as required.
-    if member.role > required as i32 {
+    // Role (numeric, lower = stronger): the author's role must be at least as strong as required. The
+    // MembershipView carries the role as `i16`.
+    if member.role > required as i16 {
         return Err(EntryError::InsufficientRole);
     }
     Ok(())
@@ -131,12 +132,26 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openom_keyring::{encode_governing_ref, generate_identity};
+    use openom_keyring_chain::{encode_governing_ref, generate_identity};
     use edsign::SigningKey;
-    use openom_protocol::v1::{KeyEpoch, Member, MemberRole};
+    use openom_keyring_chain::wire::{KeyEpoch, Member};
+    use openom_protocol::v1::MemberRole;
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;
+
+    /// Drive `verify_entry` from a chain `Keyring` fixture: fold it to the engine-neutral `MembershipView`
+    /// and compute the newest epoch's `key_id` — exactly what the wasm caller does (OPE-333).
+    fn call(version: u32, header: &Header, plaintext: &[u8], kr: &Keyring) -> Result<(), EntryError> {
+        let view = openom_keyring_chain::membership_view(kr);
+        let newest = kr
+            .epochs
+            .iter()
+            .max_by_key(|e| e.epoch)
+            .map(|e| e.key_id.clone())
+            .unwrap_or_default();
+        verify_entry(version, header, plaintext, &view, &newest)
+    }
 
     fn member(id: &str, role: MemberRole, author: &SigningKey) -> Member {
         Member {
@@ -190,7 +205,7 @@ mod tests {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "m1", &k, b"payload");
-        assert_eq!(verify_entry(VERSION, &h, b"payload", &kr), Ok(()));
+        assert_eq!(call(VERSION, &h, b"payload", &kr), Ok(()));
     }
 
     #[test]
@@ -198,11 +213,11 @@ mod tests {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("e1", MemberRole::Editor, &k)]);
         assert_eq!(
-            verify_entry(VERSION, &signed(Kind::Delta, "e1", &k, b"x"), b"x", &kr),
+            call(VERSION, &signed(Kind::Delta, "e1", &k, b"x"), b"x", &kr),
             Err(EntryError::InsufficientRole)
         );
         assert_eq!(
-            verify_entry(VERSION, &signed(Kind::Proposal, "e1", &k, b"x"), b"x", &kr),
+            call(VERSION, &signed(Kind::Proposal, "e1", &k, b"x"), b"x", &kr),
             Ok(())
         );
     }
@@ -213,7 +228,7 @@ mod tests {
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "m1", &k, b"original");
         assert_eq!(
-            verify_entry(VERSION, &h, b"tampered", &kr),
+            call(VERSION, &h, b"tampered", &kr),
             Err(EntryError::BadSignature)
         );
     }
@@ -225,7 +240,7 @@ mod tests {
         let kr = governing(vec![member("m1", MemberRole::Admin, &real)]);
         let h = signed(Kind::Delta, "m1", &mallory, b"x");
         assert_eq!(
-            verify_entry(VERSION, &h, b"x", &kr),
+            call(VERSION, &h, b"x", &kr),
             Err(EntryError::BadSignature)
         );
     }
@@ -236,7 +251,7 @@ mod tests {
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "ghost", &k, b"x");
         assert_eq!(
-            verify_entry(VERSION, &h, b"x", &kr),
+            call(VERSION, &h, b"x", &kr),
             Err(EntryError::UnknownAuthor)
         );
     }
@@ -256,7 +271,7 @@ mod tests {
             .to_bytes()
             .to_vec();
         assert_eq!(
-            verify_entry(VERSION, &h, b"x", &kr),
+            call(VERSION, &h, b"x", &kr),
             Err(EntryError::EpochMismatch)
         );
     }
@@ -270,7 +285,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            verify_entry(VERSION, &h, b"x", &kr),
+            call(VERSION, &h, b"x", &kr),
             Err(EntryError::Unattributed)
         );
     }
@@ -311,19 +326,19 @@ mod tests {
         let kr = governing(vec![member("m1", MemberRole::Admin, &author.signing_key)]);
         let plaintext = open_envelope(dek.expose(), &env).unwrap();
         assert_eq!(
-            verify_entry(VERSION, header, &plaintext, &kr),
+            call(VERSION, header, &plaintext, &kr),
             Ok(()),
             "the sealed entry verifies"
         );
         assert_eq!(
-            verify_entry(VERSION, header, b"tampered", &kr),
+            call(VERSION, header, b"tampered", &kr),
             Err(EntryError::BadSignature)
         );
     }
 
     #[test]
     fn epoch_attribution_tracks_who_the_dek_is_wrapped_to() {
-        use openom_protocol::v1::KeyWrap;
+        use openom_keyring_chain::wire::KeyWrap;
         let wrap = |id: &str| KeyWrap {
             member_id: id.into(),
             wrap_method: 0,

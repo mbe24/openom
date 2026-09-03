@@ -90,62 +90,6 @@ pub struct Header {
     #[prost(bytes="vec", tag="15")]
     pub blob_id: ::prost::alloc::vec::Vec<u8>,
 }
-/// Per-tree key material AND governance: the DEK wrapped for each member across
-/// epochs and the signed membership/role list — one signed, anti-rollback,
-/// hash-chained document. The authorized-signer set is DERIVED from members (a member
-/// at CO_OWNER or stronger is a signer), so it is not a separate roster. Signed by ANY
-/// authorized signer (1-of-N in V1); changing the signer set itself (i.e. a member's
-/// signer-tier role) needs the founder (or, founder gone, all remaining signers) — a
-/// client-enforced policy, not a wire distinction.
-/// Keyring-local: the Envelope/Header skeleton and AAD are untouched by this shape.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Keyring {
-    /// Opaque tree id.
-    #[prost(bytes="vec", tag="1")]
-    pub tree_id: ::prost::alloc::vec::Vec<u8>,
-    /// Key generations (rotation produces a new epoch).
-    #[prost(message, repeated, tag="2")]
-    pub epochs: ::prost::alloc::vec::Vec<KeyEpoch>,
-    /// Monotonic anti-rollback counter, bumped on every revision. A client refuses a
-    /// revision lower than the highest it has seen and (with prev_keyring_hash) one
-    /// that doesn't chain onto the revision it last accepted.
-    #[prost(uint32, tag="3")]
-    pub revision: u32,
-    /// Keyring layout selector (analogous to Envelope.version): read first, then covered
-    /// by the signed bytes. A higher value than the client understands is opened
-    /// read-only rather than misread.
-    #[prost(uint32, tag="6")]
-    pub layout_version: u32,
-    /// SHA-256 of the previous revision's canonical signing bytes; empty at genesis
-    /// (revision 1). Chains the revision history so a server fork of history is
-    /// detectable evidence rather than two indistinguishable valid states.
-    #[prost(bytes="vec", tag="7")]
-    pub prev_keyring_hash: ::prost::alloc::vec::Vec<u8>,
-    /// The signed membership/role manifest — the authority for author_signature
-    /// verification and role-gated approval, so neither rests on a server-rewritable row.
-    #[prost(message, repeated, tag="9")]
-    pub members: ::prost::alloc::vec::Vec<Member>,
-    /// One or more Ed25519 signatures over this keyring's canonical signing bytes, each
-    /// from a currently-authorized signer (any-of / 1-of-N in V1). Excluded from the
-    /// signed bytes, so signatures are independently collectible (threshold-ready).
-    #[prost(message, repeated, tag="10")]
-    pub signatures: ::prost::alloc::vec::Vec<KeyringSignature>,
-    /// The founder-only recovery root key(s). Every epoch's DEK is HPKE-wrapped to a
-    /// RecoveryKey's public key (a WRAP_METHOD_RRK_HPKE wrap in the epoch), so the founder
-    /// reaches every epoch — past and future, including epochs a co-owner minted — by
-    /// unwrapping ONE recovery-key private key (held only under the founder's passphrase and
-    /// recovery code, never shared with members). V1: exactly one, the founder's.
-    #[prost(message, repeated, tag="11")]
-    pub recovery_keys: ::prost::alloc::vec::Vec<RecoveryKey>,
-    /// Governance: the quorum to change the signer set (members at CO_OWNER or stronger) and to change this rule itself.
-    /// governance_kind: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
-    /// 3 = threshold. governance_threshold is the m for the threshold kinds. Part of the signed bytes
-    /// (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
-    #[prost(uint32, tag="12")]
-    pub governance_kind: u32,
-    #[prost(uint32, tag="13")]
-    pub governance_threshold: u32,
-}
 /// The managed keyring-endpoint transport envelope: the ONE message the server parses for
 /// `PUT /trees/{id}/keyring`. It carries only ROUTING metadata the server uses WITHOUT understanding any
 /// keyring implementation, plus an opaque `payload`. The server dispatches on `engine` to a KeyringVerifier,
@@ -173,110 +117,9 @@ pub struct KeyringUpdate {
     #[prost(bytes="vec", tag="5")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
 }
-/// The founder's cross-epoch recovery root key (an X25519 keypair). Owner-only by
-/// construction: the private key exists only under the two founder-credential wraps in
-/// `wraps`; every other party (co-owner rotations included) touches only `public_key`. A
-/// removed member never receives it, so it does not weaken revocation.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RecoveryKey {
-    /// X25519 public key. Every KeyEpoch carries one WRAP_METHOD_RRK_HPKE wrap of its DEK to
-    /// this key. Covered by the keyring signature, so the server can't substitute it.
-    #[prost(bytes="vec", tag="1")]
-    pub public_key: ::prost::alloc::vec::Vec<u8>,
-    /// The founder this recovery key belongs to (must equal the FOUNDER signer's member_id;
-    /// client-verified).
-    #[prost(string, tag="2")]
-    pub member_id: ::prost::alloc::string::String,
-    /// The recovery root private key, wrapped under the founder's passphrase KEK
-    /// (WRAP_METHOD_PASSPHRASE_ARGON2ID) and recovery-code KEK
-    /// (WRAP_METHOD_RECOVERY_CODE_ARGON2ID) — exactly two entries in V1, each with its
-    /// Argon2id kdf_params. AAD is the tree-scoped rrk binding, not the per-epoch tuple.
-    #[prost(message, repeated, tag="3")]
-    pub wraps: ::prost::alloc::vec::Vec<KeyWrap>,
-    /// The Recovery Verification Key: an Ed25519 public key HKDF-derived from the recovery-root
-    /// secret (openom_crypto::derive_rvk, domain-separated from public_key's ECDH use). Covered by
-    /// the keyring signature, so the untrusted server can't substitute it. A reset/recovery keyring
-    /// must carry the SAME recovery_verifying_key as the prior keyring (continuity) and be signed by
-    /// it (authorization) — this is what makes a chain reset cryptographically verifiable rather than
-    /// OOB-trusted. Empty on pre-RVK keyrings (then verify_reset falls back to the OOB self-check).
-    #[prost(bytes="vec", tag="4")]
-    pub recovery_verifying_key: ::prost::alloc::vec::Vec<u8>,
-}
-/// The signed role + key manifest for one member (everyone with access, signer or
-/// not). Roles and per-member keys live here so they are covered by the signature and
-/// cannot be rewritten by the (partly untrusted) server.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Member {
-    /// Account id (matches KeyWrap.member_id).
-    #[prost(string, tag="1")]
-    pub member_id: ::prost::alloc::string::String,
-    /// Access/approval role.
-    #[prost(enumeration="MemberRole", tag="2")]
-    pub role: i32,
-    /// Ed25519 key that produces this member's Header.author_signature. Empty until the
-    /// member enrolls one; pinned here so verifiers never fetch author keys from the server.
-    #[prost(bytes="vec", tag="3")]
-    pub author_public_key: ::prost::alloc::vec::Vec<u8>,
-    /// The member's X25519 HPKE public key, recorded by the signer who verified it
-    /// out-of-band at invite (§4a). Rotations wrap the DEK to THIS key.
-    #[prost(bytes="vec", tag="4")]
-    pub hpke_public_key: ::prost::alloc::vec::Vec<u8>,
-}
-/// One signature over the keyring's canonical signing bytes.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KeyringSignature {
-    /// Which signer produced this — a hint only; verification is always against the
-    /// client's pinned/trusted set (the members-derived signer set), never this claim.
-    #[prost(bytes="vec", tag="1")]
-    pub signer_public_key: ::prost::alloc::vec::Vec<u8>,
-    /// Ed25519 signature over the keyring's canonical signing bytes.
-    #[prost(bytes="vec", tag="2")]
-    pub signature: ::prost::alloc::vec::Vec<u8>,
-}
-/// One key generation.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KeyEpoch {
-    /// Matches Header.key_id.
-    #[prost(bytes="vec", tag="1")]
-    pub key_id: ::prost::alloc::vec::Vec<u8>,
-    /// Generation number, from 0.
-    #[prost(uint32, tag="2")]
-    pub epoch: u32,
-    /// The DEK wrapped once per member.
-    #[prost(message, repeated, tag="3")]
-    pub wraps: ::prost::alloc::vec::Vec<KeyWrap>,
-}
-/// The DEK sealed for one member.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KeyWrap {
-    /// Member account id (provider-agnostic).
-    #[prost(string, tag="1")]
-    pub member_id: ::prost::alloc::string::String,
-    /// How the DEK was wrapped.
-    #[prost(enumeration="WrapMethod", tag="2")]
-    pub wrap_method: i32,
-    /// AEAD nonce for the wrap.
-    #[prost(bytes="vec", tag="3")]
-    pub nonce: ::prost::alloc::vec::Vec<u8>,
-    /// AEAD(DEK); its AAD binds (tree_id, key_id, member_id, wrap_method, epoch).
-    #[prost(bytes="vec", tag="4")]
-    pub wrapped_dek: ::prost::alloc::vec::Vec<u8>,
-    /// Set for the Argon2id wrap methods (WRAP_METHOD_PASSPHRASE_ARGON2ID and
-    /// WRAP_METHOD_RECOVERY_CODE_ARGON2ID). The recovery wrap uses minimal cost — its
-    /// input is a high-entropy code, so memory-hardness buys nothing.
-    #[prost(message, optional, tag="5")]
-    pub kdf_params: ::core::option::Option<KdfParams>,
-    /// Set for WRAP_METHOD_X25519_HPKE: the sender's one-time public key.
-    #[prost(bytes="vec", tag="6")]
-    pub ephemeral_public_key: ::prost::alloc::vec::Vec<u8>,
-    /// Set for the HPKE wrap methods (WRAP_METHOD_X25519_HPKE, WRAP_METHOD_RRK_HPKE): the RECIPIENT's public
-    /// key this wrap addresses. An UNAUTHENTICATED hint (the op author writes it; it is not cryptographically
-    /// tied to the ciphertext) used by the dag's epoch-coverage heuristic to detect a wrap addressed to a
-    /// member's STALE key after a rekey race — never a proof of decryptability (OPE-290).
-    #[prost(bytes="vec", tag="7")]
-    pub recipient_public_key: ::prost::alloc::vec::Vec<u8>,
-}
-/// Argon2id parameters (explicit so cost can rise later).
+/// Argon2id parameters (explicit so cost can rise later). Kept here (unlike the rest of the keyring wire,
+/// which moved to openom-keyring-chain in OPE-300) because the sealer/crypto path — openom-crypto's
+/// recovery/wrap KDFs — reads and writes it. openom-keyring-chain carries its OWN wire-identical copy.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KdfParams {
     /// Random per-member salt.
@@ -431,7 +274,9 @@ impl Compression {
 }
 /// A member's access/approval role. OWNER is the founder (billing payer). CO_OWNER is
 /// also an authorized signer; ADMIN approves edits but does NOT sign the keyring;
-/// EDITOR proposes (needs approval); VIEWER is read-only.
+/// EDITOR proposes (needs approval); VIEWER is read-only. (The keyring wire itself —
+/// Keyring/Member/KeyEpoch/KeyWrap/RecoveryKey/KeyringSignature — moved to
+/// openom-keyring-chain in OPE-300; this enum stays because the sealer/vault path reads role values.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MemberRole {
@@ -470,7 +315,8 @@ impl MemberRole {
         }
     }
 }
-/// How a DEK is wrapped for a member.
+/// How a DEK is wrapped for a member. (Value-compatible with openom-keyring-chain's wrap-method constants;
+/// kept here because openom-crypto reads it on the sealer path.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum WrapMethod {

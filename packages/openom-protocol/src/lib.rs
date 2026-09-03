@@ -1,8 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-/// Generated types for `package openom.v1` — `Envelope`, `Header`, `Keyring`,
-/// `KeyEpoch`, `KeyWrap`, `KdfParams`, and the `Kind` / `Format` / `Aead` /
-/// `Compression` / `WrapMethod` enums.
+/// Generated types for `package openom.v1` — `Envelope`, `Header`, `KeyringUpdate`,
+/// `KdfParams`, and the `Kind` / `Format` / `Aead` / `Compression` / `WrapMethod` /
+/// `MemberRole` enums. (The keyring wire — `Keyring` / `Member` / `KeyEpoch` / `KeyWrap` /
+/// `RecoveryKey` / `KeyringSignature` — moved to `openom-keyring-chain` in OPE-300.)
 pub mod v1 {
     include!("generated/openom/v1/openom.v1.rs");
 }

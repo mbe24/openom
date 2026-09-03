@@ -19,12 +19,12 @@ use openom_crypto::{
     HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_did::DidKey;
-use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
+use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{
-    KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
-};
+use openom_protocol::v1::{KdfParams, MemberRole};
+// The keyring wire moved to openom-keyring-chain in OPE-300.
+use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey};
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 // The founder is the owner (the sole OWNER-role member) of a freshly-built single-owner keyring. The
 // signer set is DERIVED from members now (OPE-309): a member at CO_OWNER or stronger IS a signer, so there
@@ -255,7 +255,7 @@ pub fn unlock(
     if attributed {
         // The chain encodes the member's watermarked keyring head (`revision`) as the entry's opaque
         // governing_ref; every entry this sealer signs stamps it (OPE-277 GoverningRef).
-        let governing_ref = openom_keyring::encode_governing_ref(revision);
+        let governing_ref = openom_keyring_chain::encode_governing_ref(revision);
         sealer = sealer.with_author(identity, member_id.to_string(), governing_ref);
     }
     Ok(Unlocked {
@@ -327,7 +327,9 @@ pub fn recover(
     };
     validate_kdf(&CoreKdf::from(&kdf))?;
     let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
-    let recovery_kek = derive_kek(entropy.as_slice(), &kdf)?;
+    // The wrap's kdf_params is the CHAIN's KdfParams (the keyring wire); the crypto path takes
+    // openom-protocol's — convert through CoreKdf (OPE-300).
+    let recovery_kek = derive_kek(entropy.as_slice(), &KdfParams::from(&CoreKdf::from(&kdf)))?;
     let rrk_secret = unwrap_rrk_secret(
         &recovery_kek,
         &rec_nonce,
@@ -745,7 +747,7 @@ pub fn unlock_as_member(
     // The trust anchor: a signature from a key the member pinned OOB. This is the member
     // path's whole security — the member cannot derive the owner's key, so it must be
     // supplied, never taken from the (untrusted) document.
-    verify_keyring_any(&keyring, trusted_signers)?;
+    verify_keyring_any(&keyring, trusted_signers).map_err(|_| CryptoError::Signature)?;
     validate_kdf(&CoreKdf::from(member_kdf))?;
     let root = derive_root(member_passphrase, member_kdf)?;
 
@@ -1130,7 +1132,8 @@ fn open_with_passphrase(
         (kdf, w.nonce.clone(), w.wrapped_dek.clone())
     };
     validate_kdf(&CoreKdf::from(&kdf))?;
-    let root = derive_root(passphrase, &kdf)?;
+    // Chain KdfParams (keyring wire) → openom-protocol KdfParams (crypto path) via CoreKdf (OPE-300).
+    let root = derive_root(passphrase, &KdfParams::from(&CoreKdf::from(&kdf)))?;
     // Our own derived identity must be the founder entry (a wrong passphrase yields a wrong
     // key; the server can't swap the founder). The keyring must then be signed by SOME current
     // authorized signer — a co-owner may have signed the latest ordinary (any-of) change, so
@@ -1144,7 +1147,7 @@ fn open_with_passphrase(
     if !is_founder {
         return Err(CryptoError::Signature.into());
     }
-    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))?;
+    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
     let rrk_secret =
         unwrap_rrk_secret(&root.kek, &nonce, &wrapped, tree_id, member_id, PASSPHRASE)?;
 
@@ -1227,7 +1230,7 @@ fn open_as_co_owner(
     if !founder_pinned {
         return Err(CryptoError::Signature.into());
     }
-    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))?;
+    verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
     validate_kdf(&CoreKdf::from(kdf))?;
     let root = derive_root(passphrase, kdf)?;
     // Authority: the caller must be a current co-owner signer (a CO_OWNER-role member) whose registered
@@ -1451,9 +1454,10 @@ mod tests {
     use crate::VaultError;
     use openom_sealer::{EntryKind, SealContext, SealerSet};
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
-    use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
+    use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-    use openom_protocol::v1::{Keyring, Member, MemberRole};
+    use openom_keyring_chain::wire::{Keyring, Member};
+    use openom_protocol::v1::MemberRole;
     use openom_protocol::Message;
 
     /// The founder's verify key, as a member would pin it out-of-band from an invite — the OWNER-role
@@ -1513,17 +1517,17 @@ mod tests {
 
     #[test]
     fn rotate_recovery_mints_a_new_authority_authorized_by_the_old() {
-        use openom_keyring::{verify_transition, KeyringAnchor};
+        use openom_keyring_chain::{verify_transition, KeyringAnchor};
         use openom_protocol::Message;
         let pass = Passphrase::new(b"correct horse");
         let p = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"replica-A")).unwrap();
-        let prior = openom_protocol::v1::Keyring::decode(p.keyring.as_slice()).unwrap();
+        let prior = Keyring::decode(p.keyring.as_slice()).unwrap();
         let anchor = KeyringAnchor::from_keyring(&prior);
         assert!(!anchor.recovery_verifying_key.is_empty(), "provision pins an RVK");
 
         // Rotate the recovery root.
         let rot = rotate_recovery(&p.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 0).unwrap();
-        let rotated = openom_protocol::v1::Keyring::decode(rot.keyring.as_slice()).unwrap();
+        let rotated = Keyring::decode(rot.keyring.as_slice()).unwrap();
 
         // It's a valid transition, authorized by the OLD recovery authority, and the pinned RVK changed.
         let new_anchor = verify_transition(&anchor, &rotated).unwrap();
@@ -1618,7 +1622,7 @@ mod tests {
         // bytes -> bytes lifecycle, so every op's output publishes through keyring/head. Two replicas,
         // one dumb local-FS backend.
         use blobstore::{BlobStore, FsBlob, Precondition};
-        use openom_keyring::blob_sync::{KeyringChainBlobSync, PullError};
+        use openom_keyring_chain::blob_sync::{KeyringChainBlobSync, PullError};
         use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();

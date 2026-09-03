@@ -14,13 +14,14 @@
 use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
-use openom_keyring::{
+use openom_keyring_chain::{
     decode_governing_ref, keyring_hash, verify_reset, verify_walk, KeyringAnchor, VerifyingKey,
 };
+use openom_keyring_chain::wire::Keyring;
 use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
+use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
@@ -1299,7 +1300,17 @@ pub fn verify_entry_wasm(
     // directly now (the attribution moved out of the chain engine, OPE-300).
     let kr = Keyring::decode(governing)
         .map_err(|e| JsError::new(&format!("bad governing keyring: {e}")))?;
-    verify_entry(version, header, plaintext, &kr).map_err(|e| JsError::new(&e.to_string()))
+    // Fold the chain keyring to the engine-neutral MembershipView + compute the newest epoch's key_id, the
+    // two inputs verify_entry now takes (OPE-333); behaviour is identical.
+    let view = openom_keyring_chain::membership_view(&kr);
+    let newest_key_id = kr
+        .epochs
+        .iter()
+        .max_by_key(|e| e.epoch)
+        .map(|e| e.key_id.clone())
+        .unwrap_or_default();
+    verify_entry(version, header, plaintext, &view, &newest_key_id)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// An entry's attribution coordinates, read from its (AAD-bound) header — enough for the client to decide
@@ -1370,7 +1381,7 @@ pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsErr
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
     // Chain engine: fold the proto Keyring to the engine-neutral MembershipView, then read moderators off
     // it — the same path a dag-resolved view would take (OPE-308).
-    let view = openom_keyring::membership_view(&kr);
+    let view = openom_keyring_chain::membership_view(&kr);
     Ok(crate::membership::moderators(&view).into_iter().collect())
 }
 

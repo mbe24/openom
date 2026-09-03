@@ -25,10 +25,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
-use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
-use openom_protocol::v1::{
-    Aead, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole, WrapMethod,
-};
+use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring, SigningKey};
+use openom_protocol::v1::{Aead, Envelope, Header, Kind, MemberRole, WrapMethod};
+use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member};
 use openom_protocol::Message;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -332,7 +331,7 @@ fn put_keyring_as(tree: Uuid, k: &Keyring, member: Uuid) -> Request<Body> {
         version: 1,
         tree_id: tree.as_bytes().to_vec(),
         engine: "chain".to_string(),
-        update_ref: openom_keyring::encode_governing_ref(k.revision),
+        update_ref: openom_keyring_chain::encode_governing_ref(k.revision),
         payload,
     };
     Request::builder()

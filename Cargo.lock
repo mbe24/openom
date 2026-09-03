@@ -3579,8 +3579,8 @@ dependencies = [
  "jsonwebtoken",
  "lambda_http",
  "openom-crypto",
- "openom-keyring",
  "openom-keyring-api",
+ "openom-keyring-chain",
  "openom-protocol",
  "openom-roles",
  "opentelemetry",
@@ -3674,23 +3674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-keyring"
-version = "0.1.0"
-dependencies = [
- "blobstore",
- "edsign",
- "getrandom 0.3.4",
- "openom-crypto",
- "openom-did",
- "openom-keyring-api",
- "openom-protocol",
- "openom-roles",
- "proptest",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "openom-keyring-api"
 version = "0.1.0"
 dependencies = [
@@ -3700,14 +3683,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-keyring-chain"
+version = "0.1.0"
+dependencies = [
+ "blobstore",
+ "edsign",
+ "getrandom 0.3.4",
+ "keyeo-core",
+ "keyeo-linear",
+ "openom-keyring-api",
+ "proptest",
+ "prost",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "openom-keyring-dag"
 version = "0.1.0"
 dependencies = [
  "blobstore",
  "edsign",
  "keyeo-dag",
- "openom-keyring",
  "openom-keyring-api",
+ "openom-keyring-chain",
  "openom-protocol",
  "openom-roles",
  "postcard",
@@ -3762,7 +3762,7 @@ version = "0.1.0"
 dependencies = [
  "edsign",
  "openom-crypto",
- "openom-keyring",
+ "openom-keyring-chain",
  "openom-protocol",
  "proptest",
  "thiserror 2.0.20",
@@ -3815,8 +3815,8 @@ dependencies = [
  "edsign",
  "openom-crypto",
  "openom-did",
- "openom-keyring",
  "openom-keyring-api",
+ "openom-keyring-chain",
  "openom-keyring-dag",
  "openom-protocol",
  "openom-roles",
@@ -3836,8 +3836,8 @@ name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
  "openom-crypto",
- "openom-keyring",
  "openom-keyring-api",
+ "openom-keyring-chain",
  "openom-protocol",
  "openom-sealer",
  "openom-vault",

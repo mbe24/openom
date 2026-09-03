@@ -8,11 +8,12 @@
 //! *expected* divergences so the oracle stays honest.
 
 use keyeo_dag::{Keyeo, MemberInit, MembershipAction, StrongRemove};
-use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
+use openom_keyring_chain::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
 use openom_keyring_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
-use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod};
+use openom_protocol::v1::{MemberRole, WrapMethod};
+use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member};
 use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER};
 use edsign::SigningKey;
 

@@ -13,7 +13,7 @@ openom-vault = { path = "../openom-vault" }
 openom-sealer = { path = "../openom-sealer" }
 openom-crypto.workspace = true
 # Keyring chain verification (verify_walk/verify_transition/verify_reset) the host re-checks on sync.
-openom-keyring.workspace = true
+openom-keyring-chain.workspace = true
 # EngineKind — the deployment's keyring engine preset the host builds an AppVault from (OPE-278).
 openom-keyring-api.workspace = true
 openom-protocol.workspace = true
@@ -29,4 +29,4 @@ sqlite = ["dep:rusqlite"]
 
 [dev-dependencies]
 # Tests mint ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
-openom-keyring = { workspace = true, features = ["test-util"] }
+openom-keyring-chain = { workspace = true, features = ["test-util"] }

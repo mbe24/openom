@@ -20,7 +20,7 @@ postcard = { version = "1", features = ["use-std"] }
 # The differential-oracle + seam-parity tests drive the openom chain keyring (openom-keyring) alongside
 # the DAG one and assert they agree ("CAS = degenerate DAG"), against openom's own roles/proto vocabulary.
 # openom-coupled but TEST-ONLY — the published library (its [dependencies]) stays openom-free.
-openom-keyring.workspace = true
+openom-keyring-chain.workspace = true
 openom-protocol.workspace = true
 openom-roles.workspace = true
 proptest.workspace = true

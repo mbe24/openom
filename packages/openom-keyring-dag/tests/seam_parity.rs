@@ -8,11 +8,12 @@
 //! EFFECT (no membership change) reached by different mechanisms.
 
 use keyeo_dag::{MemberInit, MembershipAction};
-use openom_keyring::verifier::ChainVerifier;
+use openom_keyring_chain::verifier::ChainVerifier;
 use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
 use openom_keyring_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
 use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
-use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod};
+use openom_protocol::v1::{MemberRole, WrapMethod};
+use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member};
 use openom_protocol::Message;
 use openom_roles::MEMBER_OWNER;
 use edsign::SigningKey;
@@ -68,7 +69,7 @@ fn chain_genesis() -> Keyring {
         }],
         ..Default::default()
     };
-    openom_keyring::sign_keyring(&mut g, &sk(1));
+    openom_keyring_chain::sign_keyring(&mut g, &sk(1));
     g
 }
 /// Add a Maintainer "dave" (seed 4) — a MEMBER but NOT a signer — to a genesis, founder re-signed.
@@ -81,14 +82,14 @@ fn with_maintainer_dave(mut g: Keyring) -> Keyring {
     });
     g.epochs[0].wraps.push(wrap("dave", WrapMethod::X25519Hpke));
     g.signatures.clear();
-    openom_keyring::sign_keyring(&mut g, &sk(1));
+    openom_keyring_chain::sign_keyring(&mut g, &sk(1));
     g
 }
 /// A rev-2 successor adding ordinary editor "carol", signed by `signer_seed`.
 fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
     let mut k = prior.clone();
     k.revision = 2;
-    k.prev_keyring_hash = openom_keyring::keyring_hash(prior).to_vec();
+    k.prev_keyring_hash = openom_keyring_chain::keyring_hash(prior).to_vec();
     k.members.push(Member {
         member_id: "carol".into(),
         role: MemberRole::Editor as i32,
@@ -97,7 +98,7 @@ fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
     });
     k.epochs[0].wraps.push(wrap("carol", WrapMethod::X25519Hpke));
     k.signatures.clear();
-    openom_keyring::sign_keyring(&mut k, &sk(signer_seed));
+    openom_keyring_chain::sign_keyring(&mut k, &sk(signer_seed));
     k
 }
 

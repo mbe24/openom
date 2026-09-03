@@ -20,7 +20,7 @@ openom-crypto.workspace = true
 # The capability→role policy (advisory ACL gate) and the keyring chain the server re-verifies as
 # honest-server defense-in-depth. Both are content-agnostic — the server still never decrypts.
 openom-roles.workspace = true
-openom-keyring.workspace = true
+openom-keyring-chain.workspace = true
 # The engine-agnostic keyless verifier seam (KeyringVerifier/MembershipView): the server binds this and
 # dispatches on a per-tree engine tag, so chain and (soon) dag admit through one surface (OPE-278).
 openom-keyring-api.workspace = true
@@ -64,6 +64,6 @@ tower-http.workspace = true
 # Integration tests drive the router in-process via ServiceExt::oneshot (no socket).
 tower = { version = "0.5", features = ["util"] }
 # tests/api.rs mints ad-hoc signer identities via openom_keyring::generate_identity (test-util gated).
-openom-keyring = { workspace = true, features = ["test-util"] }
+openom-keyring-chain = { workspace = true, features = ["test-util"] }
 # Metering tests seed accounts with tiny caps directly, to drive the rate/capacity gates.
 sqlx.workspace = true

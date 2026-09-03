@@ -10,10 +10,9 @@
 use openom_keyring_api::{
     Admitted, EngineKind, KeyringVerifier, MemberView, MembershipEnvelope, MembershipView, VerifyError,
 };
-use openom_protocol::v1::Keyring;
-use openom_protocol::Message;
-use openom_roles::MEMBER_OWNER;
+use prost::Message;
 
+use crate::wire::{Keyring, MEMBER_OWNER};
 use crate::{
     bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor,
     VerifyingKey,
@@ -161,8 +160,9 @@ impl KeyringVerifier for ChainVerifier {
 mod tests {
     use super::*;
     use crate::{keyring_hash, sign_keyring, SigningKey};
-    use openom_protocol::v1::{KeyEpoch, KeyWrap, Member, MemberRole, WrapMethod};
-    use openom_roles::MEMBER_OWNER;
+    use crate::wire::{KeyEpoch, KeyWrap, Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+
+    const EDITOR: i32 = 4;
 
     /// Wrap a keyring in the shared MembershipEnvelope (chain engine) — the wire `admit` now receives.
     fn env(k: &Keyring) -> Vec<u8> {
@@ -175,10 +175,10 @@ mod tests {
     fn pk(seed: u8) -> Vec<u8> {
         sk(seed).verifying_key().to_bytes().to_vec()
     }
-    fn wrap(id: &str, method: WrapMethod) -> KeyWrap {
+    fn wrap(id: &str, method: i32) -> KeyWrap {
         KeyWrap {
             member_id: id.into(),
-            wrap_method: method as i32,
+            wrap_method: method,
             nonce: vec![],
             wrapped_dek: vec![1],
             kdf_params: None,
@@ -205,7 +205,7 @@ mod tests {
             epochs: vec![KeyEpoch {
                 key_id: vec![0],
                 epoch: 0,
-                wraps: vec![wrap("owner", WrapMethod::RrkHpke)],
+                wraps: vec![wrap("owner", WRAP_RRK_HPKE)],
             }],
             ..Default::default()
         };
@@ -220,11 +220,11 @@ mod tests {
         k.prev_keyring_hash = keyring_hash(prior).to_vec();
         k.members.push(Member {
             member_id: "carol".into(),
-            role: MemberRole::Editor as i32,
+            role: EDITOR,
             author_public_key: pk(3),
             hpke_public_key: vec![9; 32],
         });
-        k.epochs[0].wraps.push(wrap("carol", WrapMethod::X25519Hpke));
+        k.epochs[0].wraps.push(wrap("carol", WRAP_X25519_HPKE));
         k.signatures.clear();
         sign_keyring(&mut k, &sk(1));
         k

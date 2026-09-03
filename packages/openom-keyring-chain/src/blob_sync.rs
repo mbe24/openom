@@ -14,10 +14,10 @@
 //! [`KeyringChainBlobSync::accept_reset`], never silently walked.
 
 use blobstore::{BlobError, BlobStore, Etag, Precondition};
-use crate::keyring_signing_bytes;
-use openom_protocol::v1::Keyring;
-use openom_protocol::Message;
+use prost::Message;
 
+use crate::keyring::signing_bytes as keyring_signing_bytes;
+use crate::wire::Keyring;
 use crate::{
     keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, ChainError,
     KeyringAnchor, SigningKey,

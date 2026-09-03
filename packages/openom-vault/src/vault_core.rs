@@ -9,10 +9,11 @@
 //! engine marshals these to its own persisted form: the chain via the `From` impls below (proto
 //! `KeyEpoch`/`KeyWrap`/`RecoveryKey`), the dag by serializing them into ops (OPE-273).
 //!
-//! It must never import `openom_keyring` or `keyeo` — it stays the engine-neutral (as to *keyring engine*)
-//! sealing core BOTH engines' vaults share (a discipline kept by review; there is no CI grep for it, despite
-//! an earlier comment's claim). It DOES touch `openom_protocol` for the `From` marshaling + the wrap AAD +
-//! the sealer's id types, and `openom_crypto` for the KDF/AEAD. That is deliberate: OPE-283 scoped this
+//! It stays the engine-neutral (as to *keyring engine*) sealing core BOTH engines' vaults share (a
+//! discipline kept by review). It DOES marshal its records to the CHAIN keyring's proto shapes
+//! (`openom_keyring_chain::wire::KeyEpoch`/`KeyWrap`/`RecoveryKey`, moved out of `openom-protocol` in
+//! OPE-300) via the `From` impls below, and touches `openom_protocol` for the wrap AAD + sealer id types +
+//! the crypto-path `KdfParams`, and `openom_crypto` for the KDF/AEAD. That is deliberate: OPE-283 scoped this
 //! coupling as load-bearing, not incidental — the wrap AAD binds the proto `Envelope` (a compile-time
 //! security control) and the KDF params are the proto's, so decoupling would re-derive the wire format and
 //! scatter the crypto. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and keep the
@@ -25,7 +26,13 @@ use openom_crypto::{
 };
 use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
-use openom_protocol::v1::{KdfParams, KeyEpoch, KeyWrap, RecoveryKey, WrapMethod};
+use openom_protocol::v1::{KdfParams, WrapMethod};
+// The keyring payload wire moved to openom-keyring-chain in OPE-300; the sealing core marshals its own
+// records to the CHAIN's proto shapes here. `ChainKdfParams` is the chain's wire-identical KdfParams (the
+// crypto/derive path keeps using openom-protocol's `KdfParams`).
+use openom_keyring_chain::wire::{
+    KdfParams as ChainKdfParams, KeyEpoch, KeyWrap, RecoveryKey,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::VaultError;
@@ -116,6 +123,27 @@ impl From<&CoreKdf> for KdfParams {
         }
     }
 }
+// The chain's wire-identical KdfParams conversions (used only by the chain KeyWrap marshaling below).
+impl From<&ChainKdfParams> for CoreKdf {
+    fn from(k: &ChainKdfParams) -> Self {
+        Self {
+            salt: k.salt.clone(),
+            memory_kib: k.memory_kib,
+            iterations: k.iterations,
+            parallelism: k.parallelism,
+        }
+    }
+}
+impl From<&CoreKdf> for ChainKdfParams {
+    fn from(k: &CoreKdf) -> Self {
+        Self {
+            salt: k.salt.clone(),
+            memory_kib: k.memory_kib,
+            iterations: k.iterations,
+            parallelism: k.parallelism,
+        }
+    }
+}
 impl From<&KeyWrap> for CoreWrap {
     fn from(w: &KeyWrap) -> Self {
         Self {
@@ -136,7 +164,7 @@ impl From<&CoreWrap> for KeyWrap {
             wrap_method: w.wrap_method,
             nonce: w.nonce.clone(),
             wrapped_dek: w.wrapped_dek.clone(),
-            kdf_params: w.kdf.as_ref().map(KdfParams::from),
+            kdf_params: w.kdf.as_ref().map(ChainKdfParams::from),
             ephemeral_public_key: w.ephemeral_public_key.clone(),
             recipient_public_key: w.recipient_public_key.clone(),
         }

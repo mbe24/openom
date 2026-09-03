@@ -10,7 +10,7 @@ members = [
     "packages/openom-crypto",
     "packages/keyeo-crypto",
     "packages/openom-roles",
-    "packages/openom-keyring",
+    "packages/openom-keyring-chain",
     "packages/openom-keyring-api",
     "packages/openom-model",
     "packages/openom-jcs",
@@ -57,7 +57,7 @@ openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 keyeo-crypto = { path = "packages/keyeo-crypto" }
 openom-roles = { path = "packages/openom-roles" }
-openom-keyring = { path = "packages/openom-keyring" }
+openom-keyring-chain = { path = "packages/openom-keyring-chain" }
 openom-keyring-dag = { path = "packages/openom-keyring-dag" }
 openom-keyring-api = { path = "packages/openom-keyring-api" }
 openom-jcs = { path = "packages/openom-jcs" }

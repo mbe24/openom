@@ -18,7 +18,7 @@ use crate::{open, seal, CryptoError, KEY_LEN};
 /// Optional author attribution for a shared-tree entry (§B3 launch gate). When present, the member's
 /// Ed25519 author key signs the entry — naming them (`member_id`) and the opaque, engine-produced
 /// `governing_ref` (the keyring state that governs it) — so peers can verify authorship + role via
-/// `openom_keyring::verify_entry`. This crate treats `governing_ref` as opaque bytes: the caller (the
+/// `openom_keyring_chain::verify_entry`. This crate treats `governing_ref` as opaque bytes: the caller (the
 /// engine adapter) encodes it. `None` seals an *unattributed* entry (empty `author_signature`), the V1
 /// communal-DEK model.
 pub struct AuthorIdentity {

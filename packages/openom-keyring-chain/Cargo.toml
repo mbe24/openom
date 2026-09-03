@@ -1,6 +1,6 @@
 [package]
-name = "openom-keyring"
-description = "openom — the keyring/membership mechanism: keyring chain verification, entry authorship, signing"
+name = "openom-keyring-chain"
+description = "openom's linear signed-chain keyring binding: openom's roles/signing/keys + its own prost keyring wire, on the generic keyeo-linear engine. openom-domain-specific but openom-dependency-free (like openom-keyring-dag)."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -10,24 +10,24 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-# Wire types (Keyring / Member / Header) + the canonical signing-byte encoders.
-openom-protocol.workspace = true
+# The generic linear signed-membership-chain engine this crate binds onto (OPE-300).
+keyeo-linear.workspace = true
+# The engine-family seam types (Ed25519 / SigError / Role / SignatureScheme).
+keyeo-core.workspace = true
 # The storage swap seam — the Blob transport for the keyring document (OPE-265).
 blobstore.workspace = true
 # The engine-agnostic swap seam — this crate provides the CHAIN KeyringVerifier adapter (OPE-277).
 openom-keyring-api.workspace = true
-# Primitives layer — the shared CryptoError this crate returns (keyring/membership builds on crypto).
-openom-crypto.workspace = true
-# The capability→role policy verify_entry enforces.
-openom-roles.workspace = true
 # Ed25519 key types + the verify_strict-only verify (the raw ed25519-dalek edge lives only there).
 edsign.workspace = true
-# did:key encoding of a member's public key — for the moderator role feed the claim fold consumes.
-openom-did.workspace = true
-thiserror.workspace = true
+# Hashing for the payload commitment.
 sha2.workspace = true
-# Only generate_identity (a random-seed test helper) needs a CSPRNG; gated behind `test-util` so
-# production never mints a non-recoverable random identity (real identities are passphrase-derived).
+# serde derive for the ChainRole (it appears in the engine's signed, serialized bytes).
+serde = { workspace = true, features = ["derive"] }
+# The chain owns its keyring wire as hand-written prost messages (moved out of openom-protocol, OPE-300).
+prost.workspace = true
+thiserror.workspace = true
+# Only generate_identity (a random-seed test helper) needs a CSPRNG; gated behind `test-util`.
 getrandom = { workspace = true, optional = true }
 
 [features]
