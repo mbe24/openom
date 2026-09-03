@@ -8,7 +8,7 @@
 // per write) are DIFFERENT namespaces — this store's `version` is always the server
 // ETag. SyncStore owns the mapping between the two.
 
-import { ConflictError } from './store.js';
+import { ConflictError, AuthError } from './store.js';
 
 const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
 const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
@@ -29,28 +29,38 @@ export class BootstrapRequiredError extends Error {
 export class RemoteStore {
   #baseUrl;
   #fetch;
-  #token;
+  #getAccessToken;
 
   /**
    * @param {object} opts
    * @param {string} opts.baseUrl   e.g. "http://localhost:6060"
    * @param {typeof fetch} [opts.fetch]  injectable for tests
-   * @param {string|null} [opts.token]   Supabase JWT (prod); omit locally (fake auth)
+   * @param {object|Function|null} [opts.auth]  the AuthSession seam (an object with
+   *   `getAccessToken({forceRefresh})`) or a bare `getAccessToken` fn. Omit → no bearer (a
+   *   server running fake-auth). The token is fetched PER REQUEST (never captured at
+   *   construction) so the long-lived publishKeyring / summary closures that hold this store
+   *   keep working across token expiry — caching + refresh live BEHIND the seam.
    */
-  constructor({ baseUrl, fetch = globalThis.fetch, token = null }) {
+  constructor({ baseUrl, fetch = globalThis.fetch, auth = null }) {
     if (!baseUrl) throw new Error('RemoteStore needs a baseUrl');
     this.#baseUrl = baseUrl.replace(/\/$/, '');
     this.#fetch = fetch;
-    this.#token = token;
+    // Normalize the seam to a `getAccessToken(opts) => Promise<string>` (or null for no-auth).
+    if (typeof auth === 'function') this.#getAccessToken = auth;
+    else if (auth && typeof auth.getAccessToken === 'function') this.#getAccessToken = (o) => auth.getAccessToken(o);
+    else this.#getAccessToken = null;
   }
 
   caps() {
     return { remote: true, conditionalWrites: true, durable: true };
   }
 
-  #headers(extra = {}) {
+  async #headers(extra = {}, { forceRefresh = false } = {}) {
     const h = { ...extra };
-    if (this.#token) h.authorization = `Bearer ${this.#token}`;
+    if (this.#getAccessToken) {
+      const token = await this.#getAccessToken({ forceRefresh });
+      if (token) h.authorization = `Bearer ${token}`;
+    }
     return h;
   }
 
@@ -58,8 +68,29 @@ export class RemoteStore {
     return `${this.#baseUrl}/trees/${encodeURIComponent(id)}`;
   }
 
+  // Every request routes through here so auth is applied uniformly and a 401 gets EXACTLY ONE
+  // forced-refresh retry (the token may just be stale). If the retry still 401s, surface an
+  // AuthError so the composition root re-gates / signs out. Never loops. Non-401 statuses are
+  // handed back untouched for each method to interpret (404/409/410/etc.).
+  async #send(url, { method, extraHeaders = {}, body } = {}) {
+    const attempt = async (forceRefresh) => {
+      const headers = await this.#headers(extraHeaders, { forceRefresh });
+      return this.#fetch(url, { method, headers, body });
+    };
+    let res = await attempt(false);
+    if (res.status === 401) {
+      if (this.#getAccessToken) res = await attempt(true); // one forced-refresh retry
+      if (res.status === 401) {
+        let detail = '';
+        try { detail = (await res.text?.()) ?? ''; } catch { detail = ''; }
+        throw new AuthError(detail);
+      }
+    }
+    return res;
+  }
+
   async readSnapshot(id) {
-    const res = await this.#fetch(this.#tree(id), { headers: this.#headers() });
+    const res = await this.#send(this.#tree(id), { method: 'GET' });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`readSnapshot ${id}: HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -70,9 +101,9 @@ export class RemoteStore {
   // A 409 means someone else advanced the snapshot: surface it as ConflictError so the
   // caller pulls + reapplies, distinct from a network error (retry with the same body).
   async putSnapshot(id, bytes, expected = null) {
-    const headers = this.#headers({ 'content-type': 'application/octet-stream' });
-    if (expected != null) headers['if-match'] = expected; // server trims any quotes
-    const res = await this.#fetch(this.#tree(id), { method: 'PUT', headers, body: bytes });
+    const extraHeaders = { 'content-type': 'application/octet-stream' };
+    if (expected != null) extraHeaders['if-match'] = expected; // server trims any quotes
+    const res = await this.#send(this.#tree(id), { method: 'PUT', extraHeaders, body: bytes });
     if (res.status === 409) throw new ConflictError(expected, null);
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
@@ -85,9 +116,9 @@ export class RemoteStore {
 
   /** Append one sealed delta envelope; returns its server-assigned `seq` (idempotent on the dot). */
   async appendLog(id, sealedDelta) {
-    const res = await this.#fetch(`${this.#tree(id)}/log`, {
+    const res = await this.#send(`${this.#tree(id)}/log`, {
       method: 'POST',
-      headers: this.#headers({ 'content-type': 'application/octet-stream' }),
+      extraHeaders: { 'content-type': 'application/octet-stream' },
       body: sealedDelta,
     });
     if (!res.ok) {
@@ -104,7 +135,7 @@ export class RemoteStore {
    * retained window).
    */
   async readLog(id, since = -1) {
-    const res = await this.#fetch(`${this.#tree(id)}/log?since=${since}`, { headers: this.#headers() });
+    const res = await this.#send(`${this.#tree(id)}/log?since=${since}`, { method: 'GET' });
     if (res.status === 404) return { entries: [], nextCursor: since, oldestRetainedSeq: 0, headSeq: -1 };
     if (res.status === 410) {
       const j = await res.json().catch(() => ({}));
@@ -150,7 +181,7 @@ export class RemoteStore {
    * keyring yet) → empty.
    */
   async readKeyring(id, from = 1) {
-    const res = await this.#fetch(`${this.#tree(id)}/keyring?from=${from}`, { headers: this.#headers() });
+    const res = await this.#send(`${this.#tree(id)}/keyring?from=${from}`, { method: 'GET' });
     if (res.status === 404) return { revisions: [], head: 0 };
     if (!res.ok) throw new Error(`readKeyring ${id}: HTTP ${res.status}`);
     const body = await res.json();
@@ -169,9 +200,9 @@ export class RemoteStore {
    * accepted `{ revision }`.
    */
   async putKeyring(id, updateBytes) {
-    const res = await this.#fetch(`${this.#tree(id)}/keyring`, {
+    const res = await this.#send(`${this.#tree(id)}/keyring`, {
       method: 'PUT',
-      headers: this.#headers({ 'content-type': 'application/octet-stream' }),
+      extraHeaders: { 'content-type': 'application/octet-stream' },
       body: updateBytes,
     });
     if (res.status === 409) throw new ConflictError(null, null);
@@ -192,7 +223,7 @@ export class RemoteStore {
    * keyring PUT and never summary-pushed.
    */
   async getAccess(id) {
-    const res = await this.#fetch(`${this.#tree(id)}/access`, { headers: this.#headers() });
+    const res = await this.#send(`${this.#tree(id)}/access`, { method: 'GET' });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`getAccess ${id}: HTTP ${res.status}`);
     const b = await res.json();
@@ -215,9 +246,9 @@ export class RemoteStore {
       expected_generation: expectedGeneration,
       members: members.map((m) => ({ member_id: m.memberId, role: m.role })),
     };
-    const res = await this.#fetch(`${this.#tree(id)}/access`, {
+    const res = await this.#send(`${this.#tree(id)}/access`, {
       method: 'PUT',
-      headers: this.#headers({ 'content-type': 'application/json' }),
+      extraHeaders: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (res.status === 409) throw new ConflictError(expectedGeneration, null);

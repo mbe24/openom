@@ -11,6 +11,18 @@ export class ConflictError extends Error {
   }
 }
 
+// A 401 from the remote that survived one forced-refresh retry: the AuthSession could not
+// produce a token the server accepts (expired/rotated/revoked identity). Distinct from a
+// ConflictError (retry with a fresh CAS) and a bare network Error (retry the same request) —
+// the composition root reacts by re-gating / signing out, never by looping the request.
+export class AuthError extends Error {
+  constructor(detail = '') {
+    super(`authentication failed${detail ? `: ${detail}` : ''}`);
+    this.name = 'AuthError';
+    this.status = 401;
+  }
+}
+
 export class MemoryStore {
   #docs = new Map();
 

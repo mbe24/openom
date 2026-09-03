@@ -26,7 +26,7 @@ import { Watermarks } from './watermarks.js';
  * @param {object} [opts.local]         durable local DocStore; defaults to createStore()
  * @param {object} [opts.remote]        a RemoteStore (or built from remoteBaseUrl)
  * @param {string} [opts.remoteBaseUrl] server base URL (used if `remote` is omitted)
- * @param {string|null} [opts.token]    auth bearer for the remote
+ * @param {object|null} [opts.auth]     the AuthSession seam for the remote's per-request bearer
  * @param {object} [opts.watermarks]    §10 anti-rollback for 'synced'; defaults to a new one
  * @returns {Promise<{ store, mode, encrypted, kind, sync? }>}
  */
@@ -64,7 +64,7 @@ export async function composeStore(opts) {
   if (mode === 'synced') {
     const remote =
       opts.remote ??
-      new RemoteStore({ baseUrl: opts.remoteBaseUrl, token: opts.token ?? null });
+      new RemoteStore({ baseUrl: opts.remoteBaseUrl, auth: opts.auth ?? null });
     if (!remote) throw new Error("mode 'synced' requires a remote or remoteBaseUrl");
     // A partly-trusted server is a real adversary once sync exists, so the sync layer gets a
     // Watermarks — it refuses a fast-forward onto a snapshot the client already moved past
