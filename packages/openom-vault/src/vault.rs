@@ -18,7 +18,7 @@ use openom_crypto::{
     hpke_wrap_dek, parse_recovery_code, unwrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
     HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
-use openom_did::DidKey;
+use did::DidKey;
 use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
@@ -163,7 +163,7 @@ pub fn provision(
     let recovery_key =
         RecoveryKey::from(&build_recovery_escrow(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?);
     let author_public = secrets.root.identity.verifying_key().to_bytes();
-    let did_key = openom_did::DidKey::from_public_key(&author_public);
+    let did_key = did::DidKey::from_public_key(&author_public);
     let identity_pub = author_public.to_vec();
 
     let mut keyring = Keyring {
@@ -229,7 +229,7 @@ pub fn unlock(
     } = open_with_passphrase(keyring_bytes, passphrase, tree_id, member_id)?;
     // The did:key is over the PUBLIC identity key — capture it before `identity` may move into the
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
-    let did_key = openom_did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
+    let did_key = did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
     let epochs: Vec<(Vec<u8>, openom_crypto::Key32)> =
         epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
             .into_iter()
@@ -410,7 +410,7 @@ pub fn recover(
         KeyId::new(write_key_id.clone()),
     );
     let did_key =
-        openom_did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
+        did::DidKey::from_public_key(&secrets.root.identity.verifying_key().to_bytes());
     Ok(Recovered {
         keyring: keyring.encode_to_vec(),
         recovery_code: secrets.recovery_code,
@@ -761,7 +761,7 @@ pub fn unlock_as_member(
         .map(|(_, _, d)| dek_hash(d.expose()))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
-    let did_key = openom_did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
+    let did_key = did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
     Ok(Unlocked {
         sealer,
         revision: keyring.revision,
@@ -1569,7 +1569,7 @@ mod tests {
         .unwrap();
         // The did:key is the founder's PUBLIC identity key, encoded — not any secret.
         let founder = founder_key(&p.keyring).to_bytes();
-        assert_eq!(p.did_key.as_str(), openom_did::encode_ed25519(&founder));
+        assert_eq!(p.did_key.as_str(), did::encode_ed25519(&founder));
         assert!(p.did_key.as_str().starts_with("did:key:z6Mk"));
 
         // Stable across a re-unlock on another device (same passphrase → same identity → same did:key),
@@ -1612,7 +1612,7 @@ mod tests {
         );
         assert_eq!(
             r.did_key.as_str(),
-            openom_did::encode_ed25519(&founder_key(&r.keyring).to_bytes())
+            did::encode_ed25519(&founder_key(&r.keyring).to_bytes())
         );
     }
 

@@ -45,7 +45,7 @@ mod tests {
 
     fn did() -> String {
         let key = SigningKey::from_seed(&[3u8; 32]);
-        openom_did::encode_ed25519(&key.verifying_key().to_bytes())
+        did::encode_ed25519(&key.verifying_key().to_bytes())
     }
 
     /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.

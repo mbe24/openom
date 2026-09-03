@@ -13,10 +13,10 @@ members = [
     "packages/openom-keyring-chain",
     "packages/openom-keyring-api",
     "packages/openom-model",
-    "packages/openom-jcs",
-    "packages/openom-did",
+    "packages/jcs",
+    "packages/did",
     "packages/edsign",
-    "packages/openom-edtf",
+    "packages/edtf",
     "packages/openom-claim",
     "packages/openom-projection",
     "packages/openom-crdt",
@@ -60,10 +60,10 @@ openom-roles = { path = "packages/openom-roles" }
 openom-keyring-chain = { path = "packages/openom-keyring-chain" }
 openom-keyring-dag = { path = "packages/openom-keyring-dag" }
 openom-keyring-api = { path = "packages/openom-keyring-api" }
-openom-jcs = { path = "packages/openom-jcs" }
-openom-did = { path = "packages/openom-did" }
+jcs = { path = "packages/jcs" }
+did = { path = "packages/did" }
 edsign = { path = "packages/edsign" }
-openom-edtf = { path = "packages/openom-edtf" }
+edtf = { path = "packages/edtf" }
 openom-claim = { path = "packages/openom-claim" }
 openom-projection = { path = "packages/openom-projection" }
 openom-crdt = { path = "packages/openom-crdt" }

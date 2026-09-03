@@ -15,7 +15,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
   claims** (design.data-model-claims.v1.md §8.2 / principle 6). The projection reads the **live
   claim set** and does epistemic resolution only; it does **not** process deletion or supersession —
   that is the operations/transport layer (`journal`, `openom-sync`).
-- **Substrate vs. domain.** The foundations (`openom-jcs`, `openom-did`, `openom-edtf`,
+- **Substrate vs. domain.** The foundations (`jcs`, `did`, `edtf`,
   `openom-crypto`, `openom-protocol`) know nothing about family trees and must never gain a domain
   dependency. Dependencies point **downward** only.
 - **The engine (pre-release, zero users).** The app runs on the **claim model**: `openom-claim` /
@@ -27,9 +27,9 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 ## The crates, by layer
 
 **Foundations** (pure; no domain knowledge)
-- **openom-jcs** — RFC 8785 canonical JSON bytes; the substrate under every content hash.
-- **openom-did** — `did:key` encode/decode (Ed25519) + `member_id` ⇄ `did:key` resolution.
-- **openom-edtf** — EDTF (ISO 8601-2) date parser/normalizer → sortable `[min,max]` bounds.
+- **jcs** — RFC 8785 canonical JSON bytes; the substrate under every content hash.
+- **did** — `did:key` encode/decode (Ed25519) + `member_id` ⇄ `did:key` resolution.
+- **edtf** — EDTF (ISO 8601-2) date parser/normalizer → sortable `[min,max]` bounds.
 - **keyeo-crypto** — generic, openom-free symmetric + HPKE primitives: typed secrets, Argon2id KDF, HKDF root split, HPKE DEK wrap, AEAD cores, recovery-code codec. Shared by `openom-crypto` and `keyeo-dag`. openom-free.
 - **openom-crypto** — the proto-bound sealing layer: binds the protobuf `Header` as AAD, builds envelopes, wraps DEKs (client & server, identical algorithms), standing on `keyeo-crypto` (→ `keyeo-crypto`) for the primitives.
 - **openom-protocol** — shared protobuf data model (prost, generated via buf).
@@ -95,4 +95,4 @@ Rules:
   Windows→WSL2/Docker cargo caveat), add a **Layout** file-map, and keep Invariants only where the
   unit makes a real runtime guarantee (`src-tauri` yes; `e2e` / `test` → a short "Conventions" note).
 
-Exemplar: **`packages/openom-jcs/README.md`.**
+Exemplar: **`packages/jcs/README.md`.**

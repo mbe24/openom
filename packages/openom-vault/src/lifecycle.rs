@@ -27,7 +27,7 @@
 //! sealer, which it uses only for [`SealerSet`] (OPE-279 extraction).
 
 use openom_crypto::{Passphrase, RecoveryCode};
-use openom_did::DidKey;
+use did::DidKey;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
 use crate::vault;

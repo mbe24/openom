@@ -187,7 +187,7 @@ impl Claim {
     /// unchanged.
     pub fn sign_with(&mut self, key: &SigningKey) -> Result<(), ClaimError> {
         let sig = crate::sign(&self.to_value(), key)?;
-        self.signature = Some(openom_jcs::hex(&sig));
+        self.signature = Some(jcs::hex(&sig));
         Ok(())
     }
 
@@ -387,7 +387,7 @@ mod tests {
 
     fn author() -> (SigningKey, String) {
         let key = SigningKey::from_seed(&[5u8; 32]);
-        let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
+        let did = did::encode_ed25519(&key.verifying_key().to_bytes());
         (key, did)
     }
 

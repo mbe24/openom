@@ -1,4 +1,4 @@
-# openom-jcs
+# jcs
 
 > RFC 8785 canonical JSON bytes — the substrate every content hash rests on.
 
@@ -33,13 +33,13 @@ crypto beyond `sha256` helpers, and **depends on no other openom crate** — not
 | **JCS-7** | Field selection (`canonical_subset` / `canonical_excluding`) is order-independent and object-only (else `JcsError::NotObject`). | Fingerprint / id inputs are stable regardless of caller field order. | `tests::subset_and_excluding_pick_fields_order_independently`, `tests::non_object_subset_errors` |
 | **JCS-8** | Hex output (`hex`, `hex256`) is lowercase. | Every crate on the content-addressing path encodes hashes identically. | `tests::hex256_is_lowercase_64_chars` |
 
-Run: `node scripts/cargo.mjs test -p openom-jcs` (from the repo root; on Windows cargo runs under
-WSL2/Docker). Fuzz: `cargo +nightly fuzz run canonicalize` (from `packages/openom-jcs/fuzz`).
+Run: `node scripts/cargo.mjs test -p jcs` (from the repo root; on Windows cargo runs under
+WSL2/Docker). Fuzz: `cargo +nightly fuzz run canonicalize` (from `packages/jcs/fuzz`).
 
 ## Usage
 
 ```rust
-use openom_jcs::{to_canonical_value, canonical_subset, canonical_excluding, hex256};
+use jcs::{to_canonical_value, canonical_subset, canonical_excluding, hex256};
 use serde_json::json;
 
 // Canonical bytes: keys sorted (UTF-16), whitespace stripped, integers only.

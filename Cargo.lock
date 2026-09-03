@@ -1134,6 +1134,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "did"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1351,6 +1359,14 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "zeroize",
+]
+
+[[package]]
+name = "edtf"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2613,6 +2629,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcs"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3607,10 +3634,10 @@ dependencies = [
 name = "openom-claim"
 version = "0.1.0"
 dependencies = [
+ "did",
  "edsign",
+ "jcs",
  "jsonschema",
- "openom-did",
- "openom-jcs",
  "proptest",
  "serde",
  "serde_json",
@@ -3644,33 +3671,6 @@ dependencies = [
  "proptest",
  "sha2 0.10.9",
  "zeroize",
-]
-
-[[package]]
-name = "openom-did"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-edtf"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-jcs"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3733,9 +3733,9 @@ dependencies = [
 name = "openom-projection"
 version = "0.1.0"
 dependencies = [
+ "edtf",
+ "jcs",
  "openom-claim",
- "openom-edtf",
- "openom-jcs",
  "proptest",
  "serde",
  "serde_json",
@@ -3812,9 +3812,9 @@ name = "openom-vault"
 version = "0.1.0"
 dependencies = [
  "blobstore",
+ "did",
  "edsign",
  "openom-crypto",
- "openom-did",
  "openom-keyring-api",
  "openom-keyring-chain",
  "openom-keyring-dag",

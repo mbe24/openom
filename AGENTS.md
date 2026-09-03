@@ -53,7 +53,7 @@ runtime one.
 
 Every crate in `packages/` and every unit in `apps/` has a `README.md`, wired as the module doc
 (`#![doc = include_str!("../README.md")]` for crates). The format, the layer map, and the exemplar
-(`packages/openom-jcs/README.md`) live in `packages/README.md`.
+(`packages/jcs/README.md`) live in `packages/README.md`.
 
 When you add or materially change a unit:
 - **The README is part of the code — keep it current.** Any change to a unit's behavior or contract

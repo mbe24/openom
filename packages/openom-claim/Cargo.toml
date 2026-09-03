@@ -14,8 +14,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-openom-jcs.workspace = true
-openom-did.workspace = true
+jcs.workspace = true
+did.workspace = true
 # Ed25519 sign/verify goes through the seam (verify_strict-only), never raw dalek (§0 / OPE-205).
 edsign.workspace = true
 serde.workspace = true

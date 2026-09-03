@@ -1136,7 +1136,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             let date_edtf = event_date.get(eid).and_then(most_corroborated);
             let (date_min_year, date_max_year) = date_edtf
                 .as_deref()
-                .and_then(|s| openom_edtf::parse(s).ok())
+                .and_then(|s| edtf::parse(s).ok())
                 .map(|e| (e.min.map(|d| d.year), e.max.map(|d| d.year)))
                 .unwrap_or((None, None));
             let place_id = event_place.get(eid).and_then(most_corroborated);
@@ -1392,7 +1392,7 @@ fn fingerprint_str(c: &Claim) -> Option<String> {
     });
     openom_claim::fingerprint(&subset)
         .ok()
-        .map(|h| format!("sha256:{}", openom_jcs::hex(&h)))
+        .map(|h| format!("sha256:{}", jcs::hex(&h)))
 }
 
 /// Attestation-weighted confidence for an identity pair: distinct-author corroboration, plus
@@ -1499,7 +1499,7 @@ fn range_covers(valid_range: &str, year: i32) -> bool {
     if valid_range.is_empty() {
         return true;
     }
-    match openom_edtf::parse(valid_range) {
+    match edtf::parse(valid_range) {
         Ok(e) => e.min.is_none_or(|d| d.year <= year) && e.max.is_none_or(|d| d.year >= year),
         Err(_) => false,
     }

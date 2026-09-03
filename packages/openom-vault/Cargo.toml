@@ -28,7 +28,7 @@ openom-keyring-api.workspace = true
 # Role constants the vault compares against.
 openom-roles.workspace = true
 # did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).
-openom-did.workspace = true
+did.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
 # The sealing core's records serialize into the dag vault's anchor + op sealing payloads.

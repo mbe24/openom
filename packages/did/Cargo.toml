@@ -4,7 +4,7 @@
 # it must be pinned before content-hash ids are persisted cross-client (design.substrate-adaptation
 # §3 fix #11). Pure and dependency-free (base58btc implemented in-crate) so it is wasm-trivial.
 [package]
-name = "openom-did"
+name = "did"
 description = "did:key encode/decode for Ed25519 (multicodec 0xed01 + multibase base58btc) and a member_id ⇄ did:key resolution seam."
 version.workspace = true
 license.workspace = true

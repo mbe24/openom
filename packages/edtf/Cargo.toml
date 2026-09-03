@@ -5,7 +5,7 @@
 # precision + qualifier flags — the shape the projection's date views and timeline sort need.
 # Pure and dependency-free (no chrono) so it is wasm-trivial and deterministic across targets.
 [package]
-name = "openom-edtf"
+name = "edtf"
 description = "EDTF (ISO 8601-2) parser/normalizer for the genealogy subset: dates, uncertainty/approximation, unspecified digits, seasons, and open/unknown intervals → sortable [min,max] bounds."
 version.workspace = true
 license.workspace = true

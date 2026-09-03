@@ -18,7 +18,7 @@ use openom_crypto::{
     parse_recovery_code, unwrap_rrk_secret, CryptoError, HpkeKeypair, Passphrase, RecoveryCode,
     RrkSecret,
 };
-use openom_did::DidKey;
+use did::DidKey;
 use openom_keyring_dag::{client as dag_client, KeyringRole};
 use openom_protocol::v1::KdfParams;
 use serde::{Deserialize, Serialize};

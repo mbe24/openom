@@ -28,13 +28,13 @@ const SIGN_DOMAIN: &[u8] = b"openom-claim-v1";
 pub enum ClaimError {
     /// Canonicalization failed (non-object envelope, or a float in the content).
     #[error("canonicalization failed: {0}")]
-    Jcs(#[from] openom_jcs::JcsError),
+    Jcs(#[from] jcs::JcsError),
     /// The envelope has no string `createdBy`.
     #[error("envelope has no string createdBy")]
     MissingCreatedBy,
     /// `createdBy` is not a valid `did:key`.
     #[error("createdBy is not a valid did:key: {0}")]
-    BadCreatedBy(#[from] openom_did::DidError),
+    BadCreatedBy(#[from] did::DidError),
     /// A record has no string `type`.
     #[error("record has no string type")]
     MissingType,
@@ -60,7 +60,7 @@ pub enum ClaimError {
 
 /// The 32-byte content hash — the basis of both the `id` and the signed message.
 pub fn content_hash(envelope: &Value) -> Result<[u8; 32], ClaimError> {
-    let bytes = openom_jcs::canonical_excluding(envelope, &[F_ID, F_SIGNATURE])?;
+    let bytes = jcs::canonical_excluding(envelope, &[F_ID, F_SIGNATURE])?;
     Ok(Sha256::digest(bytes).into())
 }
 
@@ -68,13 +68,13 @@ pub fn content_hash(envelope: &Value) -> Result<[u8; 32], ClaimError> {
 pub fn claim_id(envelope: &Value) -> Result<String, ClaimError> {
     Ok(format!(
         "sha256:{}",
-        openom_jcs::hex(&content_hash(envelope)?)
+        jcs::hex(&content_hash(envelope)?)
     ))
 }
 
 /// The dedup/refutation **fingerprint**: `sha256(JCS(targetId, predicate, value))`.
 pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
-    let bytes = openom_jcs::canonical_subset(envelope, &[F_TARGET_ID, F_PREDICATE, F_VALUE])?;
+    let bytes = jcs::canonical_subset(envelope, &[F_TARGET_ID, F_PREDICATE, F_VALUE])?;
     Ok(Sha256::digest(bytes).into())
 }
 
@@ -86,7 +86,7 @@ pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
 pub fn content_ref(intrinsic: &Value) -> Result<String, ClaimError> {
     Ok(format!(
         "sha256:{}",
-        openom_jcs::hex256(&openom_jcs::to_canonical_value(intrinsic)?)
+        jcs::hex256(&jcs::to_canonical_value(intrinsic)?)
     ))
 }
 
@@ -130,7 +130,7 @@ pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> 
         .get(F_CREATED_BY)
         .and_then(Value::as_str)
         .ok_or(ClaimError::MissingCreatedBy)?;
-    let pk = openom_did::decode_ed25519(did)?;
+    let pk = did::decode_ed25519(did)?;
     let Ok(vk) = VerifyingKey::from_bytes(&pk) else {
         return Ok(SigCheck::Bad);
     };
@@ -196,7 +196,7 @@ mod proptests {
         #[test]
         fn sign_verify_and_tamper(seed in any::<[u8; 32]>(), value in arb_obj()) {
             let key = SigningKey::from_seed(&seed);
-            let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
+            let did = did::encode_ed25519(&key.verifying_key().to_bytes());
             let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, Hlc::new(1, 0));
             c.compute_id().unwrap();
             let v = c.to_value();
@@ -266,7 +266,7 @@ mod tests {
 
     fn signer(seed: u8) -> (SigningKey, String) {
         let key = SigningKey::from_seed(&[seed; 32]);
-        let did = openom_did::encode_ed25519(&key.verifying_key().to_bytes());
+        let did = did::encode_ed25519(&key.verifying_key().to_bytes());
         (key, did)
     }
 
@@ -356,7 +356,7 @@ mod tests {
         let before = claim_id(&c).unwrap();
         let sig = sign(&c, &key).unwrap();
         let mut signed = c.clone();
-        signed["signature"] = json!(openom_jcs::hex(&sig));
+        signed["signature"] = json!(jcs::hex(&sig));
         assert_eq!(claim_id(&signed).unwrap(), before);
         // …and the signature still verifies with the field present.
         assert_eq!(verify(&signed, &sig).unwrap(), SigCheck::Valid);
@@ -409,7 +409,7 @@ mod tests {
     fn a_did_encoding_a_non_curve_point_is_bad_not_error() {
         // A syntactically valid did:key (right multicodec + 32 bytes) whose bytes are not a valid
         // Ed25519 point must make verify() return Bad, never Err.
-        let did = openom_did::encode_ed25519(&[0xff; 32]);
+        let did = did::encode_ed25519(&[0xff; 32]);
         let mut c = claim(&did);
         c["createdBy"] = json!(did);
         assert_eq!(verify(&c, &[0u8; 64]).unwrap(), SigCheck::Bad);

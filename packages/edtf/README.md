@@ -1,4 +1,4 @@
-# openom-edtf
+# edtf
 
 > EDTF (ISO 8601-2) date parser/normalizer — every fuzzy genealogy date reduced to sortable
 > `[min, max]` day bounds.
@@ -42,13 +42,13 @@ calendar system beyond proleptic Gregorian; it does no I/O and **depends on no o
 | **EDTF-8** | Season codes `21`-`24` map to Spring/Summer/Autumn/Winter; Winter spans into the following year. | A season is a common genealogy approximation for a birth/death date. | `tests::seasons` |
 | **EDTF-9** | An open (`..`) or unknown (empty) interval end yields `None`, never a fabricated date. | Callers must be able to tell "unbounded" apart from a real day. | `tests::intervals` |
 
-Run: `node scripts/cargo.mjs test -p openom-edtf` (from the repo root; on Windows cargo runs under
-WSL2/Docker). Fuzz: `cargo +nightly fuzz run parse` (from `packages/openom-edtf/fuzz`).
+Run: `node scripts/cargo.mjs test -p edtf` (from the repo root; on Windows cargo runs under
+WSL2/Docker). Fuzz: `cargo +nightly fuzz run parse` (from `packages/edtf/fuzz`).
 
 ## Usage
 
 ```rust
-use openom_edtf::{parse, EdtfKind, Precision};
+use edtf::{parse, EdtfKind, Precision};
 
 // A plain year normalizes to the whole calendar year.
 let year = parse("1984").unwrap();

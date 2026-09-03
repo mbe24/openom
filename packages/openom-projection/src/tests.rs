@@ -563,7 +563,7 @@ fn attestation_by_fingerprint_counts() {
     let sa = same_as("s1", "pA", "pB", "did:key:z6MkA");
     let fp = format!(
         "sha256:{}",
-        openom_jcs::hex(&openom_claim::fingerprint(&sa.to_value()).unwrap())
+        jcs::hex(&openom_claim::fingerprint(&sa.to_value()).unwrap())
     );
     let recs = vec![
         person("pA"),

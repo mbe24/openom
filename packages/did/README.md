@@ -1,4 +1,4 @@
-# openom-did
+# did
 
 > `did:key` encode/decode for Ed25519, plus a `member_id ⇄ did:key` resolution seam.
 
@@ -36,13 +36,13 @@ extra surface.
 | **DID-6** | `MemberDirectory` resolves both directions (`member_id → did:key`, `did:key → member_id`) and returns `None` for unknown ids. | The resolution seam must be a true bijection over the keyring's members, not encode-only. | `tests::member_directory_resolves_both_ways` |
 | **DID-7** | `DidKey` is a validated newtype: `parse`/`TryFrom` only construct one from a well-formed Ed25519 `did:key` (rejecting other methods and junk), `from_public_key`/`to_public_key` round-trip, and `From<DidKey> for String` is the transparent inverse. | The author id is a distinct type from a bare `String` — it can't be swapped with a recovery code or member id at a boundary, and every `DidKey` in hand is guaranteed decodable. | `tests::didkey_is_a_validated_newtype` |
 
-Run: `node scripts/cargo.mjs test -p openom-did` (from the repo root; on Windows cargo runs under
-WSL2/Docker). Fuzz: `cargo +nightly fuzz run decode` (from `packages/openom-did/fuzz`).
+Run: `node scripts/cargo.mjs test -p did` (from the repo root; on Windows cargo runs under
+WSL2/Docker). Fuzz: `cargo +nightly fuzz run decode` (from `packages/did/fuzz`).
 
 ## Usage
 
 ```rust
-use openom_did::{decode_ed25519, encode_ed25519, MemberDirectory, MemberResolver};
+use did::{decode_ed25519, encode_ed25519, MemberDirectory, MemberResolver};
 
 let mut pk = [0u8; 32];
 for (i, b) in pk.iter_mut().enumerate() {

@@ -1,11 +1,11 @@
-# cargo-fuzz targets for openom-edtf's parse boundary. This is a DETACHED crate (its own empty
+# cargo-fuzz targets for edtf's parse boundary. This is a DETACHED crate (its own empty
 # [workspace]) so it never touches the stable workspace build — the main crates build on stable in
 # the container; these run under nightly libFuzzer:
-#   cd packages/openom-edtf && cargo +nightly fuzz run parse
+#   cd packages/edtf && cargo +nightly fuzz run parse
 # The stable proptests (parse_never_panics, min_le_max, deterministic) cover the same surface for CI;
 # this is for deep, corpus-driven fuzzing.
 [package]
-name = "openom-edtf-fuzz"
+name = "edtf-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -15,7 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-openom-edtf = { path = ".." }
+edtf = { path = ".." }
 
 [[bin]]
 name = "parse"

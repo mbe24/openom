@@ -27,7 +27,7 @@ it is not wired into any app or crate today — and the repo is pre-release with
 is no migration cost to retiring it once the claim model lands. Do not build new work against this
 crate; treat it as read-only history until it is deleted. It also does no I/O and no signing: the
 `content_hash` here is a per-entity content-hash for attestation binding, not the claim model's
-id/fingerprint scheme (that lives in `openom-jcs` + `openom-claim`).
+id/fingerprint scheme (that lives in `jcs` + `openom-claim`).
 
 ## Invariants
 

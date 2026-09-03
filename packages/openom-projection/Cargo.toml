@@ -22,9 +22,9 @@ serde_json.workspace = true
 # For the attestation-weighted identity confidence: an attestation targets a fact's fingerprint
 # (sha256(JCS(targetId,predicate,value))), so the projection recomputes it to match votes to edges.
 openom-claim.workspace = true
-openom-jcs.workspace = true
+jcs.workspace = true
 # Event dates are EDTF strings, normalized to sortable year bounds for the timeline view.
-openom-edtf.workspace = true
+edtf.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

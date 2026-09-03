@@ -24,7 +24,7 @@ pub fn moderators(view: &MembershipView) -> BTreeSet<String> {
         .iter()
         .filter(|m| moderator_rank.contains(&m.role))
         .filter_map(|m| <[u8; 32]>::try_from(m.author_public_key.as_slice()).ok())
-        .map(|pk| openom_did::encode_ed25519(&pk))
+        .map(|pk| did::encode_ed25519(&pk))
         .collect()
 }
 
@@ -61,10 +61,10 @@ mod tests {
         let mods = moderators(&v);
         assert_eq!(mods.len(), 3, "Owner + Co-owner + Maintainer");
         for pk in [owner, coowner, admin] {
-            assert!(mods.contains(&openom_did::encode_ed25519(&pk)));
+            assert!(mods.contains(&did::encode_ed25519(&pk)));
         }
         for pk in [editor, viewer] {
-            assert!(!mods.contains(&openom_did::encode_ed25519(&pk)));
+            assert!(!mods.contains(&did::encode_ed25519(&pk)));
         }
     }
 

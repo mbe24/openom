@@ -49,7 +49,7 @@ hashing/verifying an arbitrary envelope must never panic, OOM, or hang.
 ```rust
 use edsign::SigningKey;
 use openom_claim::{claim_id, fingerprint, sign, verify, SigCheck};
-use openom_did::encode_ed25519;
+use did::encode_ed25519;
 use serde_json::json;
 
 let key = SigningKey::from_seed(&[7u8; 32]);
@@ -85,7 +85,7 @@ Entry points: `claim_id` / `content_hash` (the id primitive), `fingerprint` (ded
 
 ## Position
 
-Sits directly on `openom-jcs` (canonical bytes, the hash input) and `openom-did` (`did:key` ⇄ Ed25519 key
+Sits directly on `jcs` (canonical bytes, the hash input) and `did` (`did:key` ⇄ Ed25519 key
 resolution) — nothing else sits beneath it. `openom-projection`, the claim-model read model, sits on top,
 consuming committed, signed claims by `id` and `fingerprint`. Full dependency graph: see
 `packages/README.md`.

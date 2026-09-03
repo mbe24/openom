@@ -3,7 +3,7 @@
 # wasm-dual: native and wasm MUST emit identical bytes (the read-model projection's dedup and
 # refutation memory fork silently on any divergence — see design.substrate-adaptation §7).
 [package]
-name = "openom-jcs"
+name = "jcs"
 description = "RFC 8785 JSON Canonicalization Scheme: deterministic canonical bytes (UTF-16 key order, minimal escaping, integers-only, hard float rejection) plus field-selective canonicalization for content-hash ids and fingerprints."
 version.workspace = true
 license.workspace = true

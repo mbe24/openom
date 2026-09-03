@@ -91,7 +91,7 @@ thresholds; `Projection` exposes `people`, `parent_child`, `partnerships`, `unio
 ## Position
 
 Sits in the family-tree data-model layer, on top of `openom-claim` (whose records it reads and whose
-`fingerprint` it recomputes via `openom-jcs` to match attestations) and `openom-edtf` (event/place date
+`fingerprint` it recomputes via `jcs` to match attestations) and `edtf` (event/place date
 bounds). It depends on **no** operations, CRDT, or transport crate — it is a pure read model. Not yet
 wired into the app (the in-wasm claim engine that will host it is a separate task). Full dependency
 graph: see `packages/README.md`.
