@@ -1368,7 +1368,10 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 #[wasm_bindgen(js_name = moderatorsFromKeyring)]
 pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
-    Ok(openom_keyring::moderators(&kr).into_iter().collect())
+    // Chain engine: fold the proto Keyring to the engine-neutral MembershipView, then read moderators off
+    // it — the same path a dag-resolved view would take (OPE-308).
+    let view = openom_keyring::membership_view(&kr);
+    Ok(crate::membership::moderators(&view).into_iter().collect())
 }
 
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —

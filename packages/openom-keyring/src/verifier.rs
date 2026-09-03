@@ -35,6 +35,15 @@ fn unwrap_keyring(bytes: &[u8]) -> Result<Keyring, VerifyError> {
     Keyring::decode(env.body.as_slice()).map_err(|_| VerifyError::Malformed)
 }
 
+/// The engine-neutral [`MembershipView`] of a `Keyring` — the chain engine's public fold to the shared
+/// seam vocabulary. Consumers that want the resolved membership (e.g. `openom-vault`'s moderators feed)
+/// go through this rather than reading `Keyring.members` directly, so they stay engine-agnostic. The
+/// caller MUST pass its VERIFIED, watermarked head; `reset_boundary` is `false` (this is the plain
+/// resolved view, not an admission outcome).
+pub fn membership_view(keyring: &Keyring) -> MembershipView {
+    view_of(keyring, false)
+}
+
 fn view_of(k: &Keyring, reset_boundary: bool) -> MembershipView {
     let members = k
         .members

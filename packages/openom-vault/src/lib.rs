@@ -24,5 +24,11 @@ pub use app_vault::AppVault;
 pub mod attribution;
 pub use attribution::{epoch_is_attributed, verify_entry, EntryError};
 
+// The moderator (Maintainer-or-above did:key) feed for the claim engine's authority — re-typed over the
+// engine-neutral MembershipView so it serves either keyring engine (OPE-308). Moved out of the chain
+// keyring engine: it consumes a resolved membership, it isn't the membership engine.
+pub mod membership;
+pub use membership::moderators;
+
 #[cfg(feature = "wasm")]
 pub mod wasm;

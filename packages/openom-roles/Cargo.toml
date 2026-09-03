@@ -9,3 +9,8 @@ rust-version.workspace = true
 [dependencies]
 # The role/kind vocabulary (MemberRole, Kind) lives in the wire types.
 openom-protocol.workspace = true
+
+[dev-dependencies]
+# The keyless keyring seam's generic role convention — pinned equal to ours by a drift-guard test so the
+# whole keyeo family can hardcode 1..=5 (OPE-279/308).
+openom-keyring-api.workspace = true

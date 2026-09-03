@@ -89,4 +89,15 @@ mod tests {
         assert!(ROLE_MAINTAINER < ROLE_EDITOR);
         assert!(ROLE_EDITOR < ROLE_VIEWER);
     }
+
+    /// openom-keyring-api hardcodes its OWN generic role convention (Owner=1, CoOwner=2) so it stays
+    /// openom-free / standalone-publishable (OPE-279). openom's proto-derived openom-roles MUST agree, or
+    /// the seam's `is_owner`/`is_signer` — and every engine that binds its roles to the seam's constants
+    /// instead of these — would misjudge authority. This pin is why the whole keyeo family can hardcode
+    /// 1..=5; it guards the duplication against drift.
+    #[test]
+    fn keyeo_api_role_convention_matches_openom_roles() {
+        assert_eq!(ROLE_OWNER, openom_keyring_api::ROLE_OWNER);
+        assert_eq!(ROLE_CO_OWNER, openom_keyring_api::ROLE_CO_OWNER);
+    }
 }

@@ -122,8 +122,8 @@ impl std::error::Error for EnvelopeError {}
 /// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
 /// them here, rather than depending on `openom-roles`, keeps this seam openom-free (openom-roles pulls in
 /// `openom-protocol`) so the crate — and every engine that binds its roles to these instead of to
-/// openom-roles — is standalone-publishable (OPE-279). openom's `openom-keyring::roles` drift-guard test
-/// pins these five to the proto `MemberRole` values.
+/// openom-roles — is standalone-publishable (OPE-279). openom-roles' `keyeo_api_role_convention_matches_openom_roles`
+/// drift-guard test pins these to the proto `MemberRole` values.
 pub const ROLE_OWNER: i16 = 1;
 pub const ROLE_CO_OWNER: i16 = 2;
 pub const ROLE_MAINTAINER: i16 = 3;

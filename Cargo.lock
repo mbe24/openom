@@ -3741,6 +3741,7 @@ dependencies = [
 name = "openom-roles"
 version = "0.1.0"
 dependencies = [
+ "openom-keyring-api",
  "openom-protocol",
 ]
 
