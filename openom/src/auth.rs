@@ -45,6 +45,15 @@ impl FromRequestParts<AppState> for Identity {
             let id = bearer
                 .and_then(|t| Uuid::parse_str(t.trim()).ok())
                 .unwrap_or(state.config.local_member_id);
+            // OPE-335: a fresh dev UUID has no `accounts` row, so its first `PUT /trees`
+            // would 403 (FK + per-owner quota gate). Provision it idempotently here — the
+            // one place every dev-authed path passes through — so every dev account works.
+            crate::provision_dev_account(&state.db, id).await.map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "dev account provisioning failed",
+                )
+            })?;
             return Ok(Identity { member_id: id });
         }
 

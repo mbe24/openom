@@ -149,7 +149,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     tracing::info!("migrations applied");
 
     if config.auth_is_dev() {
-        seed_local_account(&db, config.local_member_id).await?;
+        provision_dev_account(&db, config.local_member_id).await?;
     }
 
     let jwt_key = config
@@ -174,10 +174,16 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     })
 }
 
-/// Seed the fake-auth member locally (no Supabase to create accounts). Generous
-/// entitlements: the dev account is a convenience, not a free-tier user, so it grants
-/// media + streaming + big caps (§17) and shouldn't trip entitlement gates.
-async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Error> {
+/// Provision a fake-auth (`AUTH=dev`) member's `accounts` row (no Supabase to create
+/// accounts). Idempotent — called at startup for the default member AND lazily at
+/// `Identity` resolution for every dev UUID (OPE-335: without a row, the FK + quota gate
+/// make the account's first `PUT /trees` a 403). Generous entitlements: a dev account is
+/// a convenience, not a free-tier user, so it grants media + streaming + big caps (§17)
+/// and shouldn't trip entitlement gates.
+/// NOTE: production (`AUTH=jwt`) has the same gap — nothing provisions an `accounts` row
+/// for a fresh Supabase/Clerk `sub`. That is a separate, deliberate decision (free-tier
+/// defaults + a self-serve provisioning policy), deferred; the columns all have defaults.
+pub(crate) async fn provision_dev_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO accounts
              (id, max_trees, allow_media, allow_streaming_media,
@@ -204,7 +210,7 @@ async fn seed_local_account(db: &PgPool, member_id: Uuid) -> Result<(), sqlx::Er
     .bind(member_id)
     .execute(db)
     .await?;
-    tracing::info!(%member_id, "seeded local account");
+    tracing::debug!(%member_id, "provisioned dev account");
     Ok(())
 }
 
