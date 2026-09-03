@@ -99,5 +99,5 @@ public-key wrap). Recovery: `generate_recovery_code` / `parse_recovery_code`.
 A thin proto-binding crate: no domain knowledge, depends on `openom-protocol` (for the `Header` type
 and its canonical AAD encoder) and `keyeo-crypto` (for the generic primitives it binds and
 re-exports). Everything that seals or shares tree data sits on top of it — `openom-sealer`,
-`openom-keyring`, `openom-vault-host`, and the `openom` server. Full dependency graph: see
+`openom-sync`, `openom-vault`, `openom-vault-host`, and the `openom` server. Full dependency graph: see
 `packages/README.md`.

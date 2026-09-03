@@ -27,7 +27,7 @@ It is **not** the source of truth for the log chain: the caller (JS `SealedStore
 command) owns `replica_counter`, `prev_ciphertext_hash`, `covers_through_seq` and passes them in
 per call — retry means re-uploading the already-sealed bytes verbatim, never re-sealing, because a
 fresh seal mints a fresh nonce under the same counter slot. It is not the keyring wire format or
-its chain-verification primitives (`openom-keyring` owns `sign_keyring` / `verify_keyring_any` /
+its chain-verification primitives (`openom-keyring-chain` owns `sign_keyring` / `verify_keyring_any` /
 `verify_walk`); this crate drives that mechanism through passphrase flows. And on the web tier the
 unlocked DEK lives in wasm linear memory for the session's lifetime — a documented
 weaker-isolation trade-off against native, where `openom-vault-host` keeps the session in Rust so
@@ -88,7 +88,7 @@ Entry points: `Sealer` / `SealerSet` (seal/open one scope, or every reachable ke
 
 Sits directly above the two foundation crates it wraps: `openom-crypto` (AEAD/KDF/HPKE primitives) and
 `openom-protocol` (the envelope + id types). It is **engine-free** — it carries no keyring dependency
-(`openom-keyring` is a `test-util` dev-dependency only, to mint author identities in tests), so
+(`openom-keyring-chain` is a `test-util` dev-dependency only, to mint author identities in tests), so
 envelope-only consumers like `openom-sync` don't transitively rebuild the keyring engines. The keyring
 vault + wasm veneer that consume it live in `openom-vault`. Full dependency graph: see
 `packages/README.md`.

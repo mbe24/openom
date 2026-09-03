@@ -20,7 +20,7 @@ fold them into a `MembershipView` without holding a key. Concurrency, merge, and
 
 It is **not** the passphrase lifecycle: provision / unlock / recover / author (which touch the DEK and the
 sealer) live in `openom-vault`, above this. It is **not** the linear chain engine — that is the separate
-`openom-keyring`, and the two are interchangeable behind `openom-keyring-api`. Despite wiring openom's model, its
+`openom-keyring-chain`, and the two are interchangeable behind `openom-keyring-api`. Despite wiring openom's model, its
 non-dev dependency tree is **dependency-light** (it binds roles to `openom-keyring-api`'s convention and derives its RVK
 through `edsign`, not `openom-crypto`); only its test harnesses pull the
 openom crates to cross-check against the chain.

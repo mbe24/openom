@@ -52,9 +52,11 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-sealer** — the client DEK session: a stateful sealer holding the unlocked DEK, sealing/opening envelopes. Engine-free (no keyring dep).
 
 **Access control / identity / custody** — the keyring stack, two swappable engines behind one seam
-- **keyeo-dag** — Layer 0: the generic, domain-free group-membership/access-control DAG engine (sequencer-free; resolves signed ops → members + shared keys); its crypto primitives come from `keyeo-crypto` (→ `keyeo-crypto`). openom-free.
+- **keyeo-core** — Layer 0: the engine-family **seam** — the generic `Role` / `SignatureScheme` (Ed25519 via edsign) / `CanonicalBytes` trait types + the M-of-N `Requirement` every keyeo engine binds to. openom-free.
+- **keyeo-dag** — Layer 0: the generic, domain-free group-membership/access-control DAG engine (sequencer-free; resolves signed ops → members + shared keys); seam types from `keyeo-core`, crypto primitives from `keyeo-crypto`. openom-free.
+- **keyeo-linear** — Layer 0: the generic linear signed-membership-chain engine over `<Id, Role, Sig>` (quorum-signed revisions, recovery authority, anti-rollback floor); seam types from `keyeo-core`. The chain analogue of `keyeo-dag`. openom-free.
 - **openom-keyring-api** — Layer 1: the engine-agnostic seam — `MembershipView`, the keyless `KeyringVerifier`, `EngineKind`, the `ROLE_*` convention. Dependency-light but openom-domain-specific.
-- **openom-keyring** — Layer 2, the **chain** engine: the linear signed keyring (protobuf wire), chain verification, entry authorship, signing. openom-coupled.
+- **openom-keyring-chain** — Layer 2, the **chain** engine: openom's roles/signing/recovery + its own keyring wire wired onto `keyeo-linear`. Dependency-light but openom-domain-specific (openom-dep-free like `openom-keyring-dag`).
 - **openom-keyring-dag** — Layer 2, the **dag** engine: openom's roles/signing/recovery wired onto `keyeo-dag`. Dependency-light but openom-domain-specific.
 - **openom-vault** — the lifecycle layer over both engines: provision/unlock/recover/change-passphrase + membership authoring behind `KeyringLifecycle`, with `AppVault` dispatching on the tree's `EngineKind`; owns the engine-neutral sealing core + the browser wasm veneer. openom-coupled.
 - **openom-roles** — the authorization role model + capability→role policy (Viewer / Editor / Maintainer / Owner).

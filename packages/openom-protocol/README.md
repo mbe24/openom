@@ -7,9 +7,9 @@
 
 ## What it is — and is not
 
-The shared client/server contract. `v1` (`Envelope`, `Header`, `Keyring`, `KeyEpoch`, `KeyWrap`,
-`KdfParams`, `RecoveryKey`, and the `Kind` / `Format` / `Aead` / `Compression` / `WrapMethod` /
-`MemberRole` enums) is generated from `proto/openom/v1/openom.proto` by `buf generate`
+The shared client/server contract. `v1` (`Envelope`, `Header`, `KeyringUpdate`, `KdfParams`, and the
+`Kind` / `Format` / `Aead` / `Compression` / `WrapMethod` / `MemberRole` enums) is generated from
+`proto/openom/v1/openom.proto` by `buf generate`
 (the `neoeinstein-prost` plugin) and checked into `src/generated/` — there is **no build script and
 no `protoc`**, so nothing executes during `cargo build`, which is what lets the crate build on a host
 whose policy blocks build-script execution. Regenerate with `cd proto && buf generate` after editing
@@ -23,8 +23,11 @@ build and a WASM/JS build must reproduce identically, since it is what the AEAD 
 signatures actually authenticate.
 
 It is **not** where anything gets decided or enforced: no CRDT causality, no client wall-clock, no
-crypto operations (`openom-crypto`), no keyring policy or chain verification (`openom-keyring`), no
-role authorization (`openom-roles`). This crate only defines the wire shapes and the canonical byte
+crypto operations (`openom-crypto`), no keyring policy or chain verification (`openom-keyring-chain`), no
+role authorization (`openom-roles`). Nor does it define the chain engine's keyring-document types
+(`Keyring`, `KeyEpoch`, `KeyWrap`, `RecoveryKey`) any longer — those moved into `openom-keyring-chain`,
+which owns its own keyring wire; what stays here is `KeyringUpdate` (the outer transport envelope) plus
+the `keyring_signing_bytes` AAD encoder. This crate only defines the wire shapes and the canonical byte
 strings derived from them — every consumer above it decides what those bytes mean.
 
 ## Invariants
@@ -53,5 +56,5 @@ cd packages/openom-protocol/proto && buf generate
 
 A foundation crate (no domain knowledge, depends on nothing above it): everything that seals, syncs,
 or administers a tree sits on top of its wire types and canonical byte strings — directly
-`openom-crypto`, `openom-keyring`, `openom-roles`, `openom-sealer`, `openom-sync`, `openom-vault-host`,
+`openom-crypto`, `openom-roles`, `openom-sealer`, `openom-sync`, `openom-vault`, `openom-vault-host`,
 and the server crate. Full dependency graph: see `packages/README.md`.

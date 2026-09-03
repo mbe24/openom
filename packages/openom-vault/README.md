@@ -12,10 +12,14 @@ The stateful, secret-holding top of the keyring stack. Behind the [`KeyringLifec
 passphrase (or recovery code) + the keyring bytes into an unlocked DEK session and drives every membership
 operation: provision a tree, unlock on a new device, recover, change passphrase, add/remove a member,
 promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
-`openom-keyring` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
+`openom-keyring-chain` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
 serves both. Underneath sits the engine-neutral **sealing core** (`vault_core`: DEK / epoch / RRK / KDF /
 recovery-code / SealerSet machinery), extracted so both engines share one implementation of the
-security-critical crypto path. The browser `wasm` cdylib veneer lives here too.
+security-critical crypto path. The browser `wasm` cdylib veneer lives here too. Two engine-neutral
+membership helpers also live here, both typed against `openom-keyring-api`'s `MembershipView` (so they
+read the folded view, never an engine's raw wire): `attribution::verify_entry` (authorize a landed entry
+by its kind + author against the governing view — moved off the chain crate in OPE-333) and
+`membership::moderators` (the Owner/Co-owner set).
 
 It is **not** `openom-sealer`: that is now the lean, engine-free DEK *session* (`Sealer` / `SealerSet` /
 `seal` / `open`) this crate builds on. It is **not** the keyless server seam (`openom-keyring-api`) — the lifecycle
@@ -53,10 +57,11 @@ let session     = vault.unlock(&ctx, &keyring_bytes, &passphrase)?; // another d
 ```
 
 Entry points: `AppVault` (engine dispatch), the `KeyringLifecycle` trait, `ChainVault` / `DagVault`,
-`VaultContext`, `VaultError`, and the `wasm` module (browser veneer, `wasm` feature).
+`VaultContext`, `VaultError`, the `attribution` / `membership` modules (landed-entry authorization +
+the moderator set over a `MembershipView`), and the `wasm` module (browser veneer, `wasm` feature).
 
 ## Position
 
-The top of the keyring stack: above the two engines (`openom-keyring`, `openom-keyring-dag`) and above
+The top of the keyring stack: above the two engines (`openom-keyring-chain`, `openom-keyring-dag`) and above
 `openom-sealer` (the DEK session it uses). Its native counterpart is `openom-vault-host` (Tauri custody).
 Full dependency graph: see `packages/README.md`.

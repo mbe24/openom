@@ -8,7 +8,7 @@
 
 ## What it is — and is not
 
-openom runs **two** permanent keyring engines — the linear signed **chain** (`openom-keyring`) and the
+openom runs **two** permanent keyring engines — the linear signed **chain** (`openom-keyring-chain`) and the
 **DAG** (`openom-keyring-dag`) — and this crate is the small shared vocabulary both fold into so the rest of the
 system binds to neither. It holds three engine-agnostic pieces: [`MembershipView`] (the resolved members
 + roles, the value the app's role display and the server's ACL derivation both consume), the keyless
@@ -33,8 +33,8 @@ on `openom-roles` — but openom-domain-specific: the `EngineKind` roster and th
 | **KAPI-4** | `MembershipView` round-trips through serde unchanged. | The app and server exchange the resolved view as data across process boundaries. | `tests::membership_view_round_trips_through_serde` |
 
 The `ROLE_*` constants (`ROLE_OWNER=1 … ROLE_VIEWER=5`) are pinned to openom's proto `MemberRole` values
-by `openom-keyring`'s drift-guard test — that binding is asserted there, not here, so this crate keeps no
-openom dependency. Run: `node scripts/cargo.mjs test -p openom-keyring-api` (from the repo root).
+by `openom-roles`'s drift-guard test (`tests::keyeo_api_role_convention_matches_openom_roles`) — that
+binding is asserted there, not here, so this crate keeps no openom dependency. Run: `node scripts/cargo.mjs test -p openom-keyring-api` (from the repo root).
 
 ## Usage
 
@@ -61,5 +61,5 @@ constants.
 ## Position
 
 Layer 1 — the seam. It sits above the two engines and below their consumers: `openom-keyring-dag` and
-`openom-keyring` fold into its `MembershipView`, and the server + `openom-vault` bind to it. It depends
-only on `serde` + `prost`; the generic Layer-0 engine is `keyeo-dag`. Full dependency graph: see `packages/README.md`.
+`openom-keyring-chain` fold into its `MembershipView`, and the server + `openom-vault` bind to it. It depends
+only on `serde` + `prost`; the generic Layer-0 engines are `keyeo-dag` (DAG) and `keyeo-linear` (chain). Full dependency graph: see `packages/README.md`.

@@ -62,5 +62,6 @@ a caller's domain label).
 ## Position
 
 A foundation: it depends only on `ed25519-dalek` + `zeroize` + `hkdf`/`sha2`, and no other openom crate,
-so nothing sits beneath it. Everything that authenticates — `keyeo-dag`, `openom-keyring-dag`, `openom-keyring`,
-`openom-crypto` — signs and verifies through it. Full dependency graph: see `packages/README.md`.
+so nothing sits beneath it. Everything that authenticates — `keyeo-core` (the keyeo verify seam),
+`keyeo-crypto`, `keyeo-linear`, `openom-keyring-chain`, `openom-keyring-dag`, `openom-crypto` — signs
+and verifies through it. Full dependency graph: see `packages/README.md`.
