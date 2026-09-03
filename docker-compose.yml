@@ -16,10 +16,26 @@ services:
       dockerfile: openom/Dockerfile
     image: openom-server-dev:latest
     # --poll: file-change events don't cross the Windows→container bind mount
-    # reliably, so poll instead of relying on inotify.
-    command: ["cargo", "watch", "--poll", "-x", "run -p openom"]
+    # reliably, so poll instead of relying on inotify. -w scopes the poll WALK to just
+    # the Rust source (openom/ + packages/ + the workspace manifests) instead of the
+    # whole bind-mounted repo — the default walk re-stats the host's native `target`,
+    # node_modules, .git and apps/ every cycle, which on a Windows mount is pathologically
+    # slow. (--ignore is only a post-walk event filter and does NOT prune the walk; the
+    # -w allow-list does.) NOTE: on Windows the poll can still be slow to reach the first
+    # build; if it stalls, force the compile once with
+    #   docker compose exec server sh -c 'cd /work && cargo build -p openom'
+    # after which cargo-watch's `cargo run` starts serving in seconds (deps are cached).
+    command: ["cargo", "watch", "--poll",
+              "-w", "openom", "-w", "packages", "-w", "Cargo.toml", "-w", "Cargo.lock",
+              "-x", "run -p openom"]
     working_dir: /work
     environment:
+      # RUN_MODE=local presets STORAGE=local (MinIO) + AUTH=dev (fake auth: any bearer
+      # that parses as a UUID *is* that member). To instead run against a local Supabase
+      # for real JWT verification, override the auth axis only — leave storage on MinIO:
+      #   AUTH: jwt
+      #   AUTH_JWT_SECRET: <your local supabase JWT secret>   # alias SUPABASE_JWT_SECRET
+      # (aud defaults to "authenticated"; set AUTH_JWT_AUD to override / empty to opt out.)
       RUN_MODE: local
       OPENOM_HTTP_ADDR: 0.0.0.0:${OPENOM_HTTP_PORT:-6060}
       DATABASE_URL: postgres://openom:openom@postgres:5432/openom
