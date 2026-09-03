@@ -55,5 +55,5 @@ and `compact` (history GC).
 ## Position
 
 Layer 0 — the generic base of the keyring stack, depended on only by `keyeo-dag` (the openom binding). It
-depends on `edsign` + crypto primitives (HPKE / AEAD / KDF) but no openom crate, so nothing openom sits
-beneath it. Full dependency graph: see `packages/README.md`.
+depends on `edsign` + `keyeo-crypto` (its HPKE / AEAD / KDF primitives — `keyeo` no longer carries its own
+`kdf`/`hpke_wrap`) but no openom crate, so nothing openom sits beneath it. Full dependency graph: see `packages/README.md`.
