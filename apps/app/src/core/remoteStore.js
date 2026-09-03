@@ -160,6 +160,29 @@ export class RemoteStore {
     };
   }
 
+  /**
+   * Publish a produced keyring revision so peers can pull + verify it. `updateBytes` is the RAW
+   * `KeyringUpdate` protobuf (from the vault's `wrapChainKeyringUpdate`) — sent as opaque binary; the
+   * server `KeyringUpdate::decode`s it, dispatches to the engine verifier, and admits. The server keys
+   * storage on the VERIFIED position, so this needs no CAS token: a stale/forked candidate is rejected as
+   * a 409 (ConflictError → the caller pulls the newer head, re-produces, retries). Returns the server's
+   * accepted `{ revision }`.
+   */
+  async putKeyring(id, updateBytes) {
+    const res = await this.#fetch(`${this.#tree(id)}/keyring`, {
+      method: 'PUT',
+      headers: this.#headers({ 'content-type': 'application/octet-stream' }),
+      body: updateBytes,
+    });
+    if (res.status === 409) throw new ConflictError(null, null);
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`putKeyring ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+    }
+    const b = await res.json().catch(() => ({}));
+    return { revision: b.revision ?? null };
+  }
+
   // ---- advisory membership summary surface (GET/PUT /trees/{id}/access) ----
 
   /**

@@ -72,9 +72,15 @@ function carryChainPin(next, prev) {
  * @param {object} deps.keyringStore   { saveHead, loadHead, load, save(revision), at(revision), head }
  * @param {object} deps.watermarks     a Watermarks instance
  * @param {'chain'|'dag'} [deps.engine]  the deployment's keyring engine (a backend preset; default 'chain')
+ * @param {(treeId: Uint8Array, keyringBytes: Uint8Array) => Promise<void>} [deps.publishKeyring]  OUTBOUND
+ *        publish seam (OPE-301): called after a locally-produced chain revision is durably persisted, to
+ *        wrap it as a KeyringUpdate + PUT it so peers can pull. Injected (like syncKeyring's fetchSuccessors
+ *        and pushMembershipSummary's remote) so the vault stays decoupled from the server + id mapping.
+ *        Absent ⇒ local-only (no publish). Its failures are SWALLOWED here — the local commit is already
+ *        durable and the next sync reconciles, mirroring the offline-safe sync-retry stance.
  * @param {() => Uint8Array} [deps.makeReplicaId]  fresh replica id per unlock (default: CSPRNG)
  */
-export function createVault({ worker, keyringStore, watermarks, engine = 'chain', makeReplicaId = freshReplicaId }) {
+export function createVault({ worker, keyringStore, watermarks, engine = 'chain', publishKeyring, makeReplicaId = freshReplicaId }) {
   if (!worker || !keyringStore || !watermarks) {
     throw new Error('createVault needs { worker, keyringStore, watermarks }');
   }
@@ -87,11 +93,22 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
   const sessionFor = (sealerId) => new SealerSession(workerCore(worker, sealerId));
 
   // Persist a flow's result: the engine-neutral head record (the unlock anchor), the chain-only per-revision
-  // retention (for §B3 entry attribution), and the opaque watermark cursor.
-  const persist = async (treeKey, anchor, watermark) => {
+  // retention (for §B3 entry attribution), and the opaque watermark cursor. Then, for a locally-PRODUCED
+  // chain revision (provision/recover/changePassphrase — NOT the inbound accept/reset paths, which take
+  // their revisions FROM the server), publish it outbound so peers can pull (OPE-301). Publishing is
+  // best-effort AFTER the durable local commit: a failure (offline, no remote, or a losing CAS race) is
+  // swallowed — the local state stands and the next sync reconciles (the offline-safe sync-retry stance).
+  const persist = async (treeKey, treeId, anchor, watermark) => {
     await keyringStore.saveHead(treeKey, engine, anchor);
     if (engine === 'chain') await keyringStore.save(treeKey, chainRevision(watermark), anchor);
     watermarks.observe(treeKey, { keyringCursor: watermark });
+    if (engine === 'chain' && publishKeyring) {
+      try {
+        await publishKeyring(treeId, anchor);
+      } catch {
+        // Best-effort: the produced revision is already durable locally; the next sync republishes/reconciles.
+      }
+    }
   };
   const floor = (treeKey) => watermarks.current(treeKey).keyringCursor;
 
@@ -102,7 +119,7 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
 
     async provision(treeKey, treeId, passphrase, memberId) {
       const r = await worker.provision(engine, passphrase, treeId, memberId, makeReplicaId());
-      await persist(treeKey, r.keyring, r.watermark);
+      await persist(treeKey, treeId, r.keyring, r.watermark);
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
@@ -118,14 +135,14 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
     async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
       const r = await worker.recover(engine, keyring, recoveryCode, newPassphrase, treeId, memberId, makeReplicaId(), floor(treeKey));
-      await persist(treeKey, r.keyring, r.watermark);
+      await persist(treeKey, treeId, r.keyring, r.watermark);
       return { session: sessionFor(r.sealerId), recoveryCode: r.recoveryCode, didKey: r.didKey };
     },
 
     async changePassphrase(treeKey, treeId, oldPassphrase, newPassphrase, memberId) {
       const keyring = await requireKeyring(treeKey);
       const r = await worker.changePassphrase(engine, keyring, oldPassphrase, newPassphrase, treeId, memberId, makeReplicaId(), floor(treeKey));
-      await persist(treeKey, r.keyring, r.watermark);
+      await persist(treeKey, treeId, r.keyring, r.watermark);
       return { recoveryCode: r.recoveryCode };
     },
 

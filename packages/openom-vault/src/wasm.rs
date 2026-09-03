@@ -15,13 +15,14 @@ use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring_chain::{
-    decode_governing_ref, keyring_hash, verify_reset, verify_walk, KeyringAnchor, VerifyingKey,
+    decode_governing_ref, encode_governing_ref, keyring_hash, verify_reset, verify_walk,
+    KeyringAnchor, VerifyingKey,
 };
 use openom_keyring_chain::wire::Keyring;
 use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, MemberRole};
+use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, KeyringUpdate, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
@@ -1269,6 +1270,34 @@ pub fn accept_remote_keyring(
         needs_backfill: false,
         sealer: None,
     })
+}
+
+/// Frame a raw signed chain `Keyring` revision as the wire `KeyringUpdate` the server's `PUT
+/// /trees/{id}/keyring` accepts — the OUTBOUND mirror of [`accept_remote_keyring`]'s unwrap. The client
+/// produces + locally persists a new keyring revision (add/remove member, rotate, refounder), then calls
+/// this and PUTs the bytes so peers can pull it.
+///
+/// The `KeyringUpdate` carries: `version` = the server's `KEYRING_UPDATE_VERSION` (1); `tree_id` +
+/// `update_ref` are ROUTING/POSITION HINTS the server cross-checks against the values its verifier reads
+/// from the signed body (so they must match — `tree_id` = the keyring's `tree_id`, `update_ref` =
+/// [`encode_governing_ref`] of its `revision`); `engine` = `"chain"`; `payload` = the engine-opaque
+/// [`MembershipEnvelope`] wrapping the signed keyring bytes (the exact framing the server stores and
+/// `accept_remote_keyring` later unwraps). Fails closed if `keyring` isn't a decodable chain `Keyring`.
+#[wasm_bindgen(js_name = wrapChainKeyringUpdate)]
+pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
+    // The server checks `update.version != KEYRING_UPDATE_VERSION` (openom/src/keyring.rs) and refuses a
+    // mismatch; there is no shared const yet, so this literal tracks that value (also asserted in the test).
+    const KEYRING_UPDATE_VERSION: u32 = 1;
+    let kr = Keyring::decode(keyring)
+        .map_err(|e| JsError::new(&format!("not a decodable chain keyring: {e}")))?;
+    let update = KeyringUpdate {
+        version: KEYRING_UPDATE_VERSION,
+        tree_id: kr.tree_id.clone(),
+        engine: EngineKind::Chain.as_tag().to_string(),
+        update_ref: encode_governing_ref(kr.revision),
+        payload: MembershipEnvelope::wrap(EngineKind::Chain, keyring.to_vec()).encode(),
+    };
+    Ok(update.encode_to_vec())
 }
 
 /// Verify a landed entry's author attribution (§B3 launch gate). `envelope` is the sealed entry (its

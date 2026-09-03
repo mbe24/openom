@@ -15,6 +15,7 @@ import init, {
   changePassphrase as wasmChangePassphrase,
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
   acceptResetKeyring as wasmAcceptResetKeyring,
+  wrapChainKeyringUpdate as wasmWrapChainKeyringUpdate,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
   entryAttribution as wasmEntryAttribution,
@@ -151,6 +152,14 @@ const api = {
     const out = { keyring: r.keyring, watermark: r.watermark };
     r.free();
     return out;
+  },
+
+  // Frame a produced chain keyring revision as the wire `KeyringUpdate` the server's PUT /trees/{id}/keyring
+  // accepts — the OUTBOUND mirror of acceptRemoteKeyring. Pure bytes→bytes (no sealer/DEK); the caller PUTs
+  // the result so peers can pull the new revision. Chain engine only (the dag syncs via /access, not here).
+  async wrapChainKeyringUpdate(keyring) {
+    await ensureInit();
+    return wasmWrapChainKeyringUpdate(keyring);
   },
 
   // Local-development sealer (reserved dev key) — routed through the SAME worker so demo and

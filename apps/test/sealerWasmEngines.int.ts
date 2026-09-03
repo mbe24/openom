@@ -14,8 +14,11 @@ import init, {
   dagReseal as wasmDagReseal,
   keyringSummary as wasmKeyringSummary,
   keyringCovers as wasmKeyringCovers,
+  wrapChainKeyringUpdate as wasmWrapChainKeyringUpdate,
 } from '../app/src/vendor/vault/openom_vault.js';
 import { pushMembershipSummary } from '../app/src/core/membershipSummary.js';
+import { RemoteStore } from '../app/src/core/remoteStore.js';
+import { makeKeyringPublisher, treeIdToUuid } from '../app/src/core/keyringPublish.js';
 
 // The REAL wasm sealer, driven directly (no fake worker): loads the vendored openom_sealer_bg.wasm and
 // runs the passphrase lifecycle through it, selecting the engine by tag. This is the web host's half of
@@ -309,6 +312,74 @@ describe('keyring membership summary + basis coverage (real wasm, OPE-293/294)',
     // cover the new basis (it lacks the new tip) — exactly the pre-push staleness guard.
     expect(wasmKeyringCovers('dag', anchor1, s0.basis)).toBe(true);
     expect(wasmKeyringCovers('dag', anchor0, s1.basis)).toBe(false);
+  });
+
+  it('chain: outbound wrapChainKeyringUpdate frames a produced revision as a KeyringUpdate, and putKeyring PUTs it (OPE-301)', async () => {
+    // A minimal top-level protobuf field reader (enough to read the KeyringUpdate's outer fields without a JS
+    // proto lib): returns { fieldNumber -> raw bytes } (last-wins; these fields are non-repeated).
+    function protoTop(buf: Uint8Array): Record<number, Uint8Array | number> {
+      const out: Record<number, Uint8Array | number> = {};
+      const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+      let off = 0;
+      const varint = () => {
+        let shift = 0;
+        let val = 0;
+        for (;;) {
+          const b = dv.getUint8(off++);
+          val += (b & 0x7f) * 2 ** shift;
+          if ((b & 0x80) === 0) break;
+          shift += 7;
+        }
+        return val;
+      };
+      while (off < buf.length) {
+        const tag = varint();
+        const field = tag >>> 3;
+        const wire = tag & 7;
+        if (wire === 0) {
+          out[field] = varint(); // varint (version)
+        } else if (wire === 2) {
+          const len = varint();
+          out[field] = buf.slice(off, off + len);
+          off += len;
+        } else {
+          throw new Error(`unexpected wire type ${wire}`);
+        }
+      }
+      return out;
+    }
+
+    const p = wasmProvision('chain', 'owner horse', TREE, MEMBER, replica(1));
+    const anchor = p.keyring; // the produced (genesis, revision 1) signed chain Keyring
+    p.takeSealer()!.free();
+    p.free();
+
+    const update = wasmWrapChainKeyringUpdate(anchor);
+    const fields = protoTop(update);
+    // version(1)=1, tree_id(2)=TREE, engine(3)="chain", update_ref(4)=BE32(revision 1), payload(5) present.
+    expect(fields[1]).toBe(1);
+    expect(Array.from(fields[2] as Uint8Array)).toEqual(Array.from(TREE));
+    expect(dec.decode(fields[3] as Uint8Array)).toBe('chain');
+    expect(Array.from(fields[4] as Uint8Array)).toEqual([0, 0, 0, 1]); // 4-byte big-endian revision 1
+    expect((fields[5] as Uint8Array).length).toBeGreaterThan(0); // the MembershipEnvelope(chain) payload
+
+    // And the whole produce→wrap→PUT path: makeKeyringPublisher wraps + PUTs the exact bytes to the
+    // uuid-routed keyring endpoint (the server does KeyringUpdate::decode on this opaque binary body).
+    let seen: any = null;
+    const remote = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async (url: string, opts: any) => {
+        seen = { url, opts };
+        return { ok: true, status: 200, json: async () => ({ revision: 1 }) };
+      },
+    });
+    const publish = makeKeyringPublisher({ wrapChainKeyringUpdate: async (k: Uint8Array) => wasmWrapChainKeyringUpdate(k) }, remote);
+    const res = await publish(TREE, anchor);
+    expect(res).toEqual({ revision: 1 });
+    expect(seen.url).toBe(`http://x/trees/${treeIdToUuid(TREE)}/keyring`);
+    expect(seen.opts.method).toBe('PUT');
+    expect(seen.opts.headers['content-type']).toBe('application/octet-stream');
+    expect(Array.from(seen.opts.body as Uint8Array)).toEqual(Array.from(update)); // the exact wrapped update
   });
 
   it('chain: summary + revision-based coverage', () => {

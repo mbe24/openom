@@ -9,6 +9,7 @@ import { createVault, frameHops } from '../app/src/core/sealer/vault.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 import { Watermarks } from '../app/src/core/watermarks.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
+import { makeKeyringPublisher, treeIdToUuid } from '../app/src/core/keyringPublish.js';
 
 const bytes = (...xs) => new Uint8Array(xs);
 // The chain watermark is the 4-byte big-endian revision (what the neutral cursor carries now).
@@ -156,6 +157,121 @@ describe('RemoteStore.readKeyring', () => {
   it('404 (no keyring yet) → empty chain', async () => {
     const rs = new RemoteStore({ baseUrl: 'http://x', fetch: async () => ({ ok: false, status: 404 }) });
     expect(await rs.readKeyring('t1')).toEqual({ revisions: [], head: 0 });
+  });
+});
+
+describe('RemoteStore.putKeyring (OPE-301 outbound)', () => {
+  it('PUTs the raw KeyringUpdate bytes as binary to /trees/{id}/keyring and returns the accepted revision', async () => {
+    const update = new Uint8Array([9, 8, 7, 6]);
+    let seen = null;
+    const rs = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async (url, opts) => {
+        seen = { url, opts };
+        return { ok: true, status: 200, json: async () => ({ revision: 4 }) };
+      },
+    });
+    const out = await rs.putKeyring('t1', update);
+    expect(out).toEqual({ revision: 4 });
+    expect(seen.url).toBe('http://x/trees/t1/keyring');
+    expect(seen.opts.method).toBe('PUT');
+    // Binary body, opaque bytes — NOT JSON/base64 (the server does KeyringUpdate::decode on the raw body).
+    expect(seen.opts.headers['content-type']).toBe('application/octet-stream');
+    expect(seen.opts.body).toBe(update);
+  });
+
+  it('maps a 409 (a losing CAS race / stale head) to ConflictError', async () => {
+    const rs = new RemoteStore({ baseUrl: 'http://x', fetch: async () => ({ ok: false, status: 409 }) });
+    await expect(rs.putKeyring('t1', new Uint8Array([1]))).rejects.toMatchObject({ name: 'ConflictError' });
+  });
+
+  it('throws on any other non-2xx', async () => {
+    const rs = new RemoteStore({
+      baseUrl: 'http://x',
+      fetch: async () => ({ ok: false, status: 400, text: async () => 'malformed' }),
+    });
+    await expect(rs.putKeyring('t1', new Uint8Array([1]))).rejects.toThrow(/HTTP 400 — malformed/);
+  });
+});
+
+describe('vault outbound keyring publish (OPE-301)', () => {
+  const treeKey = 'k1';
+  const treeId = new Uint8Array(16).fill(0xab); // 16 raw tree-id bytes → a canonical uuid in the url
+
+  // A fake worker exposing just what the produce + publish path needs: provision returns a produced chain
+  // keyring, wrapChainKeyringUpdate frames it (here: a recognizable transform, so the test can assert the
+  // PUT carried exactly the wrapped produced revision without a real protobuf).
+  function fakeWorker() {
+    return {
+      async provision() {
+        return { keyring: new Uint8Array([1, 1]), recoveryCode: 'rc', watermark: be32(1), needsReseal: false, didKey: 'did:key:z1', sealerId: 's1' };
+      },
+      async wrapChainKeyringUpdate(keyring) {
+        return new Uint8Array([0xff, ...keyring]); // stand-in for the KeyringUpdate framing
+      },
+    };
+  }
+
+  it('publishes a produced revision AFTER the durable local commit: wraps it + PUTs to the uuid-routed url', async () => {
+    const worker = fakeWorker();
+    const puts = [];
+    const remote = { putKeyring: async (id, bytes) => { puts.push({ id, bytes }); return { revision: 1 }; } };
+    const keyringStore = memoryKeyringStore();
+    const vault = createVault({
+      worker,
+      keyringStore,
+      watermarks: new Watermarks(),
+      publishKeyring: makeKeyringPublisher(worker, remote),
+    });
+
+    await vault.provision(treeKey, treeId, 'pw', 'acct-1');
+
+    // The local commit is durable …
+    expect(Array.from(await keyringStore.load(treeKey))).toEqual([1, 1]);
+    // … and the produced revision was published: PUT /trees/{uuid}/keyring with the WRAPPED bytes.
+    expect(puts).toHaveLength(1);
+    expect(puts[0].id).toBe(treeIdToUuid(treeId));
+    expect(Array.from(puts[0].bytes)).toEqual([0xff, 1, 1]);
+  });
+
+  it('degrades gracefully offline: a publish failure does NOT fail the flow — the local commit still stands', async () => {
+    const worker = fakeWorker();
+    const remote = { putKeyring: async () => { throw new Error('network down'); } };
+    const keyringStore = memoryKeyringStore();
+    const vault = createVault({
+      worker,
+      keyringStore,
+      watermarks: new Watermarks(),
+      publishKeyring: makeKeyringPublisher(worker, remote),
+    });
+
+    // Resolves despite the publish throwing (offline-safe sync-retry stance) …
+    await expect(vault.provision(treeKey, treeId, 'pw', 'acct-1')).resolves.toBeDefined();
+    // … and the keyring is durably persisted locally regardless.
+    expect(Array.from(await keyringStore.load(treeKey))).toEqual([1, 1]);
+  });
+
+  it('no publishKeyring seam ⇒ local-only (the pre-OPE-301 behavior is preserved)', async () => {
+    const worker = fakeWorker();
+    const keyringStore = memoryKeyringStore();
+    const vault = createVault({ worker, keyringStore, watermarks: new Watermarks() });
+    await expect(vault.provision(treeKey, treeId, 'pw', 'acct-1')).resolves.toBeDefined();
+    expect(Array.from(await keyringStore.load(treeKey))).toEqual([1, 1]);
+  });
+
+  it('the INBOUND accept path never republishes: syncKeyring adopts a served revision without a PUT', async () => {
+    const publishKeyring = () => { throw new Error('syncKeyring must not publish inbound revisions'); };
+    const worker = {
+      async acceptRemoteKeyring(_a, _t, _h) { return { keyring: bytes(3, 3), watermark: be32(3) }; },
+    };
+    const keyringStore = memoryKeyringStore();
+    const watermarks = new Watermarks();
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7));
+    await keyringStore.save(treeKey, 1, bytes(7, 7));
+    watermarks.observe(treeKey, { keyringCursor: be32(1) });
+    const vault = createVault({ worker, keyringStore, watermarks, publishKeyring });
+    const r = await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 3, bytes: bytes(3, 3) }]);
+    expect(r).toEqual({ revision: 3, changed: true }); // adopted, and publishKeyring was never invoked
   });
 });
 
