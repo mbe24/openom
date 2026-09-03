@@ -7,6 +7,7 @@ import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, DevAuth } from './core/session.js';
+import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { stats, search } from './core/queries.js';
@@ -25,14 +26,6 @@ import { settingsView } from './views/settings.js';
 import { transferView } from './views/transfer.js';
 import { onboardingView } from './views/onboarding.js';
 import { gateView } from './views/gate.js';
-
-// The single real (passphrase-protected) tree for V1; the demo uses the seed datasets. A
-// stable 16-byte tree id derived from the doc id (matches the sealer's own derivation).
-const REAL_DOC = 'my-tree';
-async function realTreeIdBytes() {
-  const data = new TextEncoder().encode('openom-tree:' + REAL_DOC);
-  return new Uint8Array(await crypto.subtle.digest('SHA-256', data)).slice(0, 16);
-}
 
 // Auto-lock window (minutes; 0 = off) is a device preference — like the locale, it lives in
 // localStorage so it survives reloads and is available before any tree is open.
@@ -94,6 +87,10 @@ class App {
   gateRecoveryCode = '';
   pendingSession = null;
   vault = null;
+  // The active member's ONE tree identity (§ treeId.js): realDoc = the UUID string (server resource
+  // id, local doc/keyring key, sync docId — all the same); realTreeId = its 16 seam bytes (crypto
+  // scope, carried inside every payload). Both null until the member has provisioned a tree.
+  realDoc = null;
   realTreeId = null;
   // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
   // and "Lock now" act on this; the demo never sets it (there'd be no keyring to re-unlock).
@@ -135,7 +132,6 @@ class App {
     // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
     // shortcut below is inert unless the flag is set.
     this.demoEnabled = document.querySelector('meta[name="openom:demo"]')?.content === 'true';
-    this.realTreeId = await realTreeIdBytes();
     // A local account is the identity every provision/unlock binds to (memberId == the vault member ==
     // the token's sub). Ensure one exists for this dev context; the account UI (later) creates/switches more.
     if (!this.auth.memberId()) await this.auth.signIn({ label: 'You' });
@@ -148,7 +144,22 @@ class App {
       await this.startDemo();
       return;
     }
-    this.showGate((await this.vault.hasKeyring(REAL_DOC)) ? 'unlock' : 'welcome');
+    this.showGate(await this.gateForMember());
+  }
+
+  // Load the active member's tree identity (uuid + 16 seam bytes) into realDoc/realTreeId. Returns
+  // whether the member has a tree at all (provisioned before) — false for a brand-new account.
+  loadTreeIdentity() {
+    const id = readTreeIdentity(this.auth.memberId());
+    this.realDoc = id?.uuid ?? null;
+    this.realTreeId = id?.bytes ?? null;
+    return !!id;
+  }
+
+  // The gate a returning member lands on: 'unlock' if they have a provisioned tree keyring, else the
+  // 'welcome' first-run screen. Resolves (and caches) the member's tree identity as a side effect.
+  async gateForMember() {
+    return this.loadTreeIdentity() && (await this.vault.hasKeyring(this.realDoc)) ? 'unlock' : 'welcome';
   }
 
   // The ONE identity source (OPE-336 invariant): the member id the vault provisions/unlocks under MUST
@@ -163,8 +174,9 @@ class App {
   // Composition-root reaction to an identity change (sign-out / account switch / another tab). The keyring
   // and vault are per-member unlock state, so drop the whole open stack, lock the sealer, rebuild a fresh
   // vault bound to the NEW member, and re-gate — never a token-swap under a live RemoteStore.
-  // TODO(OPE-337): also rebuild the composeStore around the new member's authed RemoteStore + real tree id
-  // (per-member tree UUID). Until then the local REAL_DOC/realTreeId are shared across dev accounts.
+  // The new member's tree identity is resolved per-member (gateForMember → loadTreeIdentity), so realDoc/
+  // realTreeId already switch with the account. TODO(OPE-337 T4): rebuild the composeStore around the new
+  // member's authed RemoteStore (synced mode) — today enterApp still composes local-only.
   async onIdentityChange() {
     if (this.sealer) {
       try { await this.sealer.lock(); } catch (e) { console.warn('[openom] lock on identity change', e); }
@@ -180,8 +192,8 @@ class App {
     try { await this.blobs?.lock?.(); } catch { /* best-effort */ }
     // A fresh vault so the next provision/unlock binds to the new member id.
     try { this.vault = await createAppVault(); } catch (e) { console.error('[openom] rebuild vault on identity change', e); }
-    if (!this.auth.memberId()) { this.showGate('welcome'); return; } // signed out
-    this.showGate((await this.vault.hasKeyring(REAL_DOC)) ? 'unlock' : 'welcome');
+    if (!this.auth.memberId()) { this.realDoc = null; this.realTreeId = null; this.showGate('welcome'); return; } // signed out
+    this.showGate(await this.gateForMember());
   }
 
   // The gate owns its DOM: renderGate() mounts it on explicit transitions/actions, while the
@@ -216,7 +228,12 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { session, recoveryCode } = await this.vault.provision(REAL_DOC, this.realTreeId, passphrase, this.authMemberId());
+      // First provision mints this member's ONE tree identity (serialized across tabs); recover/unlock
+      // read it back. The uuid is the server resource id + local doc/keyring key; the bytes are the seam id.
+      const id = await ensureTreeIdentity(this.authMemberId());
+      this.realDoc = id.uuid;
+      this.realTreeId = id.bytes;
+      const { session, recoveryCode } = await this.vault.provision(this.realDoc, this.realTreeId, passphrase, this.authMemberId());
       this.pendingSession = session;
       this.gateRecoveryCode = recoveryCode;
       this.showGate('recovery');
@@ -233,7 +250,7 @@ class App {
     const session = this.pendingSession;
     this.pendingSession = null;
     this.gateRecoveryCode = '';
-    if (session) await this.enterApp({ sealer: session, docId: REAL_DOC, lockable: true });
+    if (session) await this.enterApp({ sealer: session, docId: this.realDoc, lockable: true });
     else { this.gate = null; this.render(); }
   }
 
@@ -279,12 +296,13 @@ class App {
 
   async doUnlock(passphrase) {
     if (!passphrase) { this.gateError = t('gate-err-enter-pass'); this.renderGate(); return; }
+    if (!this.realDoc) this.loadTreeIdentity(); // ensure the member's tree identity is resolved
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
     try {
-      const { session } = await this.vault.unlock(REAL_DOC, this.realTreeId, passphrase, this.authMemberId());
-      await this.enterApp({ sealer: session, docId: REAL_DOC, lockable: true });
+      const { session } = await this.vault.unlock(this.realDoc, this.realTreeId, passphrase, this.authMemberId());
+      await this.enterApp({ sealer: session, docId: this.realDoc, lockable: true });
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
@@ -301,11 +319,12 @@ class App {
     if (!recoveryCode?.trim()) { this.gateError = t('gate-err-enter-code'); this.renderGate(); return; }
     if (!newPassphrase || newPassphrase.length < 8) { this.gateError = t('gate-err-min-new'); this.renderGate(); return; }
     if (newPassphrase !== confirm) { this.gateError = t('gate-err-mismatch'); this.renderGate(); return; }
+    if (!this.realDoc) this.loadTreeIdentity(); // ensure the member's tree identity is resolved
     this.gateBusy = true;
     this.gateError = '';
     this.renderGate();
     try {
-      const { session, recoveryCode: newCode } = await this.vault.recover(REAL_DOC, this.realTreeId, recoveryCode, newPassphrase, this.authMemberId());
+      const { session, recoveryCode: newCode } = await this.vault.recover(this.realDoc, this.realTreeId, recoveryCode, newPassphrase, this.authMemberId());
       this.pendingSession = session;
       this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
       this.showGate('recovery');
@@ -332,7 +351,7 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { recoveryCode } = await this.vault.changePassphrase(REAL_DOC, this.realTreeId, current, next, this.authMemberId());
+      const { recoveryCode } = await this.vault.changePassphrase(this.realDoc, this.realTreeId, current, next, this.authMemberId());
       this.gateRecoveryCode = recoveryCode; // a fresh code — the old one no longer works
       this.showGate('recovery');
     } catch (e) {
@@ -421,7 +440,7 @@ class App {
       } catch (e) {
         console.error('[openom] could not rebuild crypto worker', e);
       }
-      const next = (await this.vault?.hasKeyring(REAL_DOC).catch(() => false)) ? 'unlock' : 'welcome';
+      const next = (this.loadTreeIdentity() && (await this.vault?.hasKeyring(this.realDoc).catch(() => false))) ? 'unlock' : 'welcome';
       this.showGate(next);
     });
   }
