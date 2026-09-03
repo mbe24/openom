@@ -12,11 +12,9 @@ use openom_keyring::verifier::ChainVerifier;
 use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
 use openom_keyring_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
 use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
-use openom_protocol::v1::{
-    AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
-};
+use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod};
 use openom_protocol::Message;
-use openom_roles::{MEMBER_OWNER, SIGNER_FOUNDER};
+use openom_roles::MEMBER_OWNER;
 use edsign::SigningKey;
 
 fn sk(seed: u8) -> SigningKey {
@@ -54,11 +52,7 @@ fn chain_genesis() -> Keyring {
         revision: 1,
         layout_version: 1,
         prev_keyring_hash: vec![],
-        authorized_signers: vec![AuthorizedSigner {
-            public_key: pk(1),
-            member_id: "owner".into(),
-            role: SIGNER_FOUNDER,
-        }],
+        // The OWNER-role member is the founder signer (the signer set derives from members, OPE-309).
         members: vec![Member {
             member_id: "owner".into(),
             role: MEMBER_OWNER,

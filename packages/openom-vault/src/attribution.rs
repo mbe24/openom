@@ -13,7 +13,7 @@
 
 use openom_crypto::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};
-use openom_roles::{required_role_for_kind, SIGNER_FOUNDER};
+use openom_roles::{required_role_for_kind, MEMBER_OWNER};
 use edsign::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -114,11 +114,13 @@ pub fn verify_entry(
 /// attributed epoch to "looks unattributed, skip the check" (the §B3 downgrade attack). `key_id` is
 /// AAD-bound, so a forger can't lie about which epoch they sealed under either.
 pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
+    // The founder is the sole OWNER-role member (the signer set is derived from members now, OPE-309),
+    // so there is no separate authorized_signers roster to consult.
     let founder = keyring
-        .authorized_signers
+        .members
         .iter()
-        .find(|s| s.role == SIGNER_FOUNDER)
-        .map(|s| &s.member_id);
+        .find(|m| m.role == MEMBER_OWNER)
+        .map(|m| &m.member_id);
     keyring
         .epochs
         .iter()
@@ -131,7 +133,7 @@ mod tests {
     use super::*;
     use openom_keyring::{encode_governing_ref, generate_identity};
     use edsign::SigningKey;
-    use openom_protocol::v1::{KeyEpoch, Member, MemberRole, SignerRole};
+    use openom_protocol::v1::{KeyEpoch, Member, MemberRole};
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;
@@ -153,7 +155,6 @@ mod tests {
             revision: 3,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![],
             members,
             signatures: vec![],
             recovery_keys: vec![],
@@ -322,7 +323,7 @@ mod tests {
 
     #[test]
     fn epoch_attribution_tracks_who_the_dek_is_wrapped_to() {
-        use openom_protocol::v1::{AuthorizedSigner, KeyWrap};
+        use openom_protocol::v1::KeyWrap;
         let wrap = |id: &str| KeyWrap {
             member_id: id.into(),
             wrap_method: 0,
@@ -332,18 +333,19 @@ mod tests {
             ephemeral_public_key: vec![],
             recipient_public_key: vec![],
         };
-        let founder = AuthorizedSigner {
-            public_key: vec![0; 32],
+        // The founder is the OWNER-role member (the signer set derives from members now).
+        let founder = Member {
             member_id: "owner".into(),
-            role: SignerRole::Founder as i32,
+            role: MemberRole::Owner as i32,
+            author_public_key: vec![0; 32],
+            hpke_public_key: vec![9; 32],
         };
         let mk = |wraps: Vec<KeyWrap>| Keyring {
             tree_id: vec![],
             revision: 1,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![founder.clone()],
-            members: vec![],
+            members: vec![founder.clone()],
             signatures: vec![],
             recovery_keys: vec![],
             epochs: vec![KeyEpoch {

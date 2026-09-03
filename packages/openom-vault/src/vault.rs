@@ -23,16 +23,14 @@ use openom_keyring::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey,
 use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{
-    AuthorizedSigner, KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
+    KdfParams, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, RecoveryKey,
 };
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
-// The founder is the sole authorized signer of a freshly-built single-owner keyring, and the owner is
-// its sole member (§4 multi-signer; V1 builds the degenerate case). The role constants live in
-// openom-roles (one definition); aliased here to the local names used below.
-use openom_roles::{
-    MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER, SIGNER_CO_OWNER as CO_OWNER_SIGNER,
-    SIGNER_FOUNDER as FOUNDER,
-};
+// The founder is the owner (the sole OWNER-role member) of a freshly-built single-owner keyring. The
+// signer set is DERIVED from members now (OPE-309): a member at CO_OWNER or stronger IS a signer, so there
+// is no separate authorized-signer roster to build or read. The role constants live in openom-roles (one
+// definition); aliased here to the local names used below.
+use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, member_epoch_deks, new_owner_secrets,
@@ -173,11 +171,7 @@ pub fn provision(
         revision: 1,
         layout_version: KEYRING_LAYOUT_VERSION,
         prev_keyring_hash: Vec::new(), // genesis
-        authorized_signers: vec![AuthorizedSigner {
-            public_key: identity_pub.clone(),
-            member_id: member_id.to_string(),
-            role: FOUNDER,
-        }],
+        // The OWNER-role member is the founder signer (the signer set derives from members, OPE-309).
         members: vec![Member {
             member_id: member_id.to_string(),
             role: OWNER,
@@ -896,12 +890,13 @@ pub fn remove_member_as_co_owner(
     {
         return Err(VaultError::MemberNotFound);
     }
-    // A co-owner can't remove a signer (co-owner/founder) — that's a founder-gated set change.
+    // A co-owner can't remove a signer (co-owner/founder) — that's a founder-gated set change. A signer
+    // is a member at CO_OWNER or stronger (the signer set is derived from members, OPE-309).
     if acc
         .keyring
-        .authorized_signers
+        .members
         .iter()
-        .any(|s| s.member_id == remove_member_id)
+        .any(|m| m.member_id == remove_member_id && (m.role == OWNER || m.role == CO_OWNER_MEMBER))
     {
         return Err(VaultError::NotAuthorized);
     }
@@ -970,15 +965,17 @@ pub fn add_co_owner(
         founder_member_id,
     )?;
 
-    // Already a signer (this also rejects re-adding the founder).
+    // Already a signer (this also rejects re-adding the founder) — a member at CO_OWNER or stronger.
     if keyring
-        .authorized_signers
+        .members
         .iter()
-        .any(|s| s.member_id == target_member_id)
+        .any(|m| m.member_id == target_member_id && (m.role == OWNER || m.role == CO_OWNER_MEMBER))
     {
         return Err(VaultError::MemberExists);
     }
-    let author_pub = {
+    // The target must exist and carry an author key — that pinned, OOB-verified key becomes their signer
+    // key (a co-owner signs the keyring with it), so promotion needs no new key exchange.
+    {
         let m = keyring
             .members
             .iter()
@@ -989,13 +986,14 @@ pub fn add_co_owner(
                 "member has no author key to sign with".into(),
             ));
         }
-        m.author_public_key.clone()
-    };
+    }
     let new_revision = min_revision
         .max(revision)
         .checked_add(1)
         .ok_or(VaultError::RevisionOverflow)?;
 
+    // Promote by raising the member's role to CO_OWNER — which, since the signer set is derived from
+    // members, makes them a signer. No separate roster entry to push.
     if let Some(m) = keyring
         .members
         .iter_mut()
@@ -1003,11 +1001,6 @@ pub fn add_co_owner(
     {
         m.role = CO_OWNER_MEMBER;
     }
-    keyring.authorized_signers.push(AuthorizedSigner {
-        public_key: author_pub,
-        member_id: target_member_id.to_string(),
-        role: CO_OWNER_SIGNER,
-    });
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
@@ -1062,9 +1055,9 @@ pub fn remove_co_owner(
         return Err(VaultError::CannotRemoveOwner);
     }
     let is_co_owner = keyring
-        .authorized_signers
+        .members
         .iter()
-        .any(|s| s.member_id == target_member_id && s.role == CO_OWNER_SIGNER);
+        .any(|m| m.member_id == target_member_id && m.role == CO_OWNER_MEMBER);
     if !is_co_owner {
         return Err(VaultError::MemberNotFound);
     }
@@ -1073,9 +1066,8 @@ pub fn remove_co_owner(
         .checked_add(1)
         .ok_or(VaultError::RevisionOverflow)?;
 
-    keyring
-        .authorized_signers
-        .retain(|s| s.member_id != target_member_id);
+    // Demote by lowering the member's role to a non-signer role — which removes them from the derived
+    // signer set. No separate roster entry to retain.
     if let Some(m) = keyring
         .members
         .iter_mut()
@@ -1146,10 +1138,9 @@ fn open_with_passphrase(
     // the document's current signer set is hardened by the deferred client chain-walk that
     // refuses an unendorsed signer-set change.
     let founder_pub = root.identity.verifying_key().to_bytes().to_vec();
-    let is_founder = keyring
-        .authorized_signers
-        .iter()
-        .any(|s| s.role == FOUNDER && s.member_id == member_id && s.public_key == founder_pub);
+    let is_founder = keyring.members.iter().any(|m| {
+        m.role == OWNER && m.member_id == member_id && m.author_public_key == founder_pub
+    });
     if !is_founder {
         return Err(CryptoError::Signature.into());
     }
@@ -1227,11 +1218,11 @@ fn open_as_co_owner(
     // pinned out-of-band, so the server can't swap the whole signer set. The revision itself
     // may have been signed by any current authorized signer (a co-owner did an ordinary
     // change), so verify any-of over the current set — hardened later by the chain-walk.
-    let founder_pinned = keyring.authorized_signers.iter().any(|s| {
-        s.role == FOUNDER
+    let founder_pinned = keyring.members.iter().any(|m| {
+        m.role == OWNER
             && trusted_signers
                 .iter()
-                .any(|t| s.public_key.as_slice() == &t.to_bytes()[..])
+                .any(|t| m.author_public_key.as_slice() == &t.to_bytes()[..])
     });
     if !founder_pinned {
         return Err(CryptoError::Signature.into());
@@ -1239,12 +1230,12 @@ fn open_as_co_owner(
     verify_keyring_any(&keyring, &authorized_verify_keys(&keyring))?;
     validate_kdf(&CoreKdf::from(kdf))?;
     let root = derive_root(passphrase, kdf)?;
-    // Authority: the caller must be a current co-owner signer whose registered key is theirs.
+    // Authority: the caller must be a current co-owner signer (a CO_OWNER-role member) whose registered
+    // author key is theirs.
     let my_pub = root.identity.verifying_key().to_bytes().to_vec();
-    let authorized = keyring
-        .authorized_signers
-        .iter()
-        .any(|s| s.member_id == member_id && s.role == CO_OWNER_SIGNER && s.public_key == my_pub);
+    let authorized = keyring.members.iter().any(|m| {
+        m.member_id == member_id && m.role == CO_OWNER_MEMBER && m.author_public_key == my_pub
+    });
     if !authorized {
         return Err(VaultError::NotAuthorized);
     }
@@ -1260,28 +1251,30 @@ fn open_as_co_owner(
 }
 
 
-/// The Ed25519 verify keys of the keyring's current authorized signers (malformed entries
-/// skipped). Used for any-of verification of an ordinary revision, which a co-owner may have
-/// signed. Trusting this document-provided set is hardened by the deferred client chain-walk.
+/// The Ed25519 verify keys of the keyring's current authorized signers — the members at CO_OWNER or
+/// stronger (the signer set is derived from members, OPE-309); malformed keys skipped. Used for any-of
+/// verification of an ordinary revision, which a co-owner may have signed. Trusting this document-provided
+/// set is hardened by the deferred client chain-walk.
 fn authorized_verify_keys(keyring: &Keyring) -> Vec<VerifyingKey> {
     keyring
-        .authorized_signers
+        .members
         .iter()
-        .filter_map(|s| {
-            let arr: [u8; 32] = s.public_key.as_slice().try_into().ok()?;
+        .filter(|m| m.role == OWNER || m.role == CO_OWNER_MEMBER)
+        .filter_map(|m| {
+            let arr: [u8; 32] = m.author_public_key.as_slice().try_into().ok()?;
             VerifyingKey::from_bytes(&arr).ok()
         })
         .collect()
 }
 
 /// Founder identity's member id (needed to locate the RRK wrap and skip the founder — who
-/// has no per-epoch member wrap — when re-wrapping a new epoch).
+/// has no per-epoch member wrap — when re-wrapping a new epoch). The founder is the sole OWNER-role member.
 fn founder_member_id(keyring: &Keyring) -> Result<String, VaultError> {
     keyring
-        .authorized_signers
+        .members
         .iter()
-        .find(|s| s.role == FOUNDER)
-        .map(|s| s.member_id.clone())
+        .find(|m| m.role == OWNER)
+        .map(|m| m.member_id.clone())
         .ok_or_else(|| VaultError::BadKeyring("no founder".into()))
 }
 
@@ -1396,10 +1389,8 @@ fn do_remove_member(
         epoch: new_epoch,
         wraps,
     });
+    // Removing the member removes them from the derived signer set too (no separate roster to retain).
     keyring.members.retain(|m| m.member_id != remove_member_id);
-    keyring
-        .authorized_signers
-        .retain(|s| s.member_id != remove_member_id);
     for ep in &mut keyring.epochs {
         ep.wraps.retain(|w| w.member_id != remove_member_id);
     }
@@ -1433,15 +1424,11 @@ fn replace_recovery_key(keyring: &mut Keyring, member_id: &str, new: RecoveryKey
     keyring.recovery_keys.push(new);
 }
 
-/// After the owner's key changes, point the founder signer entry and the owner's member
-/// entry at the new identity/HPKE keys, so future verification and rotations use them.
+/// After the owner's key changes, point the owner's member entry at the new identity/HPKE keys, so future
+/// verification and rotations use them. The founder signer is derived from this member entry (OPE-309), so
+/// updating the member author key re-keys the signer too — no separate roster to update.
 fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
     let new_pub = new.identity.verifying_key().to_bytes().to_vec();
-    for s in &mut keyring.authorized_signers {
-        if s.member_id == member_id {
-            s.public_key = new_pub.clone();
-        }
-    }
     for m in &mut keyring.members {
         if m.member_id == member_id {
             m.author_public_key = new_pub.clone();
@@ -1466,17 +1453,19 @@ mod tests {
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
     use openom_keyring::{keyring_hash, sign_keyring, verify_keyring, VerifyingKey};
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-    use openom_protocol::v1::{AuthorizedSigner, Keyring, MemberRole, SignerRole};
+    use openom_protocol::v1::{Keyring, Member, MemberRole};
     use openom_protocol::Message;
 
-    /// The founder's verify key, as a member would pin it out-of-band from an invite.
+    /// The founder's verify key, as a member would pin it out-of-band from an invite — the OWNER-role
+    /// member's author key (the signer set is derived from members, OPE-309).
     fn founder_key(keyring_bytes: &[u8]) -> VerifyingKey {
         let k = Keyring::decode(keyring_bytes).unwrap();
-        let bytes: [u8; 32] = k.authorized_signers[0]
-            .public_key
-            .as_slice()
-            .try_into()
+        let founder = k
+            .members
+            .iter()
+            .find(|m| m.role == MemberRole::Owner as i32)
             .unwrap();
+        let bytes: [u8; 32] = founder.author_public_key.as_slice().try_into().unwrap();
         VerifyingKey::from_bytes(&bytes).unwrap()
     }
 
@@ -2081,16 +2070,15 @@ mod tests {
             k.prev_keyring_hash.is_empty(),
             "genesis has no prior revision to chain onto"
         );
-        assert_eq!(k.authorized_signers.len(), 1);
-        assert_eq!(k.authorized_signers[0].role, SignerRole::Founder as i32);
-        assert_eq!(k.authorized_signers[0].member_id, MEMBER);
+        // The signer set is derived from members: exactly one member, the OWNER-role founder.
         assert_eq!(k.members.len(), 1);
         assert_eq!(k.members[0].role, MemberRole::Owner as i32);
+        assert_eq!(k.members[0].member_id, MEMBER);
         assert_eq!(k.signatures.len(), 1);
-        // The lone signature is by the founder key named in the signer set.
+        // The lone signature is by the founder key (the OWNER member's author key).
         assert_eq!(
             k.signatures[0].signer_public_key,
-            k.authorized_signers[0].public_key
+            k.members[0].author_public_key
         );
     }
 
@@ -2801,13 +2789,11 @@ mod tests {
         )
         .unwrap();
         let k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
-        assert!(k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
-            && s.role == SignerRole::CoOwner as i32
-            && s.public_key == co.author_public));
-        assert!(k
-            .members
-            .iter()
-            .any(|m| m.member_id == MEMBER2 && m.role == MemberRole::CoOwner as i32));
+        // Promotion raises the member's role to CO_OWNER — which IS the signer set now (derived from
+        // members) — keeping their author key.
+        assert!(k.members.iter().any(|m| m.member_id == MEMBER2
+            && m.role == MemberRole::CoOwner as i32
+            && m.author_public_key == co.author_public));
         let founder = founder_key(&owner.keyring);
         verify_keyring(&k, &founder).unwrap(); // the signer-set change is founder-authorized
 
@@ -2847,7 +2833,11 @@ mod tests {
         )
         .unwrap();
         let k2 = Keyring::decode(demoted.keyring.as_slice()).unwrap();
-        assert!(!k2.authorized_signers.iter().any(|s| s.member_id == MEMBER2));
+        // Demotion drops the member below CO_OWNER, so they are no longer in the derived signer set.
+        assert!(!k2
+            .members
+            .iter()
+            .any(|m| m.member_id == MEMBER2 && (m.role == MemberRole::Owner as i32 || m.role == MemberRole::CoOwner as i32)));
         assert!(k2
             .members
             .iter()
@@ -3240,13 +3230,15 @@ mod tests {
         .unwrap();
         let founder = founder_key(&owner.keyring);
 
-        // A rogue co-owner appends a signer and signs ONLY with their own identity.
+        // A rogue co-owner appends a signer (a CO_OWNER-role member — the signer set is derived from
+        // members) and signs ONLY with their own identity.
         let co_identity = derive_root(b"co pass", &co.kdf_params).unwrap().identity;
         let mut k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
-        k.authorized_signers.push(AuthorizedSigner {
-            public_key: vec![9u8; 32],
+        k.members.push(Member {
             member_id: "acct-rogue".into(),
-            role: SignerRole::CoOwner as i32,
+            role: MemberRole::CoOwner as i32,
+            author_public_key: vec![9u8; 32],
+            hpke_public_key: vec![9u8; 32],
         });
         k.revision += 1;
         k.signatures.clear();
@@ -3344,11 +3336,12 @@ mod tests {
         .unwrap();
         let k = Keyring::decode(rec.keyring.as_slice()).unwrap();
 
-        // The co-owner's signer entry survived recovery, unchanged.
+        // The co-owner (a CO_OWNER-role member — the signer set is derived from members) survived
+        // recovery, unchanged.
         assert!(
-            k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
-                && s.role == SignerRole::CoOwner as i32
-                && s.public_key == co.author_public),
+            k.members.iter().any(|m| m.member_id == MEMBER2
+                && m.role == MemberRole::CoOwner as i32
+                && m.author_public_key == co.author_public),
             "recover must not drop a co-owner from the signer set"
         );
         // …and they still read the tree — re-pinning the new founder, per the succession boundary
@@ -3416,9 +3409,9 @@ mod tests {
         let k = Keyring::decode(re.keyring.as_slice()).unwrap();
 
         assert!(
-            k.authorized_signers.iter().any(|s| s.member_id == MEMBER2
-                && s.role == SignerRole::CoOwner as i32
-                && s.public_key == co.author_public),
+            k.members.iter().any(|m| m.member_id == MEMBER2
+                && m.role == MemberRole::CoOwner as i32
+                && m.author_public_key == co.author_public),
             "change_passphrase must leave co-owners untouched"
         );
         // The old founder co-signed, so the co-owner still verifies against its pre-change pin.

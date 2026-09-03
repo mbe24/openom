@@ -4,7 +4,7 @@
 //! branchless, length-prefixed, fixed-width discipline as the envelope AAD (see `openom_crypto::aad`), so a
 //! Rust and a JS/WASM verifier agree byte-for-byte.
 
-use openom_protocol::v1::{AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey};
+use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey};
 
 /// The canonical, domain-separated byte string an authorized signer's Ed25519 key
 /// signs over the keyring (§4): every keyring field **except `signatures`**, length- and
@@ -13,9 +13,9 @@ use openom_protocol::v1::{AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, 
 /// `layout_version` is first (after the tag) and is the sole version axis — a
 /// fail-closed forward selector, like `Envelope.version` — so any future keyring layout
 /// is byte-disjoint from this one. Covered: `revision`/`prev_keyring_hash` (anti-rollback
-/// and history chain), the `authorized_signers` trust set, the `members` role/key manifest,
-/// and the epochs/wraps. `signatures` is excluded, so every signer signs identical bytes
-/// and their signatures collect independently.
+/// and history chain), the `members` role/key manifest (which — since the signer set is
+/// derived from members — also covers the trust set), and the epochs/wraps. `signatures` is
+/// excluded, so every signer signs identical bytes and their signatures collect independently.
 #[deny(unused_variables)]
 pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
     // Exhaustive destructure (no `..`) + deny(unused): adding a Keyring/RecoveryKey/etc. field is a
@@ -27,7 +27,6 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
         revision,
         layout_version,
         prev_keyring_hash,
-        authorized_signers,
         members,
         // `signatures` EXCLUDED by design: every signer signs identical bytes, so their signatures
         // collect independently — the one field that must NOT be in its own signed bytes.
@@ -43,14 +42,6 @@ pub fn keyring_signing_bytes(keyring: &Keyring) -> Vec<u8> {
     put_bytes(&mut out, tree_id);
     put_u32(&mut out, *revision);
     put_bytes(&mut out, prev_keyring_hash);
-
-    put_u32(&mut out, authorized_signers.len() as u32);
-    for s in authorized_signers {
-        let AuthorizedSigner { public_key, member_id, role } = s;
-        put_bytes(&mut out, public_key);
-        put_bytes(&mut out, member_id.as_bytes());
-        put_u32(&mut out, *role as u32);
-    }
 
     put_u32(&mut out, members.len() as u32);
     for m in members {
@@ -163,7 +154,6 @@ mod tests {
             revision: 1,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![],
             members: vec![],
             signatures: vec![],
             recovery_keys: vec![],
@@ -196,14 +186,9 @@ mod tests {
             revision: 1,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![AuthorizedSigner {
-                public_key: vec![0xAB; 32],
-                member_id: "acct".into(),
-                role: 1, // FOUNDER
-            }],
             members: vec![Member {
                 member_id: "acct".into(),
-                role: 1, // OWNER
+                role: 1, // OWNER (a signer-tier member — the signer set derives from this)
                 author_public_key: vec![],
                 hpke_public_key: vec![],
             }],
@@ -243,11 +228,13 @@ mod tests {
         kr.revision = 2;
         assert_ne!(a, keyring_signing_bytes(&kr), "revision is covered (anti-rollback)");
 
-        // The signer set, the member/role manifest, and the history-chain link are covered.
+        // The member/role manifest and the history-chain link are covered. Because the signer set is
+        // DERIVED from members, a signer-member's role change (which changes the derived signer set)
+        // is covered precisely because `members` is covered — the two are one field now.
         let mut set_change = kr.clone();
         set_change.revision = 1;
-        set_change.authorized_signers[0].role = 2; // FOUNDER -> CO_OWNER
-        assert_ne!(a, keyring_signing_bytes(&set_change), "authorized_signers are covered");
+        set_change.members[0].role = 2; // OWNER -> CO_OWNER: a signer-tier role change, via members
+        assert_ne!(a, keyring_signing_bytes(&set_change), "a signer-member's role change changes the signed bytes (via members)");
         let mut role_change = kr.clone();
         role_change.revision = 1;
         role_change.members[0].role = 4; // OWNER -> EDITOR

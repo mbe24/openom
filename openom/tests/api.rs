@@ -27,8 +27,7 @@ use axum::Router;
 use base64::Engine as _;
 use openom_keyring::{generate_identity, keyring_hash, sign_keyring, SigningKey};
 use openom_protocol::v1::{
-    Aead, AuthorizedSigner, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole,
-    SignerRole, WrapMethod,
+    Aead, Envelope, Header, KeyEpoch, KeyWrap, Keyring, Kind, Member, MemberRole, WrapMethod,
 };
 use openom_protocol::Message;
 use serde_json::Value;
@@ -310,11 +309,7 @@ fn build_keyring(
         revision,
         layout_version: 1,
         prev_keyring_hash: prev_hash,
-        authorized_signers: vec![AuthorizedSigner {
-            public_key: fpub,
-            member_id: owner_s,
-            role: SignerRole::Founder as i32,
-        }],
+        // The signer set is derived from members: the OWNER-role member (built above) is the founder.
         members,
         signatures: vec![],
         recovery_keys: vec![],

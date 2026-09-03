@@ -22,7 +22,7 @@ pub struct ReplicaId(Vec<u8>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyId(Vec<u8>);
 
-/// An application member id (`Member.member_id` / `AuthorizedSigner.member_id`).
+/// An application member id (`Member.member_id` / `KeyWrap.member_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MemberId(String);
 

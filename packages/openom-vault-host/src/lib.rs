@@ -2187,13 +2187,16 @@ mod tests {
 
     /// The founder verify-key from the stored keyring, as a member would pin it OOB.
     fn founder_key(h: &VaultHost<MemStore>, tree_key: &str) -> Vec<u8> {
-        use openom_protocol::v1::Keyring;
+        use openom_protocol::v1::{Keyring, MemberRole};
         let bytes = h.store.load_keyring(tree_key).unwrap().unwrap();
+        // The founder is the OWNER-role member (the signer set is derived from members, OPE-309).
         Keyring::decode(bytes.as_slice())
             .unwrap()
-            .authorized_signers[0]
-            .public_key
-            .clone()
+            .members
+            .into_iter()
+            .find(|m| m.role == MemberRole::Owner as i32)
+            .unwrap()
+            .author_public_key
     }
 
     const MEMBER2: &str = "acct-2";
@@ -2355,15 +2358,16 @@ mod tests {
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
         use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
-        use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
+        use openom_protocol::v1::{KeyWrap, Member};
 
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let prior_bytes = h.store.load_keyring(KEY).unwrap().unwrap();
         let prior = Keyring::decode(prior_bytes.as_slice()).unwrap();
 
-        // A structurally-valid successor that injects a rogue co-owner into the signer set and
-        // is signed only by that rogue — the exact substitution the chain-walk exists to catch.
+        // A structurally-valid successor that injects a rogue co-owner (a CO_OWNER-role member — the signer
+        // set is derived from members) and is signed only by that rogue — the exact substitution the
+        // chain-walk exists to catch.
         let rogue = generate_identity().unwrap();
         let rogue_pub = rogue.verifying_key().to_bytes().to_vec();
         let mut bad = prior.clone();
@@ -2383,11 +2387,6 @@ mod tests {
             kdf_params: None,
             ephemeral_public_key: vec![],
             recipient_public_key: vec![],
-        });
-        bad.authorized_signers.push(AuthorizedSigner {
-            public_key: rogue_pub,
-            member_id: "rogue".into(),
-            role: openom_protocol::v1::SignerRole::CoOwner as i32,
         });
         bad.signatures.clear();
         sign_keyring(&mut bad, &rogue);
@@ -2486,13 +2485,14 @@ mod tests {
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
         use openom_keyring::{generate_identity, keyring_hash, sign_keyring};
-        use openom_protocol::v1::{AuthorizedSigner, KeyWrap, Member};
+        use openom_protocol::v1::{KeyWrap, Member};
 
         let a = host();
         let (rev1, _rev2, _rev3) = produce_three_revisions(&a);
         let anchor = Keyring::decode(rev1.as_slice()).unwrap();
 
-        // A forged rev2: injects a rogue co-owner and is signed only by that rogue.
+        // A forged rev2: injects a rogue co-owner (a CO_OWNER-role member — the signer set is derived from
+        // members) and is signed only by that rogue.
         let rogue = generate_identity().unwrap();
         let rogue_pub = rogue.verifying_key().to_bytes().to_vec();
         let mut bad = anchor.clone();
@@ -2512,11 +2512,6 @@ mod tests {
             kdf_params: None,
             ephemeral_public_key: vec![],
             recipient_public_key: vec![],
-        });
-        bad.authorized_signers.push(AuthorizedSigner {
-            public_key: rogue_pub,
-            member_id: "rogue".into(),
-            role: openom_protocol::v1::SignerRole::CoOwner as i32,
         });
         bad.signatures.clear();
         sign_keyring(&mut bad, &rogue);

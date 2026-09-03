@@ -12,10 +12,8 @@ use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition
 use openom_keyring_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
-use openom_protocol::v1::{
-    AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
-};
-use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER, SIGNER_CO_OWNER, SIGNER_FOUNDER};
+use openom_protocol::v1::{KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod};
+use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER};
 use edsign::SigningKey;
 
 const TREE: &[u8] = b"tree-uuid-16byte";
@@ -38,15 +36,12 @@ fn pk32(k: &SigningKey) -> [u8; 32] {
 struct Cast {
     seed: u8,
     id: &'static str,
-    /// Signer role (`SIGNER_FOUNDER`/`SIGNER_CO_OWNER`), or `None` for an ordinary (non-signer) member.
-    signer_role: Option<i32>,
-    /// Proto `MemberRole` value (drives both the chain member role and the keyeo `KeyringRole`).
+    /// Proto `MemberRole` value (drives both the chain member role and the keyeo `KeyringRole`). The chain
+    /// signer set is DERIVED from this (a member at CO_OWNER or stronger is a signer, OPE-309), so there is
+    /// no separate signer-role axis.
     member_role: i32,
 }
 
-fn signer(k: &SigningKey, id: &str, role: i32) -> AuthorizedSigner {
-    AuthorizedSigner { public_key: pubv(k), member_id: id.into(), role }
-}
 fn keyed_member(k: &SigningKey, id: &str, role: i32) -> Member {
     Member { member_id: id.into(), role, author_public_key: pubv(k), hpke_public_key: vec![9; 32] }
 }
@@ -64,14 +59,10 @@ fn wrap(id: &str, method: i32) -> KeyWrap {
 
 /// The chain.rs genesis keyring for a cast (cast[0] is the founder: RRK-wrapped, FOUNDER signer).
 fn chain_genesis(cast: &[Cast]) -> Keyring {
-    let mut signers = Vec::new();
     let mut members = Vec::new();
     let mut wraps = Vec::new();
     for (i, c) in cast.iter().enumerate() {
         let k = sk(c.seed);
-        if let Some(sr) = c.signer_role {
-            signers.push(signer(&k, c.id, sr));
-        }
         members.push(keyed_member(&k, c.id, c.member_role));
         wraps.push(wrap(c.id, if i == 0 { RRK_HPKE } else { HPKE }));
     }
@@ -80,7 +71,6 @@ fn chain_genesis(cast: &[Cast]) -> Keyring {
         revision: 1,
         layout_version: 1,
         prev_keyring_hash: vec![],
-        authorized_signers: signers,
         members,
         signatures: vec![],
         recovery_keys: vec![],
@@ -145,13 +135,13 @@ fn keyeo_owner_key(k: &KeyringEngine) -> [u8; 32] {
 }
 
 fn founder() -> Cast {
-    Cast { seed: 1, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER }
+    Cast { seed: 1, id: "owner", member_role: MEMBER_OWNER }
 }
 fn co_owner(seed: u8, id: &'static str) -> Cast {
-    Cast { seed, id, signer_role: Some(SIGNER_CO_OWNER), member_role: MEMBER_CO_OWNER }
+    Cast { seed, id, member_role: MEMBER_CO_OWNER }
 }
 fn plain(seed: u8, id: &'static str, role: i32) -> Cast {
-    Cast { seed, id, signer_role: None, member_role: role }
+    Cast { seed, id, member_role: role }
 }
 
 // ────────────────────────────── AGREEMENT cases ──────────────────────────────
@@ -165,7 +155,7 @@ fn founder_adds_a_co_owner_agrees() {
     let cand = chain_next(
         &g,
         |k| {
-            k.authorized_signers.push(signer(&sk(5), "erin", SIGNER_CO_OWNER));
+            // A CO_OWNER-role member IS a signer (derived from members) — no separate roster push.
             k.members.push(keyed_member(&sk(5), "erin", MEMBER_CO_OWNER));
             k.epochs[0].wraps.push(wrap("erin", HPKE));
         },
@@ -276,7 +266,7 @@ fn founder_cannot_self_remove_agrees() {
     let cand = chain_next(
         &g,
         |k| {
-            k.authorized_signers.retain(|s| s.member_id != "owner");
+            // Removing the owner member removes the derived founder signer too.
             k.members.retain(|m| m.member_id != "owner");
             k.epochs[0].wraps.retain(|w| w.member_id != "owner");
         },
@@ -303,7 +293,7 @@ fn recovery_re_establishes_the_owner_in_both_and_preserves_membership() {
 
     // chain.rs: a reset keyring whose Owner is re-keyed to `new_owner`, self-signed by that new key.
     let reset_cast = [
-        Cast { seed: new_owner, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER },
+        Cast { seed: new_owner, id: "owner", member_role: MEMBER_OWNER },
         co_owner(2, "bob"),
     ];
     let reset = chain_genesis(&reset_cast); // chain_genesis self-signs with cast[0] = the new Owner key
@@ -352,7 +342,7 @@ fn keyeo_reset_requires_the_recovery_authority_where_chain_accepts_a_self_signed
 
     // chain.rs accepts a reset self-signed by the new Owner key (no RVK anywhere).
     let reset_cast = [
-        Cast { seed: new_owner, id: "owner", signer_role: Some(SIGNER_FOUNDER), member_role: MEMBER_OWNER },
+        Cast { seed: new_owner, id: "owner", member_role: MEMBER_OWNER },
     ];
     assert!(
         verify_reset(None, &chain_genesis(&reset_cast)).is_ok(),

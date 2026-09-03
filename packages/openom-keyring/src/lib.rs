@@ -10,7 +10,8 @@ pub use signing_bytes::keyring_signing_bytes;
 
 pub use chain::{
     bootstrap_from_genesis, bootstrap_from_oob, decode_governing_ref, encode_governing_ref,
-    verify_reset, verify_transition, verify_walk, ChainError, GoverningKeyring, KeyringAnchor,
+    verify_reset, verify_transition, verify_walk, AuthorizedSigner, ChainError, GoverningKeyring,
+    KeyringAnchor,
 };
 pub use verifier::membership_view;
 pub use keyring::{

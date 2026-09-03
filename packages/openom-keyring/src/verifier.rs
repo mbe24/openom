@@ -12,7 +12,7 @@ use openom_keyring_api::{
 };
 use openom_protocol::v1::Keyring;
 use openom_protocol::Message;
-use openom_roles::SIGNER_FOUNDER;
+use openom_roles::MEMBER_OWNER;
 
 use crate::{
     bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor,
@@ -81,11 +81,11 @@ fn classify(e: ChainError) -> VerifyError {
     }
 }
 
-/// The founder's verifying key, from the keyring's own founder signer — the first-sight trust root for a
-/// self-signed genesis.
+/// The founder's verifying key, from the keyring's own founder — the sole OWNER-role member (the signer
+/// set is derived from members now, OPE-309) — the first-sight trust root for a self-signed genesis.
 fn founder_key(k: &Keyring) -> Option<VerifyingKey> {
-    let signer = k.authorized_signers.iter().find(|s| s.role == SIGNER_FOUNDER)?;
-    let bytes: [u8; 32] = signer.public_key.as_slice().try_into().ok()?;
+    let founder = k.members.iter().find(|m| m.role == MEMBER_OWNER)?;
+    let bytes: [u8; 32] = founder.author_public_key.as_slice().try_into().ok()?;
     VerifyingKey::from_bytes(&bytes).ok()
 }
 
@@ -161,8 +161,8 @@ impl KeyringVerifier for ChainVerifier {
 mod tests {
     use super::*;
     use crate::{keyring_hash, sign_keyring, SigningKey};
-    use openom_protocol::v1::{AuthorizedSigner, KeyEpoch, KeyWrap, Member, MemberRole, WrapMethod};
-    use openom_roles::{MEMBER_OWNER, SIGNER_FOUNDER as SF};
+    use openom_protocol::v1::{KeyEpoch, KeyWrap, Member, MemberRole, WrapMethod};
+    use openom_roles::MEMBER_OWNER;
 
     /// Wrap a keyring in the shared MembershipEnvelope (chain engine) — the wire `admit` now receives.
     fn env(k: &Keyring) -> Vec<u8> {
@@ -194,11 +194,6 @@ mod tests {
             revision: 1,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![AuthorizedSigner {
-                public_key: pk(founder_seed),
-                member_id: "owner".into(),
-                role: SF,
-            }],
             members: vec![Member {
                 member_id: "owner".into(),
                 role: MEMBER_OWNER,

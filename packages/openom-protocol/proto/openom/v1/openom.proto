@@ -120,10 +120,12 @@ enum Compression {
 }
 
 // Per-tree key material AND governance: the DEK wrapped for each member across
-// epochs, the authorized-signer set, and the signed membership/role list — one
-// signed, anti-rollback, hash-chained document. Signed by ANY authorized signer
-// (1-of-N in V1); changing the signer set itself needs the founder (or, founder
-// gone, all remaining signers) — a client-enforced policy, not a wire distinction.
+// epochs and the signed membership/role list — one signed, anti-rollback,
+// hash-chained document. The authorized-signer set is DERIVED from members (a member
+// at CO_OWNER or stronger is a signer), so it is not a separate roster. Signed by ANY
+// authorized signer (1-of-N in V1); changing the signer set itself (i.e. a member's
+// signer-tier role) needs the founder (or, founder gone, all remaining signers) — a
+// client-enforced policy, not a wire distinction.
 // Keyring-local: the Envelope/Header skeleton and AAD are untouched by this shape.
 message Keyring {
   // Opaque tree id.
@@ -134,9 +136,11 @@ message Keyring {
   // revision lower than the highest it has seen and (with prev_keyring_hash) one
   // that doesn't chain onto the revision it last accepted.
   uint32 revision = 3;
-  // Retired single-signer fields (were signer_key_id and signature). The signer set
-  // and per-signature key hints now live in authorized_signers / signatures.
-  reserved 4, 5;
+  // Retired single-signer fields (were signer_key_id and signature). Per-signature key
+  // hints now live in signatures. Tag 8 was authorized_signers: the signer set is no
+  // longer a separate roster — it is DERIVED from `members` (a member at CO_OWNER or
+  // stronger IS a signer), so signer authority and member role can never drift apart.
+  reserved 4, 5, 8;
   // Keyring layout selector (analogous to Envelope.version): read first, then covered
   // by the signed bytes. A higher value than the client understands is opened
   // read-only rather than misread.
@@ -145,8 +149,6 @@ message Keyring {
   // (revision 1). Chains the revision history so a server fork of history is
   // detectable evidence rather than two indistinguishable valid states.
   bytes prev_keyring_hash = 7;
-  // The trust set: who may author keyring revisions. Exactly one SIGNER_ROLE_FOUNDER.
-  repeated AuthorizedSigner authorized_signers = 8;
   // The signed membership/role manifest — the authority for author_signature
   // verification and role-gated approval, so neither rests on a server-rewritable row.
   repeated Member members = 9;
@@ -160,7 +162,7 @@ message Keyring {
   // unwrapping ONE recovery-key private key (held only under the founder's passphrase and
   // recovery code, never shared with members). V1: exactly one, the founder's.
   repeated RecoveryKey recovery_keys = 11;
-  // Governance: the quorum to change the authorized-signer set (and to change this rule itself).
+  // Governance: the quorum to change the signer set (members at CO_OWNER or stronger) and to change this rule itself.
   // governance_kind: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
   // 3 = threshold. governance_threshold is the m for the threshold kinds. Part of the signed bytes
   // (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
@@ -218,17 +220,6 @@ message RecoveryKey {
   bytes recovery_verifying_key = 4;
 }
 
-// A member of the authorized-signer set — a founder or co-owner who may administer
-// the keyring (rotate keys, add/remove members, re-sign).
-message AuthorizedSigner {
-  // Ed25519 verifying key.
-  bytes public_key = 1;
-  // Account binding (matches a Member and the KeyWrap member_id).
-  string member_id = 2;
-  // Exactly one FOUNDER at all times; the rest are CO_OWNER.
-  SignerRole role = 3;
-}
-
 // The signed role + key manifest for one member (everyone with access, signer or
 // not). Roles and per-member keys live here so they are covered by the signature and
 // cannot be rewritten by the (partly untrusted) server.
@@ -247,18 +238,11 @@ message Member {
 
 // One signature over the keyring's canonical signing bytes.
 message KeyringSignature {
-  // Which authorized_signers[] entry produced this — a hint only; verification is
-  // always against the client's pinned/trusted set, never this claim.
+  // Which signer produced this — a hint only; verification is always against the
+  // client's pinned/trusted set (the members-derived signer set), never this claim.
   bytes signer_public_key = 1;
   // Ed25519 signature over the keyring's canonical signing bytes.
   bytes signature = 2;
-}
-
-// Keyring administrative authority. Exactly one FOUNDER per keyring.
-enum SignerRole {
-  SIGNER_ROLE_UNSPECIFIED = 0;
-  SIGNER_ROLE_FOUNDER = 1;
-  SIGNER_ROLE_CO_OWNER = 2;
 }
 
 // A member's access/approval role. OWNER is the founder (billing payer). CO_OWNER is

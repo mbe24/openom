@@ -45,8 +45,8 @@ pub fn generate_identity() -> Result<SigningKey, CryptoError> {
 /// Append a signature from `signing_key` to the keyring (the any-of model): compute the
 /// §4 canonical bytes and push a [`KeyringSignature`] carrying this signer's public key
 /// (a hint) and the signature. Set `tree_id`, `epochs`, `revision`, `layout_version`,
-/// `prev_keyring_hash`, `authorized_signers`, and `members` first — all are covered.
-/// Multiple signers can each call this on the same keyring (order-independent).
+/// `prev_keyring_hash`, and `members` first — all are covered (the signer set is derived from
+/// `members`). Multiple signers can each call this on the same keyring (order-independent).
 pub fn sign_keyring(keyring: &mut Keyring, signing_key: &SigningKey) {
     let msg = keyring_signing_bytes(keyring);
     let signature = signing_key.sign(&msg).to_bytes().to_vec();
@@ -155,7 +155,7 @@ pub fn keyring_hash(keyring: &Keyring) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openom_protocol::v1::{AuthorizedSigner, KeyEpoch, KeyWrap, Member};
+    use openom_protocol::v1::{KeyEpoch, KeyWrap, Member};
 
     fn sample_keyring() -> Keyring {
         Keyring {
@@ -163,14 +163,9 @@ mod tests {
             revision: 1,
             layout_version: 1,
             prev_keyring_hash: vec![],
-            authorized_signers: vec![AuthorizedSigner {
-                public_key: vec![],
-                member_id: "acct-1".into(),
-                role: 1, // FOUNDER
-            }],
             members: vec![Member {
                 member_id: "acct-1".into(),
-                role: 1, // OWNER
+                role: 1, // OWNER (the sole signer, derived from this member)
                 author_public_key: vec![],
                 hpke_public_key: vec![],
             }],
@@ -197,7 +192,7 @@ mod tests {
     fn sign_then_verify() {
         let id = generate_identity().unwrap();
         let mut kr = sample_keyring();
-        kr.authorized_signers[0].public_key = id.verifying_key().to_bytes().to_vec();
+        kr.members[0].author_public_key = id.verifying_key().to_bytes().to_vec();
         sign_keyring(&mut kr, &id);
         assert_eq!(kr.signatures.len(), 1);
         assert_eq!(kr.signatures[0].signature.len(), SIG_LEN);

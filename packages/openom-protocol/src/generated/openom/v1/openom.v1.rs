@@ -91,10 +91,12 @@ pub struct Header {
     pub blob_id: ::prost::alloc::vec::Vec<u8>,
 }
 /// Per-tree key material AND governance: the DEK wrapped for each member across
-/// epochs, the authorized-signer set, and the signed membership/role list — one
-/// signed, anti-rollback, hash-chained document. Signed by ANY authorized signer
-/// (1-of-N in V1); changing the signer set itself needs the founder (or, founder
-/// gone, all remaining signers) — a client-enforced policy, not a wire distinction.
+/// epochs and the signed membership/role list — one signed, anti-rollback,
+/// hash-chained document. The authorized-signer set is DERIVED from members (a member
+/// at CO_OWNER or stronger is a signer), so it is not a separate roster. Signed by ANY
+/// authorized signer (1-of-N in V1); changing the signer set itself (i.e. a member's
+/// signer-tier role) needs the founder (or, founder gone, all remaining signers) — a
+/// client-enforced policy, not a wire distinction.
 /// Keyring-local: the Envelope/Header skeleton and AAD are untouched by this shape.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Keyring {
@@ -119,9 +121,6 @@ pub struct Keyring {
     /// detectable evidence rather than two indistinguishable valid states.
     #[prost(bytes="vec", tag="7")]
     pub prev_keyring_hash: ::prost::alloc::vec::Vec<u8>,
-    /// The trust set: who may author keyring revisions. Exactly one SIGNER_ROLE_FOUNDER.
-    #[prost(message, repeated, tag="8")]
-    pub authorized_signers: ::prost::alloc::vec::Vec<AuthorizedSigner>,
     /// The signed membership/role manifest — the authority for author_signature
     /// verification and role-gated approval, so neither rests on a server-rewritable row.
     #[prost(message, repeated, tag="9")]
@@ -138,7 +137,7 @@ pub struct Keyring {
     /// recovery code, never shared with members). V1: exactly one, the founder's.
     #[prost(message, repeated, tag="11")]
     pub recovery_keys: ::prost::alloc::vec::Vec<RecoveryKey>,
-    /// Governance: the quorum to change the authorized-signer set (and to change this rule itself).
+    /// Governance: the quorum to change the signer set (members at CO_OWNER or stronger) and to change this rule itself.
     /// governance_kind: 0 = founder-or-unanimity (default), 1 = founder-only, 2 = founder-or-threshold,
     /// 3 = threshold. governance_threshold is the m for the threshold kinds. Part of the signed bytes
     /// (tamper-evident) and enforced from the PRIOR revision (anti-downgrade).
@@ -169,7 +168,7 @@ pub struct KeyringUpdate {
     /// storage / CAS / head-advance on the VERIFIED `Admitted.update_ref`, never on this.
     #[prost(bytes="vec", tag="4")]
     pub update_ref: ::prost::alloc::vec::Vec<u8>,
-    /// The opaque membership update — a openom-keyring-api `MembershipEnvelope` wrapping the engine's signed body
+    /// The opaque membership update — an openom-keyring-api `MembershipEnvelope` wrapping the engine's signed body
     /// (chain: a Keyring). The server never decodes it; it hands it to the dispatched verifier's `admit`.
     #[prost(bytes="vec", tag="5")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
@@ -203,20 +202,6 @@ pub struct RecoveryKey {
     #[prost(bytes="vec", tag="4")]
     pub recovery_verifying_key: ::prost::alloc::vec::Vec<u8>,
 }
-/// A member of the authorized-signer set — a founder or co-owner who may administer
-/// the keyring (rotate keys, add/remove members, re-sign).
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AuthorizedSigner {
-    /// Ed25519 verifying key.
-    #[prost(bytes="vec", tag="1")]
-    pub public_key: ::prost::alloc::vec::Vec<u8>,
-    /// Account binding (matches a Member and the KeyWrap member_id).
-    #[prost(string, tag="2")]
-    pub member_id: ::prost::alloc::string::String,
-    /// Exactly one FOUNDER at all times; the rest are CO_OWNER.
-    #[prost(enumeration="SignerRole", tag="3")]
-    pub role: i32,
-}
 /// The signed role + key manifest for one member (everyone with access, signer or
 /// not). Roles and per-member keys live here so they are covered by the signature and
 /// cannot be rewritten by the (partly untrusted) server.
@@ -240,8 +225,8 @@ pub struct Member {
 /// One signature over the keyring's canonical signing bytes.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KeyringSignature {
-    /// Which authorized_signers\[\] entry produced this — a hint only; verification is
-    /// always against the client's pinned/trusted set, never this claim.
+    /// Which signer produced this — a hint only; verification is always against the
+    /// client's pinned/trusted set (the members-derived signer set), never this claim.
     #[prost(bytes="vec", tag="1")]
     pub signer_public_key: ::prost::alloc::vec::Vec<u8>,
     /// Ed25519 signature over the keyring's canonical signing bytes.
@@ -440,36 +425,6 @@ impl Compression {
             "COMPRESSION_UNSPECIFIED" => Some(Self::Unspecified),
             "COMPRESSION_NONE" => Some(Self::None),
             "COMPRESSION_ZSTD" => Some(Self::Zstd),
-            _ => None,
-        }
-    }
-}
-/// Keyring administrative authority. Exactly one FOUNDER per keyring.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum SignerRole {
-    Unspecified = 0,
-    Founder = 1,
-    CoOwner = 2,
-}
-impl SignerRole {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "SIGNER_ROLE_UNSPECIFIED",
-            Self::Founder => "SIGNER_ROLE_FOUNDER",
-            Self::CoOwner => "SIGNER_ROLE_CO_OWNER",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "SIGNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
-            "SIGNER_ROLE_FOUNDER" => Some(Self::Founder),
-            "SIGNER_ROLE_CO_OWNER" => Some(Self::CoOwner),
             _ => None,
         }
     }

@@ -48,9 +48,7 @@ WSL2/Docker).
 
 ```rust
 use openom_keyring::{bootstrap_from_genesis, keyring_hash, sign_keyring, verify_transition, SigningKey};
-use openom_protocol::v1::{
-    AuthorizedSigner, KeyEpoch, Keyring, KeyWrap, Member, MemberRole, SignerRole, WrapMethod,
-};
+use openom_protocol::v1::{KeyEpoch, Keyring, KeyWrap, Member, MemberRole, WrapMethod};
 
 // In production an identity is passphrase-derived (openom_crypto::derive_root); a fixed seed keeps this
 // example deterministic.
@@ -72,11 +70,7 @@ let mut genesis = Keyring {
     revision: 1,
     layout_version: 1,
     prev_keyring_hash: vec![],
-    authorized_signers: vec![AuthorizedSigner {
-        public_key: founder_key.clone(),
-        member_id: "owner".into(),
-        role: SignerRole::Founder as i32,
-    }],
+    // The signer set is DERIVED from members: the OWNER-role member is the founder signer (OPE-309).
     members: vec![Member {
         member_id: "owner".into(),
         role: MemberRole::Owner as i32,
