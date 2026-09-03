@@ -76,7 +76,7 @@ fn validate_proposal(
     }
     if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
         return Err(ApiError::BadRequest(
-            "dev key_id refused under RUN_MODE=production (§16)".into(),
+            "dev key_id refused under STORAGE=cloud (§16)".into(),
         ));
     }
     let computed = Sha256::digest(&env.ciphertext);
@@ -108,7 +108,7 @@ pub async fn create_proposal(
         ));
     }
     let size = body.len() as i64;
-    let ciphertext_hash = validate_proposal(&body, tree_id, !state.config.is_local())?;
+    let ciphertext_hash = validate_proposal(&body, tree_id, state.config.storage_is_cloud())?;
 
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)

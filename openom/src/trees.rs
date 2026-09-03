@@ -73,7 +73,7 @@ fn validate_snapshot(
     // production so a misconfigured dev client can't write with the well-known dev DEK.
     if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
         return Err(ApiError::BadRequest(
-            "dev key_id refused under RUN_MODE=production (§16)".into(),
+            "dev key_id refused under STORAGE=cloud (§16)".into(),
         ));
     }
     // ciphertext_hash is a hash of *ciphertext*, so the keyless server verifies it.
@@ -100,7 +100,7 @@ pub async fn put_tree(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("tree.put");
-    let valid = validate_snapshot(&body, tree_id, !state.config.is_local())?;
+    let valid = validate_snapshot(&body, tree_id, state.config.storage_is_cloud())?;
     let expected = if_match(&headers);
 
     // New opaque version + fresh key; the object is written before the pointer CAS.

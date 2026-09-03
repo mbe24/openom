@@ -92,7 +92,7 @@ fn validate_delta(
     }
     if reject_dev_key && header.key_id.as_slice() == openom_crypto::DEV_KEY_ID {
         return Err(ApiError::BadRequest(
-            "dev key_id refused under RUN_MODE=production (§16)".into(),
+            "dev key_id refused under STORAGE=cloud (§16)".into(),
         ));
     }
     let computed = Sha256::digest(&env.ciphertext);
@@ -178,7 +178,7 @@ pub async fn append_log(
             "delta exceeds the per-append size limit".into(),
         ));
     }
-    let d = validate_delta(&body, tree_id, !state.config.is_local())?;
+    let d = validate_delta(&body, tree_id, state.config.storage_is_cloud())?;
 
     let mut tx = state.db.begin().await.map_err(internal)?;
     // Serialize seq assignment on this tree: lock the row, so concurrent appenders can't gap/collide.

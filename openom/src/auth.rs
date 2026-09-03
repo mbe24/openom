@@ -39,7 +39,7 @@ impl FromRequestParts<AppState> for Identity {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "));
 
-        if state.config.is_local() {
+        if state.config.auth_is_dev() {
             // Fake auth: no signature check. A bearer token that parses as a UUID
             // lets a test impersonate a specific member; otherwise the default one.
             let id = bearer

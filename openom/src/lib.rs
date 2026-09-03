@@ -122,7 +122,7 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/media/{blob_id}/detach",
             post(media::detach),
         );
-    if state.config.is_local() {
+    if state.config.dev_routes_enabled() {
         router = router.route("/dev/gc", post(media::sweep_dev));
     }
     router
@@ -148,7 +148,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     sqlx::migrate!("./migrations").run(&db).await?;
     tracing::info!("migrations applied");
 
-    if config.is_local() {
+    if config.auth_is_dev() {
         seed_local_account(&db, config.local_member_id).await?;
     }
 
@@ -160,7 +160,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     let storage = S3Store::from_config(config)?;
     // Dev bootstrap: MinIO starts empty, so create the bucket up front. In prod the
     // bucket is provisioned out of band and this is a cheap already-exists no-op.
-    if config.is_local() {
+    if config.storage_is_local() {
         if let Err(err) = storage.ensure_bucket().await {
             tracing::warn!(%err, "could not ensure local bucket (MinIO not up yet?)");
         }

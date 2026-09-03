@@ -13,6 +13,8 @@ async fn main() -> Result<(), lambda_http::Error> {
 
     tracing::info!(
         run_mode = ?config.run_mode,
+        storage = ?config.storage,
+        auth = ?config.auth,
         envelope_version = openom_protocol::ENVELOPE_VERSION,
         ciphers = openom_crypto::cipher_suite(),
         "openom starting"
@@ -21,7 +23,7 @@ async fn main() -> Result<(), lambda_http::Error> {
     let state = build_state(&config).await?;
     let router = app(state);
 
-    if config.is_local() {
+    if !config.is_lambda() {
         let addr = config.http_addr.clone();
         tracing::info!(%addr, "serving locally over plain HTTP");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -65,7 +67,7 @@ fn init_tracing(config: &Config) -> Option<SdkTracerProvider> {
         tracing_opentelemetry::layer().with_tracer(p.tracer("openom"))
     });
 
-    let fmt_layer = if config.is_local() {
+    let fmt_layer = if !config.is_lambda() {
         fmt::layer().boxed()
     } else {
         fmt::layer().json().boxed()
