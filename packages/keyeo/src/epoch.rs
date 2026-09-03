@@ -46,8 +46,8 @@ use crate::roles::Role;
 use crate::signature::SignatureScheme;
 use crate::CryptoError;
 
-const EPOCH_WRAP_INFO: &[u8] = b"flowcontrol:epoch:wraps:v1";
-const COMMITMENT_PREFIX: &[u8] = b"flowcontrol:epoch:members:v1";
+const EPOCH_WRAP_INFO: &[u8] = b"keyeo:epoch:wraps:v1";
+const COMMITMENT_PREFIX: &[u8] = b"keyeo:epoch:members:v1";
 
 /// Deterministic bytes binding an epoch (group + number + membership commitment) — the HPKE `info` used
 /// for both wrapping and unwrapping, so the writer and reader agree without exchanging anything else. The
