@@ -10,8 +10,8 @@
 
 `keyeo` is domain-free; this crate is its openom binding. It fixes the four generic type parameters —
 op ids are 32-byte content hashes, member ids are openom member strings, roles are [`KeyringRole`]
-(`Owner=1 … Viewer=5`, bound to `keyeo_api::ROLE_*`), signatures are [`OpenomSign`] (strict Ed25519 via
-`edsign`) — and supplies the authority policy: [`KeyringAccess`] gates keyring writes to signers
+(`Owner=1 … Viewer=5`, bound to `keyeo_api::ROLE_*`), signatures are keyeo's unified [`Ed25519`] (strict
+Ed25519 via `edsign`) — and supplies the authority policy: [`KeyringAccess`] gates keyring writes to signers
 (CoOwner-or-stronger), with founder-signed governance and, in v2, per-family [`KeyringQuorum`] rules.
 It adds **recovery** (the RVK derived from the escrowed RRK secret, pinned in genesis, authorizing a
 `ReFound`) and implements the keyless [`keyeo_api::KeyringVerifier`] seam so the server can admit ops and

@@ -13,8 +13,8 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
 use crate::dag::resolver::{GroupId, MemberId, MembershipAction, OpId, SignedOp};
-use crate::roles::Role;
-use crate::signature::{Ed25519, SignatureScheme};
+use crate::Role;
+use crate::{Ed25519, SignatureScheme};
 
 /// A concrete, self-contained signed membership operation.
 ///
@@ -158,7 +158,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> SignedOp for Op<OId,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::Ed25519;
+    use crate::Ed25519;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
     struct TRole;

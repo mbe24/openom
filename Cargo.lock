@@ -2854,6 +2854,7 @@ name = "keyeo"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "keyeo-core",
  "keyeo-crypto",
  "petgraph",
  "postcard",
@@ -2870,6 +2871,16 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "keyeo-core"
+version = "0.1.0"
+dependencies = [
+ "edsign",
+ "postcard",
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

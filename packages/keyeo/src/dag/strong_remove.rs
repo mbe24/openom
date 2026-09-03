@@ -52,8 +52,8 @@ use crate::access::AccessControl;
 use crate::blocklace::Graph;
 use crate::dag::lamport::apply_action;
 use crate::dag::resolver::{GroupState, MembershipAction, OpId, Resolver, SignedOp};
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 
 /// Tracks which operations to ignore during rebuild. Keyed on the real `OId`.
 #[derive(Clone, Debug)]

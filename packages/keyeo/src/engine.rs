@@ -9,8 +9,8 @@ use crate::dag::resolver::{
 };
 use crate::epoch::{membership_commitment, reconcile_epochs, Epoch};
 use crate::quorum::{Individual, QuorumPolicy};
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 use std::collections::{HashMap, HashSet};
 
 type ApplyResult<Op> = Result<
@@ -659,7 +659,7 @@ pub fn keyeo<Op, R, MId>(
     min_role: R,
 ) -> Keyeo<Op, DefaultAccessControl<R>, crate::dag::strong_remove::StrongRemove>
 where
-    Op: SignedOp<MemberId = MId, R = R, S = crate::signature::Ed25519>,
+    Op: SignedOp<MemberId = MId, R = R, S = crate::Ed25519>,
     R: Role,
     MId: crate::dag::resolver::MemberId,
 {

@@ -5,8 +5,8 @@ use crate::blocklace::Graph;
 use crate::dag::resolver::{
     GroupState, MemberId, MemberState, MembershipAction, MembershipEvent, OpId, Resolver, SignedOp,
 };
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Default)]

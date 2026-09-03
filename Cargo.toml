@@ -26,6 +26,7 @@ members = [
     "packages/openom-vault-host",
     "packages/journal",
     "packages/openom-sync",
+    "packages/keyeo-core",
     "packages/keyeo",
     "packages/keyeo-dag",
     "packages/docsync",
@@ -71,6 +72,9 @@ blobstore = { path = "packages/blobstore" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
 # roles/signing/keys onto keyeo's seams in keyeo-dag; keyeo itself never gains an openom dep.
 keyeo = { path = "packages/keyeo" }
+# The keyeo engine-family SEAM types (Role / SignatureScheme+Ed25519 / CanonicalBytes / Requirement),
+# extracted below the engine so every keyeo engine binds one definition. openom-free / dalek-free.
+keyeo-core = { path = "packages/keyeo-core" }
 
 # Protocol / serialization.
 prost = "0.14"

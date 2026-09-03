@@ -1,42 +1,18 @@
 //! Canonical, versioned encoding of an operation's signed content — the byte layout that
 //! signatures and content-addressed ids bind to.
 //!
-//! **Design "A":** [`CanonicalBytes`] is the seam — the single definition of "the bytes".
-//! **Default "B":** a blanket impl over `serde::Serialize` via **postcard**, a compact,
-//! deterministic binary format that is byte-identical across native and wasm Rust builds. (The old
-//! `format!("{:?}")` encoding was never guaranteed stable across builds, so it could never back a
-//! content hash.) To adopt a non-postcard layout for a specific type later, drop the blanket and
-//! implement the trait by hand — a versioned change, since every id/signature over that type moves.
+//! The [`CanonicalBytes`] seam and its postcard default ([`Postcard`]) live in `keyeo-core`; this module
+//! owns the concrete block-layout encoders ([`canonical_encode`] / [`canonical_encode_epoch`]) and the
+//! by-hand impls for keyeo's own payload types (`MemberInit`, `MembershipAction`, `DekWrap`), which name
+//! engine types and route their `Serialize` sub-fields through `Postcard`.
 //!
 //! The signed content is `(parents, author, action)` — **not** the op id. A content-addressed id is
 //! `H(this ‖ signature ‖ author_public_key)`, so signing over the id would be circular; and a
 //! signature must bind the content, not a caller-chosen label.
 
-use serde::Serialize;
+use keyeo_core::{CanonicalBytes, Postcard, Role, SignatureScheme};
 
 use crate::dag::resolver::{DekWrap, GroupId, MemberId, MemberInit, MembershipAction, OpId};
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
-
-/// The canonical-bytes seam. The default ("B") is a deterministic postcard encoding for anything
-/// `Serialize` — used for the primitive `Id`/`Role`/`OpId` values. Types that embed non-serde
-/// crypto byte-arrays (`MemberInit`, `MembershipAction`) implement it by hand below.
-pub trait CanonicalBytes {
-    fn write_canonical(&self, out: &mut Vec<u8>);
-}
-
-/// A newtype so the postcard default doesn't blanket-cover *every* `Serialize` type — which would
-/// collide (coherence) with the hand impls below. Wrap a `Serialize` value to get its postcard bytes.
-struct Postcard<'a, T: Serialize>(&'a T);
-
-impl<T: Serialize> CanonicalBytes for Postcard<'_, T> {
-    fn write_canonical(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(
-            &postcard::to_allocvec(self.0)
-                .expect("postcard serialization of canonical op content is infallible"),
-        );
-    }
-}
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id, R, S> {
     #[deny(unused_variables)]

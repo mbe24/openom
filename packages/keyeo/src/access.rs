@@ -1,7 +1,7 @@
 //! Access control — pluggable authorization policy.
 use crate::dag::resolver::{GroupState, MemberId, MembershipAction};
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 use std::marker::PhantomData;
 
 pub trait AccessControl<Id: MemberId, R: Role, S: SignatureScheme>: Send + Sync {

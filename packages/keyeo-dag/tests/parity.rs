@@ -59,7 +59,7 @@ fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
 fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
     Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
 }
-fn add(member: &str, role: KeyringRole, seed: u8) -> MembershipAction<String, KeyringRole, keyeo_dag::OpenomSign> {
+fn add(member: &str, role: KeyringRole, seed: u8) -> MembershipAction<String, KeyringRole, keyeo_dag::Ed25519> {
     MembershipAction::Add {
         member: member.to_string(),
         role,

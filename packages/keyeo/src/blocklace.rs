@@ -234,7 +234,7 @@ mod tests {
         // The block-bytes layer (`canonical_encode`) is generic over the payload via `CanonicalBytes`:
         // here a toy payload — no MembershipAction, no roles, no keys — proves a blocklace block's signed
         // bytes are defined independently of what it carries, and testable without membership scaffolding.
-        use crate::canonical::{canonical_encode, CanonicalBytes};
+        use crate::{canonical::canonical_encode, CanonicalBytes};
         struct Payload(u8);
         impl CanonicalBytes for Payload {
             fn write_canonical(&self, out: &mut Vec<u8>) {

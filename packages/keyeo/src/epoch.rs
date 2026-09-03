@@ -40,8 +40,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use crate::dag::resolver::{DekWrap, GroupId, MemberId, OpId};
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 use crate::CryptoError;
 use keyeo_crypto::{generate_dek, hpke_unwrap_dek, hpke_wrap_dek, Key32};
 
@@ -191,7 +191,7 @@ impl<OId: OpId, MId: MemberId, S: SignatureScheme> Epoch<OId, MId, S> {
 /// The canonical bytes an epoch's author signs over: `(parents, commitment, epoch, wraps)`. Both the
 /// author ([`Epoch::author`]) and the verifier ([`verify_epoch`]) build these from the epoch's own
 /// fields, so a signature binds to exactly this content and can't be transplanted. Delegates to the
-/// shared [`crate::canonical::CanonicalBytes`] seam (G-S5) — there is no second hand-rolled encoder.
+/// shared [`crate::CanonicalBytes`] seam (G-S5) — there is no second hand-rolled encoder.
 pub fn epoch_signing_bytes<OId: OpId, MId: MemberId>(
     group_id: &GroupId,
     parents: &[OId],
@@ -290,7 +290,7 @@ pub fn wraps_complete<Id: MemberId>(wraps: &[DekWrap<Id>], active: &[Id]) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::Ed25519;
+    use crate::Ed25519;
     use keyeo_crypto::{derive_hpke_keypair, Key32};
     use serde::Serialize;
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

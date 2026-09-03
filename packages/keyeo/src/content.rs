@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use crate::canonical::canonical_encode;
 use crate::dag::resolver::{GroupId, MemberId, MembershipAction, OpId, SignedOp};
 use crate::op::Op;
-use crate::roles::Role;
-use crate::signature::{Ed25519, SignatureScheme};
+use crate::Role;
+use crate::{Ed25519, SignatureScheme};
 
 /// A 32-byte content-addressed operation id (SHA-256 of the op's content).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize)]
@@ -103,7 +103,7 @@ pub fn verify_content_id<MId: MemberId, R: Role, S: SignatureScheme>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signature::Ed25519;
+    use crate::Ed25519;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
     struct TRole;

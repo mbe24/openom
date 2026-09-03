@@ -10,9 +10,14 @@ name = "keyeo"
 path = "src/lib.rs"
 
 [dependencies]
+# The engine-family SEAM types (Role / SignatureScheme+Ed25519 / CanonicalBytes / Requirement),
+# re-exported so `keyeo::X` keeps resolving for keyeo-dag and other consumers (OPE-306).
+keyeo-core = { path = "../keyeo-core" }
 # The generic crypto primitives (DEK generation, HPKE DEK wraps, Key32/CryptoError) — openom-free,
 # so keyeo stays standalone-publishable (OPE-305). The Argon2id/AEAD/recovery surface rides along.
 keyeo-crypto = { path = "../keyeo-crypto" }
+# Still used directly by the signing helpers (Op::sign / epoch + content signing take a dalek SigningKey);
+# the verify seam moved to keyeo-core (Ed25519 via edsign), but the sign side keeps this edge.
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 sha2 = "0.10"
 thiserror = "2"

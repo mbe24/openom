@@ -33,7 +33,7 @@ and is publishable on its own.
 | **KEYEO-2** | Resolution is order-independent: the same op set in any delivery order resolves to the same state. | Sequencer-free convergence — replicas that receive ops in different orders agree. | `tests::resolution_is_order_independent`, `epoch::tests::commitment_is_order_independent` |
 | **KEYEO-3** | A content id verifies its bytes and detects any tamper. | Ops are content-addressed; a mutated op is caught, not silently accepted into the DAG. | `content::tests::content_id_verifies_and_detects_tampering` |
 | **KEYEO-4** | Concurrent epochs reconcile to a single shared DEK, and a fresh epoch's DEK round-trips for every current member. | Two members re-keying at once must not fork the group's encryption; everyone lands on one key. | `epoch::tests::concurrent_epochs_reconcile_to_a_single_shared_dek`, `epoch::tests::fresh_epoch_round_trips_for_its_members` |
-| **KEYEO-5** | Quorum governance is exact: `All` is unanimity (and the empty set is not a quorum); `EitherFounderOr` accepts the founder alone or the configured set. | Multi-party authority can't be met by an off-by-one or an empty roster. | `quorum::tests::all_is_unanimity_and_the_empty_set_is_not`, `quorum::tests::either_is_founder_or_unanimity` |
+| **KEYEO-5** | Quorum governance is exact: `All` is unanimity (and the empty set is not a quorum); `EitherFounderOr` accepts the founder alone or the configured set. | Multi-party authority can't be met by an off-by-one or an empty roster. | (the generic `Requirement` now lives in `keyeo-core`) `keyeo_core::quorum::tests::all_is_unanimity_and_the_empty_set_is_not`, `keyeo_core::quorum::tests::either_is_founder_or_unanimity`; `Individual` inertness: `quorum::tests::individual_governance_never_reaches_quorum` |
 
 Run: `node scripts/cargo.mjs test -p keyeo` (from the repo root; on Windows cargo runs under WSL2/Docker).
 
@@ -54,6 +54,8 @@ and `compact` (history GC).
 
 ## Position
 
-Layer 0 — the generic base of the keyring stack, depended on only by `keyeo-dag` (the openom binding). It
-depends on `edsign` + `keyeo-crypto` (its HPKE / AEAD / KDF primitives — `keyeo` no longer carries its own
-`kdf`/`hpke_wrap`) but no openom crate, so nothing openom sits beneath it. Full dependency graph: see `packages/README.md`.
+Layer 0 — the engine over the keyring stack's seam types, depended on only by `keyeo-dag` (the openom
+binding). It depends on `keyeo-core` (the generic `Role` / `SignatureScheme` / `CanonicalBytes` /
+`Requirement` seam types, re-exported so `keyeo::X` keeps resolving) + `edsign` + `keyeo-crypto` (its HPKE
+/ AEAD / KDF primitives — `keyeo` no longer carries its own `kdf`/`hpke_wrap`) but no openom crate, so
+nothing openom sits beneath it. Full dependency graph: see `packages/README.md`.

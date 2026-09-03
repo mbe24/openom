@@ -124,9 +124,9 @@ struct DagAnchor {
     ops: Vec<Vec<u8>>,
 }
 
-/// Mint a signed, content-addressed op carrying an opaque `sealing` payload, using openom's `OpenomSign`
-/// scheme (keyeo's `Op::content_addressed` is Ed25519/`ContentId`-specific; openom's `KeyringOp` uses
-/// `[u8; 32]` ids + `OpenomSign`, so we derive the content id via the generic `keyeo::content_id`).
+/// Mint a signed, content-addressed op carrying an opaque `sealing` payload, using keyeo's unified
+/// `Ed25519` scheme (keyeo's `Op::content_addressed` is `ContentId`-specific; openom's `KeyringOp` uses
+/// `[u8; 32]` ids + `Ed25519`, so we derive the content id via the generic `keyeo::content_id`).
 fn mint(
     group_id: &keyeo::GroupId,
     parents: Vec<[u8; 32]>,

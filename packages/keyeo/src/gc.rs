@@ -18,7 +18,7 @@
 //!   history; a snapshot/`compact` that actually drops op's lands with the sync layer (FLO-81).
 
 use crate::dag::resolver::MemberId;
-use crate::roles::Role;
+use crate::Role;
 
 /// A set of op ids known to have been replicated to all peers — the most recent frontier below which
 /// the local store may prune. Until a sync layer supplies it, callers pass a conservative frontier.
@@ -35,7 +35,7 @@ pub struct Snapshot<
     OId: crate::dag::resolver::OpId,
     Id: MemberId,
     R: Role,
-    S: crate::signature::SignatureScheme,
+    S: crate::SignatureScheme,
 > {
     pub frontier: Vec<OId>,
     pub state: crate::dag::resolver::GroupState<Id, R, S>,

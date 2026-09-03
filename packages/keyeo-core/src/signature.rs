@@ -1,5 +1,8 @@
 //! Signature schemes — pluggable, with Ed25519 as default.
-use ed25519_dalek::VerifyingKey;
+//!
+//! The one concrete scheme, [`Ed25519`], verifies through [`edsign`] — i.e. `verify_strict`, which
+//! rejects small-order / torsion public keys and non-canonical signatures. This is the single Ed25519
+//! verify path every keyeo engine shares (there is no raw `ed25519-dalek` edge here; §0 / OPE-205/215).
 use std::fmt::Debug;
 use std::hash::Hash;
 use thiserror::Error;
@@ -16,6 +19,8 @@ pub trait SignatureScheme: Debug + Clone + PartialEq + Eq + Send + Sync {
     fn verify(pk: &Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> Result<(), SigError>;
 }
 
+/// Ed25519 through the [`edsign`] seam: `verify` is `verify_strict`, so small-order / torsion keys and
+/// non-canonical signatures are rejected. The single Ed25519 scheme shared by every keyeo engine.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ed25519;
 
@@ -23,8 +28,8 @@ impl SignatureScheme for Ed25519 {
     type PublicKey = [u8; 32];
     type Signature = [u8; 64];
     fn verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SigError> {
-        let pk = VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
-        let sig = ed25519_dalek::Signature::from_bytes(sig);
-        pk.verify_strict(msg, &sig).map_err(|_| SigError)
+        let vk = edsign::VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
+        vk.verify(msg, &edsign::Signature::from_bytes(sig))
+            .map_err(|_| SigError)
     }
 }

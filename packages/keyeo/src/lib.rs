@@ -10,11 +10,9 @@ pub mod epoch;
 pub mod gc;
 pub mod op;
 pub mod quorum;
-pub mod roles;
-pub mod signature;
 
 pub use access::{AccessControl, DefaultAccessControl, DynAccessControl};
-pub use canonical::{canonical_encode, CanonicalBytes};
+pub use canonical::canonical_encode;
 pub use content::{content_id, verify_content_id, ContentId};
 pub use blocklace::Graph;
 pub use dag::lamport::LamportTiebreak;
@@ -30,9 +28,12 @@ pub use epoch::{
 };
 pub use gc::{compact, Frontier, RetentionPolicy, Snapshot};
 pub use op::Op;
-pub use quorum::{Individual, QuorumPolicy, Requirement};
-pub use roles::Role;
-pub use signature::{Ed25519, SigError, SignatureScheme};
+pub use quorum::{Individual, QuorumPolicy};
+
+// The generic engine-family SEAM types now live in keyeo-core (OPE-306). Re-exported here so `keyeo::X`
+// keeps resolving for keyeo-dag and the engine's other consumers (Role / SignatureScheme / SigError /
+// Ed25519 / CanonicalBytes / Requirement).
+pub use keyeo_core::{CanonicalBytes, Ed25519, Requirement, Role, SigError, SignatureScheme};
 
 // The generic crypto primitives now live in keyeo-crypto (OPE-305). Re-exported here so `keyeo::X`
 // keeps resolving for the group-membership engine's own consumers.

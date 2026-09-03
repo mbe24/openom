@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn rvk_signs_and_the_edsign_seam_verifies() {
-        // A ReFound will be signed by the RVK and verified by every replica via the same OpenomSign seam
+        // A ReFound will be signed by the RVK and verified by every replica via the same Ed25519 seam
         // (edsign verify_strict) the engine authenticates all ops with.
         let secret = [9u8; 32];
         let rvk = derive_rvk(&secret);

@@ -1,0 +1,17 @@
+[package]
+name = "keyeo-core"
+description = "The keyeo engine-family SEAM: the generic membership/signing trait types every keyeo engine binds to — the Role + SignatureScheme (Ed25519 via edsign) + CanonicalBytes seams and the M-of-N Requirement. openom-free / dalek-free / standalone-publishable (OPE-306)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# The single Ed25519 verify seam (verify_strict-only): keyeo-core's unified `Ed25519` scheme goes through
+# edsign, so no crate re-derives raw dalek and the strict check can't be bypassed (§0 / OPE-205/215).
+edsign.workspace = true
+thiserror.workspace = true
+# Canonical binary encoding behind the CanonicalBytes seam: compact + deterministic, and byte-identical
+# across native and wasm Rust builds (a content-hash id depends on that).
+postcard = { version = "1", features = ["use-std"] }

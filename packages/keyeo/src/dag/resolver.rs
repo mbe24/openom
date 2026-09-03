@@ -1,7 +1,7 @@
 //! Core types: Resolver trait, GroupState, MembershipAction, MemberState.
 
-use crate::roles::Role;
-use crate::signature::SignatureScheme;
+use crate::Role;
+use crate::SignatureScheme;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
@@ -169,7 +169,7 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberState<R: Role, S: SignatureScheme = crate::signature::Ed25519> {
+pub struct MemberState<R: Role, S: SignatureScheme = crate::Ed25519> {
     pub role: R,
     pub member_counter: u64,
     pub access_counter: u64,
@@ -208,7 +208,7 @@ pub struct DekWrap<Id: MemberId> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::signature::Ed25519> {
+pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::Ed25519> {
     pub members: HashMap<Id, MemberState<R, S>>,
     /// Monotonic epoch, bumped by the engine when the resolved active membership changes (item 3).
     pub epoch: u64,

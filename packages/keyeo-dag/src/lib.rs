@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role, SigError, SignatureScheme};
+use keyeo::{AccessControl, GroupState, MembershipAction, QuorumPolicy, Requirement, Role};
 use std::collections::HashSet;
 
 pub mod blob_sync;
@@ -8,21 +8,11 @@ pub mod client;
 pub mod recovery;
 pub mod verifier;
 
-/// openom's Ed25519 plugged into keyeo's `SignatureScheme` seam, so the engine verifies with
-/// edsign's `verify_strict` (rejecting small-order / torsion keys and non-canonical signatures)
-/// rather than keyeo's built-in dalek path.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OpenomSign;
-
-impl SignatureScheme for OpenomSign {
-    type PublicKey = [u8; 32];
-    type Signature = [u8; 64];
-    fn verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> Result<(), SigError> {
-        let vk = edsign::VerifyingKey::from_bytes(pk).map_err(|_| SigError)?;
-        vk.verify(msg, &edsign::Signature::from_bytes(sig))
-            .map_err(|_| SigError)
-    }
-}
+// The signature scheme is keyeo's unified [`Ed25519`] (verify = edsign's `verify_strict`, rejecting
+// small-order / torsion keys and non-canonical signatures) — re-exported so `keyeo_dag::Ed25519` names
+// the scheme the keyring types are instantiated with. It replaces the old crate-local `OpenomSign`, a
+// byte-identical duplicate of the same edsign verify that was deduplicated into keyeo-core (OPE-306).
+pub use keyeo::Ed25519;
 
 /// A keyring role, power-descending (**lower is stronger**): `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
 /// bound to keyeo-api's engine-neutral role convention ([`keyeo_api::ROLE_OWNER`] …) — which openom's
@@ -58,11 +48,11 @@ impl Role for KeyringRole {
 }
 
 /// The concrete keyeo instantiation for the openom keyring: op ids are 32-byte content hashes, member
-/// ids are openom member-id strings, roles are [`KeyringRole`], signatures are [`OpenomSign`].
-pub type KeyringAction = MembershipAction<String, KeyringRole, OpenomSign>;
-pub type KeyringOp = keyeo::Op<[u8; 32], String, KeyringRole, OpenomSign>;
-pub type KeyringState = GroupState<String, KeyringRole, OpenomSign>;
-pub type KeyringMemberInit = keyeo::MemberInit<String, KeyringRole, OpenomSign>;
+/// ids are openom member-id strings, roles are [`KeyringRole`], signatures are keyeo's unified [`Ed25519`].
+pub type KeyringAction = MembershipAction<String, KeyringRole, Ed25519>;
+pub type KeyringOp = keyeo::Op<[u8; 32], String, KeyringRole, Ed25519>;
+pub type KeyringState = GroupState<String, KeyringRole, Ed25519>;
+pub type KeyringMemberInit = keyeo::MemberInit<String, KeyringRole, Ed25519>;
 pub type KeyringEngine = keyeo::Keyeo<KeyringOp, KeyringAccess, keyeo::StrongRemove>;
 /// The v2 keyring engine — same authority + strong-remove, plus a [`KeyringQuorum`] multi-signer policy
 /// for privileged changes. Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
@@ -130,7 +120,7 @@ impl KeyringAccess {
     }
 }
 
-impl AccessControl<String, KeyringRole, OpenomSign> for KeyringAccess {
+impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
     fn is_authorized(
         &self,
         state: &KeyringState,
@@ -340,7 +330,7 @@ impl KeyringQuorum {
     }
 }
 
-impl QuorumPolicy<String, KeyringRole, OpenomSign> for KeyringQuorum {
+impl QuorumPolicy<String, KeyringRole, Ed25519> for KeyringQuorum {
     fn eligible(&self, state: &KeyringState, target: &KeyringAction) -> HashSet<String> {
         // Any signer may propose/approve under every rule; the rule only decides how many are required.
         Self::signer_set(state, target_member(target), KeyringRole::is_signer)
@@ -430,7 +420,7 @@ mod tests {
     #[test]
     fn founder_signed_governance_resolves_through_keyeo() {
         // founder (Owner) creates the group and adds bob as a CoOwner (a signer); bob (a signer) then
-        // adds an ordinary Editor. The openom seams (OpenomSign, KeyringRole, KeyringAccess) resolve end
+        // adds an ordinary Editor. The openom seams (Ed25519, KeyringRole, KeyringAccess) resolve end
         // to end.
         let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
         k.apply(sign_op(
@@ -1050,7 +1040,7 @@ mod tests {
     #[test]
     fn the_edsign_seam_rejects_a_forged_signature() {
         // A structurally-valid op whose signature is over the wrong bytes must be rejected by the
-        // engine's authenticate step, i.e. by OpenomSign::verify (edsign verify_strict).
+        // engine's authenticate step, i.e. by Ed25519::verify (edsign verify_strict).
         let mut k = engine(&[minit("founder", KeyringRole::OWNER, 1)]);
         let action = MembershipAction::Remove {
             member: "founder".to_string(),
