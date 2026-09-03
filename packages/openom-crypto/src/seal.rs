@@ -4,18 +4,15 @@
 //! There is no plaintext path: sealing always happens; only the *key* varies (the
 //! reserved dev key locally, a passphrase-derived DEK in prod — §16). `seal`/`open`
 //! build the AAD internally from the header, so the §5 encoder is never exposed
-//! across the wasm-bindgen boundary and a JS twin can't drift from it.
+//! across the wasm-bindgen boundary and a JS twin can't drift from it. The actual AEAD
+//! primitives are the AAD-agnostic cores in `keyeo_crypto::aead`; this layer just builds
+//! the header AAD and dispatches on `Header.aead`.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::Aes256Gcm;
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use crate::aad::header_aad;
+use keyeo_crypto::aead::{aesgcm_open, aesgcm_seal, xchacha_open, xchacha_seal};
 use openom_protocol::v1::{Aead as AeadAlg, Header};
 
 use crate::{CryptoError, KEY_LEN};
-
-const XCHACHA_NONCE_LEN: usize = 24;
-const AES_GCM_NONCE_LEN: usize = 12;
 
 /// Seal `plaintext` under the DEK `key` for `header`, binding the whole header as AAD
 /// (§5). The AEAD and nonce come from `header` (`aead` + `nonce`). Returns the
@@ -52,118 +49,12 @@ pub fn open(
     }
 }
 
-// Low-level, AAD-agnostic AEAD (crate-internal). The DEK-wrap path (§4) reuses the
-// XChaCha20 pair with the wrap-context AAD instead of a header AAD.
-
-pub(crate) fn xchacha_seal(
-    key: &[u8; KEY_LEN],
-    nonce: &[u8],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    check_nonce(nonce, XCHACHA_NONCE_LEN)?;
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-    let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
-    cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|_| CryptoError::Seal)
-}
-
-pub(crate) fn xchacha_open(
-    key: &[u8; KEY_LEN],
-    nonce: &[u8],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    check_nonce(nonce, XCHACHA_NONCE_LEN)?;
-    let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-    let nonce = XNonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
-    cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| CryptoError::Open)
-}
-
-fn aesgcm_seal(
-    key: &[u8; KEY_LEN],
-    nonce: &[u8],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    check_nonce(nonce, AES_GCM_NONCE_LEN)?;
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-    let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
-    cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .map_err(|_| CryptoError::Seal)
-}
-
-fn aesgcm_open(
-    key: &[u8; KEY_LEN],
-    nonce: &[u8],
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    check_nonce(nonce, AES_GCM_NONCE_LEN)?;
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| CryptoError::KeyLength)?;
-    let nonce = aes_gcm::Nonce::try_from(nonce).map_err(|_| CryptoError::NonceLength)?;
-    cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| CryptoError::Open)
-}
-
-fn check_nonce(nonce: &[u8], want: usize) -> Result<(), CryptoError> {
-    if nonce.len() == want {
-        Ok(())
-    } else {
-        Err(CryptoError::NonceLength)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use openom_protocol::v1::Kind;
 
     const KEY: [u8; KEY_LEN] = [7u8; KEY_LEN];
-
-    #[test]
-    fn check_nonce_requires_the_exact_length() {
-        // Kills `check_nonce -> Ok(())` (which would accept any nonce length and defeat the guard
-        // at all four seal/open call sites).
-        assert!(check_nonce(&[0u8; XCHACHA_NONCE_LEN], XCHACHA_NONCE_LEN).is_ok());
-        assert!(matches!(
-            check_nonce(&[0u8; XCHACHA_NONCE_LEN - 1], XCHACHA_NONCE_LEN),
-            Err(CryptoError::NonceLength)
-        ));
-        assert!(matches!(
-            check_nonce(&[0u8; AES_GCM_NONCE_LEN + 1], AES_GCM_NONCE_LEN),
-            Err(CryptoError::NonceLength)
-        ));
-    }
 
     fn header(aead: AeadAlg, nonce: Vec<u8>) -> Header {
         Header {

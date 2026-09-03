@@ -1,26 +1,12 @@
 #![doc = include_str!("../README.md")]
 
-/// Default AEAD cipher — **XChaCha20-Poly1305** (frozen §6). Its 192-bit nonce makes
-/// random nonces collision-free in practice, so a long delta log under one DEK never
-/// hits AES-GCM's nonce-reuse footgun. Matches `Aead::Xchacha20Poly1305`.
-pub type Cipher = chacha20poly1305::XChaCha20Poly1305;
+//! The thin, proto-bound layer over [`keyeo_crypto`]'s generic primitives (OPE-305): the §5
+//! header-AAD encoder, the header-driven envelope `seal`/`open`, the openom DEK/RRK wraps, and the
+//! wire-`KdfParams` edges — plus a full re-export of the primitives so every consumer keeps calling
+//! `openom_crypto::*` unchanged.
 
-/// Disciplined alternate — **AES-256-GCM** (§6): snapshots, or counter-based nonces if
-/// ever used for deltas. Matches `Aead::Aes256Gcm`.
-pub type CipherAlt = aes_gcm::Aes256Gcm;
-
-/// Key-derivation function (Argon2id).
+/// Argon2id key-derivation function type alias (kept in the public surface).
 pub type Kdf<'a> = argon2::Argon2<'a>;
-
-/// Symmetric key length in bytes — XChaCha20 and AES-256 both use 256-bit keys.
-pub const KEY_LEN: usize = 32;
-
-/// Argon2id salt length in bytes.
-pub const SALT_LEN: usize = 16;
-
-/// 256-bit key material (a DEK or KEK) that **zeroizes on drop**. Derefs to
-/// `[u8; KEY_LEN]`, so it passes straight to [`seal`]/[`open`] as `&*key`.
-pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
 
 /// The reserved `Header.key_id` for local development (§16). Local dev / demo seal with
 /// a well-known fixed DEK ([`dev_dek`]) so a developer can inspect payloads — but the
@@ -46,72 +32,29 @@ pub fn cipher_suite() -> &'static str {
 
 pub mod aad;
 mod envelope;
-mod hpke_wrap;
 mod kdf;
 mod recovery;
 mod root;
 mod seal;
-mod secret;
 mod wrap;
-pub use envelope::{open_envelope, seal_envelope, AuthorIdentity, SealParams};
-pub use hpke_wrap::{
-    derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek, HpkeKeypair,
-    HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
-};
-pub use kdf::{
-    default_kdf_params, derive_kek, generate_dek, generate_salt, DEFAULT_ARGON2_ITERATIONS,
-    DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
-};
-pub use recovery::{
-    generate_recovery_code, parse_recovery_code, recovery_kdf_params, RECOVERY_ENTROPY_LEN,
-};
-pub use root::{derive_root, derive_rvk, RootKeys};
-pub use seal::{open, seal};
-pub use secret::{Dek, HpkePrivate, Kek, Passphrase, RecoveryCode, RrkSecret};
-pub use wrap::{unwrap_dek, unwrap_rrk_secret, wrap_dek, wrap_rrk_secret, WrapContext, WrappedDek};
 
-/// A crypto operation failed. `Open` deliberately does not distinguish a bad key from
-/// a bad tag from a tampered header — all are "this ciphertext didn't authenticate".
-#[derive(Debug, thiserror::Error)]
-pub enum CryptoError {
-    /// `Header.aead` is `AEAD_UNSPECIFIED` or a value this build doesn't implement.
-    #[error("unsupported or unspecified AEAD ({0})")]
-    UnsupportedAead(i32),
-    /// The DEK is not [`KEY_LEN`] bytes.
-    #[error("wrong DEK length")]
-    KeyLength,
-    /// The header's nonce is the wrong length for the selected AEAD (24 for XChaCha20,
-    /// 12 for AES-256-GCM).
-    #[error("wrong nonce length for the selected AEAD")]
-    NonceLength,
-    /// Encryption failed (should not happen with valid inputs).
-    #[error("AEAD seal failed")]
-    Seal,
-    /// Decryption/authentication failed — bad key, nonce, tag, or a tampered
-    /// header/AAD. Intentionally opaque.
-    #[error("AEAD open failed")]
-    Open,
-    /// Argon2id key derivation failed (invalid params or salt).
-    #[error("KDF failed: {0}")]
-    Kdf(String),
-    /// The system CSPRNG failed.
-    #[error("RNG failed: {0}")]
-    Rng(String),
-    /// A recovery code isn't valid base32 or the wrong length.
-    #[error("malformed recovery code")]
-    RecoveryFormat,
-    /// A recovery code's checksum doesn't match — almost certainly a typo.
-    #[error("recovery code checksum mismatch (likely a typo)")]
-    RecoveryChecksum,
-    /// Keyring signature verification failed, or the signature isn't the right length
-    /// (§4).
-    #[error("keyring signature invalid")]
-    Signature,
-    /// An HPKE seal/open failed — a malformed member public/secret/encapsulated key, or
-    /// a wrap that didn't authenticate (wrong recipient, tampered context). Opaque.
-    #[error("HPKE wrap/unwrap failed")]
-    Hpke,
-}
+// The generic primitives, re-exported so `openom_crypto::X` still resolves for every consumer.
+pub use keyeo_crypto::{
+    derive_hpke_keypair, derive_rvk, generate_dek, generate_hpke_keypair, generate_recovery_code,
+    generate_salt, hpke_unwrap_dek, hpke_wrap_dek, parse_recovery_code, Cipher, CipherAlt,
+    CryptoError, Dek, HpkeKeypair, HpkePrivate, HpkeWrap, Kek, Key32, Passphrase, RecoveryCode,
+    RootKeys, RrkSecret, DEFAULT_ARGON2_ITERATIONS, DEFAULT_ARGON2_MEMORY_KIB,
+    DEFAULT_ARGON2_PARALLELISM, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN, KEY_LEN, RECOVERY_ENTROPY_LEN,
+    SALT_LEN,
+};
+
+// The proto-bound layer.
+pub use envelope::{open_envelope, seal_envelope, AuthorIdentity, SealParams};
+pub use kdf::{default_kdf_params, derive_kek};
+pub use recovery::recovery_kdf_params;
+pub use root::derive_root;
+pub use seal::{open, seal};
+pub use wrap::{unwrap_dek, unwrap_rrk_secret, wrap_dek, wrap_rrk_secret, WrapContext, WrappedDek};
 
 #[cfg(test)]
 mod tests {

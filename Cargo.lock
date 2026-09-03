@@ -2853,29 +2853,44 @@ dependencies = [
 name = "keyeo"
 version = "0.1.0"
 dependencies = [
- "argon2",
- "chacha20poly1305 0.11.0",
- "data-encoding",
  "ed25519-dalek",
- "getrandom 0.3.4",
- "hkdf 0.12.4",
- "hpke",
+ "keyeo-crypto",
  "petgraph",
  "postcard",
  "proptest",
- "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.20",
- "zeroize",
 ]
 
 [[package]]
 name = "keyeo-api"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "keyeo-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm 0.11.0",
+ "argon2",
+ "chacha20poly1305 0.11.0",
+ "data-encoding",
+ "edsign",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "hkdf 0.12.4",
+ "hpke",
+ "proptest",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]
@@ -2889,6 +2904,7 @@ dependencies = [
  "openom-keyring",
  "openom-protocol",
  "openom-roles",
+ "postcard",
  "proptest",
  "serde",
  "serde_json",
@@ -3622,22 +3638,16 @@ dependencies = [
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [
- "aes-gcm 0.11.0",
  "arbitrary",
  "argon2",
- "chacha20poly1305 0.11.0",
- "data-encoding",
  "edsign",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
- "hkdf 0.12.4",
- "hpke",
+ "keyeo-crypto",
  "openom-protocol",
  "proptest",
- "rand_core 0.6.4",
  "sha2 0.10.9",
- "thiserror 2.0.20",
  "zeroize",
 ]
 
@@ -3779,6 +3789,7 @@ name = "openom-vault"
 version = "0.1.0"
 dependencies = [
  "blobstore",
+ "edsign",
  "keyeo-api",
  "keyeo-dag",
  "openom-crypto",

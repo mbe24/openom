@@ -8,8 +8,6 @@ pub mod dag;
 pub mod engine;
 pub mod epoch;
 pub mod gc;
-pub mod hpke_wrap;
-pub mod kdf;
 pub mod op;
 pub mod quorum;
 pub mod roles;
@@ -31,34 +29,11 @@ pub use epoch::{
     wraps_complete, Epoch,
 };
 pub use gc::{compact, Frontier, RetentionPolicy, Snapshot};
-pub use kdf::{Key32, KEY_LEN, SALT_LEN};
 pub use op::Op;
 pub use quorum::{Individual, QuorumPolicy, Requirement};
 pub use roles::Role;
 pub use signature::{Ed25519, SigError, SignatureScheme};
 
-#[derive(Debug, thiserror::Error)]
-pub enum CryptoError {
-    #[error("unsupported or unspecified AEAD")]
-    UnsupportedAead(i32),
-    #[error("wrong DEK length")]
-    KeyLength,
-    #[error("wrong nonce length")]
-    NonceLength,
-    #[error("AEAD seal failed")]
-    Seal,
-    #[error("AEAD open failed")]
-    Open,
-    #[error("KDF failed: {0}")]
-    Kdf(String),
-    #[error("RNG failed: {0}")]
-    Rng(String),
-    #[error("malformed recovery code")]
-    RecoveryFormat,
-    #[error("recovery code checksum mismatch")]
-    RecoveryChecksum,
-    #[error("keyeo signature invalid")]
-    Signature,
-    #[error("HPKE wrap/unwrap failed")]
-    Hpke,
-}
+// The generic crypto primitives now live in keyeo-crypto (OPE-305). Re-exported here so `keyeo::X`
+// keeps resolving for the group-membership engine's own consumers.
+pub use keyeo_crypto::{CryptoError, Key32, KEY_LEN, SALT_LEN};

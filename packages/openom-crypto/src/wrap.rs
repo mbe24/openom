@@ -10,7 +10,7 @@
 use crate::aad::{rrk_wrap_aad, wrap_aad};
 use zeroize::Zeroizing;
 
-use crate::seal::{xchacha_open, xchacha_seal};
+use keyeo_crypto::aead::{xchacha_open, xchacha_seal};
 use crate::{CryptoError, Dek, Kek, RrkSecret, KEY_LEN};
 
 /// XChaCha20-Poly1305 nonce length for a wrap.

@@ -10,22 +10,17 @@ name = "keyeo"
 path = "src/lib.rs"
 
 [dependencies]
+# The generic crypto primitives (DEK generation, HPKE DEK wraps, Key32/CryptoError) — openom-free,
+# so keyeo stays standalone-publishable (OPE-305). The Argon2id/AEAD/recovery surface rides along.
+keyeo-crypto = { path = "../keyeo-crypto" }
 ed25519-dalek = { version = "2", features = ["zeroize"] }
-hpke = { version = "0.12", default-features = false, features = ["x25519", "alloc"] }
 sha2 = "0.10"
-getrandom = "0.3"
-zeroize = { version = "1", features = ["derive"] }
-rand_core = "0.6"
-data-encoding = "2"
 thiserror = "2"
 petgraph = "0.8"
 serde = { version = "1", features = ["derive"] }
 # Canonical binary encoding behind the CanonicalBytes seam: compact + deterministic, and
 # byte-identical across native and wasm Rust builds (a content-hash id depends on that).
 postcard = { version = "1", features = ["use-std"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 # Adversarial property tests for the authority-aware resolver (an unauthorized op has no effect).

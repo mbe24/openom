@@ -1,0 +1,39 @@
+[package]
+name = "keyeo-crypto"
+description = "keyeo — generic symmetric/HPKE crypto primitives (Argon2id KDF, XChaCha20/AES-GCM AEAD cores, HPKE DEK wrapping, typed secrets, recovery codes). openom-free / standalone-publishable; the proto-bound envelope layer lives in openom-crypto (OPE-305)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aes-gcm.workspace = true
+chacha20poly1305.workspace = true
+argon2.workspace = true
+# Ed25519 sign/verify goes through the seam, never raw dalek (verify_strict-only, §0 / OPE-205).
+edsign.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+# Recovery code: base32 encoding + a SHA-256-derived checksum byte for typo detection.
+data-encoding.workspace = true
+sha2.workspace = true
+# HKDF split of the Argon2id master into the KEK + owner identity + HPKE key (root.rs).
+hkdf.workspace = true
+# RFC 9180 HPKE — wrap the tree DEK to a member's X25519 public key when sharing.
+hpke.workspace = true
+# rand_core traits for the getrandom-backed CSPRNG passed to HPKE seal.
+rand_core.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# WASM (the web sealer) needs getrandom's browser backend enabled — only for wasm32;
+# native uses the OS RNG directly. Several getrandom majors reach this crate
+# transitively (via the crypto deps), each with its own wasm feature, so enable all of
+# them (renamed, so the same crate can appear more than once). Pair with
+# RUSTFLAGS=--cfg getrandom_backend="wasm_js" at the wasm build step.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }

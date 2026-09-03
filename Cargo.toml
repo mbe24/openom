@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
+    "packages/keyeo-crypto",
     "packages/openom-roles",
     "packages/openom-keyring",
     "packages/keyeo-api",
@@ -52,6 +53,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 # Internal crates (path relative to this root manifest).
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
+keyeo-crypto = { path = "packages/keyeo-crypto" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
 keyeo-dag = { path = "packages/keyeo-dag" }

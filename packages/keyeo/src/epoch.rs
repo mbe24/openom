@@ -40,11 +40,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use crate::dag::resolver::{DekWrap, GroupId, MemberId, OpId};
-use crate::hpke_wrap::{hpke_unwrap_dek, hpke_wrap_dek};
-use crate::kdf::{generate_dek, Key32};
 use crate::roles::Role;
 use crate::signature::SignatureScheme;
 use crate::CryptoError;
+use keyeo_crypto::{generate_dek, hpke_unwrap_dek, hpke_wrap_dek, Key32};
 
 const EPOCH_WRAP_INFO: &[u8] = b"keyeo:epoch:wraps:v1";
 const COMMITMENT_PREFIX: &[u8] = b"keyeo:epoch:members:v1";
@@ -106,7 +105,7 @@ pub fn generate_epoch<Id: MemberId>(
     let info = epoch_context(group_id, epoch, commitment);
     let mut wraps: Vec<DekWrap<Id>> = Vec::with_capacity(active_hpke.len());
     for (id, hpke_public) in active_hpke {
-        let w = hpke_wrap_dek(hpke_public, dek.as_slice(), info.as_slice())?;
+        let w = hpke_wrap_dek(hpke_public, &dek, info.as_slice())?;
         wraps.push(DekWrap {
             member: id.clone(),
             hpke_public_key: *hpke_public,
@@ -115,7 +114,7 @@ pub fn generate_epoch<Id: MemberId>(
         });
     }
     wraps.sort_by(|a, b| a.member.cmp(&b.member));
-    Ok((wraps, dek))
+    Ok((wraps, dek.into_inner()))
 }
 
 /// A signed epoch artifact, authored once into the op DAG.
@@ -260,12 +259,13 @@ pub fn recover_epoch_dek<Id: MemberId>(
     commitment: &[u8; 32],
 ) -> Result<Key32, CryptoError> {
     let info = epoch_context(group_id, epoch, commitment);
-    hpke_unwrap_dek(
+    Ok(hpke_unwrap_dek(
         hpke_secret,
         wrap.encapped_key.as_slice(),
         wrap.ciphertext.as_slice(),
         &info,
-    )
+    )?
+    .into_inner())
 }
 
 /// The openom `wrap_complete` invariant, adapted: every active member has exactly one wrap, and no
@@ -290,9 +290,8 @@ pub fn wraps_complete<Id: MemberId>(wraps: &[DekWrap<Id>], active: &[Id]) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hpke_wrap::derive_hpke_keypair;
-    use crate::kdf::Key32;
     use crate::signature::Ed25519;
+    use keyeo_crypto::{derive_hpke_keypair, Key32};
     use serde::Serialize;
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
     enum TRole {
@@ -309,7 +308,8 @@ mod tests {
     }
 
     fn hpke(ikm: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
-        derive_hpke_keypair(ikm)
+        let kp = derive_hpke_keypair(ikm);
+        (*kp.secret, kp.public)
     }
 
     #[test]
