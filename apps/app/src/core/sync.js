@@ -91,45 +91,76 @@ export class SyncController {
 
   /**
    * Pull the remote tail after our cursor, VERIFY each entry's author attribution (§B3), and merge the
-   * ones that pass. An entry that fails verification is dropped (never merged) and returned in `rejected`;
-   * the rest still merge (order-insensitive), so a single unauthorized entry from a hostile server can't
-   * stall or poison the log. Own echoes (replicaKey) are skipped without verifying.
+   * ones that pass. A GENUINELY-rejected entry (bad signature / wrong role) is dropped (never merged) and
+   * returned in `rejected`; the rest still merge (order-insensitive), so a single unauthorized entry from a
+   * hostile server can't stall or poison the log. A TRANSIENT rejection (`err.retryable` — the governing
+   * keyring revision isn't retained yet) instead HOLDS: the pull stops at that entry with the cursor
+   * un-advanced and returns its seq as `held`, so a later tick (after a keyring sync) re-verifies it rather
+   * than losing it. Own echoes (replicaKey) are skipped without verifying.
    */
   async pull() {
     const tail = await this.#remote.readLog(this.#docId, this.#pulledCursor);
     let merged = 0;
     const rejected = [];
+    let held = null;
     for (const e of tail.entries) {
-      if (!(this.#replicaKey && e.replica === this.#replicaKey)) {
-        const plain = await this.#open(e.payload);
-        if (this.#verify) {
-          try {
-            await this.#verify(e.payload, plain);
-          } catch (err) {
-            rejected.push({ seq: e.seq, member: e.member ?? null, reason: String(err?.message ?? err) });
-            this.#pulledCursor = e.seq; // drop it and move on — a bad entry doesn't block the good ones
-            continue;
-          }
-        }
-        await this.#tree.mergeRemote(plain);
-        merged += 1;
+      // Our own echo — nothing to verify or merge, but safe to advance past.
+      if (this.#replicaKey && e.replica === this.#replicaKey) {
+        this.#pulledCursor = e.seq;
+        continue;
       }
+      const plain = await this.#open(e.payload);
+      if (this.#verify) {
+        try {
+          await this.#verify(e.payload, plain);
+        } catch (err) {
+          // A TRANSIENT failure (`retryable`): the governing keyring revision isn't retained
+          // yet. HOLD this entry — and, to preserve order, everything after it — WITHOUT
+          // advancing the cursor, so a later tick that has synced the keyring re-pulls from
+          // here and verifies. Advancing past it (as a genuine rejection does) would drop a
+          // valid edit FOREVER: the durable cursor never revisits a seq it moved beyond.
+          if (err?.retryable) {
+            held = e.seq;
+            break;
+          }
+          // A genuine rejection (bad signature / wrong role / unauthorized author): drop it and
+          // move past — the rest still merge (order-insensitive), so one bad entry can't stall.
+          rejected.push({ seq: e.seq, member: e.member ?? null, reason: String(err?.message ?? err) });
+          this.#pulledCursor = e.seq;
+          continue;
+        }
+      }
+      await this.#tree.mergeRemote(plain);
+      merged += 1;
       this.#pulledCursor = e.seq;
     }
     this.#saveCursor();
-    return { merged, rejected, headSeq: tail.headSeq };
+    return { merged, rejected, headSeq: tail.headSeq, held };
   }
 
   /**
    * A fresh device: adopt the remote snapshot baseline (if any) then pull the tail. The snapshot is
    * VERIFIED before adoption (§B3) — a forged snapshot is the worst injection (a fresh device swallows the
-   * whole tree from it), so if verification throws we do NOT adopt it and the error propagates (fail-closed).
+   * whole tree from it), so a GENUINE verification failure does NOT adopt it and propagates (fail-closed).
+   * A TRANSIENT failure (`err.retryable` — governing keyring not retained yet) instead DEFERS: returns
+   * `{ deferred: true }` without adopting or throwing, so the driver can sync the keyring and retry.
    */
   async bootstrap() {
     const snap = await this.#remote.readSnapshot(this.#docId);
     if (snap && snap.bytes) {
       const plain = await this.#open(snap.bytes);
-      if (this.#verify) await this.#verify(snap.bytes, plain); // throws → refuse to bootstrap from it
+      if (this.#verify) {
+        try {
+          await this.#verify(snap.bytes, plain);
+        } catch (err) {
+          // TRANSIENT (`retryable`): the governing keyring isn't retained yet — DEFER the whole
+          // bootstrap (don't adopt, don't throw). The driver syncs the keyring and retries; a
+          // fresh device simply isn't caught up. A GENUINE failure still throws (fail-closed):
+          // a forged snapshot is the worst injection, so we never adopt one we can't verify.
+          if (err?.retryable) return { merged: 0, rejected: [], headSeq: -1, deferred: true };
+          throw err;
+        }
+      }
       await this.#tree.mergeRemote(plain);
     }
     return this.pull();

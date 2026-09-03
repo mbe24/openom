@@ -9,6 +9,7 @@ import { createTree } from '../app/src/core/tree/index.js';
 import { FamilyTree } from '../app/src/core/familyTree.js';
 import { SyncController } from '../app/src/core/sync.js';
 import { createSyncedDeltaSync } from '../app/src/core/syncedDeltaSync.js';
+import { RetryableVerifyError } from '../app/src/core/sealer/entryVerifier.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 import { MemoryStore } from '../app/src/core/store.js';
 
@@ -160,6 +161,59 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     const r = await sb.pull();
     expect(r.rejected.length).toBe(1);
     expect(r.merged).toBeGreaterThanOrEqual(1);
+  });
+
+  it('HOLDS a retryable entry (keyring not retained yet) without advancing the cursor, then merges it after a keyring sync', async () => {
+    const remote = new FakeRemote();
+    const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    await a.hydrate();
+    await b.hydrate();
+    const sa = new SyncController({ tree: a, remote, docId: 'doc', seal: identity, open: identity });
+    // The composer asks for governing keyring revision 2. The store starts EMPTY → keyringAt(2) is null →
+    // the verifier throws a RetryableVerifyError (transient, NOT a rejection). With the epoch unattributed,
+    // a RETAINED keyring later accepts the entry unsigned.
+    const worker = {
+      entryAttribution: async () => ({ keyringRevision: 2, keyId: new Uint8Array([1]) }),
+      epochIsAttributed: async () => false, // epoch not shared → accept once the governing keyring is present
+      verifyEntry: async () => {},
+    };
+    const keyringStore = memoryKeyringStore();
+    const sb = createSyncedDeltaSync({ version: 1, tree: b, remote, docId: 'doc', seal: identity, open: identity, worker, keyringStore });
+
+    const p = await a.createPerson({ given: 'Ada' });
+    await sa.push();
+
+    // First pull: rev 2 not retained → the entry is HELD, the cursor is NOT advanced, nothing merges.
+    const r1 = await sb.pull();
+    expect(r1.merged).toBe(0);
+    expect(r1.rejected.length).toBe(0); // a hold is NOT a rejection — the entry must never be dropped
+    expect(r1.held).not.toBeNull();
+    expect(b.person(p.id)).toBeFalsy();
+
+    // Retain the governing keyring and pull again: because the cursor never advanced, the SAME entry is
+    // re-served and now merges — the edit was held, not lost forever.
+    await keyringStore.save('doc', 2, new Uint8Array([9]));
+    const r2 = await sb.pull();
+    expect(r2.merged).toBe(1);
+    expect(b.person(p.id)?.given).toBe('Ada');
+  });
+
+  it('bootstrap DEFERS (no throw, no adopt) on a retryable snapshot verify', async () => {
+    const snapshot = new Uint8Array([0xbe, 0xef]);
+    const remote = {
+      readSnapshot: async () => ({ bytes: snapshot }),
+      readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
+    };
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    await b.hydrate();
+    const verify = async () => { throw new RetryableVerifyError('governing keyring not retained yet'); };
+    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, verify });
+    // A transient failure must not abort bootstrap (that would strand an invited device forever) — it
+    // defers, unlike the genuine forged-snapshot case below which still throws.
+    const r = await sb.bootstrap();
+    expect(r.deferred).toBe(true);
+    expect(b.allPeople().length).toBe(0); // nothing adopted, but no throw either
   });
 
   it('bootstrap refuses a snapshot that fails verification (never adopts it)', async () => {
