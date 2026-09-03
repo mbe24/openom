@@ -13,8 +13,8 @@ pub mod dag_vault;
 pub use dag_vault::{Backfilled, DagVault, Resealed};
 
 // Re-exported: the dag membership methods take a KeyringRole, so callers name it through openom-vault
-// without a direct keyeo-dag dependency.
-pub use keyeo_dag::KeyringRole;
+// without a direct openom-keyring-dag dependency.
+pub use openom_keyring_dag::KeyringRole;
 
 pub mod app_vault;
 pub use app_vault::AppVault;

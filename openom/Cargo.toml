@@ -23,7 +23,7 @@ openom-roles.workspace = true
 openom-keyring.workspace = true
 # The engine-agnostic keyless verifier seam (KeyringVerifier/MembershipView): the server binds this and
 # dispatches on a per-tree engine tag, so chain and (soon) dag admit through one surface (OPE-278).
-keyeo-api.workspace = true
+openom-keyring-api.workspace = true
 
 # The whole HTTP surface in one Lambda: Axum routing over the Lambda runtime.
 axum.workspace = true

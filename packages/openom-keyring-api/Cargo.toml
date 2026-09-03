@@ -1,0 +1,17 @@
+[package]
+name = "openom-keyring-api"
+description = "openom's keyring engine seam: EngineKind{Chain,Dag} + MembershipView + its own role convention (pinned to openom) + the keyless KeyringVerifier trait + MembershipEnvelope, shared by the chain (openom-keyring) and dag (openom-keyring-dag) bindings. Dependency-light but openom-domain-specific (OPE-276/277/279)."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+# The generic membership-envelope wire (`MembershipEnvelope`) — a hand-written `#[derive(prost::Message)]`
+# struct, so openom-keyring-api OWNS an efficient protobuf wire of its own (no borrowed openom proto, no buf/protoc
+# codegen tooling). prost is generic, so the crate stays dependency-light.
+prost.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

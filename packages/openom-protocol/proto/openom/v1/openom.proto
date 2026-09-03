@@ -185,7 +185,7 @@ message KeyringUpdate {
   // Position HINT (chain: the revision's governing-ref). A fast-fail equality check only — the server keys
   // storage / CAS / head-advance on the VERIFIED `Admitted.update_ref`, never on this.
   bytes update_ref = 4;
-  // The opaque membership update — a keyeo-api `MembershipEnvelope` wrapping the engine's signed body
+  // The opaque membership update — an openom-keyring-api `MembershipEnvelope` wrapping the engine's signed body
   // (chain: a Keyring). The server never decodes it; it hands it to the dispatched verifier's `admit`.
   bytes payload = 5;
   // 6..15 reserved for engine-neutral transport additions — any future field a server acts on must arrive

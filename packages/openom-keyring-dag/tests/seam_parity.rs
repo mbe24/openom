@@ -7,11 +7,11 @@
 //! the chain (it verifies a candidate) but ADMITTED-as-a-no-op by the dag (admit-then-resolve) — the same
 //! EFFECT (no membership change) reached by different mechanisms.
 
-use keyeo::{MemberInit, MembershipAction};
+use keyeo_dag::{MemberInit, MembershipAction};
 use openom_keyring::verifier::ChainVerifier;
-use keyeo_dag::verifier::{bootstrap_update, op_update, DagVerifier};
-use keyeo_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
-use keyeo_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
+use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
+use openom_keyring_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
+use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
 use openom_protocol::v1::{
     AuthorizedSigner, KeyEpoch, KeyWrap, Keyring, Member, MemberRole, WrapMethod,
 };

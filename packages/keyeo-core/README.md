@@ -9,7 +9,7 @@
 
 ## What it is — and is not
 
-This crate is the fully-generic vocabulary the keyeo engine (`keyeo`) and any future keyeo engine share,
+This crate is the fully-generic vocabulary the keyeo engine (`keyeo-dag`) and any future keyeo engine share,
 extracted so the seam is defined once, below every engine. It owns four pieces, all domain-free:
 
 - **`Role`** — the pluggable role model (`grants_at_least`); role *values* are the caller's.
@@ -31,9 +31,9 @@ standalone-publishable.
 
 ## Position
 
-Layer 0 — the seam types beneath the keyeo engine. `keyeo` depends on it and re-exports its types
+Layer 0 — the seam types beneath the keyeo engine. `keyeo-dag` depends on it and re-exports its types
 (`Role`, `SignatureScheme`, `SigError`, `Ed25519`, `CanonicalBytes`, `Requirement`) so existing
-`keyeo::X` consumers are unaffected. It depends only on `serde`, `postcard`, `edsign`, and `thiserror`.
+`keyeo_dag::X` consumers are unaffected. It depends only on `serde`, `postcard`, `edsign`, and `thiserror`.
 Full dependency graph: see `packages/README.md`.
 
 Run: `node scripts/cargo.mjs test -p keyeo-core` (from the repo root; on Windows cargo runs under

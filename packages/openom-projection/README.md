@@ -13,7 +13,7 @@ while a third says they are different. This crate turns that set into a material
 (people, relationships, events, family unions, sources, places, media) **deterministically**: it is a
 **pure function of the record set**, so every replica computes the same answer from the same records
 without a shared clock. Write-time invariants that cannot hold in a concurrent append-only store become
-read-time guarantees (the move keyeo's StrongRemove resolver makes). It does the *epistemic* work:
+read-time guarantees (the move keyeo-dag's StrongRemove resolver makes). It does the *epistemic* work:
 identity clustering (`same_as` / `different_from` via constraint-repair union-find), attestation-weighted
 confidence, `reattribute_to`, `preferred`, name equivalence, and the assembly of relationships / events /
 unions / places / sources / media over the canonical persons.

@@ -1,6 +1,6 @@
 //! The DAG keyring's vault (OPE-273) — the dag-engine counterpart to [`crate::vault`], producing the same
 //! [`openom_sealer::SealerSet`] through the shared sealing core (`vault_core`) while resolving membership +
-//! recovery authority through the DAG keyring's client facade (`keyeo_dag::client`).
+//! recovery authority through the DAG keyring's client facade (`openom_keyring_dag::client`).
 //!
 //! The trust anchor is engine-opaque bytes: the dag's pinned genesis config + op closure, with the DEK
 //! epochs + recovery escrow riding the ops' `sealing` payloads (the design pass converged on this — one
@@ -19,7 +19,7 @@ use openom_crypto::{
     RrkSecret,
 };
 use openom_did::DidKey;
-use keyeo_dag::{client as dag_client, KeyringRole};
+use openom_keyring_dag::{client as dag_client, KeyringRole};
 use openom_protocol::v1::KdfParams;
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ use crate::vault_core::{
     rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap, RecoveryEscrow,
     SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
 };
-use keyeo_api::MembershipView;
+use openom_keyring_api::MembershipView;
 use crate::VaultError;
 
 /// The opaque **delta** an op carries in its `sealing` field. The vault folds these (in effective-op
@@ -1094,7 +1094,7 @@ impl DagVault {
 mod tests {
     use super::*;
     use openom_sealer::{EntryKind, SealContext};
-    use keyeo_api::MemberView;
+    use openom_keyring_api::MemberView;
     use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
     const TREE: &[u8] = b"tree-uuid-16byte";
@@ -1110,8 +1110,8 @@ mod tests {
 
     /// The DAG vault provisions a tree's recovery-verification key via `openom_crypto::derive_rvk` (the
     /// shared vault derivation, also used by the chain vault), but the DAG *engine* verifies a `ReFound`
-    /// against its own `keyeo_dag::recovery::derive_rvk`. Since OPE-279 those two live in different crates —
-    /// openom-crypto and the now-openom-free keyeo-dag — sharing only `edsign`'s HKDF and the frozen
+    /// against its own `openom_keyring_dag::recovery::derive_rvk`. Since OPE-279 those two live in different crates —
+    /// openom-crypto and the now-openom-free openom-keyring-dag — sharing only `edsign`'s HKDF and the frozen
     /// `keyeo:rvk:v1` label. They MUST stay byte-identical or a validly recovered tree would fail admission;
     /// this pins them against drift (the guard the recovery.rs / root.rs doc-comments point to).
     #[test]
@@ -1123,7 +1123,7 @@ mod tests {
             *b"a-32-byte-recovery-root-secret!!",
         ] {
             let vault_rvk = openom_crypto::derive_rvk(&secret).verifying_key().to_bytes();
-            let engine_rvk = keyeo_dag::recovery::rvk_public(&secret);
+            let engine_rvk = openom_keyring_dag::recovery::rvk_public(&secret);
             assert_eq!(
                 vault_rvk, engine_rvk,
                 "the vault's provisioning RVK and the dag engine's verifying RVK must match byte-for-byte"
@@ -1395,7 +1395,7 @@ mod tests {
     /// neither wrapped nor matched, so it must not wedge `needs_reseal`/`needs_backfill` permanently true.
     #[test]
     fn coverage_excludes_an_empty_keyed_member() {
-        use keyeo_api::MemberView;
+        use openom_keyring_api::MemberView;
         let members = MembershipView::new(
             vec![
                 MemberView { member_id: "owner".into(), role: 1, author_public_key: vec![], hpke_public_key: hpke_key("owner") },

@@ -31,7 +31,7 @@ use crate::{
 
 /// HKDF `info` label for the Recovery Verification Key. **Frozen.** Domain-separated from every other
 /// use of the recovery-root secret (never reuse a scalar across roles). Byte-identical to
-/// `keyeo_dag::recovery::RVK_HKDF_INFO` — both engines derive the same RVK.
+/// `openom_keyring_dag::recovery::RVK_HKDF_INFO` — both engines derive the same RVK.
 const HKDF_RVK_INFO: &[u8] = b"keyeo:rvk:v1";
 
 /// The three HKDF `info` labels [`derive_root`] expands the Argon2id master under — one each for the
@@ -47,7 +47,7 @@ pub struct RootLabels {
 /// reset/recovery — from the recovery-root (RRK) secret. BOTH keyring engines (chain + dag) call this, so
 /// a recovery is verifiable identically whichever engine authored it. Deterministic and domain-separated:
 /// HKDF-SHA256(rrk_secret) under the frozen RVK label, then an Ed25519 key from the 32-byte output — via
-/// the shared [`edsign::derive_signing_key`], so this is byte-identical to `keyeo_dag::recovery::derive_rvk`
+/// the shared [`edsign::derive_signing_key`], so this is byte-identical to `openom_keyring_dag::recovery::derive_rvk`
 /// (an openom-vault cross-check test guards the two).
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> SigningKey {
     edsign::derive_signing_key(rrk_secret, HKDF_RVK_INFO)

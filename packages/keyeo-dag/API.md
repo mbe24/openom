@@ -1,8 +1,8 @@
-# keyeo API Reference
+# keyeo-dag API Reference
 
 ## Overview
 
-`keyeo` is a decentralised group membership and access control library. It provides:
+`keyeo-dag` is a decentralised group membership and access control library. It provides:
 - A signed-operation DAG with pluggable concurrency resolution (LamportTiebreak / StrongRemove)
 - Ed25519 signature verification bound to stored keys (no forgeable author fields)
 - Pluggable access control (DefaultAccessControl with configurable min_role, or DynAccessControl)
@@ -18,7 +18,7 @@
 ## Quick start
 
 ```rust
-use keyeo::*;
+use keyeo_dag::*;
 
 // 1. Define your role model
 #[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]

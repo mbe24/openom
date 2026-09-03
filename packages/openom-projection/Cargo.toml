@@ -2,7 +2,7 @@
 # materialized read model, and the substrate's critical path (design.substrate-adaptation §7).
 #
 # This is increment 1: the deterministic identity-clustering core (§11 constraint-repair union-find
-# over same_as / different_from, the same routine keyeo's StrongRemove uses), person-id
+# over same_as / different_from, the same routine keyeo-dag's StrongRemove uses), person-id
 # canonicalization, and person assembly (names + sex), with tombstone suppression. Because the whole
 # thing is a pure function of the record set, replicas converge without a shared clock — verified by
 # an order-independence property test. Still to come: attestation-weighted confidence, `preferred`,

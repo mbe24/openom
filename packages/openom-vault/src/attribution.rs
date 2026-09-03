@@ -9,7 +9,7 @@
 //! Moved here from the chain keyring engine (OPE-300): entry-attribution is a *consumer* of the keyring,
 //! not the membership engine — and it's the proto-`Envelope`/`Header` + `openom_crypto::aad` coupling that
 //! kept the chain engine openom-bound. It lives in the vault, which holds both the keyring and the entries
-//! and is openom-coupled by design. (The equivalent for the dag engine is `keyeo::entry`.)
+//! and is openom-coupled by design. (The equivalent for the dag engine is `keyeo_dag::entry`.)
 
 use openom_crypto::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Keyring, Kind};

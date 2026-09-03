@@ -2850,30 +2850,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyeo"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "keyeo-core",
- "keyeo-crypto",
- "petgraph",
- "postcard",
- "proptest",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "keyeo-api"
-version = "0.1.0"
-dependencies = [
- "prost",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "keyeo-core"
 version = "0.1.0"
 dependencies = [
@@ -2908,18 +2884,15 @@ dependencies = [
 name = "keyeo-dag"
 version = "0.1.0"
 dependencies = [
- "blobstore",
- "edsign",
- "keyeo",
- "keyeo-api",
- "openom-keyring",
- "openom-protocol",
- "openom-roles",
+ "ed25519-dalek",
+ "keyeo-core",
+ "keyeo-crypto",
+ "petgraph",
  "postcard",
  "proptest",
  "serde",
- "serde_json",
- "tempfile",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3593,10 +3566,10 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "jsonwebtoken",
- "keyeo-api",
  "lambda_http",
  "openom-crypto",
  "openom-keyring",
+ "openom-keyring-api",
  "openom-protocol",
  "openom-roles",
  "opentelemetry",
@@ -3696,14 +3669,41 @@ dependencies = [
  "blobstore",
  "edsign",
  "getrandom 0.3.4",
- "keyeo-api",
  "openom-crypto",
  "openom-did",
+ "openom-keyring-api",
  "openom-protocol",
  "openom-roles",
  "proptest",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-keyring-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "openom-keyring-dag"
+version = "0.1.0"
+dependencies = [
+ "blobstore",
+ "edsign",
+ "keyeo-dag",
+ "openom-keyring",
+ "openom-keyring-api",
+ "openom-protocol",
+ "openom-roles",
+ "postcard",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -3801,11 +3801,11 @@ version = "0.1.0"
 dependencies = [
  "blobstore",
  "edsign",
- "keyeo-api",
- "keyeo-dag",
  "openom-crypto",
  "openom-did",
  "openom-keyring",
+ "openom-keyring-api",
+ "openom-keyring-dag",
  "openom-protocol",
  "openom-roles",
  "openom-sealer",
@@ -3823,9 +3823,9 @@ dependencies = [
 name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
- "keyeo-api",
  "openom-crypto",
  "openom-keyring",
+ "openom-keyring-api",
  "openom-protocol",
  "openom-sealer",
  "openom-vault",

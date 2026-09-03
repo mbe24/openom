@@ -10,8 +10,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keyeo::{Keyeo, MembershipAction, StrongRemove};
-use keyeo_api::MembershipView;
+use keyeo_dag::{Keyeo, MembershipAction, StrongRemove};
+use openom_keyring_api::MembershipView;
 use serde::{Deserialize, Serialize};
 
 use crate::blob_sync::{decode_op, dto_to_minit, encode_op, minit_to_dto, MemberInitDto};
@@ -37,7 +37,7 @@ fn append(
         .map(|b| decode_op(b))
         .collect::<Result<_, _>>()
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let group_id = keyeo::GroupId::new(anchor.group_id.clone());
+    let group_id = keyeo_dag::GroupId::new(anchor.group_id.clone());
     let op = mint(&group_id, frontier(&ops), author.to_string(), action, sealing, signing_key);
     anchor.ops.push(encode_op(&op));
     Ok(postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible"))
@@ -115,7 +115,7 @@ impl std::error::Error for ClientError {}
 struct DagAnchor {
     /// The group (openom: the tree) id every op in this anchor is bound to, pinned at provision. It is the
     /// value the engine's genesis is scoped to on resolve, and the id every appended op carries — so an op
-    /// minted for a different tree is refused (`keyeo::Error::WrongGroup`). A hint the SIGNED ops must
+    /// minted for a different tree is refused (`keyeo_dag::Error::WrongGroup`). A hint the SIGNED ops must
     /// agree with: tampering it makes resolution fail closed, since the signed ops won't match.
     group_id: Vec<u8>,
     genesis: Vec<MemberInitDto>,
@@ -126,20 +126,20 @@ struct DagAnchor {
 
 /// Mint a signed, content-addressed op carrying an opaque `sealing` payload, using keyeo's unified
 /// `Ed25519` scheme (keyeo's `Op::content_addressed` is `ContentId`-specific; openom's `KeyringOp` uses
-/// `[u8; 32]` ids + `Ed25519`, so we derive the content id via the generic `keyeo::content_id`).
+/// `[u8; 32]` ids + `Ed25519`, so we derive the content id via the generic `keyeo_dag::content_id`).
 fn mint(
-    group_id: &keyeo::GroupId,
+    group_id: &keyeo_dag::GroupId,
     parents: Vec<[u8; 32]>,
     author: String,
     action: KeyringAction,
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> KeyringOp {
-    let canonical = keyeo::canonical_encode(group_id, &parents, &author, &action, &sealing);
+    let canonical = keyeo_dag::canonical_encode(group_id, &parents, &author, &action, &sealing);
     let signature = signing_key.sign(&canonical).to_bytes();
     let author_public_key = signing_key.verifying_key().to_bytes();
     let id =
-        keyeo::content_id(group_id, &parents, &author, &action, &sealing, &signature, &author_public_key).0;
+        keyeo_dag::content_id(group_id, &parents, &author, &action, &sealing, &signature, &author_public_key).0;
     let mut op = KeyringOp::new(id, group_id.clone(), parents, author, action, signature, author_public_key);
     op.sealing = sealing;
     op
@@ -158,7 +158,7 @@ pub fn provision_anchor(
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> Vec<u8> {
-    let group_id = keyeo::GroupId::new(tree_id.to_vec());
+    let group_id = keyeo_dag::GroupId::new(tree_id.to_vec());
     let founder = KeyringMemberInit {
         id: founder_id.to_string(),
         role: KeyringRole::OWNER,
@@ -229,7 +229,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         .map(dto_to_minit)
         .collect::<Result<_, _>>()
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let base = KeyringState::create(keyeo::GroupId::new(anchor.group_id.clone()), &genesis)
+    let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
         .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
     // Pass 1: decode + replay every op (authorization resolves only once the whole closure is applied).
@@ -471,7 +471,7 @@ mod tests {
         let rvk_pub = rvk.verifying_key().to_bytes();
 
         // Genesis {founder Owner, bob CoOwner}, RVK pinned; carries a genesis sealing.
-        let genesis_op = mint(&keyeo::GroupId::unscoped(),
+        let genesis_op = mint(&keyeo_dag::GroupId::unscoped(),
             vec![],
             "founder".to_string(),
             MembershipAction::Create {
@@ -484,7 +484,7 @@ mod tests {
 
         // (A) the compromised founder key adds a co-owner (a signer = privileged), concurrent with (B) an
         // RVK-signed recovery ReFound. Both are children of genesis. Each carries a sealing delta.
-        let thief = mint(&keyeo::GroupId::unscoped(),
+        let thief = mint(&keyeo_dag::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::Add {
@@ -497,7 +497,7 @@ mod tests {
             b"THIEF-SEALING".to_vec(),
             &sk(1),
         );
-        let recovery_op = mint(&keyeo::GroupId::unscoped(),
+        let recovery_op = mint(&keyeo_dag::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::ReFound {

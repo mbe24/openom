@@ -11,8 +11,8 @@
 //! State + update are the engine's own opaque encoding (the seam never inspects them). The op bytes are
 //! the SAME `blob_sync` codec the transport publishes, so an op verifies identically however it arrived.
 
-use keyeo::{ApplyOutcome, Error as KeyeoError, Keyeo, MembershipAction, SignedOp, StrongRemove};
-use keyeo_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
+use keyeo_dag::{ApplyOutcome, Error as KeyeoError, Keyeo, MembershipAction, SignedOp, StrongRemove};
+use openom_keyring_api::{Admitted, KeyringVerifier, MemberView, MembershipView, VerifyError};
 use serde::{Deserialize, Serialize};
 
 use crate::blob_sync::{decode_op, dto_to_minit, minit_to_dto, MemberInitDto};
@@ -60,7 +60,7 @@ impl DagVerifier {
             .map(dto_to_minit)
             .collect::<Result<_, _>>()
             .map_err(|_| VerifyError::Malformed)?;
-        let base = KeyringState::create(keyeo::GroupId::new(pinned.group_id.clone()), &genesis)
+        let base = KeyringState::create(keyeo_dag::GroupId::new(pinned.group_id.clone()), &genesis)
             .with_reset_authority(pinned.reset_authority);
         Ok(Keyeo::new(base, KeyringAccess, StrongRemove))
     }
@@ -201,7 +201,7 @@ pub fn op_update(op: &crate::KeyringOp) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{recovery, sign_op, KeyringMemberInit, KeyringRole};
-    use keyeo::MemberInit;
+    use keyeo_dag::MemberInit;
 
     fn sk(seed: u8) -> edsign::SigningKey {
         edsign::SigningKey::from_seed(&[seed; 32])

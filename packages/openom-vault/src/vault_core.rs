@@ -16,7 +16,7 @@
 //! coupling as load-bearing, not incidental — the wrap AAD binds the proto `Envelope` (a compile-time
 //! security control) and the KDF params are the proto's, so decoupling would re-derive the wire format and
 //! scatter the crypto. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and keep the
-//! `openom-` prefix; only the engine layer below them (keyeo / keyeo-api / keyeo-dag) is openom-free.
+//! `openom-` prefix; only the engine layer below them (keyeo / openom-keyring-api / openom-keyring-dag) is openom-free.
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,

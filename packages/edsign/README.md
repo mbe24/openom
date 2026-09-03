@@ -33,7 +33,7 @@ it.
 | **SIGN-3** | Sign/verify round-trips, and any tamper of message or key is rejected. | The base authenticity guarantee every op and keyring entry rests on. | `tests::sign_verify_roundtrip`, `tests::a_tampered_message_is_rejected`, `tests::a_wrong_key_is_rejected` |
 | **SIGN-4** | `Debug` on a `SigningKey` (or a struct embedding one) redacts the seed; the signing seed zeroizes on drop. | A key can't leak into a log line, and the seed doesn't linger in freed memory. | `tests::signing_key_debug_redacts_the_seed`, `tests::signature_debug_is_redacted` |
 | **SIGN-5** | A malformed public key is a construction error, not a deferred verify failure. | Bad key bytes fail closed at the boundary, before any signature is trusted. | `tests::malformed_public_key_is_a_construction_error` |
-| **SIGN-6** | `derive_signing_key(ikm, info)` domain-separates: the same `ikm` under different `info` yields unrelated keys. | Both keyring engines derive their recovery key here; a signing capability can never be confused with an encryption/identity key from the same secret. | `keyeo_dag::recovery::tests::rvk_is_domain_separated_from_the_raw_seed_key` |
+| **SIGN-6** | `derive_signing_key(ikm, info)` domain-separates: the same `ikm` under different `info` yields unrelated keys. | Both keyring engines derive their recovery key here; a signing capability can never be confused with an encryption/identity key from the same secret. | `openom_keyring_dag::recovery::tests::rvk_is_domain_separated_from_the_raw_seed_key` |
 
 Run: `node scripts/cargo.mjs test -p edsign` (from the repo root; on Windows cargo runs under WSL2/Docker).
 
@@ -62,5 +62,5 @@ a caller's domain label).
 ## Position
 
 A foundation: it depends only on `ed25519-dalek` + `zeroize` + `hkdf`/`sha2`, and no other openom crate,
-so nothing sits beneath it. Everything that authenticates — `keyeo`, `keyeo-dag`, `openom-keyring`,
+so nothing sits beneath it. Everything that authenticates — `keyeo-dag`, `openom-keyring-dag`, `openom-keyring`,
 `openom-crypto` — signs and verifies through it. Full dependency graph: see `packages/README.md`.

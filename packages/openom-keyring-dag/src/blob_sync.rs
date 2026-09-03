@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use blobstore::{BlobError, BlobStore, Precondition};
-use keyeo::MembershipAction;
+use keyeo_dag::MembershipAction;
 use serde::{Deserialize, Serialize};
 
 use crate::{KeyringAction, KeyringEngine, KeyringMemberInit, KeyringOp, KeyringRole};
@@ -237,23 +237,23 @@ pub(crate) fn encode_op(op: &KeyringOp) -> Vec<u8> {
         author_public_key: op.author_public_key,
         sealing: op.sealing.clone(),
     };
-    // The op body is a compact postcard encoding (no JSON), framed in keyeo-api's generic
+    // The op body is a compact postcard encoding (no JSON), framed in openom-keyring-api's generic
     // MembershipEnvelope tagged as the dag engine — the shared wire both engines emit.
     let body = postcard::to_allocvec(&dto).expect("op DTO postcard serialization is infallible");
-    keyeo_api::MembershipEnvelope::wrap(keyeo_api::EngineKind::Dag, body).encode()
+    openom_keyring_api::MembershipEnvelope::wrap(openom_keyring_api::EngineKind::Dag, body).encode()
 }
 
 pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
-    let env = keyeo_api::MembershipEnvelope::decode(bytes)
+    let env = openom_keyring_api::MembershipEnvelope::decode(bytes)
         .map_err(|e| BlobSyncError::Decode(e.to_string()))?;
-    if env.engine_kind() != Ok(keyeo_api::EngineKind::Dag) {
+    if env.engine_kind() != Ok(openom_keyring_api::EngineKind::Dag) {
         return Err(BlobSyncError::Malformed("membership envelope is not a dag op"));
     }
     let dto: OpDto =
         postcard::from_bytes(&env.body).map_err(|e| BlobSyncError::Decode(e.to_string()))?;
-    let mut op = keyeo::Op::new(
+    let mut op = keyeo_dag::Op::new(
         dto.id,
-        keyeo::GroupId::new(dto.group_id),
+        keyeo_dag::GroupId::new(dto.group_id),
         dto.parents,
         dto.author,
         dto_to_action(&dto.action)?,
@@ -410,7 +410,7 @@ mod tests {
     use super::*;
     use crate::{sign_op, KeyringAccess, KeyringState};
     use blobstore::{BlobStore, MemoryBlob, Precondition};
-    use keyeo::{Keyeo, StrongRemove};
+    use keyeo_dag::{Keyeo, StrongRemove};
     use std::sync::Arc;
 
     fn sk(seed: u8) -> edsign::SigningKey {
@@ -428,7 +428,7 @@ mod tests {
         }
     }
     fn engine(members: &[KeyringMemberInit]) -> KeyringEngine {
-        Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
+        Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), members), KeyringAccess, StrongRemove)
     }
     fn add(member: &str, role: KeyringRole, seed: u8) -> KeyringAction {
         MembershipAction::Add {

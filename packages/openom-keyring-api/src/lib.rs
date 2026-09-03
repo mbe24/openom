@@ -50,7 +50,7 @@ impl std::error::Error for UnknownEngine {}
 pub const MEMBERSHIP_ENVELOPE_VERSION: u32 = 1;
 
 /// The **generic membership-update envelope** — the single wire both keyring engines emit, owned by
-/// keyeo-api (a real protobuf message via `prost`, so it is efficient AND self-owned — the crate borrows no
+/// openom-keyring-api (a real protobuf message via `prost`, so it is efficient AND self-owned — the crate borrows no
 /// openom proto). It is a thin frame: a `version`, the producing `engine` tag ([`EngineKind::as_tag`]), and
 /// an OPAQUE `body` — the chain's signed `Keyring`, or a dag op — that only that engine parses. The op/
 /// keyring content id is computed over the inner `body`, BEFORE this framing, so wrapping never changes it.
@@ -62,7 +62,7 @@ pub struct MembershipEnvelope {
     /// authoritative engine is the tree's pinned selection, and the body is self-authenticating.
     #[prost(string, tag = "2")]
     pub engine: String,
-    /// The engine-specific, opaque update bytes. keyeo-api never parses it.
+    /// The engine-specific, opaque update bytes. openom-keyring-api never parses it.
     #[prost(bytes = "vec", tag = "3")]
     pub body: Vec<u8>,
 }
@@ -117,7 +117,7 @@ impl std::fmt::Display for EnvelopeError {
 
 impl std::error::Error for EnvelopeError {}
 
-/// keyeo-api's own generic role convention (`i16`, **lower is stronger**): the Owner is the single
+/// openom-keyring-api's own generic role convention (`i16`, **lower is stronger**): the Owner is the single
 /// strongest role and a signer is CoOwner-or-stronger. A consumer maps its own role enum onto these — for
 /// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
 /// them here, rather than depending on `openom-roles`, keeps this seam openom-free (openom-roles pulls in
@@ -135,7 +135,7 @@ pub const ROLE_VIEWER: i16 = 5;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberView {
     pub member_id: String,
-    /// A role in keyeo-api's convention ([`ROLE_OWNER`] = 1 … Viewer = 5); **lower is stronger**.
+    /// A role in openom-keyring-api's convention ([`ROLE_OWNER`] = 1 … Viewer = 5); **lower is stronger**.
     pub role: i16,
     pub author_public_key: Vec<u8>,
     pub hpke_public_key: Vec<u8>,

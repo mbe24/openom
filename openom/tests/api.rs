@@ -332,7 +332,7 @@ fn build_keyring(
 fn put_keyring_as(tree: Uuid, k: &Keyring, member: Uuid) -> Request<Body> {
     // Frame the signed Keyring as the client now does: MembershipEnvelope(chain) inside the KeyringUpdate
     // transport envelope. The server parses only the outer KeyringUpdate.
-    let payload = keyeo_api::MembershipEnvelope::wrap(keyeo_api::EngineKind::Chain, k.encode_to_vec()).encode();
+    let payload = openom_keyring_api::MembershipEnvelope::wrap(openom_keyring_api::EngineKind::Chain, k.encode_to_vec()).encode();
     let update = openom_protocol::v1::KeyringUpdate {
         version: 1,
         tree_id: tree.as_bytes().to_vec(),
@@ -1153,7 +1153,7 @@ async fn keyring_history() {
         .decode(h["revisions"][0]["payload"].as_str().unwrap())
         .unwrap();
     // The stored payload is the engine-opaque Admitted.state = the MembershipEnvelope wrapping the Keyring.
-    let env1 = keyeo_api::MembershipEnvelope::decode(&p1).unwrap();
+    let env1 = openom_keyring_api::MembershipEnvelope::decode(&p1).unwrap();
     assert_eq!(env1.engine, "chain");
     assert_eq!(env1.body, rev1.encode_to_vec(), "the revision's keyring round-trips inside the envelope");
 

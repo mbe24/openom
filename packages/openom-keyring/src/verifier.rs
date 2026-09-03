@@ -1,13 +1,13 @@
 //! The chain keyring's [`KeyringVerifier`] adapter (OPE-277) — the keyless server-side seam.
 //!
 //! The chain is already pure bytes→bytes + keyless, so this is a thin adapter: an `update` (and the
-//! persisted `state`) is a keyeo-api `MembershipEnvelope` wrapping the candidate/head `Keyring`; `admit`
+//! persisted `state`) is a openom-keyring-api `MembershipEnvelope` wrapping the candidate/head `Keyring`; `admit`
 //! unwraps it, rebuilds the anchor from the head, and runs `verify_transition` (falling back to
 //! `verify_reset` for a recovery). It exports the verified `tree_id` + `update_ref` the server keys on. `changed` is the honest membership diff; `reset_boundary` is set when the candidate was
 //! admitted as a reset. The chain's rich `ChainError` taxonomy is classed into the neutral
 //! [`VerifyError`] (the full detail stays available inside the chain layer for diagnostics).
 
-use keyeo_api::{
+use openom_keyring_api::{
     Admitted, EngineKind, KeyringVerifier, MemberView, MembershipEnvelope, MembershipView, VerifyError,
 };
 use openom_protocol::v1::Keyring;

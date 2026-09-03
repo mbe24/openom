@@ -30,7 +30,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-jcs** — RFC 8785 canonical JSON bytes; the substrate under every content hash.
 - **openom-did** — `did:key` encode/decode (Ed25519) + `member_id` ⇄ `did:key` resolution.
 - **openom-edtf** — EDTF (ISO 8601-2) date parser/normalizer → sortable `[min,max]` bounds.
-- **keyeo-crypto** — generic, openom-free symmetric + HPKE primitives: typed secrets, Argon2id KDF, HKDF root split, HPKE DEK wrap, AEAD cores, recovery-code codec. Shared by `openom-crypto` and `keyeo`. openom-free.
+- **keyeo-crypto** — generic, openom-free symmetric + HPKE primitives: typed secrets, Argon2id KDF, HKDF root split, HPKE DEK wrap, AEAD cores, recovery-code codec. Shared by `openom-crypto` and `keyeo-dag`. openom-free.
 - **openom-crypto** — the proto-bound sealing layer: binds the protobuf `Header` as AAD, builds envelopes, wraps DEKs (client & server, identical algorithms), standing on `keyeo-crypto` (→ `keyeo-crypto`) for the primitives.
 - **openom-protocol** — shared protobuf data model (prost, generated via buf).
 - **edsign** — the single Ed25519 dependency edge: newtypes whose only verify is `verify_strict`, so the weak path is uncallable elsewhere (compile-time signature-verification policy). openom-free.
@@ -52,10 +52,10 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-sealer** — the client DEK session: a stateful sealer holding the unlocked DEK, sealing/opening envelopes. Engine-free (no keyring dep).
 
 **Access control / identity / custody** — the keyring stack, two swappable engines behind one seam
-- **keyeo** — Layer 0: the generic, domain-free group-membership/access-control DAG engine (sequencer-free; resolves signed ops → members + shared keys); its crypto primitives come from `keyeo-crypto` (→ `keyeo-crypto`). openom-free.
-- **keyeo-api** — Layer 1: the engine-agnostic seam — `MembershipView`, the keyless `KeyringVerifier`, `EngineKind`, the `ROLE_*` convention. openom-free.
+- **keyeo-dag** — Layer 0: the generic, domain-free group-membership/access-control DAG engine (sequencer-free; resolves signed ops → members + shared keys); its crypto primitives come from `keyeo-crypto` (→ `keyeo-crypto`). openom-free.
+- **openom-keyring-api** — Layer 1: the engine-agnostic seam — `MembershipView`, the keyless `KeyringVerifier`, `EngineKind`, the `ROLE_*` convention. Dependency-light but openom-domain-specific.
 - **openom-keyring** — Layer 2, the **chain** engine: the linear signed keyring (protobuf wire), chain verification, entry authorship, signing. openom-coupled.
-- **keyeo-dag** — Layer 2, the **dag** engine: openom's roles/signing/recovery wired onto `keyeo`. openom-free (standalone-publishable).
+- **openom-keyring-dag** — Layer 2, the **dag** engine: openom's roles/signing/recovery wired onto `keyeo-dag`. Dependency-light but openom-domain-specific.
 - **openom-vault** — the lifecycle layer over both engines: provision/unlock/recover/change-passphrase + membership authoring behind `KeyringLifecycle`, with `AppVault` dispatching on the tree's `EngineKind`; owns the engine-neutral sealing core + the browser wasm veneer. openom-coupled.
 - **openom-roles** — the authorization role model + capability→role policy (Viewer / Editor / Maintainer / Owner).
 - **openom-vault-host** — the native (Tauri) key-custody host: keeps Sealer sessions + keyring storage in Rust so the DEK never enters the webview.

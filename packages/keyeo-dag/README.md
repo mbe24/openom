@@ -1,64 +1,61 @@
 # keyeo-dag
 
-> openom's DAG keyring engine — the openom role model, Ed25519 seam, authority policy, and recovery key
-> wired onto the generic `keyeo` group-membership DAG (the sequencer-free keyring).
+> A generic, domain-free engine for decentralised group membership and access control — a
+> sequencer-free DAG of signed ops that resolves to a converged member set + shared keys.
 
-**Status:** built · keyring engine (one of two) · openom-free / standalone-publishable · design keyring-dag (OPE-137/269)
+**Status:** built · Layer-0 generic engine, standalone-publishable · design keyring-dag (OPE-137/269)
 **Last updated:** 2026-09-03
 
 ## What it is — and is not
 
-`keyeo` is domain-free; this crate is its openom binding. It fixes the four generic type parameters —
-op ids are 32-byte content hashes, member ids are openom member strings, roles are [`KeyringRole`]
-(`Owner=1 … Viewer=5`, bound to `keyeo_api::ROLE_*`), signatures are keyeo's unified [`Ed25519`] (strict
-Ed25519 via `edsign`) — and supplies the authority policy: [`KeyringAccess`] gates keyring writes to signers
-(CoOwner-or-stronger), with founder-signed governance and, in v2, per-family [`KeyringQuorum`] rules.
-It adds **recovery** (the RVK derived from the escrowed RRK secret, pinned in genesis, authorizing a
-`ReFound`) and implements the keyless [`keyeo_api::KeyringVerifier`] seam so the server can admit ops and
-fold them into a `MembershipView` without holding a key. Concurrency, merge, and strong-remove come from
-`keyeo` underneath.
+Feed [`Keyeo`] a stream of signed [`Op`]s — add / remove / promote a member, rotate a key — and it
+resolves the causal DAG into a converged [`GroupState`]: who is a member, at what role, and the current
+shared encryption epoch. It is **sequencer-free**: ops carry their causal parents, concurrency is
+tie-broken deterministically ([`LamportTiebreak`]), and conflicting removals are settled by a
+strong-remove resolver ([`StrongRemove`]) so a member removed on one branch stays removed after a merge.
+Authority is pluggable via [`AccessControl`], multi-party governance via a [`QuorumPolicy`]. Keys ride
+along: each membership change can mint a fresh [`Epoch`] whose DEK is HPKE-wrapped to every current
+member, and concurrent epochs **reconcile to a single shared DEK** rather than forking. Recovery,
+content-addressing ([`content_id`]), and history GC ([`compact`]) round it out.
 
-It is **not** the passphrase lifecycle: provision / unlock / recover / author (which touch the DEK and the
-sealer) live in `openom-vault`, above this. It is **not** the linear chain engine — that is the separate
-`openom-keyring`, and the two are interchangeable behind `keyeo-api`. Despite wiring openom's model, its
-non-dev dependency tree is **openom-free** (it binds roles to `keyeo-api`'s convention and derives its RVK
-through `edsign`, not `openom-crypto`), so it is standalone-publishable; only its test harnesses pull the
-openom crates to cross-check against the chain.
+It is **not** openom, and knows nothing about family trees, protobuf, roles-as-`MemberRole`, or the
+sealer. It is generic over the op id, member id, **role**, and signature-scheme types — the openom
+bindings (the concrete role model, the Ed25519 seam, the authority + quorum policy) all live one layer up
+in `openom-keyring-dag`. It owns **no storage** and assigns no total order: it consumes ops and produces resolved
+state; persistence and transport are the caller's (a `blobstore` above it). It has no openom dependency
+and is publishable on its own.
 
 ## Invariants
 
 | id | guarantee | why it matters | verified by |
 |----|-----------|----------------|-------------|
-| **KDAG-1** | Only a signer (CoOwner-or-stronger) can write the keyring; a Maintainer's keyring op is refused. | Keyring administrative authority is strictly the signer set — a lower role cannot alter membership. | `tests::a_maintainer_cannot_write_the_keyring` |
-| **KDAG-2** | A `ReFound` retargets the owner only when signed by the pinned recovery authority; without it (or against a non-owner) it is rejected. | Recovery is gated on the RRK-derived key pinned in genesis — strictly stronger than the chain's self-signed reset. | `tests::a_refound_signed_by_the_recovery_authority_retargets_the_owner`, `tests::a_refound_is_rejected_without_the_recovery_authority_or_against_a_non_owner` |
-| **KDAG-3** | A concurrent fork converges with both branches surviving; a fork branching from before the merge horizon is rejected. | Sequencer-free merge must not lose ops, but also can't accept an op reaching behind the GC'd horizon. | `tests::a_fork_converges_and_both_survive`, `tests::a_fork_branching_from_before_the_merge_horizon_is_rejected` |
-| **KDAG-4** | A second `Create` cannot re-found the group and wipe the roster; an op carrying a key that isn't the author's registered key is ignored. | Genesis and author-key binding close two roster-hijack vectors. | `tests::a_second_create_cannot_re_found_and_wipe_the_roster`, `tests::an_op_carrying_a_key_that_is_not_the_authors_registered_key_is_ignored` |
-| **KDAG-5** | A privileged op concurrent with a recovery is voided, but a later owner op stands. | Recovery takes precedence over concurrent privileged writes without permanently freezing post-recovery governance. | `tests::a_privileged_op_concurrent_with_recovery_is_voided_but_a_later_owner_op_stands` |
-| **KDAG-6** | The verifier folds admitted ops into a `keyeo_api::MembershipView`, and the RVK is deterministic + secret-dependent (different secrets → different RVKs). | The keyless server seam and the recovery-key derivation are the two cross-crate contracts. | `verifier::tests::dag_verifier_folds_admitted_ops_into_a_membership_view`, `recovery::tests::different_secrets_yield_different_rvks` |
+| **KEYEO-1** | An op whose author lacks authority never changes the resolved membership. | Access control is enforced at resolution, so an unauthorized signed op is inert, not merely flagged. | `tests::an_unauthorized_op_never_changes_resolved_membership` |
+| **KEYEO-2** | Resolution is order-independent: the same op set in any delivery order resolves to the same state. | Sequencer-free convergence — replicas that receive ops in different orders agree. | `tests::resolution_is_order_independent`, `epoch::tests::commitment_is_order_independent` |
+| **KEYEO-3** | A content id verifies its bytes and detects any tamper. | Ops are content-addressed; a mutated op is caught, not silently accepted into the DAG. | `content::tests::content_id_verifies_and_detects_tampering` |
+| **KEYEO-4** | Concurrent epochs reconcile to a single shared DEK, and a fresh epoch's DEK round-trips for every current member. | Two members re-keying at once must not fork the group's encryption; everyone lands on one key. | `epoch::tests::concurrent_epochs_reconcile_to_a_single_shared_dek`, `epoch::tests::fresh_epoch_round_trips_for_its_members` |
+| **KEYEO-5** | Quorum governance is exact: `All` is unanimity (and the empty set is not a quorum); `EitherFounderOr` accepts the founder alone or the configured set. | Multi-party authority can't be met by an off-by-one or an empty roster. | (the generic `Requirement` now lives in `keyeo-core`) `keyeo_core::quorum::tests::all_is_unanimity_and_the_empty_set_is_not`, `keyeo_core::quorum::tests::either_is_founder_or_unanimity`; `Individual` inertness: `quorum::tests::individual_governance_never_reaches_quorum` |
 
-The RVK derivation is byte-identical to the chain vault's (`openom_crypto::derive_rvk`), guarded by a
-cross-check test in `openom-vault`. Run: `node scripts/cargo.mjs test -p keyeo-dag` (from the repo root).
+Run: `node scripts/cargo.mjs test -p keyeo-dag` (from the repo root; on Windows cargo runs under WSL2/Docker).
 
 ## Usage
 
 ```rust,ignore
-use keyeo_dag::{verifier::DagVerifier, recovery};
-use keyeo_api::KeyringVerifier;
+use keyeo_dag::{Keyeo, StrongRemove};
 
-// Keyless admission (server side): admit an op against prior opaque trust state → new state + view.
-let admitted = DagVerifier::default().admit(prior_state, &op_bytes)?;
-let members = admitted.view.members;
-
-// Recovery: the RVK pinned in genesis, derived from the escrowed RRK secret.
-let rvk_public = recovery::rvk_public(&rrk_secret);
+// state: GroupState, access: impl AccessControl, resolver: StrongRemove — all caller-chosen type params.
+let mut k = Keyeo::new(state, access, resolver);
+let outcome = k.apply(signed_op)?;   // ApplyOutcome: the resolved membership + any epoch event
 ```
 
-Entry points: the type aliases (`KeyringAction` / `KeyringOp` / `KeyringState` / `KeyringEngine`),
-`KeyringRole`, `sign_op`, `KeyringAccess` + `KeyringQuorum` / `QuorumRule` (authority), `recovery`
-(`derive_rvk` / `rvk_public`), the `verifier` (the `KeyringVerifier` impl), and `client` / `blob_sync`.
+Entry points: `Keyeo` (`new` / `apply` → `ApplyOutcome`), `GroupState` / `MembershipAction` /
+`MemberInit` / `SignedOp`, the `AccessControl` and `QuorumPolicy` traits, the epoch API
+(`generate_epoch` / `reconcile_epochs` / `recover_epoch_dek` / `membership_commitment`), `content_id`,
+and `compact` (history GC).
 
 ## Position
 
-Layer 2 — one of the two keyring engines, over `keyeo` (Layer 0) and behind `keyeo-api` (Layer 1). Above
-it sits `openom-vault` (the lifecycle). Non-dev deps: `keyeo`, `keyeo-api`, `edsign`, `blobstore`, serde —
-all openom-free. Full dependency graph: see `packages/README.md`.
+Layer 0 — the engine over the keyring stack's seam types, depended on only by `openom-keyring-dag` (the openom
+binding). It depends on `keyeo-core` (the generic `Role` / `SignatureScheme` / `CanonicalBytes` /
+`Requirement` seam types, re-exported so `keyeo_dag::X` keeps resolving) + `edsign` + `keyeo-crypto` (its HPKE
+/ AEAD / KDF primitives — `keyeo-dag` no longer carries its own `kdf`/`hpke_wrap`) but no openom crate, so
+nothing openom sits beneath it. Full dependency graph: see `packages/README.md`.

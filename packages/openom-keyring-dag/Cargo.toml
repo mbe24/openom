@@ -1,0 +1,27 @@
+[package]
+name = "openom-keyring-dag"
+description = "openom's DAG keyring binding: openom's roles/signing/keys wired onto the generic keyeo-dag group-membership engine (sequencer-free keyring, OPE-137). Dependency-light but openom-domain-specific — binds roles to openom-keyring-api's convention and derives its recovery key through edsign."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+keyeo-dag.workspace = true
+blobstore.workspace = true
+openom-keyring-api.workspace = true
+edsign.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The op body wire: a compact postcard encoding wrapped in openom-keyring-api's MembershipEnvelope (no JSON).
+postcard = { version = "1", features = ["use-std"] }
+
+[dev-dependencies]
+# The differential-oracle + seam-parity tests drive the openom chain keyring (openom-keyring) alongside
+# the DAG one and assert they agree ("CAS = degenerate DAG"), against openom's own roles/proto vocabulary.
+# openom-coupled but TEST-ONLY — the published library (its [dependencies]) stays openom-free.
+openom-keyring.workspace = true
+openom-protocol.workspace = true
+openom-roles.workspace = true
+proptest.workspace = true
+tempfile = "3"

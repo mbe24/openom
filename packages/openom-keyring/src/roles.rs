@@ -70,13 +70,13 @@ mod tests {
         }
     }
 
-    /// keyeo-api hardcodes its OWN generic role convention (Owner=1, CoOwner=2) so it stays openom-free /
+    /// openom-keyring-api hardcodes its OWN generic role convention (Owner=1, CoOwner=2) so it stays openom-free /
     /// standalone-publishable (OPE-279). openom's proto-derived openom-roles MUST agree, or the seam's
     /// `is_owner`/`is_signer` would misjudge authority. This guards the duplication against drift.
     #[test]
-    fn keyeo_api_role_convention_matches_openom_roles() {
-        assert_eq!(openom_roles::ROLE_OWNER, keyeo_api::ROLE_OWNER);
-        assert_eq!(openom_roles::ROLE_CO_OWNER, keyeo_api::ROLE_CO_OWNER);
+    fn openom_keyring_api_role_convention_matches_openom_roles() {
+        assert_eq!(openom_roles::ROLE_OWNER, openom_keyring_api::ROLE_OWNER);
+        assert_eq!(openom_roles::ROLE_CO_OWNER, openom_keyring_api::ROLE_CO_OWNER);
     }
 
     #[test]

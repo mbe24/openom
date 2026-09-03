@@ -1,4 +1,4 @@
-//! Differential oracle: the DAG keyring (keyeo-dag / keyeo) vs the legacy CAS keyring
+//! Differential oracle: the DAG keyring (openom-keyring-dag / keyeo) vs the legacy CAS keyring
 //! (openom-keyring / chain.rs), on a fork-free sequence — the "CAS = degenerate DAG" acceptance gate.
 //!
 //! For a shared cast + a single logical mutation, we drive BOTH systems and compare — chain.rs builds
@@ -7,9 +7,9 @@
 //! the two documented v1 divergences (self-removal widen; unanimity is v2), which are asserted as
 //! *expected* divergences so the oracle stays honest.
 
-use keyeo::{Keyeo, MemberInit, MembershipAction, StrongRemove};
+use keyeo_dag::{Keyeo, MemberInit, MembershipAction, StrongRemove};
 use openom_keyring::{keyring_hash, sign_keyring, verify_reset, verify_transition, KeyringAnchor};
-use keyeo_dag::{
+use openom_keyring_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
 use openom_protocol::v1::{
@@ -115,7 +115,7 @@ fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
             hpke_public_key: [c.seed; 32],
         })
         .collect();
-    Keyeo::new(KeyringState::create(keyeo::GroupId::unscoped(), &inits), KeyringAccess, StrongRemove)
+    Keyeo::new(KeyringState::create(keyeo_dag::GroupId::unscoped(), &inits), KeyringAccess, StrongRemove)
 }
 
 fn keyeo_has(k: &KeyringEngine, id: &str) -> bool {
@@ -134,7 +134,7 @@ fn keyeo_engine_with_rvk(cast: &[Cast], rvk_pub: [u8; 32]) -> KeyringEngine {
         })
         .collect();
     Keyeo::new(
-        KeyringState::create(keyeo::GroupId::unscoped(), &inits).with_reset_authority(Some(rvk_pub)),
+        KeyringState::create(keyeo_dag::GroupId::unscoped(), &inits).with_reset_authority(Some(rvk_pub)),
         KeyringAccess,
         StrongRemove,
     )

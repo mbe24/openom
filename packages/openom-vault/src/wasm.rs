@@ -18,7 +18,7 @@ use openom_keyring::{
     decode_governing_ref, keyring_hash, verify_reset, verify_walk, KeyringAnchor, VerifyingKey,
 };
 use crate::attribution::{epoch_is_attributed, verify_entry};
-use keyeo_dag::client as dag_client;
+use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
@@ -26,7 +26,7 @@ use openom_protocol::{Message, ENVELOPE_VERSION};
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
-use keyeo_api::{EngineKind, MembershipEnvelope};
+use openom_keyring_api::{EngineKind, MembershipEnvelope};
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -209,7 +209,7 @@ fn to_js(e: impl std::fmt::Display) -> JsError {
 /// Parse the deployment's configured engine tag (a backend preset, never a per-tree user choice — OPE-278).
 /// The tag mapping is [`EngineKind`]'s own `FromStr`, so this host and the Tauri host can't drift apart.
 fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
-    s.parse().map_err(|e: keyeo_api::UnknownEngine| JsError::new(&e.to_string()))
+    s.parse().map_err(|e: openom_keyring_api::UnknownEngine| JsError::new(&e.to_string()))
 }
 
 // ---- the keyring vault (passphrase lifecycle) ----

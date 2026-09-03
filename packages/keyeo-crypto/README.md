@@ -1,7 +1,7 @@
 # keyeo-crypto
 
 Generic, openom-free symmetric and HPKE crypto primitives shared by openom-crypto (the
-proto-bound envelope layer) and the keyeo DAG keyring engine.
+proto-bound envelope layer) and the keyeo-dag DAG keyring engine.
 
 It owns the pieces that carry no wire/proto knowledge:
 

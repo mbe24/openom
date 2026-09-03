@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
 use openom_keyring::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
 // Re-exported: `with_engine` takes an `EngineKind`, so callers select the engine preset without a
-// direct keyeo-api dependency.
-pub use keyeo_api::EngineKind;
+// direct openom-keyring-api dependency.
+pub use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, KdfParams, Keyring, MemberRole};
 use openom_protocol::Message;

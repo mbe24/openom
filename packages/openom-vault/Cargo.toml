@@ -21,10 +21,10 @@ sha2.workspace = true
 edsign.workspace = true
 # The two keyring engines the vaults drive.
 openom-keyring.workspace = true
-keyeo-dag.workspace = true
+openom-keyring-dag.workspace = true
 # The keyless seam's MembershipView — the engine-neutral resolved membership the dag vault checks coverage
 # against (OPE-282/288/290).
-keyeo-api.workspace = true
+openom-keyring-api.workspace = true
 # Role constants the vault compares against.
 openom-roles.workspace = true
 # did:key encoding of the member's PUBLIC identity key — the stable claim author id (createdBy).

@@ -22,7 +22,7 @@ use axum::Json;
 use base64::Engine;
 use openom_keyring::decode_governing_ref;
 use openom_keyring::verifier::ChainVerifier;
-use keyeo_api::{EngineKind, KeyringVerifier, VerifyError};
+use openom_keyring_api::{EngineKind, KeyringVerifier, VerifyError};
 use openom_protocol::v1::KeyringUpdate;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};

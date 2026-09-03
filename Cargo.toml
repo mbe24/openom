@@ -11,7 +11,7 @@ members = [
     "packages/keyeo-crypto",
     "packages/openom-roles",
     "packages/openom-keyring",
-    "packages/keyeo-api",
+    "packages/openom-keyring-api",
     "packages/openom-model",
     "packages/openom-jcs",
     "packages/openom-did",
@@ -27,8 +27,8 @@ members = [
     "packages/journal",
     "packages/openom-sync",
     "packages/keyeo-core",
-    "packages/keyeo",
     "packages/keyeo-dag",
+    "packages/openom-keyring-dag",
     "packages/docsync",
     "packages/blobstore",
     "openom",
@@ -57,8 +57,8 @@ openom-crypto = { path = "packages/openom-crypto" }
 keyeo-crypto = { path = "packages/keyeo-crypto" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring = { path = "packages/openom-keyring" }
-keyeo-dag = { path = "packages/keyeo-dag" }
-keyeo-api = { path = "packages/keyeo-api" }
+openom-keyring-dag = { path = "packages/openom-keyring-dag" }
+openom-keyring-api = { path = "packages/openom-keyring-api" }
 openom-jcs = { path = "packages/openom-jcs" }
 openom-did = { path = "packages/openom-did" }
 edsign = { path = "packages/edsign" }
@@ -70,8 +70,8 @@ openom-tree = { path = "packages/openom-tree" }
 journal = { path = "packages/journal" }
 blobstore = { path = "packages/blobstore" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
-# roles/signing/keys onto keyeo's seams in keyeo-dag; keyeo itself never gains an openom dep.
-keyeo = { path = "packages/keyeo" }
+# roles/signing/keys onto keyeo-dag's seams in openom-keyring-dag; keyeo-dag itself never gains an openom dep.
+keyeo-dag = { path = "packages/keyeo-dag" }
 # The keyeo engine-family SEAM types (Role / SignatureScheme+Ed25519 / CanonicalBytes / Requirement),
 # extracted below the engine so every keyeo engine binds one definition. openom-free / dalek-free.
 keyeo-core = { path = "packages/keyeo-core" }

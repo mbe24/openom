@@ -169,7 +169,7 @@ pub struct KeyringUpdate {
     /// storage / CAS / head-advance on the VERIFIED `Admitted.update_ref`, never on this.
     #[prost(bytes="vec", tag="4")]
     pub update_ref: ::prost::alloc::vec::Vec<u8>,
-    /// The opaque membership update — a keyeo-api `MembershipEnvelope` wrapping the engine's signed body
+    /// The opaque membership update — a openom-keyring-api `MembershipEnvelope` wrapping the engine's signed body
     /// (chain: a Keyring). The server never decodes it; it hands it to the dispatched verifier's `admit`.
     #[prost(bytes="vec", tag="5")]
     pub payload: ::prost::alloc::vec::Vec<u8>,

@@ -12,13 +12,13 @@ The stateful, secret-holding top of the keyring stack. Behind the [`KeyringLifec
 passphrase (or recovery code) + the keyring bytes into an unlocked DEK session and drives every membership
 operation: provision a tree, unlock on a new device, recover, change passphrase, add/remove a member,
 promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine — [`ChainVault`] over
-`openom-keyring` or [`DagVault`] over `keyeo-dag` — on the tree's bound [`keyeo_api::EngineKind`], so one binary
+`openom-keyring` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
 serves both. Underneath sits the engine-neutral **sealing core** (`vault_core`: DEK / epoch / RRK / KDF /
 recovery-code / SealerSet machinery), extracted so both engines share one implementation of the
 security-critical crypto path. The browser `wasm` cdylib veneer lives here too.
 
 It is **not** `openom-sealer`: that is now the lean, engine-free DEK *session* (`Sealer` / `SealerSet` /
-`seal` / `open`) this crate builds on. It is **not** the keyless server seam (`keyeo-api`) — the lifecycle
+`seal` / `open`) this crate builds on. It is **not** the keyless server seam (`openom-keyring-api`) — the lifecycle
 results carry `SealerSet` + `Passphrase` / `RecoveryCode` / `DidKey`, so they must stay off the server's
 key-free binding surface. Unlike the engines below it, this crate is **openom-coupled by design** (it uses
 `openom-crypto`'s AEAD/KDF and `openom-protocol`'s envelope/id types) and keeps the `openom-` prefix; that
@@ -34,7 +34,7 @@ coupling is load-bearing, not incidental (see `packages/openom-crypto` and OPE-2
 | **VAULT-4** | Removing a member re-keys to a fresh epoch that locks them out of new content. | Forward secrecy: a removed member keeps only what they could already read. | `vault::tests::removing_a_member_re_keys_and_denies_them_new_content`, `dag_vault::tests::dag_remove_member_forward_secret_epoch_locks_them_out` |
 | **VAULT-5** | `recover` pins the write epoch to DEK *material* (revision‖key_id‖H(DEK)), and a stale anchor / rolled-back watermark is refused. | Anti-rollback binds recovery to real key material, not a public label an attacker can mint (OPE-286). | `vault::tests::recover_pins_the_write_epoch_to_dek_material`, `dag_vault::tests::dag_watermark_advances_and_a_stale_anchor_is_refused` |
 | **VAULT-6** | Absurd KDF params are rejected before Argon2id runs; the member's `did:key` is the founder key and stable across unlock. | A malicious keyring can't DoS via KDF cost, and the claim-author id is deterministic. | `vault::tests::absurd_kdf_params_are_rejected_before_running_argon2id`, `dag_vault::tests::did_key_is_the_founder_key_and_stable_across_unlock` |
-| **VAULT-7** | The vault's provisioning RVK (`openom_crypto::derive_rvk`) and the dag engine's verifying RVK (`keyeo_dag::recovery`) are byte-identical. | A tree recovered by one is verifiable by the other — the two derivations live in different crates and must not drift. | `dag_vault::tests::vault_and_engine_derive_the_same_recovery_key` |
+| **VAULT-7** | The vault's provisioning RVK (`openom_crypto::derive_rvk`) and the dag engine's verifying RVK (`openom_keyring_dag::recovery`) are byte-identical. | A tree recovered by one is verifiable by the other — the two derivations live in different crates and must not drift. | `dag_vault::tests::vault_and_engine_derive_the_same_recovery_key` |
 
 Run: `node scripts/cargo.mjs test -p openom-vault` (from the repo root). The wasm veneer is built via
 `node scripts/build-vault.mjs` → `apps/app/src/vendor/vault/`.
@@ -57,6 +57,6 @@ Entry points: `AppVault` (engine dispatch), the `KeyringLifecycle` trait, `Chain
 
 ## Position
 
-The top of the keyring stack: above the two engines (`openom-keyring`, `keyeo-dag`) and above
+The top of the keyring stack: above the two engines (`openom-keyring`, `openom-keyring-dag`) and above
 `openom-sealer` (the DEK session it uses). Its native counterpart is `openom-vault-host` (Tauri custody).
 Full dependency graph: see `packages/README.md`.

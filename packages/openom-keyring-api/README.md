@@ -1,4 +1,4 @@
-# keyeo-api
+# openom-keyring-api
 
 > The engine-agnostic vocabulary for openom's two swappable keyring engines — the resolved
 > `MembershipView`, the keyless `KeyringVerifier` seam, and the `EngineKind` tag.
@@ -9,7 +9,7 @@
 ## What it is — and is not
 
 openom runs **two** permanent keyring engines — the linear signed **chain** (`openom-keyring`) and the
-**DAG** (`keyeo-dag`) — and this crate is the small shared vocabulary both fold into so the rest of the
+**DAG** (`openom-keyring-dag`) — and this crate is the small shared vocabulary both fold into so the rest of the
 system binds to neither. It holds three engine-agnostic pieces: [`MembershipView`] (the resolved members
 + roles, the value the app's role display and the server's ACL derivation both consume), the keyless
 [`KeyringVerifier`] seam (admit an update against prior opaque trust state, report the new state + view +
@@ -20,8 +20,8 @@ It is deliberately **not** one `KeyringEngine` trait, and **not** the secret-hol
 (provision / unlock / recover / author) — that returns sealer + DEK material and lives in `openom-vault`,
 away from the server's keyless binding surface. It runs **no** crypto and holds **no** engine internals:
 the trust `state` is opaque bytes it never parses, and the anti-rollback floor lives *inside* those bytes,
-never as a field here. It is openom-free — it defines its own `i16` role convention rather than depending
-on `openom-roles` — so it is standalone-publishable.
+never as a field here. It is dependency-light — it defines its own `i16` role convention rather than depending
+on `openom-roles` — but openom-domain-specific: the `EngineKind` roster and the `ROLE_*` values are openom's.
 
 ## Invariants
 
@@ -34,12 +34,12 @@ on `openom-roles` — so it is standalone-publishable.
 
 The `ROLE_*` constants (`ROLE_OWNER=1 … ROLE_VIEWER=5`) are pinned to openom's proto `MemberRole` values
 by `openom-keyring`'s drift-guard test — that binding is asserted there, not here, so this crate keeps no
-openom dependency. Run: `node scripts/cargo.mjs test -p keyeo-api` (from the repo root).
+openom dependency. Run: `node scripts/cargo.mjs test -p openom-keyring-api` (from the repo root).
 
 ## Usage
 
 ```rust
-use keyeo_api::{MembershipView, MemberView, EngineKind, ROLE_OWNER, ROLE_EDITOR};
+use openom_keyring_api::{MembershipView, MemberView, EngineKind, ROLE_OWNER, ROLE_EDITOR};
 
 let view = MembershipView::new(
     vec![
@@ -60,6 +60,6 @@ constants.
 
 ## Position
 
-Layer 1 — the seam. It sits above the two engines and below their consumers: `keyeo-dag` and
+Layer 1 — the seam. It sits above the two engines and below their consumers: `openom-keyring-dag` and
 `openom-keyring` fold into its `MembershipView`, and the server + `openom-vault` bind to it. It depends
-only on `serde`; the generic Layer-0 engine is `keyeo`. Full dependency graph: see `packages/README.md`.
+only on `serde` + `prost`; the generic Layer-0 engine is `keyeo-dag`. Full dependency graph: see `packages/README.md`.

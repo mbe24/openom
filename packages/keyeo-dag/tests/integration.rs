@@ -1,4 +1,4 @@
-use keyeo::{
+use keyeo_dag::{
     self, dag::lamport::LamportTiebreak, dag::strong_remove::StrongRemove, keyeo as keyeo_fn,
     membership_commitment, ApplyOutcome, DefaultAccessControl, Ed25519, Epoch, Error, GroupId,
     GroupState, Keyeo, MemberInit, MembershipAction, Op, Role,
@@ -572,14 +572,14 @@ fn op_and_epoch_signing_domains_are_byte_disjoint() {
     // `keyeo:epoch:v2`), so a signature over one can never verify as the other — the invariant that lets an
     // unauthenticated engine/kind discriminant be safe. (openom's chain uses `openom:keyring`, also
     // disjoint.) A cheap prefix check pins it against a future tag edit that accidentally collides.
-    let op_bytes = keyeo::canonical_encode(
+    let op_bytes = keyeo_dag::canonical_encode(
         &GroupId::unscoped(),
         &[] as &[u64],
         &[1u8; 32],
         &MembershipAction::<[u8; 32], TestRole, Ed25519>::Reseal,
         &[],
     );
-    let epoch_bytes = keyeo::canonical::canonical_encode_epoch::<u64, [u8; 32]>(
+    let epoch_bytes = keyeo_dag::canonical::canonical_encode_epoch::<u64, [u8; 32]>(
         &GroupId::unscoped(),
         &[],
         &[0u8; 32],
@@ -1410,7 +1410,7 @@ fn test_epoch_rotation_follows_membership_and_is_forward_secret() {
     // his HPKE key is not wrapped (forward secrecy). Both replicas receive the same signed artifact and
     // reconcile to the same wraps. The commitment is computed the way the engine does (from the stored
     // member hpke keys) so reconcile matches.
-    let active_keys = keyeo::epoch::membership_commitment(&[
+    let active_keys = keyeo_dag::epoch::membership_commitment(&[
         (a, TestRole::Admin, [0xaa; 32]),
         (c, TestRole::Viewer, [0xcc; 32]),
     ]);
@@ -1912,7 +1912,7 @@ proptest! {
 // A test QuorumPolicy: eligible = the active Admins; requirement = unanimity of them. So a Commit's
 // target takes effect only when every Admin (the proposer implicitly + the approvers) has approved.
 struct AllAdmins;
-impl keyeo::QuorumPolicy<[u8; 32], TestRole, Ed25519> for AllAdmins {
+impl keyeo_dag::QuorumPolicy<[u8; 32], TestRole, Ed25519> for AllAdmins {
     fn eligible(
         &self,
         state: &GroupState<[u8; 32], TestRole, Ed25519>,
@@ -1929,8 +1929,8 @@ impl keyeo::QuorumPolicy<[u8; 32], TestRole, Ed25519> for AllAdmins {
         &self,
         state: &GroupState<[u8; 32], TestRole, Ed25519>,
         target: &MembershipAction<[u8; 32], TestRole, Ed25519>,
-    ) -> keyeo::Requirement<[u8; 32]> {
-        keyeo::Requirement::All(self.eligible(state, target))
+    ) -> keyeo_dag::Requirement<[u8; 32]> {
+        keyeo_dag::Requirement::All(self.eligible(state, target))
     }
 }
 
