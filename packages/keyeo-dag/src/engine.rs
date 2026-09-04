@@ -357,6 +357,19 @@ where
         self.resolve_walk().map(|(_, e)| e).unwrap_or_default()
     }
 
+    /// Whether this group HAS EVER been shared beyond its founder — i.e. any EFFECTIVE `Add` op exists.
+    /// MONOTONIC: an effective Add stays effective after the member is removed (a `Remove` is a separate
+    /// op, it doesn't un-effect the Add), so this never regresses to false. This is the dag's analog of the
+    /// chain's `first_shared_revision != 0`: the gate for attributed writes. Scan-backed while nothing is
+    /// pruned; a compaction Snapshot carries the marker so it survives pruning (see `gc::Snapshot`). (Assumes
+    /// a solo genesis — openom's `Create` always has one initial member; a co-founder genesis would need the
+    /// Create's `initial_members.len() > 1` folded in too.)
+    pub fn ever_shared(&self) -> bool {
+        self.effective_ops()
+            .iter()
+            .any(|id| matches!(self.ops.get(id).map(|o| o.action()), Some(MembershipAction::Add { .. })))
+    }
+
     /// Kahn's topological sort over all admitted ops, with `OpId` as a deterministic tiebreak among
     /// concurrent ops — a real topo sort, NOT a plain OpId sort (which misorders whenever OpIds aren't
     /// causally monotonic, e.g. content-hash ids). Errors as `DagCycle` if the ops don't form a DAG.

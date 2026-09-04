@@ -187,6 +187,9 @@ pub struct Resolved {
     /// with the id of the op that minted it. The vault deserializes + folds these into the current epochs +
     /// escrow, and uses the op-id to break concurrent same-ordinal epoch ties deterministically (OPE-282).
     pub sealing: Vec<SealingEntry>,
+    /// Whether this tree HAS EVER been shared (any effective Add) — the dag's monotonic attributed-writes
+    /// gate, the analog of the chain's `first_shared_revision != 0`. Never regresses after an un-share.
+    pub ever_shared: bool,
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
@@ -275,7 +278,8 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             }
         }
     }
-    Ok(Resolved { members, sealing })
+    let ever_shared = engine.ever_shared();
+    Ok(Resolved { members, sealing, ever_shared })
 }
 
 /// Map a keyeo action to the coarse [`SealingOrigin`] the sealer's fold uses to decide epoch eligibility.
@@ -565,6 +569,27 @@ mod tests {
         assert!(
             matches!(check_floor(&a0, &w1), Err(ClientError::RolledBack(_))),
             "the advanced tip is absent from the stale anchor — a rollback"
+        );
+    }
+
+    #[test]
+    fn ever_shared_is_monotonic_true_after_an_add_even_once_removed() {
+        // Solo genesis: never shared.
+        let a0 = provision_anchor(b"tree-es", "founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        assert!(!resolve(&a0).unwrap().ever_shared, "a solo tree has never been shared");
+
+        // Admit a member → shared.
+        let a1 = append_add(
+            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"wrap".to_vec(), &sk(1),
+        )
+        .unwrap();
+        assert!(resolve(&a1).unwrap().ever_shared, "admitting a member makes the tree shared");
+
+        // Remove the member → solo membership again, but ever_shared stays TRUE (the effective Add persists).
+        let a2 = append_remove(&a1, "founder", "bob", b"reseal".to_vec(), &sk(1)).unwrap();
+        assert!(
+            resolve(&a2).unwrap().ever_shared,
+            "an un-shared-back-to-solo dag still reports ever_shared (monotonic)"
         );
     }
 }
