@@ -14,6 +14,11 @@
 
 import { SealerSession } from './session.js';
 import { workerCore } from './workerSealer.js';
+import { createSyncedDeltaSync } from '../syncedDeltaSync.js';
+
+// The envelope format version the wasm sealer stamps and verifyEntry checks against. V1 = 1; pinned here
+// (there is no runtime accessor yet) and validated end-to-end by the real seal/verify round-trip tests.
+export const ENVELOPE_VERSION = 1;
 
 const bytesEqual = (a, b) =>
   a === b || (!!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]));
@@ -212,7 +217,7 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
      */
     async reconcileKeyring(treeKey, { getServerHead, putUpdate, serverBytesAt }) {
       const localHead = (await keyringStore.head(treeKey))?.revision ?? 0;
-      let head = await getServerHead();
+      let head = await getServerHead(localHead); // passed localHead so the probe fetches head+1.. (no full history)
       while (head < localHead) {
         const rev = head + 1;
         const bytes = await keyringStore.at(treeKey, rev);
@@ -231,6 +236,20 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
         }
       }
       return { head: localHead };
+    },
+
+    /**
+     * Assemble this tree's delta-log SyncController, verifying every landed entry against this device's
+     * retained keyring chain (§B3). It lives on the vault because the vault owns the crypto worker + the
+     * keyring store the entry verifier needs; the seal/open are bound to the passphrase SESSION for this
+     * tree (kind:'delta'). `docId` is the server tree id (== the local keyring key after the identity
+     * collapse), so keyringStore.at(docId, rev) resolves the governing revision.
+     * @returns {import('../sync.js').SyncController}
+     */
+    makeDeltaSync({ tree, remote, docId, session, replicaKey = null, version = ENVELOPE_VERSION }) {
+      const seal = (raw) => session.seal(raw, docId, { kind: 'delta' });
+      const open = (sealed) => session.open(sealed, docId, { kind: 'delta' });
+      return createSyncedDeltaSync({ version, tree, remote, docId, seal, open, worker, keyringStore, replicaKey });
     },
 
     /**
