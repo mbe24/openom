@@ -60,7 +60,10 @@ createServer(async (req, res) => {
     if (extname(file) === '.html') {
       // Local dev has the demo on by default (set OPENOM_DEMO=0 to match production).
       const demo = process.env.OPENOM_DEMO === '0' ? 'false' : 'true';
-      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%DEMO%', demo);
+      // The managed sync backend: the docker-compose server by default, so synced mode works in dev
+      // (set OPENOM_SERVER='' to run local-only). Substituted like %DEMO% so the placeholder never ships.
+      const server = process.env.OPENOM_SERVER ?? 'http://localhost:6060';
+      body = body.toString('utf8').replaceAll('%SITE_URL%', LOCAL_URL).replaceAll('%DEMO%', demo).replaceAll('%SERVER%', server);
     }
     res.writeHead(200, {
       'content-type': TYPES[extname(file)] ?? 'application/octet-stream',

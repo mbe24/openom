@@ -51,12 +51,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     } catch { /* no .env.demo — demo stays off */ }
   }
   demo = demo === 'true' ? 'true' : 'false';
+  // The managed sync backend URL: empty unless a deployment sets OPENOM_SERVER, so production is
+  // local-only (no account wall) until a server is wired.
+  const server = process.env.OPENOM_SERVER ?? '';
   let touched = 0;
   for await (const file of htmlFiles(target)) {
     const before = await readFile(file, 'utf8');
     if (!before.includes('%SITE_URL%')) continue;
-    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%DEMO%', demo));
+    await writeFile(file, before.replaceAll('%SITE_URL%', url).replaceAll('%DEMO%', demo).replaceAll('%SERVER%', server));
     touched++;
   }
-  console.log('site-url → ' + url + ' · demo=' + demo + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
+  console.log('site-url → ' + url + ' · demo=' + demo + ' · server=' + (server || '(none)') + ' (' + touched + ' file' + (touched === 1 ? '' : 's') + ')');
 }

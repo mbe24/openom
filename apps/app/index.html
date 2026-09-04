@@ -6,6 +6,9 @@
     <!-- Demo mode (dev/marketing only). Substituted at deploy: false in production, true
          locally and on a demo deployment. A missing substitution reads as "not true" → off. -->
     <meta name="openom:demo" content="%DEMO%" />
+    <!-- The managed sync backend's base URL, substituted at serve/deploy time (empty ⇒ local-only, no
+         account wall). Per-tree backends attach on top of this; a tree with no backend never syncs. -->
+    <meta name="openom:server" content="%SERVER%" />
     <title>openom</title>
     <!-- Fonts are vendored (scripts/vendor-fonts.mjs), never fetched from Google at runtime — a
          privacy-first app must not phone home or need the network to render. @font-face with

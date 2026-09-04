@@ -8,6 +8,8 @@ import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, DevAuth } from './core/session.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
+import { RemoteStore } from './core/remoteStore.js';
+import { buildSyncSession } from './core/syncSession.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { stats, search } from './core/queries.js';
@@ -38,6 +40,13 @@ function loadAutoLock() {
 }
 function saveAutoLock(min) {
   try { localStorage.setItem(AUTOLOCK_KEY, String(min)); } catch { /* ephemeral */ }
+}
+
+// The managed sync backend's base URL (from the openom:server meta, substituted at serve/deploy time).
+// Absent or the unsubstituted placeholder ⇒ null ⇒ the app stays local-only (no server, no account wall).
+function readServerUrl() {
+  const v = document.querySelector('meta[name="openom:server"]')?.content ?? '';
+  return /^https?:\/\//.test(v) ? v.replace(/\/$/, '') : null;
 }
 
 // A rollback/tamper signal, not a "wrong passphrase". The Tauri host reports a structured
@@ -92,6 +101,11 @@ class App {
   // scope, carried inside every payload). Both null until the member has provisioned a tree.
   realDoc = null;
   realTreeId = null;
+  // The managed backend URL (null ⇒ local-only) and the active tree's owned SyncSession (null unless
+  // synced). syncStatus mirrors the driver's last status for a future sync indicator.
+  serverUrl = null;
+  sync = null;
+  syncStatus = null;
   // The active real (lockable) sealer session, or null at the gate / in the demo. Auto-lock
   // and "Lock now" act on this; the demo never sets it (there'd be no keyring to re-unlock).
   sealer = null;
@@ -132,6 +146,7 @@ class App {
     // deployment). A production user can't turn it on: no welcome affordance, and the ?demo
     // shortcut below is inert unless the flag is set.
     this.demoEnabled = document.querySelector('meta[name="openom:demo"]')?.content === 'true';
+    this.serverUrl = readServerUrl(); // null ⇒ local-only (sync stays off; no account wall)
     // A local account is the identity every provision/unlock binds to (memberId == the vault member ==
     // the token's sub). Ensure one exists for this dev context; the account UI (later) creates/switches more.
     if (!this.auth.memberId()) await this.auth.signIn({ label: 'You' });
@@ -175,9 +190,10 @@ class App {
   // and vault are per-member unlock state, so drop the whole open stack, lock the sealer, rebuild a fresh
   // vault bound to the NEW member, and re-gate — never a token-swap under a live RemoteStore.
   // The new member's tree identity is resolved per-member (gateForMember → loadTreeIdentity), so realDoc/
-  // realTreeId already switch with the account. TODO(OPE-337 T4): rebuild the composeStore around the new
-  // member's authed RemoteStore (synced mode) — today enterApp still composes local-only.
+  // realTreeId switch with the account, and enterApp rebuilds the SyncSession around the new member's
+  // authed RemoteStore. Tear the old session down first (its signal aborts, in-flight ticks no-op).
   async onIdentityChange() {
+    this.stopSync();
     if (this.sealer) {
       try { await this.sealer.lock(); } catch (e) { console.warn('[openom] lock on identity change', e); }
     }
@@ -269,6 +285,7 @@ class App {
   // A no-op unless a real, lockable session is open (guards the demo and the gate).
   async lockNow(_reason = 'manual') {
     if (!this.sealer || !this.tree || this.gate) return;
+    this.stopSync(); // abort sync before freeing the key (its channels seal through this sealer)
     const sealer = this.sealer;
     this.sealer = null;
     this.lockPolicy?.disarm();
@@ -400,7 +417,48 @@ class App {
     this.gate = null;
     // Start the idle clock only for the real, lockable session.
     if (this.sealer) this.lockPolicy?.arm();
+    // Turn on synced mode for the real tree (gated on a configured backend + an active account).
+    this.startSync();
     this.render();
+  }
+
+  // Build + start this tree's owned SyncSession. Gated (D3) on a configured managed backend AND an active
+  // account — absent either, the tree stays local-first (no server, no account wall). One SyncSession per
+  // open tree; a prior one is aborted first. Web-only for now (the Tauri vault has no makeDeltaSync yet).
+  startSync() {
+    this.stopSync();
+    if (!this.sealer || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
+    if (!this.serverUrl || !this.auth.memberId()) return; // no backend / no account → local-only
+    if (typeof this.vault?.makeDeltaSync !== 'function') return; // Tauri host: synced mode deferred
+    try {
+      const remote = new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
+      this.sync = buildSyncSession({
+        tree: this.tree,
+        uuid: this.realDoc,
+        treeId: this.realTreeId,
+        session: this.sealer,
+        vault: this.vault,
+        remote,
+        callbacks: {
+          onStatus: (s) => { this.syncStatus = s; },
+          // A dead BACKEND session is independent of the vault (per-backend auth): stop syncing + record
+          // it for the UI to offer re-connect; do NOT lock the passphrase vault.
+          onAuthError: () => { this.syncStatus = { state: 'auth-error' }; console.warn('[openom] sync: backend session needs re-auth'); },
+          onSecurity: (e) => { this.syncStatus = { state: 'security' }; console.warn('[openom] sync: security signal', e); },
+        },
+      });
+      this.sync.start();
+    } catch (e) {
+      console.warn('[openom] sync start failed', e);
+    }
+  }
+
+  // Abort + drop the SyncSession (aborts its signal, stops the driver, releases the delta subscription).
+  // Called by every teardown path before the plaintext is dropped. Idempotent.
+  stopSync() {
+    try { this.sync?.abort(); } catch { /* best-effort */ }
+    this.sync = null;
+    this.syncStatus = null;
   }
 
   // Global listeners, attached once. Each routes through render(), which early-returns while
@@ -427,6 +485,7 @@ class App {
     // a lock: drop the plaintext and re-gate. (lockNow's sealer.lock() is a harmless no-op then.)
     window.addEventListener('openom:sealer-locked', () => this.lockNow('evicted'));
     window.addEventListener('openom:worker-error', async () => {
+      this.stopSync(); // the worker is dead — abort the driver + release subscriptions (do NOT sealer.lock a corpse)
       this.sealer = null;
       this.lockPolicy?.disarm();
       this.togglePalette(false);
