@@ -425,18 +425,27 @@ impl KeyringLifecycle for DagVault {
             PASSPHRASE,
         )?;
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let owner_key: [u8; 32] = founder
             .author_public_key
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::BadKeyring("owner key is not 32 bytes".into()))?;
+        // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor — it
+        // reports the cursor the caller persists and passes back as the floor on the next mutation.
+        let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
+        // Sign entries once the tree HAS BEEN SHARED (`ever_shared` — a monotonic effective-Add scan). A
+        // never-shared solo dag stays unattributed (the launch gate skips it); once shared the sealer signs
+        // and KEEPS signing after an un-share back to solo (ex-members still hold old-epoch DEKs). The dag
+        // stamps its unlock-time frontier as the opaque governing_ref — the analog of the chain's revision
+        // (Phase C, OPE-351).
+        if resolved.ever_shared {
+            sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
+        }
         Ok(Unlocked {
             sealer,
-            // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor —
-            // it reports the cursor the caller persists and passes back as the floor on the next mutation.
-            watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+            watermark,
             did_key: DidKey::from_public_key(&owner_key),
             needs_reseal,
             needs_backfill,
@@ -734,17 +743,24 @@ impl DagVault {
         }
 
         let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
         let my_key: [u8; 32] = me
             .author_public_key
             .as_slice()
             .try_into()
             .map_err(|_| VaultError::BadKeyring("member key is not 32 bytes".into()))?;
+        // A member unlock reports the same frontier watermark as the owner path (anti-rollback is not
+        // owner-specific): the member persists it and passes it back as their floor.
+        let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
+        // Member writer gate: sign iff the tree has been shared. Always true on a member unlock — a member
+        // only exists once shared — but gate on `ever_shared` for symmetry with the owner path, stamping the
+        // unlock-time frontier as governing_ref (Phase C, OPE-351).
+        if resolved.ever_shared {
+            sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
+        }
         Ok(Unlocked {
             sealer,
-            // A member unlock reports the same frontier watermark as the owner path (anti-rollback is not
-            // owner-specific): the member persists it and passes it back as their floor.
-            watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+            watermark,
             did_key: DidKey::from_public_key(&my_key),
             needs_reseal,
             needs_backfill,
@@ -1712,6 +1728,78 @@ mod tests {
             u.sealer.open_entry(EntryKind::Snapshot, &sealed).unwrap(),
             b"shared secret"
         );
+    }
+
+    /// Phase C (OPE-351): the dag writer attaches an author to every entry once the tree HAS BEEN SHARED —
+    /// the write side of attributed writes, mirroring the chain. A never-shared solo dag writes unattributed;
+    /// once a member is admitted both the owner and the member sign, each attributed to their own member id.
+    #[test]
+    fn dag_writer_signs_iff_the_tree_has_been_shared() {
+        use openom_protocol::{v1::Envelope, Message};
+        use openom_sealer::SealerSet;
+        let seal_header = |sealer: &SealerSet, plaintext: &[u8]| {
+            Envelope::decode(
+                sealer
+                    .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), plaintext)
+                    .unwrap()
+                    .envelope
+                    .as_slice(),
+            )
+            .unwrap()
+            .header
+            .unwrap()
+        };
+
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"owner passphrase");
+
+        // Solo (never shared): the sealer attaches no author → entries are unattributed.
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+        assert!(
+            seal_header(&p.sealer, b"solo edit").author_signature.is_empty(),
+            "a never-shared dag writes unattributed"
+        );
+
+        // First share — admit bob.
+        let bob_pass = Passphrase::new(b"bobs own passphrase");
+        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob_author = bob.root.identity.verifying_key().to_bytes();
+        let new_anchor = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                "acct-bob",
+                KeyringRole::EDITOR,
+                bob_author,
+                bob.root.hpke_public,
+            )
+            .unwrap();
+
+        // Owner unlock on the shared anchor: now signs, attributed to the owner.
+        let u_owner = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &new_anchor, &owner_pass)
+            .unwrap();
+        let owner_h = seal_header(&u_owner.sealer, b"owner edit");
+        assert!(!owner_h.author_signature.is_empty(), "shared dag: owner signs");
+        assert_eq!(owner_h.author_member_id, MEMBER);
+
+        // Member unlock: bob signs as himself.
+        let bob_id = MemberId::new("acct-bob");
+        let u_member = DagVault
+            .unlock_as_member(
+                &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
+                &new_anchor,
+                &bob_pass,
+                &KdfParams::from(&bob.pass_kdf),
+            )
+            .unwrap();
+        let member_h = seal_header(&u_member.sealer, b"member edit");
+        assert!(!member_h.author_signature.is_empty(), "shared dag: member signs");
+        assert_eq!(member_h.author_member_id, "acct-bob");
     }
 
     /// The full shared-tree cycle: the owner adds bob, and bob unlocks with HIS OWN passphrase + account
