@@ -22,6 +22,18 @@ export function treeIdToUuid(treeId) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// The inverse: recover the 16 seam bytes from a canonical UUID string. A joining member learns only the
+// tree UUID (from the invite link) and needs the seam id back for the sealer/keyring scope.
+export function uuidToTreeId(uuid) {
+  const hex = String(uuid).replace(/-/g, '');
+  if (hex.length !== 32 || /[^0-9a-fA-F]/.test(hex)) {
+    throw new Error(`uuidToTreeId: expected a UUID, got ${uuid}`);
+  }
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 /**
  * Build a `publishKeyring(treeId, keyringBytes)` seam for `createVault` from a crypto worker (its
  * `wrapChainKeyringUpdate`) and a RemoteStore (its `putKeyring`). `toUrlId` maps the seam's 16-byte tree id

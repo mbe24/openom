@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { readTreeIdentity, ensureTreeIdentity } from '../app/src/core/treeId.js';
-import { treeIdToUuid } from '../app/src/core/keyringPublish.js';
+import { readTreeIdentity, ensureTreeIdentity, seedTreeIdentity } from '../app/src/core/treeId.js';
+import { treeIdToUuid, uuidToTreeId } from '../app/src/core/keyringPublish.js';
 
 function fakeStorage() {
   const m = new Map();
@@ -72,5 +72,24 @@ describe('treeId — per-member tree identity', () => {
     const storage = fakeStorage();
     const id = await ensureTreeIdentity('m1', { storage, makeBytes: () => new Uint8Array(16).fill(3), locks: null });
     expect(id.uuid).toBe(treeIdToUuid(new Uint8Array(16).fill(3)));
+  });
+
+  it('uuidToTreeId is the exact inverse of treeIdToUuid', () => {
+    const bytes = Uint8Array.from({ length: 16 }, (_, i) => i * 7 + 1);
+    expect(Array.from(uuidToTreeId(treeIdToUuid(bytes)))).toEqual(Array.from(bytes));
+    expect(() => uuidToTreeId('not-a-uuid')).toThrow(/expected a UUID/);
+  });
+
+  it('seedTreeIdentity adopts an invited tree; readTreeIdentity returns it', () => {
+    const storage = fakeStorage();
+    const uuid = treeIdToUuid(new Uint8Array(16).fill(5));
+    const bytes = uuidToTreeId(uuid);
+    const seeded = seedTreeIdentity('m1', { bytes, uuid }, { storage });
+    expect(seeded.uuid).toBe(uuid);
+    expect(readTreeIdentity('m1', { storage })).toEqual({ bytes, uuid });
+    // idempotent for the same tree; conflicting tree for the same member is a bug → throws
+    expect(() => seedTreeIdentity('m1', { bytes, uuid }, { storage })).not.toThrow();
+    const otherUuid = treeIdToUuid(new Uint8Array(16).fill(6));
+    expect(() => seedTreeIdentity('m1', { bytes: uuidToTreeId(otherUuid), uuid: otherUuid }, { storage })).toThrow(/different tree/);
   });
 });

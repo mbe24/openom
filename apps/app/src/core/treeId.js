@@ -99,3 +99,23 @@ export async function ensureTreeIdentity(
   if (locks?.request) return locks.request(`openom.tree.mint.${memberId}`, mint);
   return mint(); // no navigator.locks (tests / older browsers): best-effort, single-tab-safe
 }
+
+/**
+ * Seed a member's tree identity from an invite: the invitee ADOPTS the owner's tree id (learned from the
+ * link) rather than minting a fresh one — without this, `ensureTreeIdentity` would mint a random tree and
+ * the member would never sync the owner's. Idempotent; a conflicting existing identity for this member is
+ * a bug and is surfaced. (V1 is one active tree per member; the multi-tree registry is separate future work.)
+ * @param {string} memberId
+ * @param {{ bytes: Uint8Array, uuid: string }} identity  bytes = uuidToTreeId(uuid) — the 16 seam bytes
+ * @returns {{ bytes: Uint8Array, uuid: string }}
+ */
+export function seedTreeIdentity(memberId, { bytes, uuid }, { storage = defaultStorage() } = {}) {
+  if (!memberId) throw new Error('seedTreeIdentity needs a memberId');
+  if (!bytes || bytes.length !== 16 || !uuid) throw new Error('seedTreeIdentity needs { bytes(16 B), uuid }');
+  const existing = read(storage, memberId);
+  if (existing && existing.uuid !== uuid) {
+    throw new Error('seedTreeIdentity: this member already holds a different tree identity');
+  }
+  write(storage, memberId, bytes, uuid);
+  return { bytes, uuid };
+}
