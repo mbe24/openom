@@ -1,17 +1,17 @@
-// e2e: Mode A genesis-walk JOIN + attributed READ against the real server (slice 1, Step D). Host-node
-// (the vitest runner is dockerized; a browser hits CORS). Proves the WHOLE read path end to end on REAL
+// e2e: Mode A member JOIN + the ATTRIBUTED-WRITES invariant, against the real server. Host-node (the vitest
+// runner is dockerized; a browser hits CORS). Proves the whole slice-2 security core end to end on REAL
 // crypto + a real server — the piece the native harness can't reach (wasm-bindgen JsError panics off a JS
 // runtime):
-//   * an owner provisions a tree (genesis rev 1), seals a PRE-share entry, admits an editor member
-//     (rev 2 — which HPKE-wraps every epoch to them + carries their read access), then seals a POST-share
-//     ATTRIBUTED entry with the new epoch sealer;
-//   * the member JOINS via the invite: verifyKeyringWalk walks the whole chain from genesis, bound to the
-//     invite's PREFIX pin (rev 1 hash) even though the head is rev 2 — the admit-bump the review fixed;
-//     then unlockAsMember + retains every revision;
-//   * the member READS both entries: the pre-share one is governed by rev 1 (where its epoch is wrapped
-//     only to the founder → UNATTRIBUTED → accepted unsigned), the post-share one by rev 2 (where the same
-//     epoch is now attributed → the owner's signature is verified). Per-revision retention is what makes
-//     the SAME epoch resolve differently across revisions.
+//   * an owner provisions a tree (genesis rev 1), seals a PRE-share entry, admits an editor (rev 2, the
+//     first share), then publishes a SIGNED base (a snapshot subsuming the pre-share log) and a POST-share
+//     ATTRIBUTED delta, and — as an attacker would — appends a FORGED UNSIGNED delta;
+//   * the member JOINS via the invite: verifyKeyringWalk walks the chain from genesis, bound to the invite's
+//     PREFIX pin (rev 1 hash) against a rev-3 head (the admit-bump), then unlockAsMember + retains every
+//     revision;
+//   * the member BOOTSTRAPS from the signed base (reconstructs the pre-share state from it, never replaying
+//     the unsigned pre-share delta), then pulls the post-share tail on the SHARED reader rule: the attributed
+//     delta is accepted (owner signature verified at a non-head revision, from retained history), and the
+//     forged unsigned delta is REJECTED — the H1 close.
 // Run with the compose server up:  node apps/e2e/sharing-join.mjs
 
 import { readFileSync } from 'node:fs';
@@ -27,6 +27,7 @@ import init, {
   unlockAsMember as wasmUnlockAsMember,
   entryAttribution as wasmEntryAttribution,
   epochIsAttributed as wasmEpochIsAttributed,
+  keyringHasBeenShared as wasmKeyringHasBeenShared,
   verifyEntry as wasmVerifyEntry,
 } from '../app/src/vendor/vault/openom_vault.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
@@ -115,12 +116,15 @@ function directWorker() {
     },
     async entryAttribution(envelope) {
       const a = wasmEntryAttribution(envelope);
-      const out = { keyringRevision: a.keyringRevision, keyId: a.keyId };
+      const out = { keyringRevision: a.keyringRevision, keyId: a.keyId, coversThroughSeq: a.coversThroughSeq };
       a.free();
       return out;
     },
     async epochIsAttributed(keyring, keyId) {
       return wasmEpochIsAttributed(keyring, keyId);
+    },
+    async keyringHasBeenShared(keyring) {
+      return wasmKeyringHasBeenShared(keyring);
     },
     async verifyEntry(version, envelope, plaintext, governing) {
       wasmVerifyEntry(version, envelope, plaintext, governing); // throws to reject
@@ -163,9 +167,27 @@ ok(true, 'owner admitted an editor member + published rev 2');
 const ownerRev2 = unlock('chain', rev2Raw, OWNER_PASS, TREE, OWNER, rid());
 const ownerSealer2 = ownerRev2.takeSealer();
 ownerRev2.free();
+
+// FIRST-SHARE BASE: seal a SIGNED snapshot subsuming the pre-share log (covers = 1 → subsumes seq 0, the
+// pre-share delta) and CAS-update the provision snapshot. This is what members bootstrap from — an
+// attributed base carrying the pre-share state — so they never replay the unsigned pre-share delta. It's
+// signed because the tree is now shared (ownerSealer2 carries the owner's author).
+const baseState = '{"state":"through pre-share"}';
+const baseSeal = ownerSealer2.sealEntry('snapshot', 'openom-json', 'none', 0, new Uint8Array(), 1, new Uint8Array(), enc.encode(baseState));
+const provisionSnap = await ownerRemote.readSnapshot(uuid);
+await ownerRemote.putSnapshot(uuid, baseSeal.envelope, provisionSnap.version); // CAS-update the pre-share snapshot
+baseSeal.free();
+ok(true, 'owner published a SIGNED base covering the pre-share history (covers=1)');
+
+// A POST-share attributed delta (seq 1, governed by rev 2 → signed).
 const postText = '{"note":"after sharing"}';
 await ownerRemote.appendLog(uuid, sealDelta(ownerSealer2, 0, postText));
 ok(true, 'owner sealed a post-share attributed entry (governed by rev 2)');
+
+// A FORGED UNSIGNED delta (seq 2): the pre-share solo sealer still seals under the founder epoch with NO
+// author (governing_ref 0). This is the backdate forge the invariant must reject on a shared tree.
+await ownerRemote.appendLog(uuid, sealDelta(ownerSealer, 2, '{"forged":"unsigned"}'));
+ok(true, 'a forged UNSIGNED delta was appended to the shared log (seq 2)');
 
 // A THIRD revision (a second member) so the JOINER's head is rev 3 while the post-share entry stays
 // governed by rev 2 — the member can only verify it from RETAINED per-revision history, not the head.
@@ -219,37 +241,50 @@ ok(
   'the member retained ALL revisions (so a non-head governing revision resolves)',
 );
 
-// ── MEMBER: read + verify every entry ──────────────────────────────────────────────────────────────────
-const verify = createEntryVerifier({ version: ENVELOPE_VERSION, worker, keyringAt: (rev) => keyringStore.at('mtree', rev) });
-const { entries } = await memberRemote.readLog(uuid, -1);
-ok(entries.length === 2, 'the member read both log entries');
+// ── MEMBER: the attributed-writes reader (shared tree) ─────────────────────────────────────────────────
+// The verifier is on the SHARED path: has_been_shared from the verified head keyring (rev 3, first_shared=2),
+// head revision bounds a legit governing_ref. Every authoritative entry must now be attributed.
+const verify = createEntryVerifier({
+  version: ENVELOPE_VERSION,
+  worker,
+  keyringAt: (rev) => keyringStore.at('mtree', rev),
+  hasBeenShared: async () => worker.keyringHasBeenShared(await keyringStore.load('mtree')),
+  headRevision: async () => (await keyringStore.head('mtree'))?.revision ?? 0,
+});
+ok(await worker.keyringHasBeenShared(await keyringStore.load('mtree')), 'the member sees the tree as SHARED (first_shared_revision != 0)');
 
-// Match entries by their opened plaintext (log order is server seq: pre then post).
-let sawPre = false;
-let sawPost = false;
+// ── MEMBER: bootstrap from the SIGNED base, then pull only what it does not cover ──────────────────────
+const base = await memberRemote.readSnapshot(uuid);
+const baseAttr = await worker.entryAttribution(base.bytes);
+ok(baseAttr.coversThroughSeq === 1, 'the base declares covers_through_seq = 1 (subsumes the pre-share delta at seq 0)');
+const readState = dec.decode(new Uint8Array(await joined.session.open(base.bytes, null, { kind: 'snapshot' })));
+let baseVerifyThrew = false;
+try { await verify(base.bytes, enc.encode(readState)); } catch (err) { baseVerifyThrew = true; console.log(`    base verify error: ${err?.message ?? err}`); }
+ok(!baseVerifyThrew, 'the signed base VERIFIES (owner-attributed snapshot on a shared tree)');
+ok(readState === '{"state":"through pre-share"}', 'the member reconstructs the pre-share state FROM the base (not by replaying the delta)');
+
+// Pull from covers-1: the pre-share delta (seq 0) is subsumed by the base and never fetched.
+const cursor = baseAttr.coversThroughSeq - 1; // 0
+const { entries } = await memberRemote.readLog(uuid, cursor);
+ok(entries.map((e) => e.seq).every((s) => s > 0), 'the member never re-fetches the subsumed pre-share delta (seq 0)');
+ok(entries.length === 2, 'the member pulls the post-share tail: the signed delta + the forged one');
+
+let acceptedPost = false;
+let rejectedForge = false;
 for (const e of entries) {
   const opened = new Uint8Array(await joined.session.open(e.payload, null, { kind: 'delta' }));
   const plaintext = dec.decode(opened);
-  const attr = await worker.entryAttribution(e.payload);
-  let verifyThrew = false;
-  try {
-    await verify(e.payload, opened); // the §B3 composer: resolves the governing keyring + checks attribution
-  } catch (err) {
-    verifyThrew = true;
-    console.log(`    verify error: ${err?.message ?? err}`);
-  }
-  if (plaintext === preText) {
-    sawPre = true;
-    ok(attr.keyringRevision === 0, 'pre-share entry is an unattributed V1 entry (no governing keyring)');
-    ok(!verifyThrew, 'pre-share entry verifies (unattributed → accepted unsigned)');
-  } else if (plaintext === postText) {
-    sawPost = true;
-    ok(attr.keyringRevision === 2, 'post-share entry is governed by rev 2 (a NON-head revision)');
-    ok(!verifyThrew, 'post-share entry verifies from RETAINED rev 2 (attributed → owner signature checked)');
+  let rejected = false;
+  try { await verify(e.payload, opened); } catch (err) { rejected = true; }
+  if (plaintext === postText) {
+    acceptedPost = !rejected;
+    ok(!rejected, 'the post-share ATTRIBUTED delta is accepted (owner signature verified at rev 2)');
+  } else if (plaintext === '{"forged":"unsigned"}') {
+    rejectedForge = rejected;
+    ok(rejected, 'the forged UNSIGNED delta is REJECTED on the shared tree (the H1 fix)');
   }
 }
-ok(sawPre, 'the member decrypted the PRE-share entry (historical read access via addMember backfill)');
-ok(sawPost, 'the member decrypted the POST-share attributed entry');
+ok(acceptedPost && rejectedForge, 'exactly the attributed entry survived; the forge was dropped');
 
 await joined.session.lock();
 console.log(failed ? `\n${failed} check(s) FAILED` : '\nall checks passed');
