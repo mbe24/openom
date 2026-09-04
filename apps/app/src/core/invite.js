@@ -90,13 +90,20 @@ export async function fingerprintSigners(signers, { subtle = crypto.subtle } = {
 /**
  * Owner: mint an invite. Returns the shareable `link`, the LOCAL mint `record` (persist DEK-sealed —
  * admit reads ONLY this), and the `pending` payload for the server (which never sees `s`).
- * @param {{ uuid: string, role: string, signers: object[], recipientPin?: string|null, ttlMs?: number,
- *   base?: string, now?: number, subtle?: SubtleCrypto, makeBytes?: (n:number)=>Uint8Array }} o
+ * The head keyring's `(pinnedRevision, pinnedHash)` also travel in the link: the joiner's genesis-walk
+ * cross-checks the head it reaches against them, so a colluding co-owner can't substitute a forged
+ * alternate history whose signer-set `fp` matches (the hash chain commits every revision; the pin
+ * commits the head). `fp` stays as a human-readable cross-check only.
+ * @param {{ uuid: string, role: string, signers: object[], pinnedRevision: number,
+ *   pinnedHash: Uint8Array, recipientPin?: string|null, ttlMs?: number, base?: string, now?: number,
+ *   subtle?: SubtleCrypto, makeBytes?: (n:number)=>Uint8Array }} o
  */
 export async function mint({
   uuid,
   role,
   signers,
+  pinnedRevision,
+  pinnedHash,
   recipientPin = null,
   ttlMs = 7 * 24 * 3600 * 1000,
   base = 'https://openom.app',
@@ -104,18 +111,21 @@ export async function mint({
   subtle = crypto.subtle,
   makeBytes = (n) => crypto.getRandomValues(new Uint8Array(n)),
 }) {
+  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1) throw new Error('mint: pinnedRevision must be a positive integer');
+  if (!(pinnedHash instanceof Uint8Array) || pinnedHash.length !== 32) throw new Error('mint: pinnedHash must be 32 bytes');
   const s = makeBytes(32);
   const sMac = await hkdf(subtle, s, MAC_INFO);
   const inviteId = b64u.enc(makeBytes(16));
   const fp = await fingerprintSigners(signers, { subtle });
   const expiry = now + ttlMs;
   const q = `tree=${encodeURIComponent(uuid)}&invite=${encodeURIComponent(inviteId)}&s=${b64u.enc(s)}` +
-    `&fp=${encodeURIComponent(fp)}&role=${encodeURIComponent(role)}`;
+    `&fp=${encodeURIComponent(fp)}&role=${encodeURIComponent(role)}` +
+    `&rev=${pinnedRevision}&kh=${b64u.enc(pinnedHash)}`;
   return {
     inviteId,
     fp,
     link: `${base}/join#${q}`,
-    record: { inviteId, uuid, role, sMac, recipientPin, fp, expiry }, // LOCAL only
+    record: { inviteId, uuid, role, sMac, recipientPin, fp, expiry, pinnedRevision, pinnedHash }, // LOCAL only
     pending: { inviteId, uuid, role, recipientPin, expiry }, // to the server — NO s
   };
 }
@@ -129,8 +139,14 @@ export function parseLink(url) {
   const sB64 = p.get('s');
   const fp = p.get('fp');
   const role = p.get('role');
-  if (!uuid || !inviteId || !sB64 || !fp || !role) throw new Error('invalid invite link');
-  return { uuid, inviteId, s: b64u.dec(sB64), fp, role };
+  const revStr = p.get('rev');
+  const khB64 = p.get('kh');
+  if (!uuid || !inviteId || !sB64 || !fp || !role || !revStr || !khB64) throw new Error('invalid invite link');
+  const pinnedRevision = Number(revStr);
+  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1) throw new Error('invalid invite link: rev');
+  const pinnedHash = b64u.dec(khB64);
+  if (pinnedHash.length !== 32) throw new Error('invalid invite link: kh');
+  return { uuid, inviteId, s: b64u.dec(sB64), fp, role, pinnedRevision, pinnedHash };
 }
 
 /**

@@ -15,10 +15,10 @@ use wasm_bindgen::prelude::*;
 
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
 use openom_keyring_chain::{
-    decode_governing_ref, encode_governing_ref, keyring_hash, verify_reset, verify_walk,
-    KeyringAnchor, VerifyingKey,
+    bootstrap_from_genesis, decode_governing_ref, encode_governing_ref, keyring_hash, verify_reset,
+    verify_walk, KeyringAnchor, VerifyingKey,
 };
-use openom_keyring_chain::wire::Keyring;
+use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
 use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
@@ -1281,6 +1281,152 @@ pub fn accept_remote_keyring(
     })
 }
 
+/// A joining member's verified view of a tree's WHOLE keyring history (`verifyKeyringWalk`): the head
+/// revision + RAW head body, the head's signer set (for the JS fingerprint cross-check), and every RAW
+/// per-revision body so the member retains the full history for §B3 attributed-entry verification. No
+/// sealer — keyring state only (re-unlock to read).
+#[wasm_bindgen]
+pub struct WalkResult {
+    revision: u32,
+    head_keyring: Vec<u8>,
+    signers_json: String,
+    bodies_framed: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WalkResult {
+    /// The verified head revision (equals the invite's pinned revision).
+    #[wasm_bindgen(getter)]
+    pub fn revision(&self) -> u32 {
+        self.revision
+    }
+
+    /// The RAW head `Keyring` body — stored as the head and fed to `unlockAsMember`.
+    #[wasm_bindgen(getter, js_name = headKeyring)]
+    pub fn head_keyring(&self) -> Vec<u8> {
+        self.head_keyring.clone()
+    }
+
+    /// The head's authorized signers as a JSON string `[{"memberId","authorPublic"(hex)}]`. The JS
+    /// computes the canonical fingerprint over these and cross-checks the invite's human-readable `fp`.
+    #[wasm_bindgen(getter, js_name = signersJson)]
+    pub fn signers_json(&self) -> String {
+        self.signers_json.clone()
+    }
+
+    /// Every RAW per-revision body 1..=head, ascending, length-prefix framed (`[u32-be len][bytes]…` —
+    /// the same framing `acceptRemoteKeyring` consumes). The JS unframes and retains each so
+    /// `keyringStore.at(rev)` resolves the whole history for pre-join attributed entries.
+    #[wasm_bindgen(getter, js_name = bodiesFramed)]
+    pub fn bodies_framed(&self) -> Vec<u8> {
+        self.bodies_framed.clone()
+    }
+}
+
+#[derive(serde::Serialize)]
+struct WalkSignerDto {
+    #[serde(rename = "memberId")]
+    member_id: String,
+    #[serde(rename = "authorPublic")]
+    author_public: String,
+}
+
+/// Verify a tree's WHOLE keyring history from GENESIS — a joining member's read-side bootstrap. Where
+/// [`accept_remote_keyring`] walks forward from an already-trusted stored anchor, this trusts the genesis
+/// founder on first use (TOFU: the sole owner-role member's author key) and then PINS the verified head's
+/// `(revision, keyring_hash)` to the values the owner published out-of-band in the invite link. The pin is
+/// what closes the co-owner-collusion gap that TOFU + a head-signer fingerprint alone leaves open: a
+/// colluding co-owner could sign a forged alternate history whose head signer-SET fingerprint matches, but
+/// not one whose head HASH matches (the hash chain commits every revision; the pin commits the head).
+///
+/// `hops` is `[u32-be len][MembershipEnvelope bytes]…` for revisions 1..=head, ascending, no gaps. Returns
+/// the validated head, its signers, and every RAW per-revision body. Fails closed (throws — the caller
+/// persists nothing) on: an empty/truncated history, a first revision that isn't a genesis (revision 1) or
+/// lacks exactly one owner, any invalid transition, or a head that doesn't match the pin.
+#[wasm_bindgen(js_name = verifyKeyringWalk)]
+pub fn verify_keyring_walk(
+    tree_id: &[u8],
+    hops: &[u8],
+    pinned_revision: u32,
+    pinned_hash: &[u8],
+) -> Result<WalkResult, JsError> {
+    if pinned_hash.len() != 32 {
+        return Err(JsError::new("pinned keyring hash must be 32 bytes"));
+    }
+    let raw = split_length_prefixed(hops)?;
+    if raw.is_empty() {
+        return Err(JsError::new("empty keyring history (need at least the genesis)"));
+    }
+    // Unwrap each served MembershipEnvelope to its RAW chain Keyring body, then decode — the client
+    // retains and verifies the raw bodies (the format §B3 verify consumes).
+    let bodies = raw
+        .iter()
+        .map(|b| unwrap_chain_keyring(b))
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let decoded = bodies
+        .iter()
+        .map(|b| {
+            Keyring::decode(b.as_slice()).map_err(|e| JsError::new(&format!("bad served keyring: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let genesis = &decoded[0];
+    if genesis.revision != 1 {
+        return Err(JsError::new(
+            "first keyring in the history is not the genesis (revision 1)",
+        ));
+    }
+    // TOFU the genesis founder: the sole role==MEMBER_OWNER member's author key. The engine enforces
+    // exactly one owner at genesis; extract it gracefully (a typed error, never a panic).
+    let owners: Vec<_> = genesis
+        .members
+        .iter()
+        .filter(|m| m.role == MEMBER_OWNER)
+        .collect();
+    let founder = match owners.as_slice() {
+        [only] => *only,
+        [] => return Err(JsError::new("genesis keyring declares no owner")),
+        _ => return Err(JsError::new("genesis keyring declares more than one owner")),
+    };
+    let founder_arr: [u8; 32] = founder
+        .author_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| JsError::new("genesis owner author key is not 32 bytes"))?;
+    let founder_key = VerifyingKey::from_bytes(&founder_arr)
+        .map_err(|_| JsError::new("genesis owner has an invalid author public key"))?;
+    let genesis_anchor =
+        bootstrap_from_genesis(genesis, &founder_key).map_err(|e| JsError::new(&e.to_string()))?;
+    let head =
+        verify_walk(&genesis_anchor, &decoded[1..]).map_err(|e| JsError::new(&e.to_string()))?;
+    // Bind the cryptographically-verified head to the invite's out-of-band pin.
+    if head.tree_id != tree_id {
+        return Err(JsError::new("keyring history is for a different tree"));
+    }
+    if head.revision != pinned_revision {
+        return Err(JsError::new(
+            "keyring head revision does not match the invite pin",
+        ));
+    }
+    if head.keyring_hash.as_slice() != pinned_hash {
+        return Err(JsError::new("keyring head hash does not match the invite pin"));
+    }
+    let signers = head
+        .trusted_signers
+        .iter()
+        .map(|s| WalkSignerDto {
+            member_id: s.member_id.clone(),
+            author_public: hex(&s.public_key),
+        })
+        .collect::<Vec<_>>();
+    let signers_json = serde_json::to_string(&signers).map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(WalkResult {
+        revision: head.revision,
+        head_keyring: bodies.last().expect("non-empty run").clone(),
+        signers_json,
+        bodies_framed: frame_length_prefixed(&bodies),
+    })
+}
+
 /// Frame a raw signed chain `Keyring` revision as the wire `KeyringUpdate` the server's `PUT
 /// /trees/{id}/keyring` accepts — the OUTBOUND mirror of [`accept_remote_keyring`]'s unwrap. The client
 /// produces + locally persists a new keyring revision (add/remove member, rotate, refounder), then calls
@@ -1475,6 +1621,17 @@ pub fn accept_reset_keyring(
 
 /// Split a buffer of `[u32-be length][bytes]…` frames into slices. The framing keeps a list of
 /// variable-length keyrings marshallable over the plain-wasm-bindgen boundary (no serde).
+/// Concatenate byte runs as `[u32-be length][bytes]…` — the inverse of [`split_length_prefixed`], for
+/// returning the per-revision bodies to JS in one buffer (mirrors the JS `frameHops`).
+fn frame_length_prefixed(runs: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(runs.iter().map(|r| r.len() + 4).sum());
+    for r in runs {
+        out.extend_from_slice(&(r.len() as u32).to_be_bytes());
+        out.extend_from_slice(r);
+    }
+    out
+}
+
 fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, JsError> {
     let mut out = Vec::new();
     let mut i = 0usize;

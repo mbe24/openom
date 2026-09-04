@@ -14,9 +14,19 @@ const M = {
 };
 
 const UUID = 'bc4e834a-7856-865c-98f7-7a91502b86bf';
+const PINNED_REVISION = 4;
+const PINNED_HASH = new Uint8Array(32).fill(0xcd);
 
 async function ownerMints(role = 'Editor') {
-  return mint({ uuid: UUID, role, signers, now: 1_000_000, ttlMs: 3600_000 });
+  return mint({
+    uuid: UUID,
+    role,
+    signers,
+    pinnedRevision: PINNED_REVISION,
+    pinnedHash: PINNED_HASH,
+    now: 1_000_000,
+    ttlMs: 3600_000,
+  });
 }
 
 describe('invite crypto (two-channel)', () => {
@@ -41,6 +51,22 @@ describe('invite crypto (two-channel)', () => {
     expect('s' in pending || 'sMac' in pending).toBe(false);
     expect(pending.role).toBe('Maintainer');
     expect(pending.expiry).toBe(1_000_000 + 3600_000);
+    // the head pin round-trips through the link (the joiner's genesis-walk checks the head against it)
+    expect(parsed.pinnedRevision).toBe(PINNED_REVISION);
+    expect(parsed.pinnedHash).toEqual(PINNED_HASH);
+    // and the server pending payload carries NO pin (it's owner↔invitee, over the OOB channel)
+    expect('pinnedHash' in pending || 'pinnedRevision' in pending).toBe(false);
+  });
+
+  it('mint rejects a missing or malformed head pin', async () => {
+    await expect(mint({ uuid: UUID, role: 'Editor', signers, pinnedHash: PINNED_HASH })).rejects.toThrow(/pinnedRevision/);
+    await expect(mint({ uuid: UUID, role: 'Editor', signers, pinnedRevision: 1, pinnedHash: new Uint8Array(31) })).rejects.toThrow(/pinnedHash/);
+  });
+
+  it('parseLink rejects a link missing the head pin', () => {
+    // a link without rev/kh (an older or tampered link) is refused — the pin is mandatory
+    const noPin = `https://openom.app/join#tree=${UUID}&invite=x&s=AAAA&fp=y&role=Editor`;
+    expect(() => parseLink(noPin)).toThrow(/invalid invite link/);
   });
 
   it('a genuine claim verifies against the owner record', async () => {

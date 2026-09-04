@@ -15,6 +15,7 @@
 import { SealerSession } from './session.js';
 import { workerCore } from './workerSealer.js';
 import { createSyncedDeltaSync } from '../syncedDeltaSync.js';
+import { fingerprintSigners } from '../invite.js';
 
 // The envelope format version the wasm sealer stamps and verifyEntry checks against. V1 = 1; pinned here
 // (there is no runtime accessor yet) and validated end-to-end by the real seal/verify round-trip tests.
@@ -35,6 +36,58 @@ export class KeyringForkError extends Error {
     this.name = 'KeyringForkError';
     this.revision = revision;
   }
+}
+
+/**
+ * A joining member's genesis-walk failed a SECURITY check — an invalid transition, a head that doesn't
+ * match the invite's pinned (revision, hash), or a signer-fingerprint mismatch. TERMINAL: never retried
+ * (unlike a pre-admission 403, which the caller polls through). The member persists nothing and aborts.
+ */
+export class KeyringJoinError extends Error {
+  constructor(message) {
+    super(`keyring join rejected: ${message}`);
+    this.name = 'KeyringJoinError';
+  }
+}
+
+// Inverse of `frameHops`: split a `[u32-BE len][bytes]…` buffer back into its byte runs. The production
+// counterpart to the genesis-walk's `bodiesFramed` output (the wasm frames the RAW per-revision bodies;
+// the join unframes them to retain each). Throws on truncation/overrun (a malformed buffer is never
+// silently short-read).
+export function unframe(buf) {
+  const out = [];
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let off = 0;
+  while (off < buf.length) {
+    if (off + 4 > buf.length) throw new Error('unframe: truncated length prefix');
+    const len = dv.getUint32(off, false); // big-endian
+    off += 4;
+    if (off + len > buf.length) throw new Error('unframe: length prefix overruns buffer');
+    out.push(buf.subarray(off, off + len));
+    off += len;
+  }
+  return out;
+}
+
+// Concatenate a signer set's 32-byte author keys into the `trustedSigners` blob `unlockAsMember` expects
+// (parse_trusted_signers: one or more concatenated 32-byte Ed25519 verify-keys). Author keys only — the
+// wasm derives roles/member-ids from the verified keyring itself.
+function concatSigners(signers) {
+  const out = new Uint8Array(signers.length * 32);
+  signers.forEach((s, i) => {
+    if (s.authorPublic.length !== 32) throw new KeyringJoinError('signer author key is not 32 bytes');
+    out.set(s.authorPublic, i * 32);
+  });
+  return out;
+}
+
+// Decode the hex `authorPublic` the wasm emits in `signersJson` back to raw bytes (for the fingerprint
+// cross-check and the trustedSigners concat).
+function hexToBytes(hex) {
+  if (hex.length % 2 !== 0) throw new KeyringJoinError('odd-length signer hex');
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 function freshReplicaId() {
@@ -155,6 +208,67 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // watermark could only ever regress it in a store/cursor desync, never advance it.
       const r = await worker.unlock(engine, keyring, passphrase, treeId, memberId, makeReplicaId());
       return { session: sessionFor(r.sealerId), didKey: r.didKey, needsReseal: r.needsReseal };
+    },
+
+    /**
+     * Join a SHARED tree as an invited member (Mode A sharing). Verifies the tree's WHOLE keyring history
+     * from GENESIS (TOFU the founder) bound to the invite's out-of-band `(pinnedRevision, pinnedHash)`,
+     * cross-checks the signer fingerprint, unlocks at the head, then RETAINS every RAW revision (so §B3
+     * entry attribution resolves pre-join history) + watermarks the head. FAIL-CLOSED: any security check
+     * throws `KeyringJoinError` and NOTHING is persisted (a wrong passphrase likewise persists nothing).
+     * The caller owns the pre-admission 403 poll (a 403 is retryable; a `KeyringJoinError` is terminal) and
+     * passes the already-fetched WRAPPED keyring history.
+     * @param {{revision:number, bytes:Uint8Array}[]} revisions  the WRAPPED keyring, revisions 1..head ascending
+     * @param {{fp:string, pinnedRevision:number, pinnedHash:Uint8Array}} invite  the parsed invite-link pins
+     * @returns {Promise<{ session: SealerSession, didKey: string }>}
+     */
+    async joinAsMember(treeKey, treeId, passphrase, memberId, memberKdfParams, revisions, invite) {
+      if (engine !== 'chain') throw new KeyringJoinError('genesis-walk join is chain-only');
+      if (!revisions || revisions.length === 0) throw new KeyringJoinError('no keyring history to verify');
+      // 1. Verify the walk from genesis, bound to the invite's (revision, hash) pin. Any invalid transition
+      //    or a head that doesn't match the pin throws → terminal, persist nothing.
+      let walk;
+      try {
+        walk = await worker.verifyKeyringWalk(
+          treeId,
+          frameHops(revisions.map((r) => r.bytes)),
+          invite.pinnedRevision,
+          invite.pinnedHash,
+        );
+      } catch (e) {
+        throw new KeyringJoinError(e?.message ?? String(e));
+      }
+      // 2. Cross-check the human-readable signer fingerprint against the owner's out-of-band value.
+      const signers = JSON.parse(walk.signersJson).map((s) => ({
+        memberId: s.memberId,
+        authorPublic: hexToBytes(s.authorPublic),
+      }));
+      if ((await fingerprintSigners(signers)) !== invite.fp) {
+        throw new KeyringJoinError('signer fingerprint does not match the invite');
+      }
+      // 3. Unlock at the verified head BEFORE persisting (a wrong passphrase then leaves no partial state).
+      //    min_revision = the walked head (anti-rollback floor); the wasm returns the watermark already in
+      //    the OPE-286 pinned form.
+      const r = await worker.unlockAsMember(
+        walk.headKeyring,
+        passphrase,
+        memberKdfParams,
+        treeId,
+        memberId,
+        concatSigners(signers),
+        makeReplicaId(),
+        walk.revision,
+      );
+      // 4. Retain every RAW revision (each is the governing keyring for entries stamped at it, §B3) + the
+      //    head, then watermark. The bodies come from the walk (already unwrapped AND verified by the wasm).
+      const bodies = unframe(walk.bodiesFramed);
+      if (bodies.length !== revisions.length) throw new KeyringJoinError('walk returned a mismatched revision count');
+      for (let i = 0; i < revisions.length; i++) {
+        await keyringStore.save(treeKey, revisions[i].revision, bodies[i]);
+      }
+      await keyringStore.saveHead(treeKey, engine, walk.headKeyring);
+      watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      return { session: sessionFor(r.sealerId), didKey: r.didKey };
     },
 
     async recover(treeKey, treeId, recoveryCode, newPassphrase, memberId) {

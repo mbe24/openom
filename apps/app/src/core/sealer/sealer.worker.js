@@ -15,8 +15,10 @@ import init, {
   changePassphrase as wasmChangePassphrase,
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
   acceptResetKeyring as wasmAcceptResetKeyring,
+  unlockAsMember as wasmUnlockAsMember,
   wrapChainKeyringUpdate as wasmWrapChainKeyringUpdate,
   unwrapChainKeyring as wasmUnwrapChainKeyring,
+  verifyKeyringWalk as wasmVerifyKeyringWalk,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
   entryAttribution as wasmEntryAttribution,
@@ -77,6 +79,19 @@ const api = {
     const r = wasmUnlock(engine, keyring, passphrase, treeId, memberId, replicaId);
     const sealerId = register(r.takeSealer());
     const out = { watermark: r.watermark, needsReseal: r.needsReseal, didKey: r.didKey, sealerId };
+    r.free();
+    return out;
+  },
+
+  // Unlock a SHARED tree as an admitted member (§B3 sharing): verify the head keyring against the caller's
+  // pinned `trustedSigners` (concatenated 32-byte author keys, from the genesis-walk) + HPKE-unwrap with the
+  // member's passphrase & `memberKdfParams` (from provisionMember). `minRevision` is the walk's verified head
+  // (anti-rollback floor). Registers the produced sealer; returns { watermark(pinned), didKey, needsReseal }.
+  async unlockAsMember(keyring, passphrase, memberKdfParams, treeId, memberId, trustedSigners, replicaId, minRevision) {
+    await ensureInit();
+    const r = wasmUnlockAsMember(keyring, passphrase, memberKdfParams, treeId, memberId, trustedSigners, replicaId, minRevision);
+    const sealerId = register(r.takeSealer());
+    const out = { watermark: r.watermark, didKey: r.didKey, needsReseal: r.needsReseal, sealerId };
     r.free();
     return out;
   },
@@ -169,6 +184,24 @@ const api = {
   async unwrapChainKeyring(bytes) {
     await ensureInit();
     return wasmUnwrapChainKeyring(bytes);
+  },
+
+  // A joining member's genesis-walk: verify a tree's WHOLE keyring history from genesis (TOFU the founder),
+  // bound to the invite's out-of-band (revision, keyring_hash) pin. `hops` = all revisions 1..head framed
+  // as [u32-BE len][MembershipEnvelope bytes]… Returns { revision, headKeyring(raw), signersJson,
+  // bodiesFramed } — the RAW head, the head's signer set (JSON, for the fp cross-check), and every RAW
+  // per-revision body to retain. Throws (fail-closed) on any invalid transition or pin mismatch.
+  async verifyKeyringWalk(treeId, hops, pinnedRevision, pinnedHash) {
+    await ensureInit();
+    const r = wasmVerifyKeyringWalk(treeId, hops, pinnedRevision, pinnedHash);
+    const out = {
+      revision: r.revision,
+      headKeyring: r.headKeyring,
+      signersJson: r.signersJson,
+      bodiesFramed: r.bodiesFramed,
+    };
+    r.free();
+    return out;
   },
 
   // Local-development sealer (reserved dev key) — routed through the SAME worker so demo and
