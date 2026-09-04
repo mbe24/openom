@@ -50,15 +50,26 @@ class FakeServer {
   get logLength() { return this.#log.length; }
 }
 
-async function makeDevice(server, uuid, label) {
+// V1 is one owner across several devices: they share the OWNER's author did:key (only the per-device
+// replica id differs). Using distinct authors would instead model distinct owners and drag in cross-author
+// authorization — out of scope for a transport-convergence test.
+const OWNER = 'did:key:zOwner';
+
+async function makeDevice(server, uuid, _label) {
   const remote = server.remote();
-  const tree = new FamilyTree(new MemoryStore(), uuid, null, `did:key:z${label}`);
+  const tree = new FamilyTree(new MemoryStore(), uuid, null, OWNER);
   await tree.hydrate();
   const keyringStore = memoryKeyringStore();
   // Unattributed V1 entries (keyringRevision 0) → the verifier accepts without a governing keyring, so no
   // real keyring/wasm is needed to exercise the delta channel.
   const worker = { entryAttribution: async () => ({ keyringRevision: 0, keyId: new Uint8Array() }) };
-  const controller = createSyncedDeltaSync({ version: 1, tree, remote, docId: uuid, seal: identity, open: identity, worker, keyringStore });
+  // Each DEVICE has its own durable KV for the pull cursor. Real devices are separate browsers with
+  // separate localStorage; in-process here they'd otherwise share jsdom's localStorage under the same
+  // docId and clobber each other's cursor (a test artifact, not a production issue — two real devices
+  // never share storage).
+  const store = new Map();
+  const persist = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) };
+  const controller = createSyncedDeltaSync({ version: 1, tree, remote, docId: uuid, seal: identity, open: identity, worker, keyringStore, persist });
 
   const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot: identity });
   const deltas = () => reconcileDeltas({ controller });
