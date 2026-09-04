@@ -15,6 +15,23 @@
 import { SealerSession } from './session.js';
 import { workerCore } from './workerSealer.js';
 
+const bytesEqual = (a, b) =>
+  a === b || (!!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]));
+
+/**
+ * A produced keyring revision the server refused because ANOTHER writer already took that revision with
+ * DIFFERENT content — the local chain has diverged from the server's. NOT a transient conflict: members
+ * sealing at the server's revision would be dropped as genuine rejections, so a fork must be SURFACED
+ * (security-relevant), never silently treated as "already published".
+ */
+export class KeyringForkError extends Error {
+  constructor(revision) {
+    super(`keyring fork at revision ${revision}: local chain diverges from the server`);
+    this.name = 'KeyringForkError';
+    this.revision = revision;
+  }
+}
+
 function freshReplicaId() {
   const id = new Uint8Array(16);
   crypto.getRandomValues(id);
@@ -177,6 +194,43 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // forward so this sync doesn't erase the recover commitment (OPE-286 phase 2).
       watermarks.observe(treeKey, { keyringCursor: carryChainPin(r.watermark, floor(treeKey)) });
       return { revision: chainRevision(r.watermark), changed: true };
+    },
+
+    /**
+     * Publish this device's produced keyring TAIL so peers can pull it: PUT every retained revision the
+     * server is missing, in ascending single-hop order (the chain verifier admits only revision==prior+1,
+     * and re-PUT of an admitted revision is a 409, so the range must be exact). Injected callbacks keep the
+     * vault server-decoupled (id mapping stays outside, mirroring `syncKeyring`):
+     *   getServerHead() -> number         the server's current keyring head (0 if none yet)
+     *   putUpdate(bytes) -> Promise       PUT one wrapped KeyringUpdate (throws ConflictError on 409)
+     *   serverBytesAt(rev) -> bytes|null  the server's stored bytes at a revision, to disambiguate a 409
+     * A 409 whose served bytes EQUAL ours is benign (already admitted / a lost race) → continue; a 409 with
+     * DIFFERENT bytes is a fork → throws KeyringForkError. Network/other throws propagate. No-op when the
+     * server is already at (or past) our retained head. Bounds by the RETAINED head (a crash leaves retained
+     * ≥ watermark, never behind), so `at(rev)` is never null inside the range — a gap is an invariant bug.
+     * @returns {Promise<{ head: number }>}
+     */
+    async reconcileKeyring(treeKey, { getServerHead, putUpdate, serverBytesAt }) {
+      const localHead = (await keyringStore.head(treeKey))?.revision ?? 0;
+      let head = await getServerHead();
+      while (head < localHead) {
+        const rev = head + 1;
+        const bytes = await keyringStore.at(treeKey, rev);
+        if (!bytes) throw new Error(`keyring retention gap at revision ${rev}`);
+        const update = await worker.wrapChainKeyringUpdate(bytes);
+        try {
+          await putUpdate(update);
+          head = rev;
+        } catch (e) {
+          if (e?.name === 'ConflictError') {
+            const served = await serverBytesAt(rev);
+            if (served && bytesEqual(served, bytes)) { head = rev; continue; } // benign: already admitted
+            throw new KeyringForkError(rev);
+          }
+          throw e;
+        }
+      }
+      return { head: localHead };
     },
 
     /**

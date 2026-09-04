@@ -5,10 +5,11 @@
 // heads are persisted + watermarked (monotonic), and that hops are framed in the exact wire shape the
 // wasm decodes.
 import { describe, it, expect } from 'vitest';
-import { createVault, frameHops } from '../app/src/core/sealer/vault.js';
+import { createVault, frameHops, KeyringForkError } from '../app/src/core/sealer/vault.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 import { Watermarks } from '../app/src/core/watermarks.js';
 import { RemoteStore } from '../app/src/core/remoteStore.js';
+import { ConflictError } from '../app/src/core/store.js';
 import { makeKeyringPublisher, treeIdToUuid } from '../app/src/core/keyringPublish.js';
 
 const bytes = (...xs) => new Uint8Array(xs);
@@ -329,5 +330,61 @@ describe('vault.adoptReset (recovery/succession)', () => {
     await expect(vault.adoptReset(treeKey, treeId, bytes(9))).rejects.toThrow(/does not chain/);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // head unchanged
     expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(1); // not advanced
+  });
+});
+
+describe('vault.reconcileKeyring — publish the produced tail, fork-checked (sync-rework)', () => {
+  const TK = 'tree-1';
+  const worker = { wrapChainKeyringUpdate: async (k) => new Uint8Array([0xff, ...k]) };
+
+  async function setup(revs) {
+    const keyringStore = memoryKeyringStore();
+    for (const [rev, b] of revs) await keyringStore.save(TK, rev, b);
+    return createVault({ worker, keyringStore, watermarks: new Watermarks() });
+  }
+
+  it('PUTs the missing revisions in ascending single-hop order, wrapped', async () => {
+    const vault = await setup([[1, bytes(1, 1)], [2, bytes(2, 2)], [3, bytes(3, 3)]]);
+    const puts = [];
+    const r = await vault.reconcileKeyring(TK, {
+      getServerHead: async () => 0,
+      putUpdate: async (u) => { puts.push(Array.from(u)); },
+      serverBytesAt: async () => null,
+    });
+    expect(puts).toEqual([[0xff, 1, 1], [0xff, 2, 2], [0xff, 3, 3]]);
+    expect(r).toEqual({ head: 3 });
+  });
+
+  it('is a no-op when the server is already at the local head', async () => {
+    const vault = await setup([[1, bytes(1)], [2, bytes(2)]]);
+    const puts = [];
+    const r = await vault.reconcileKeyring(TK, {
+      getServerHead: async () => 2,
+      putUpdate: async (u) => puts.push(u),
+      serverBytesAt: async () => null,
+    });
+    expect(puts).toHaveLength(0);
+    expect(r).toEqual({ head: 2 });
+  });
+
+  it('treats a 409 with IDENTICAL served bytes as benign (already admitted / lost race) and continues', async () => {
+    const r1 = bytes(1, 1);
+    const vault = await setup([[1, r1], [2, bytes(2, 2)]]);
+    const puts = [];
+    await vault.reconcileKeyring(TK, {
+      getServerHead: async () => 0,
+      putUpdate: async (u) => { if (u[1] === 1) throw new ConflictError(null, null); puts.push(Array.from(u)); },
+      serverBytesAt: async (rev) => (rev === 1 ? r1 : null),
+    });
+    expect(puts).toEqual([[0xff, 2, 2]]); // stepped past the benign 409, published rev 2
+  });
+
+  it('throws KeyringForkError on a 409 whose served bytes DIFFER (diverged chain)', async () => {
+    const vault = await setup([[1, bytes(1, 1)]]);
+    await expect(vault.reconcileKeyring(TK, {
+      getServerHead: async () => 0,
+      putUpdate: async () => { throw new ConflictError(null, null); },
+      serverBytesAt: async () => bytes(9, 9), // a DIFFERENT revision 1, taken by another writer
+    })).rejects.toBeInstanceOf(KeyringForkError);
   });
 });
