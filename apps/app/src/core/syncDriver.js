@@ -1,68 +1,60 @@
-// SyncDriver — schedules a SyncController toward convergence. The controller does exactly ONE
-// tick (push then pull) and THROWS on a network failure; it has no notion of "when" or "retry".
-// The driver owns that: it triggers a tick on a debounced local edit, a periodic poll, a
-// reconnect, or an explicit "Sync now", makes ticks single-flight, and translates the thrown
-// outcomes into a small state machine —
-//   transient (offline / 5xx)      → exponential backoff, retry (offline is silent + normal)
-//   AuthError (dead session)       → surface + stop (never spin a dead session behind a green UI)
-//   RegressionError / rollback     → surface as a security signal (partly-trusted server replay)
-//   410 bootstrap-required         → re-run controller.bootstrap()
+// SyncDriver — a generic scheduler for ONE tree's sync tick.
 //
-// Two ordering rules matter: the keyring is synced BEFORE the pull each tick, so a landed delta
-// can be verified at its governing revision (SyncController.pull holds, not drops, an entry whose
-// keyring revision isn't retained yet); and the snapshot baseline is re-cut on a THROTTLE (edits
-// or time), not every tick — compact() otherwise only runs at hydrate, and SyncStore.isDirty is
-// set by every append so it can't gate a snapshot push. All merge/verify live in the controller;
-// this stays a pure scheduler, fully timer-injectable for tests.
+// It knows nothing about keyrings, snapshots, or deltas: it is handed a single
+//   tick(signal) => Promise<Outcome>
+// (the whole per-tree reconcile, composed by the SyncSession) and owns only WHEN to run it and what
+// to do with the outcome. It triggers a tick on a debounced local edit, a jittered periodic poll, a
+// reconnect, or an explicit "Sync now"; makes ticks single-flight (a trigger mid-tick folds into one
+// more pass); and dispatches the returned Outcome:
+//
+//   Ok           → converged: reset backoff, stamp last-synced, schedule the next poll
+//   Deferred     → a precondition isn't ready yet (row/keyring pending): retry soon, don't stamp synced
+//   Conflict     → a conflict bubbled past the reconcilers: retry soon (they resolve it in-loop)
+//   Offline      → transient: exponential backoff, silent (the local commit is durable)
+//   Rejected     → permanent refusal (quota/forbidden): surface + STOP (retrying can't help)
+//   Unauthorized → dead session: surface + STOP (never a silent backoff behind a green UI)
+//
+// The scheduler machinery (debounce / single-flight / backoff / status) is timer-injectable for tests;
+// the tick is opaque, so the driver has no error taxonomy of its own — the Outcome IS the taxonomy.
 
-import { AuthError } from './store.js';
-
-const isRollback = (e) =>
-  e?.name === 'RegressionError' || e?.code === 'revision_rollback' || /roll(?:ed)? ?back/i.test(e?.message ?? '');
-const isBootstrapRequired = (e) => e?.status === 410 || e?.code === 'bootstrap_required';
+import { OK, OFFLINE, CONFLICT, REJECTED, DEFERRED, UNAUTHORIZED, Offline } from './syncOutcome.js';
 
 export class SyncDriver {
-  #controller;
-  #syncKeyring;
-  #recut;
+  #tick;
+  #subscribeEdits;
   #onStatus;
   #onAuthError;
   #onSecurity;
+  #signal;
   #now;
   #setTimer;
   #clearTimer;
   #random;
+  #onOnline;
   #debounceMs;
   #pollMs;
+  #deferredMs;
   #backoffMinMs;
   #backoffCapMs;
-  #recutEveryDeltas;
-  #recutEveryMs;
 
-  #subscribeEdits;
-  #onOnline;
   #unsubEdits = null;
   #unsubOnline = null;
-
-  #timer = null; // the poll / backoff timer
+  #timer = null;
   #debounceTimer = null;
   #ticking = false;
-  #dirty = false; // a trigger arrived mid-tick → run once more
+  #dirty = false;
   #stopped = false;
   #backoff = 0;
   #pending = false;
   #lastSyncedAt = null;
-  #editsSinceRecut = 0;
-  #lastRecutAt = 0;
 
   constructor({
-    controller,
+    tick,
     subscribeEdits = null, // (cb) => unsubscribe — fires on each local edit (tree.onDelta)
-    syncKeyring = null, // async () => void — pull+verify keyring successors before the pull
-    recut = null, // async () => void — force a snapshot cut + push (bounded staleness)
     onStatus = () => {},
     onAuthError = () => {},
     onSecurity = () => {},
+    signal = null, // the SyncSession's AbortSignal — passed to tick + checked before scheduling
     now = () => Date.now(),
     setTimer = (fn, ms) => setTimeout(fn, ms),
     clearTimer = (h) => clearTimeout(h),
@@ -70,19 +62,17 @@ export class SyncDriver {
     random = () => Math.random(),
     debounceMs = 800,
     pollMs = 30_000,
+    deferredMs = 2_000,
     backoffMinMs = 1_000,
     backoffCapMs = 60_000,
-    recutEveryDeltas = 50,
-    recutEveryMs = 5 * 60_000,
   }) {
-    if (!controller) throw new Error('SyncDriver needs a controller');
-    this.#controller = controller;
+    if (typeof tick !== 'function') throw new Error('SyncDriver needs a tick(signal) => Outcome');
+    this.#tick = tick;
     this.#subscribeEdits = subscribeEdits;
-    this.#syncKeyring = syncKeyring;
-    this.#recut = recut;
     this.#onStatus = onStatus;
     this.#onAuthError = onAuthError;
     this.#onSecurity = onSecurity;
+    this.#signal = signal;
     this.#now = now;
     this.#setTimer = setTimer;
     this.#clearTimer = clearTimer;
@@ -90,14 +80,12 @@ export class SyncDriver {
     this.#random = random;
     this.#debounceMs = debounceMs;
     this.#pollMs = pollMs;
+    this.#deferredMs = deferredMs;
     this.#backoffMinMs = backoffMinMs;
     this.#backoffCapMs = backoffCapMs;
-    this.#recutEveryDeltas = recutEveryDeltas;
-    this.#recutEveryMs = recutEveryMs;
-    this.#lastRecutAt = now();
   }
 
-  /** Begin syncing: subscribe to edits + reconnect, kick one tick now, and schedule the poll. */
+  /** Begin: subscribe to edits + reconnect, kick one tick now, then schedule the poll. */
   start() {
     if (this.#stopped) throw new Error('SyncDriver: start() after stop()');
     if (this.#subscribeEdits) this.#unsubEdits = this.#subscribeEdits(() => this.#onEdit());
@@ -105,7 +93,7 @@ export class SyncDriver {
     this.#kick();
   }
 
-  /** Force a tick now (a "Sync now" control): reset backoff and run. */
+  /** Force a tick now ("Sync now"): reset backoff and run. */
   syncNow() {
     this.#backoff = 0;
     this.#kick();
@@ -116,32 +104,33 @@ export class SyncDriver {
     this.#stopped = true;
     this.#clear(this.#timer);
     this.#clear(this.#debounceTimer);
-    this.#timer = null;
-    this.#debounceTimer = null;
+    this.#timer = this.#debounceTimer = null;
     try { this.#unsubEdits?.(); } catch { /* best effort */ }
     try { this.#unsubOnline?.(); } catch { /* best effort */ }
-    this.#unsubEdits = null;
-    this.#unsubOnline = null;
+    this.#unsubEdits = this.#unsubOnline = null;
   }
 
   get status() {
-    return { state: this.#ticking ? 'syncing' : this.#backoff ? 'offline' : 'idle', lastSyncedAt: this.#lastSyncedAt, pending: this.#pending };
+    return {
+      state: this.#ticking ? 'syncing' : this.#backoff ? 'offline' : 'idle',
+      lastSyncedAt: this.#lastSyncedAt,
+      pending: this.#pending,
+    };
   }
 
   #onEdit() {
     this.#pending = true;
-    this.#editsSinceRecut += 1;
     this.#clear(this.#debounceTimer);
     this.#debounceTimer = this.#setTimer(() => { this.#debounceTimer = null; this.#kick(); }, this.#debounceMs);
   }
 
   #onReconnect() {
-    this.#backoff = 0; // a fresh network — retry immediately rather than waiting out the backoff
+    this.#backoff = 0; // a fresh network — retry now rather than waiting out the backoff
     this.#kick();
   }
 
   #kick() {
-    if (this.#stopped) return;
+    if (this.#stopped || this.#signal?.aborted) return;
     if (this.#ticking) { this.#dirty = true; return; } // single-flight — fold into the running tick
     void this.#runTick();
   }
@@ -151,65 +140,59 @@ export class SyncDriver {
     this.#clear(this.#timer);
     this.#timer = null;
     this.#emit('syncing');
+    let outcome;
     try {
       do {
         this.#dirty = false;
-        await this.#oneTick();
-      } while (this.#dirty && !this.#stopped); // a trigger during the tick runs one more pass
-      this.#backoff = 0;
-      this.#lastSyncedAt = this.#now();
-      this.#pending = false;
-      if (!this.#stopped) { this.#emit('idle'); this.#schedulePoll(); }
+        outcome = await this.#tick(this.#signal);
+      } while (this.#dirty && !this.#stopped && !this.#signal?.aborted);
     } catch (e) {
-      await this.#handleError(e);
+      // A tick should return an Outcome, not throw — but if a reconciler leaks, treat it as offline
+      // rather than crash the loop or leak an unhandled rejection.
+      outcome = Offline(e);
     } finally {
       this.#ticking = false;
     }
+    if (this.#stopped || this.#signal?.aborted) return;
+    this.#dispatch(outcome);
   }
 
-  async #oneTick() {
-    if (this.#syncKeyring) await this.#syncKeyring(); // keyring first: landed deltas verify at their revision
-    await this.#controller.sync(); // push then pull (may throw → caught in #runTick)
-    await this.#maybeRecut();
-  }
-
-  async #maybeRecut() {
-    if (!this.#recut) return;
-    const byCount = this.#editsSinceRecut >= this.#recutEveryDeltas;
-    const byTime = this.#editsSinceRecut > 0 && this.#now() - this.#lastRecutAt >= this.#recutEveryMs;
-    if (!byCount && !byTime) return;
-    await this.#recut(); // caller guards on "only if the local snapshot version changed"
-    this.#editsSinceRecut = 0;
-    this.#lastRecutAt = this.#now();
-  }
-
-  async #handleError(e) {
-    if (e instanceof AuthError || e?.name === 'AuthError') {
-      // A dead session must never hide behind a silent-offline backoff — surface it and stop.
-      this.#emit('offline');
-      this.#onAuthError(e);
-      this.stop();
-      return;
-    }
-    if (isRollback(e)) {
-      this.#onSecurity(e); // a partly-trusted server replayed a superseded snapshot — surface, keep polling
-      if (!this.#stopped) { this.#emit('idle'); this.#schedulePoll(); }
-      return;
-    }
-    if (isBootstrapRequired(e)) {
-      try {
-        await this.#controller.bootstrap();
-        if (!this.#stopped) { this.#emit('idle'); this.#schedulePoll(); }
+  #dispatch(outcome) {
+    switch (outcome?.tag) {
+      case OK:
+        this.#backoff = 0;
+        this.#lastSyncedAt = this.#now();
+        this.#pending = false;
+        this.#emit('idle');
+        this.#schedulePoll();
         return;
-      } catch (be) {
-        e = be; // re-bootstrap itself failed → fall through to backoff
-      }
+      case DEFERRED:
+        // a precondition isn't ready (row/keyring pending) — come back soon, stay 'pending', don't
+        // claim we synced. A fixed short retry (not exponential) so bootstrap converges promptly.
+        this.#emit('syncing');
+        this.#scheduleTimer(this.#deferredMs);
+        return;
+      case CONFLICT:
+        // conflicts are resolved inside the reconcilers' merge loop; one that bubbles here just retries
+        this.#scheduleTimer(this.#deferredMs);
+        return;
+      case UNAUTHORIZED:
+        this.#emit('offline');
+        this.#surface(this.#onAuthError, outcome);
+        this.stop(); // a dead session must not spin behind a green UI
+        return;
+      case REJECTED:
+        this.#emit('offline');
+        this.#surface(this.#onSecurity, outcome.reason ?? outcome);
+        this.stop(); // permanent refusal — retrying can't help
+        return;
+      case OFFLINE:
+      default:
+        this.#backoff = Math.min(this.#backoff ? this.#backoff * 2 : this.#backoffMinMs, this.#backoffCapMs);
+        this.#emit('offline');
+        this.#scheduleTimer(this.#backoff);
+        return;
     }
-    // Transient (offline / 5xx / network): back off and retry. Offline is normal + silent.
-    if (this.#stopped) return;
-    this.#backoff = Math.min(this.#backoff ? this.#backoff * 2 : this.#backoffMinMs, this.#backoffCapMs);
-    this.#emit('offline');
-    this.#scheduleTimer(this.#backoff);
   }
 
   #schedulePoll() {
@@ -218,7 +201,7 @@ export class SyncDriver {
   }
 
   #scheduleTimer(ms) {
-    if (this.#stopped) return;
+    if (this.#stopped || this.#signal?.aborted) return;
     this.#clear(this.#timer);
     this.#timer = this.#setTimer(() => { this.#timer = null; this.#kick(); }, ms);
   }
@@ -227,6 +210,10 @@ export class SyncDriver {
     try {
       this.#onStatus({ state, lastSyncedAt: this.#lastSyncedAt, pending: this.#pending });
     } catch { /* a status listener must never break the sync loop */ }
+  }
+
+  #surface(cb, arg) {
+    try { cb(arg); } catch { /* a surface callback must never become an unhandled rejection */ }
   }
 
   #clear(h) {
