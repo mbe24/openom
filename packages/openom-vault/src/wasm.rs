@@ -1217,6 +1217,15 @@ fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(env.body)
 }
 
+/// Unwrap a served `MembershipEnvelope` to its RAW chain `Keyring` body bytes — the format the client
+/// must retain per revision and feed §B3 verify. `verifyEntry`/`epochIsAttributed`/`wrapChainKeyringUpdate`
+/// all `Keyring::decode` their input, so a stored WRAPPED body fails to decode (a wire-type mismatch on
+/// field 1); the sync path must unwrap before persisting. Exposed for exactly that.
+#[wasm_bindgen(js_name = unwrapChainKeyring)]
+pub fn unwrap_chain_keyring_wasm(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    unwrap_chain_keyring(bytes)
+}
+
 /// `hops` is the concatenation of the successor revisions, each framed as a 4-byte big-endian
 /// length followed by its bytes, in ascending revision order with no gaps. Each is validated as
 /// a legitimate successor of the last ([`verify_walk`]); a fork, rollback, withheld hop,

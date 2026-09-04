@@ -67,6 +67,11 @@ function fakeWorker({ reject = false, headRevision = 3 } = {}) {
       state.seen = unframe(hops);
       return { keyring: state.seen[state.seen.length - 1], watermark: be32(headRevision) };
     },
+    // The fakes drive raw keyring bytes (no real MembershipEnvelope), so unwrap is identity here — it
+    // just has to EXIST, since syncKeyring now unwraps each successor before retaining it.
+    async unwrapChainKeyring(b) {
+      return b;
+    },
   };
 }
 
@@ -136,6 +141,27 @@ describe('vault.syncKeyring', () => {
     await expect(vault.syncKeyring(treeKey, treeId, async () => [{ revision: 2, bytes: bytes(9) }])).rejects.toThrow(/refused/);
     expect(Array.from(await keyringStore.load(treeKey))).toEqual([7, 7]); // NOT overwritten
     expect(revOf(watermarks.current(treeKey).keyringCursor)).toBe(1); // NOT advanced
+  });
+
+  it('retains the UNWRAPPED keyring body per revision (not the served envelope) — the §B3 verify format', async () => {
+    // A worker whose unwrap strips a 0xEE "envelope" prefix, so we can see which bytes get retained.
+    const worker = {
+      async acceptRemoteKeyring(_a, _t, hops) {
+        const seen = unframe(hops);
+        return { keyring: seen[seen.length - 1], watermark: be32(2) };
+      },
+      async unwrapChainKeyring(b) { return b.subarray(1); }, // strip the envelope prefix → raw body
+    };
+    const keyringStore = memoryKeyringStore();
+    const watermarks = new Watermarks();
+    await keyringStore.saveHead(treeKey, 'chain', bytes(7, 7));
+    await keyringStore.save(treeKey, 1, bytes(7, 7));
+    watermarks.observe(treeKey, { keyringCursor: be32(1) });
+    const vault = createVault({ worker, keyringStore, watermarks });
+    // The server serves WRAPPED bytes (0xEE-prefixed); after sync, at(2) must be the UNWRAPPED body — else
+    // §B3 verify would decode a wrapped body and hard-throw, silently dropping every entry at this revision.
+    await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 2, bytes: bytes(0xee, 2, 2) }]);
+    expect(Array.from(await keyringStore.at(treeKey, 2))).toEqual([2, 2]); // unwrapped, not [0xee, 2, 2]
   });
 });
 
@@ -267,6 +293,7 @@ describe('vault outbound keyring publish (OPE-301)', () => {
     const publishKeyring = () => { throw new Error('syncKeyring must not publish inbound revisions'); };
     const worker = {
       async acceptRemoteKeyring(_a, _t, _h) { return { keyring: bytes(3, 3), watermark: be32(3) }; },
+      async unwrapChainKeyring(b) { return b; },
     };
     const keyringStore = memoryKeyringStore();
     const watermarks = new Watermarks();

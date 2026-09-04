@@ -16,6 +16,7 @@ import init, {
   acceptRemoteKeyring as wasmAcceptRemoteKeyring,
   acceptResetKeyring as wasmAcceptResetKeyring,
   wrapChainKeyringUpdate as wasmWrapChainKeyringUpdate,
+  unwrapChainKeyring as wasmUnwrapChainKeyring,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
   entryAttribution as wasmEntryAttribution,
@@ -160,6 +161,14 @@ const api = {
   async wrapChainKeyringUpdate(keyring) {
     await ensureInit();
     return wasmWrapChainKeyringUpdate(keyring);
+  },
+
+  // Unwrap a served MembershipEnvelope to its RAW chain Keyring body — the format the client retains per
+  // revision + feeds §B3 verify (verifyEntry/epochIsAttributed/wrapChainKeyringUpdate all decode a raw
+  // Keyring; a stored WRAPPED body would fail to decode). The sync path unwraps before persisting.
+  async unwrapChainKeyring(bytes) {
+    await ensureInit();
+    return wasmUnwrapChainKeyring(bytes);
   },
 
   // Local-development sealer (reserved dev key) — routed through the SAME worker so demo and

@@ -193,7 +193,13 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // governing keyring for entries stamped at it, §B3 launch gate), update the unlock head record, and
       // watermark the new head. Persist only after validation, so an untrusted server can never plant an
       // unverified revision.
-      for (const s of successors) await keyringStore.save(treeKey, s.revision, s.bytes);
+      // Retain the RAW keyring body per revision — UNWRAP the served MembershipEnvelope first. §B3 verify
+      // (verifyEntry/epochIsAttributed) decodes a raw Keyring, so storing the wrapped envelope would make
+      // every attributed entry governed by this revision throw a hard (non-retryable) decode error, which
+      // sync.js treats as a rejection → the edit is dropped and the cursor advanced past it (silent loss).
+      for (const s of successors) {
+        await keyringStore.save(treeKey, s.revision, await worker.unwrapChainKeyring(s.bytes));
+      }
       await keyringStore.saveHead(treeKey, engine, r.keyring);
       // The accept path advances the revision without opening the DEK — carry the stored write-epoch pin
       // forward so this sync doesn't erase the recover commitment (OPE-286 phase 2).
