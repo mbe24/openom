@@ -57,6 +57,11 @@ pub struct KeyringAnchor {
     pub governance_threshold: u32,
     /// The recovery verifying key (RVK) pinned in this keyring, or empty if none.
     pub recovery_verifying_key: Vec<u8>,
+    /// The revision this tree was first shared at (0 = never). MONOTONIC: carried on the anchor so
+    /// [`verify_transition`] can reject a successor that regresses it — a shared tree can't un-share, even
+    /// authored by a valid signer (`first_shared_revision` is in the signed payload but the binding treats
+    /// it opaquely, so the chain layer enforces its semantics).
+    pub first_shared_revision: u32,
 }
 
 impl KeyringAnchor {
@@ -71,6 +76,7 @@ impl KeyringAnchor {
             governance_kind: keyring.governance_kind,
             governance_threshold: keyring.governance_threshold,
             recovery_verifying_key: reset_rvk(keyring).map(<[u8]>::to_vec).unwrap_or_default(),
+            first_shared_revision: keyring.first_shared_revision,
         }
     }
 }
@@ -119,6 +125,9 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
         governance_kind: out.governance.kind,
         governance_threshold: out.governance.threshold,
         recovery_verifying_key: out.recovery_authority.map(|k| k.to_vec()).unwrap_or_default(),
+        // first_shared_revision is a chain-payload field, opaque to the generic linear anchor — the caller
+        // sets it from the keyring it verified (0 here is a placeholder every producer overwrites).
+        first_shared_revision: 0,
     }
 }
 
@@ -234,6 +243,8 @@ pub enum ChainError {
     BadBootstrap,
     #[error("the revision would overflow")]
     RevisionOverflow,
+    #[error("first_shared_revision regressed or is out of range (a shared tree cannot un-share)")]
+    FirstSharedRegressed,
 }
 
 /// Validate `candidate` as the successor of `prior` and return the new anchor. Pure; no I/O. Delegates to
@@ -242,10 +253,23 @@ pub fn verify_transition(
     prior: &KeyringAnchor,
     candidate: &Keyring,
 ) -> Result<KeyringAnchor, ChainError> {
+    // first_shared_revision is MONOTONIC: once a tree has been shared it can never un-share. The field rides
+    // the signed payload commitment, but the binding treats it opaquely, so a valid signer (a compromised
+    // co-owner) could otherwise author an ordinary successor that CLEARS it — silently disabling attributed
+    // writes tree-wide. Enforce it here, on the trusted prior→candidate transition: it must name a real
+    // revision, and once set it must never change.
+    if candidate.first_shared_revision > candidate.revision {
+        return Err(ChainError::FirstSharedRegressed);
+    }
+    if prior.first_shared_revision != 0 && candidate.first_shared_revision != prior.first_shared_revision {
+        return Err(ChainError::FirstSharedRegressed);
+    }
     let anchor = to_linear_anchor(prior);
     let out = keyeo_linear::verify_transition(&anchor, &ChainDoc::new(candidate))
         .map_err(map_linear_err)?;
-    Ok(from_linear_anchor(out))
+    let mut new_anchor = from_linear_anchor(out);
+    new_anchor.first_shared_revision = candidate.first_shared_revision; // carry it forward on the anchor
+    Ok(new_anchor)
 }
 
 /// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
@@ -266,7 +290,9 @@ pub fn bootstrap_from_genesis(
 ) -> Result<KeyringAnchor, ChainError> {
     let out = keyeo_linear::bootstrap_genesis(&ChainDoc::new(genesis), &own_founder_key.to_bytes())
         .map_err(map_linear_err)?;
-    Ok(from_linear_anchor(out))
+    let mut a = from_linear_anchor(out);
+    a.first_shared_revision = genesis.first_shared_revision; // seed the monotonic marker (0 at a true genesis)
+    Ok(a)
 }
 
 /// Seed an anchor from a keyring pinned out-of-band (§4a). Delegates to
@@ -284,7 +310,9 @@ pub fn bootstrap_from_oob(
         &DocHash(*pinned_hash),
     )
     .map_err(map_linear_err)?;
-    Ok(from_linear_anchor(out))
+    let mut a = from_linear_anchor(out);
+    a.first_shared_revision = head.first_shared_revision; // carry the marker from the pinned head
+    Ok(a)
 }
 
 /// Validate a keyring that establishes a **new anchor on its own terms** — a genesis, or a recovery /
@@ -297,7 +325,12 @@ pub fn verify_reset(
     let rvk = prior_rvk.map(to_pk32);
     let out = keyeo_linear::verify_reset(rvk.as_ref(), &ChainDoc::new(keyring))
         .map_err(map_linear_err)?;
-    Ok(from_linear_anchor(out))
+    let mut a = from_linear_anchor(out);
+    // Seed the marker from the reset keyring. NOTE: a reset re-anchors on its own terms and verify_reset has
+    // no prior keyring to compare, so it does NOT enforce monotonicity here — a recovery/checkpoint that
+    // must preserve first_shared is the caller's (and Phase B's checkpoint-adoption) responsibility.
+    a.first_shared_revision = keyring.first_shared_revision;
+    Ok(a)
 }
 
 #[cfg(test)]
@@ -374,6 +407,37 @@ mod tests {
         };
         sign_keyring(&mut k, founder);
         k
+    }
+
+    #[test]
+    fn first_shared_revision_is_monotonic_across_transitions() {
+        let f = key();
+        let g = genesis(&f, &[], &[]); // rev 1, first_shared 0
+        assert_eq!(KeyringAnchor::from_keyring(&g).first_shared_revision, 0);
+
+        // First share: rev 2 sets the marker (prior is 0 → allowed). Accepted; the anchor carries it forward.
+        let rev2 = next(&g, |k| k.first_shared_revision = 2, &[&f]);
+        let anchor2 = verify_transition(&KeyringAnchor::from_keyring(&g), &rev2).unwrap();
+        assert_eq!(anchor2.first_shared_revision, 2);
+
+        // rev 3 KEEPING the marker → accepted.
+        let rev3_ok = next(&rev2, |_| {}, &[&f]);
+        assert!(verify_transition(&anchor2, &rev3_ok).is_ok());
+
+        // rev 3 CLEARING the marker (a compromised co-owner trying to un-share) → REJECTED.
+        let rev3_clear = next(&rev2, |k| k.first_shared_revision = 0, &[&f]);
+        assert!(matches!(verify_transition(&anchor2, &rev3_clear), Err(ChainError::FirstSharedRegressed)));
+
+        // rev 3 CHANGING the marker to another value → REJECTED.
+        let rev3_change = next(&rev2, |k| k.first_shared_revision = 3, &[&f]);
+        assert!(matches!(verify_transition(&anchor2, &rev3_change), Err(ChainError::FirstSharedRegressed)));
+
+        // A marker naming a revision that doesn't exist yet (> candidate.revision) → REJECTED even from a 0 prior.
+        let bad_range = next(&g, |k| k.first_shared_revision = 5, &[&f]); // rev 2, marker 5 > 2
+        assert!(matches!(
+            verify_transition(&KeyringAnchor::from_keyring(&g), &bad_range),
+            Err(ChainError::FirstSharedRegressed)
+        ));
     }
 
     #[test]

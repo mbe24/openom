@@ -68,9 +68,9 @@ fn classify(e: ChainError) -> VerifyError {
     match e {
         ChainError::Fork => VerifyError::Rollback,
         ChainError::NonSequential => VerifyError::Stale,
-        ChainError::UnendorsedOrdinaryChange | ChainError::UnendorsedSetChange => {
-            VerifyError::Unauthorized
-        }
+        ChainError::UnendorsedOrdinaryChange
+        | ChainError::UnendorsedSetChange
+        | ChainError::FirstSharedRegressed => VerifyError::Unauthorized,
         ChainError::TreeMismatch
         | ChainError::LayoutAhead
         | ChainError::BadStructure(_)
