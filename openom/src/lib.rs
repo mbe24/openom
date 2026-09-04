@@ -9,6 +9,7 @@ pub mod access;
 pub mod auth;
 pub mod authz;
 pub mod config;
+pub mod jwks;
 pub mod keyring;
 pub mod log;
 pub mod media;
@@ -24,7 +25,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use jsonwebtoken::DecodingKey;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
@@ -40,8 +40,9 @@ use storage::S3Store;
 pub struct AppState {
     db: PgPool,
     config: Arc<Config>,
-    /// HS256 key for verifying Supabase JWTs (production). None locally.
-    jwt_key: Option<DecodingKey>,
+    /// The provider-neutral JWT verifier (HS256 secret or RS256/ES256 JWKS) under `AUTH=jwt`; `None`
+    /// under `AUTH=dev`. `Arc` so cloning `AppState` shares one JWKS cache.
+    jwt_verifier: Option<Arc<jwks::JwtVerifier>>,
     /// Blob store (MinIO in dev, R2 in prod).
     storage: S3Store,
 }
@@ -152,10 +153,23 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
         provision_dev_account(&db, config.local_member_id).await?;
     }
 
-    let jwt_key = config
-        .jwt_secret
-        .as_ref()
-        .map(|s| DecodingKey::from_secret(s.as_bytes()));
+    // Build the JWT verifier once (its algorithm + key material are validated at config load).
+    let jwt_verifier = config.auth_is_jwt().then(|| {
+        let aud = config.jwt_audience.as_deref();
+        let iss = config.jwt_issuer.as_deref();
+        Arc::new(match config.jwt_alg {
+            config::JwtAlg::Hs256 => jwks::JwtVerifier::hs256(
+                config.jwt_secret.as_deref().expect("validate(): HS256 requires a secret"),
+                aud,
+                iss,
+            ),
+            config::JwtAlg::Rs256 => jwks::JwtVerifier::jwks(
+                config.jwks_url.clone().expect("validate(): RS256 requires a JWKS URL"),
+                aud,
+                iss,
+            ),
+        })
+    });
 
     let storage = S3Store::from_config(config)?;
     // Dev bootstrap: MinIO starts empty, so create the bucket up front. In prod the
@@ -169,7 +183,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     Ok(AppState {
         db,
         config: Arc::new(config.clone()),
-        jwt_key,
+        jwt_verifier,
         storage,
     })
 }

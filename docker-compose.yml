@@ -36,6 +36,12 @@ services:
       #   AUTH: jwt
       #   AUTH_JWT_SECRET: <your local supabase JWT secret>   # alias SUPABASE_JWT_SECRET
       # (aud defaults to "authenticated"; set AUTH_JWT_AUD to override / empty to opt out.)
+      # For an asymmetric issuer instead (Clerk / Auth0 / OIDC / self-hosted), point at its JWKS:
+      #   AUTH: jwt
+      #   AUTH_JWT_ALG: RS256
+      #   AUTH_JWKS_URL: https://<issuer>/.well-known/jwks.json
+      #   AUTH_JWT_ISS: https://<issuer>     # optional issuer pin
+      # No issuer is baked into the code — swapping providers is a config change, not a rebuild.
       RUN_MODE: local
       OPENOM_HTTP_ADDR: 0.0.0.0:${OPENOM_HTTP_PORT:-6060}
       DATABASE_URL: postgres://openom:openom@postgres:5432/openom

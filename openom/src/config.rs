@@ -40,6 +40,15 @@ pub enum AuthMode {
     Jwt,
 }
 
+/// The JWT verifier algorithm (when `AUTH=jwt`). `Hs256` = a shared secret (Supabase / dev).
+/// `Rs256` = asymmetric keys (RS256/ES256) fetched from a JWKS URL (Clerk / Auth0 / OIDC /
+/// self-hosted). The issuer is never baked in — it's a deployment config choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwtAlg {
+    Hs256,
+    Rs256,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Deployment target preset (Local server vs Lambda). See the module docs.
@@ -64,9 +73,18 @@ pub struct Config {
     pub s3_access_key: String,
     /// S3 secret access key.
     pub s3_secret_key: String,
+    /// The JWT verifier algorithm when `AUTH=jwt`. `AUTH_JWT_ALG` (`HS256`|`RS256`); default `HS256`
+    /// (Supabase/dev back-compat).
+    pub jwt_alg: JwtAlg,
     /// JWT verifier shared secret (HS256 — Supabase/dev). `AUTH_JWT_SECRET`, alias
-    /// `SUPABASE_JWT_SECRET`. Required when `AUTH=jwt` (until the JWKS/RS256 arm lands).
+    /// `SUPABASE_JWT_SECRET`. Required when `AUTH=jwt` and `AUTH_JWT_ALG=HS256`.
     pub jwt_secret: Option<String>,
+    /// JWKS URL for the asymmetric arm (RS256/ES256 — Clerk/Auth0/OIDC/self-hosted). `AUTH_JWKS_URL`.
+    /// Required when `AUTH=jwt` and `AUTH_JWT_ALG=RS256`.
+    pub jwks_url: Option<String>,
+    /// Expected JWT `iss` claim. `Some` → the token's issuer must match; `None` → skip. `AUTH_JWT_ISS`.
+    /// A deployment choice — never baked into code.
+    pub jwt_issuer: Option<String>,
     /// Expected JWT `aud` claim. `Some` → the token's audience must match; `None` → skip.
     /// Defaults to `"authenticated"` (Supabase) when `AUTH=jwt`; `AUTH_JWT_AUD` (alias
     /// `SUPABASE_JWT_AUD`) overrides, and an explicit empty value opts out.
@@ -122,9 +140,15 @@ impl Config {
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
             s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),
             s3_secret_key: env::var("S3_SECRET_KEY").unwrap_or_else(|_| "openompw123".into()),
+            jwt_alg: match env::var("AUTH_JWT_ALG").ok().as_deref() {
+                Some("RS256") | Some("rs256") | Some("ES256") | Some("es256") => JwtAlg::Rs256,
+                _ => JwtAlg::Hs256,
+            },
             jwt_secret: env::var("AUTH_JWT_SECRET")
                 .or_else(|_| env::var("SUPABASE_JWT_SECRET"))
                 .ok(),
+            jwks_url: env::var("AUTH_JWKS_URL").ok().filter(|s| !s.trim().is_empty()),
+            jwt_issuer: env::var("AUTH_JWT_ISS").ok().filter(|s| !s.trim().is_empty()),
             jwt_audience: match env::var("AUTH_JWT_AUD").or_else(|_| env::var("SUPABASE_JWT_AUD")) {
                 Ok(v) if v.trim().is_empty() => None, // explicit opt-out
                 Ok(v) => Some(v),
@@ -182,11 +206,19 @@ impl Config {
             !(self.auth == AuthMode::Dev && self.storage == StorageMode::Cloud),
             "config: AUTH=dev with STORAGE=cloud is refused — fake auth must never guard real user data"
         );
-        // The real-JWT axis needs verifier material. (The RS256/JWKS arm — OPE-340 — will
-        // extend this to accept a JWKS URL as an alternative.)
-        assert!(
-            !(self.auth == AuthMode::Jwt && self.jwt_secret.is_none()),
-            "config: AUTH=jwt requires AUTH_JWT_SECRET (HS256). No verifier key material configured."
-        );
+        // The real-JWT axis needs verifier material for its algorithm: HS256 a shared secret, RS256 a
+        // JWKS URL. Fail fast at startup rather than 500 on the first request.
+        if self.auth == AuthMode::Jwt {
+            match self.jwt_alg {
+                JwtAlg::Hs256 => assert!(
+                    self.jwt_secret.is_some(),
+                    "config: AUTH=jwt AUTH_JWT_ALG=HS256 requires AUTH_JWT_SECRET (a shared secret)"
+                ),
+                JwtAlg::Rs256 => assert!(
+                    self.jwks_url.is_some(),
+                    "config: AUTH=jwt AUTH_JWT_ALG=RS256 requires AUTH_JWKS_URL (the issuer's JWKS endpoint)"
+                ),
+            }
+        }
     }
 }
