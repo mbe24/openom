@@ -13,6 +13,16 @@ import { ConflictError, AuthError } from './store.js';
 const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
 const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
 
+// A thrown HTTP error carrying its `status`, so syncOutcome.classifyError can tell a PERMANENT refusal
+// (403 quota/forbidden, 400) from a transient one (5xx/429) — a bare Error("HTTP 403") is
+// indistinguishable from offline, which is exactly how a permanent failure used to hide behind an
+// infinite silent backoff.
+function httpError(label, status, detail = '') {
+  const e = new Error(`${label}: HTTP ${status}${detail ? ` — ${detail}` : ''}`);
+  e.status = status;
+  return e;
+}
+
 /**
  * The requested log tail is below the server's retained window (HTTP 410): the client can't catch up
  * from deltas and must bootstrap from a snapshot. Carries the retained bounds so the caller can decide.
@@ -92,7 +102,7 @@ export class RemoteStore {
   async readSnapshot(id) {
     const res = await this.#send(this.#tree(id), { method: 'GET' });
     if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`readSnapshot ${id}: HTTP ${res.status}`);
+    if (!res.ok) throw httpError(`readSnapshot ${id}`, res.status);
     const bytes = new Uint8Array(await res.arrayBuffer());
     return { bytes, version: unquote(res.headers.get('etag')) };
   }
@@ -107,7 +117,7 @@ export class RemoteStore {
     if (res.status === 409) throw new ConflictError(expected, null);
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`putSnapshot ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+      throw httpError(`putSnapshot ${id}`, res.status, detail);
     }
     return unquote(res.headers.get('etag'));
   }
@@ -123,7 +133,7 @@ export class RemoteStore {
     });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`appendLog ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+      throw httpError(`appendLog ${id}`, res.status, detail);
     }
     return (await res.json()).seq;
   }
@@ -141,7 +151,7 @@ export class RemoteStore {
       const j = await res.json().catch(() => ({}));
       throw new BootstrapRequiredError(j.oldest_retained_seq ?? 0, j.head_seq ?? -1);
     }
-    if (!res.ok) throw new Error(`readLog ${id}: HTTP ${res.status}`);
+    if (!res.ok) throw httpError(`readLog ${id}`, res.status);
     const tail = await res.json();
     return {
       entries: (tail.entries ?? []).map((e) => ({
@@ -183,7 +193,7 @@ export class RemoteStore {
   async readKeyring(id, from = 1) {
     const res = await this.#send(`${this.#tree(id)}/keyring?from=${from}`, { method: 'GET' });
     if (res.status === 404) return { revisions: [], head: 0 };
-    if (!res.ok) throw new Error(`readKeyring ${id}: HTTP ${res.status}`);
+    if (!res.ok) throw httpError(`readKeyring ${id}`, res.status);
     const body = await res.json();
     return {
       revisions: (body.revisions ?? []).map((r) => ({ revision: r.revision, bytes: b64decode(r.payload) })),
@@ -208,7 +218,7 @@ export class RemoteStore {
     if (res.status === 409) throw new ConflictError(null, null);
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`putKeyring ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+      throw httpError(`putKeyring ${id}`, res.status, detail);
     }
     const b = await res.json().catch(() => ({}));
     return { revision: b.revision ?? null };
@@ -225,7 +235,7 @@ export class RemoteStore {
   async getAccess(id) {
     const res = await this.#send(`${this.#tree(id)}/access`, { method: 'GET' });
     if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`getAccess ${id}: HTTP ${res.status}`);
+    if (!res.ok) throw httpError(`getAccess ${id}`, res.status);
     const b = await res.json();
     return {
       members: (b.members ?? []).map((m) => ({ memberId: m.member_id, role: m.role })),
@@ -254,7 +264,7 @@ export class RemoteStore {
     if (res.status === 409) throw new ConflictError(expectedGeneration, null);
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`putAccess ${id}: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`);
+      throw httpError(`putAccess ${id}`, res.status, detail);
     }
     const b = await res.json();
     return { generation: b.generation ?? null, unchanged: !!b.unchanged };
