@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  attempt, mapReplicatorStatus, reconcileSnapshot, reconcileDeltas, reconcileTree,
+  attempt, reconcileSnapshot, reconcileDeltas, reconcileTree,
 } from '../app/src/core/syncReconcilers.js';
-import { Ok, Offline, isOk, OK, OFFLINE, CONFLICT, REJECTED, DEFERRED } from '../app/src/core/syncOutcome.js';
+import { Ok, Offline, isOk, OK, OFFLINE, REJECTED, DEFERRED } from '../app/src/core/syncOutcome.js';
 
 const forkError = () => { const e = new Error('fork'); e.name = 'KeyringForkError'; e.revision = 2; return e; };
 
@@ -15,20 +15,40 @@ describe('syncReconcilers — channel mappings', () => {
     expect((await attempt(async () => { throw Object.assign(new Error('x'), { status: 403 }); })).tag).toBe(REJECTED);
   });
 
-  it('mapReplicatorStatus maps each status', () => {
-    for (const s of ['synced', 'clean', 'upToDate', 'fastForward', 'noRemote']) expect(mapReplicatorStatus(s).tag).toBe(OK);
-    expect(mapReplicatorStatus('offline').tag).toBe(OFFLINE);
-    expect(mapReplicatorStatus('rollback').tag).toBe(REJECTED);
-    expect(mapReplicatorStatus('rollback').reason.security).toBe(true);
-    expect(mapReplicatorStatus('unresolved').tag).toBe(CONFLICT);
+  it('reconcileSnapshot: no-op when the row already exists', async () => {
+    const remote = {
+      readSnapshot: async () => ({ bytes: new Uint8Array([1]), version: 'v1' }),
+      putSnapshot: async () => { throw new Error('must not create when the row exists'); },
+    };
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote, sealSnapshot: async () => new Uint8Array() });
+    expect(r).toEqual(Ok('exists'));
   });
 
-  it('reconcileSnapshot compacts (idempotent row-cut) then maps the replicator status', async () => {
-    let compacted = false;
-    const tree = { compact: async () => { compacted = true; } };
-    const replicator = { sync: async (id) => { expect(id).toBe('u'); return 'synced'; } };
-    expect(isOk(await reconcileSnapshot({ tree, uuid: 'u', replicator }))).toBe(true);
-    expect(compacted).toBe(true);
+  it('reconcileSnapshot: creates the row (expected=null) when absent, sealing the current state', async () => {
+    let put = null;
+    const remote = {
+      readSnapshot: async () => null,
+      putSnapshot: async (id, bytes, expected) => { put = { id, bytes: Array.from(bytes), expected }; },
+    };
+    const tree = { snapshotBytes: () => new Uint8Array([9]) };
+    const r = await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => new Uint8Array([0xaa, ...b]) });
+    expect(r).toEqual(Ok('created'));
+    expect(put).toEqual({ id: 'u', bytes: [0xaa, 9], expected: null });
+  });
+
+  it('reconcileSnapshot: a concurrent creator (409) resolves to exists', async () => {
+    const remote = {
+      readSnapshot: async () => null,
+      putSnapshot: async () => { const e = new Error('conflict'); e.name = 'ConflictError'; throw e; },
+    };
+    const tree = { snapshotBytes: () => new Uint8Array([9]) };
+    expect(await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => b })).toEqual(Ok('exists'));
+  });
+
+  it('reconcileSnapshot: a network failure defers (Offline)', async () => {
+    const remote = { readSnapshot: async () => { throw new TypeError('fetch failed'); } };
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote, sealSnapshot: async () => new Uint8Array() });
+    expect(r.tag).toBe(OFFLINE);
   });
 
   it('reconcileDeltas: Ok normally, Deferred when an entry is held, classified on throw', async () => {

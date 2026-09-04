@@ -12,7 +12,7 @@
 // If the row isn't established this tick (offline/deferred), the row-dependent steps are skipped and the
 // blocking Outcome is reported, so the driver retries — no ordering cursor, no persisted phase.
 
-import { Ok, Offline, Conflict, Rejected, Deferred, classifyError, isOk, worst } from './syncOutcome.js';
+import { Ok, Rejected, Deferred, classifyError, isOk, worst } from './syncOutcome.js';
 
 /**
  * Run a channel op that THROWS on failure (the vault keyring methods, RemoteStore calls) and translate a
@@ -28,35 +28,35 @@ export async function attempt(fn) {
   }
 }
 
-/** Map Replicator.sync's status string to an Outcome. */
-export function mapReplicatorStatus(status) {
-  switch (status) {
-    case 'synced':
-    case 'clean':
-    case 'upToDate':
-    case 'fastForward':
-    case 'noRemote':
-      return Ok(status); // converged (or nothing to do)
-    case 'offline':
-      return Offline();
-    case 'rollback':
-      return Rejected({ rollback: true, security: true }); // §10 anti-rollback tripped — surface, don't retry
-    case 'unresolved':
-      return Conflict(); // persistent conflict churn — retry next tick
-    default:
-      return Offline();
-  }
-}
-
 /**
- * Snapshot channel: ensure a local snapshot exists (a freshly-provisioned tree has none — compact cuts
- * one, with the proper envelope, swallowing the local CAS), then the SyncStore pull-then-push reconcile
- * creates the row (origin: noRemote→push→cas_create), adopts it (invited: fastForward), or merges a
- * conflict — all emergent, no create-vs-adopt branch to maintain.
+ * Snapshot channel (V1): the snapshot's job is to CREATE the server tree row — put_tree/cas_create is the
+ * only way a row comes into being, and the keyring PUT + delta append both FK it. It is NOT a live-synced
+ * doc here: state convergence is the delta log's job (log GC is blocked, so the full log is always present
+ * and a fresh device reconstructs by replaying it; a merged baseline snapshot is a post-GC optimization).
+ * So: if the row already exists, nothing to do; otherwise seal a snapshot of the current state and create
+ * it (expected=null → cas_create), tolerating a concurrent creator (a 409 just means the row now exists).
+ * @param {object} o
+ * @param {object} o.tree    a FamilyTree (snapshotBytes)
+ * @param {string} o.uuid    the server tree id
+ * @param {object} o.remote  a RemoteStore (readSnapshot / putSnapshot)
+ * @param {(bytes: Uint8Array) => Promise<Uint8Array>} o.sealSnapshot  seal under kind:'snapshot'
  */
-export async function reconcileSnapshot({ tree, uuid, replicator }) {
-  await tree.compact();
-  return mapReplicatorStatus(await replicator.sync(uuid));
+export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot }) {
+  let existing;
+  try {
+    existing = await remote.readSnapshot(uuid); // null = 404 = no row; a network failure THROWS
+  } catch (e) {
+    return classifyError(e); // offline → defer; a permanent refusal → surface
+  }
+  if (existing) return Ok('exists'); // row present — the delta log carries state; nothing to create in V1
+  const sealed = await sealSnapshot(tree.snapshotBytes());
+  try {
+    await remote.putSnapshot(uuid, sealed, null); // If-None-Match: create only
+    return Ok('created');
+  } catch (e) {
+    if (e?.name === 'ConflictError') return Ok('exists'); // a concurrent creator won — the row exists now
+    return classifyError(e);
+  }
 }
 
 /**
