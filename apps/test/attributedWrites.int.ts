@@ -8,6 +8,7 @@ import init, {
   provisionMember as wasmProvisionMember,
   addMember as wasmAddMember,
   removeMember as wasmRemoveMember,
+  dagAddMember as wasmDagAddMember,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
   entryAttribution as wasmEntryAttribution,
 } from '../app/src/vendor/vault/openom_vault.js';
@@ -32,7 +33,7 @@ beforeAll(async () => {
 describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
   it('is false for a never-shared solo tree, true once a member is admitted, and stays true after un-sharing', () => {
     const genesis = keyringOf(wasmProvision('chain', 'owner pass', TREE, OWNER, replica(1)));
-    expect(wasmKeyringHasBeenShared(genesis)).toBe(false); // solo → never shared
+    expect(wasmKeyringHasBeenShared('chain', genesis)).toBe(false); // solo → never shared
 
     // Admit an editor → the tree is now shared.
     const m = wasmProvisionMember('member pass');
@@ -40,11 +41,25 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
       wasmAddMember(genesis, 'owner pass', TREE, OWNER, 1, 'acct-m', 'editor', m.hpkePublic, m.authorPublic),
     );
     m.free();
-    expect(wasmKeyringHasBeenShared(shared)).toBe(true);
+    expect(wasmKeyringHasBeenShared('chain', shared)).toBe(true);
 
     // Remove the only member → back to solo, but the signal is monotonic: still true.
     const solo = keyringOf(wasmRemoveMember(shared, 'owner pass', TREE, OWNER, 2, 'acct-m', replica(2)));
-    expect(wasmKeyringHasBeenShared(solo)).toBe(true); // un-shared, still requires attribution
+    expect(wasmKeyringHasBeenShared('chain', solo)).toBe(true); // un-shared, still requires attribution
+  });
+
+  // Phase C (OPE-351): the dag arm reads the resolved anchor's ever_shared — a monotonic effective-Add scan.
+  it('dag arm: false for a solo dag tree, true once a member is admitted', () => {
+    const genesis = keyringOf(wasmProvision('dag', 'owner pass', TREE, OWNER, replica(1)));
+    expect(wasmKeyringHasBeenShared('dag', genesis)).toBe(false); // solo → never shared
+
+    // Admit an editor (dag Add op) → ever_shared flips true. Note dag arg order: author key before hpke key.
+    const m = wasmProvisionMember('member pass');
+    const shared = keyringOf(
+      wasmDagAddMember(genesis, 'owner pass', TREE, OWNER, replica(2), 'acct-m', 'editor', m.authorPublic, m.hpkePublic),
+    );
+    m.free();
+    expect(wasmKeyringHasBeenShared('dag', shared)).toBe(true);
   });
 });
 

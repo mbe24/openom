@@ -1582,14 +1582,23 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 
 /// Whether this tree HAS BEEN SHARED — a non-founder member was ever admitted — the MONOTONIC signal that
 /// gates attributed writes (§B3 slice 2): once true, the reader requires every authoritative entry to be
-/// signed and the writer attaches a signature. Chain arm: `first_shared_revision != 0`, read from the
-/// VERIFIED keyring the caller supplies (walked/synced). Unlike `epoch_is_attributed` (a per-epoch, per-
-/// revision property that removal can reset), this never regresses — it survives an un-share back to solo.
-/// The dag arm lands with dag attribution (Phase C).
+/// signed and the writer attaches a signature. Unlike `epoch_is_attributed` (a per-epoch, per-revision
+/// property that removal can reset), this never regresses — it survives an un-share back to solo. Read from
+/// the VERIFIED keyring the caller supplies (walked/synced). Chain arm: `first_shared_revision != 0`. Dag arm
+/// (Phase C, OPE-351): the resolved anchor's `ever_shared` — a monotonic scan for any effective `Add`, so an
+/// un-shared-back-to-solo dag still reports true (the effective Add persists).
 #[wasm_bindgen(js_name = keyringHasBeenShared)]
-pub fn keyring_has_been_shared(keyring: &[u8]) -> Result<bool, JsError> {
-    let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
-    Ok(crate::has_been_shared(&kr))
+pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsError> {
+    match parse_engine(engine)? {
+        EngineKind::Chain => {
+            let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            Ok(crate::has_been_shared(&kr))
+        }
+        EngineKind::Dag => {
+            let resolved = dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
+            Ok(resolved.ever_shared)
+        }
+    }
 }
 
 /// The moderator `did:key`s (members currently at Maintainer or above) from a keyring — the set the

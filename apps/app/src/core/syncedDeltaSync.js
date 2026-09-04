@@ -25,7 +25,7 @@ import { createEntryVerifier } from './sealer/entryVerifier.js';
  * @param {object} [o.persist]    durable KV for the pull cursor
  * @returns {SyncController}  a controller that verifies every landed entry before merging
  */
-export function createSyncedDeltaSync({ version, tree, remote, docId, seal, open, worker, keyringStore, replicaKey = null, persist }) {
+export function createSyncedDeltaSync({ version, tree, remote, docId, seal, open, worker, keyringStore, engine = 'chain', replicaKey = null, persist }) {
   if (version == null || !tree || !remote || !docId || !seal || !open || !worker || !keyringStore) {
     throw new Error('createSyncedDeltaSync needs { version, tree, remote, docId, seal, open, worker, keyringStore }');
   }
@@ -34,10 +34,10 @@ export function createSyncedDeltaSync({ version, tree, remote, docId, seal, open
     worker,
     keyringAt: (revision) => keyringStore.at(docId, revision), // the client's verified, retained chain
     // The monotonic shared signal + the head revision, from the VERIFIED head keyring — gate the attributed-
-    // writes rule and bound a legitimate governing_ref.
+    // writes rule and bound a legitimate governing_ref. Chain path here; the dag reader is a separate composer.
     hasBeenShared: async () => {
       const head = await keyringStore.load(docId);
-      return head ? worker.keyringHasBeenShared(head) : false;
+      return head ? worker.keyringHasBeenShared(engine, head) : false;
     },
     headRevision: async () => (await keyringStore.head(docId))?.revision ?? 0,
   });

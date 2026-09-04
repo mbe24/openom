@@ -139,11 +139,11 @@ const api = {
   },
 
   // Whether the tree HAS BEEN SHARED (monotonic; §B3 slice 2). Once true, the reader requires every
-  // authoritative entry to be attributed and the writer signs. Chain: first_shared_revision != 0 in the
-  // verified keyring. Survives an un-share back to solo.
-  async keyringHasBeenShared(keyring) {
+  // authoritative entry to be attributed and the writer signs. Chain: first_shared_revision != 0; dag: the
+  // resolved anchor's ever_shared (Phase C). Survives an un-share back to solo.
+  async keyringHasBeenShared(engine, keyring) {
     await ensureInit();
-    return wasmKeyringHasBeenShared(keyring);
+    return wasmKeyringHasBeenShared(engine, keyring);
   },
 
   // The resolved advisory membership as a JSON string `{"members":[{"memberId","role"}],"basis":[...]}` —

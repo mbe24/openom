@@ -123,8 +123,8 @@ function directWorker() {
     async epochIsAttributed(keyring, keyId) {
       return wasmEpochIsAttributed(keyring, keyId);
     },
-    async keyringHasBeenShared(keyring) {
-      return wasmKeyringHasBeenShared(keyring);
+    async keyringHasBeenShared(engine, keyring) {
+      return wasmKeyringHasBeenShared(engine, keyring);
     },
     async verifyEntry(version, envelope, plaintext, governing) {
       wasmVerifyEntry(version, envelope, plaintext, governing); // throws to reject
@@ -248,10 +248,10 @@ const verify = createEntryVerifier({
   version: ENVELOPE_VERSION,
   worker,
   keyringAt: (rev) => keyringStore.at('mtree', rev),
-  hasBeenShared: async () => worker.keyringHasBeenShared(await keyringStore.load('mtree')),
+  hasBeenShared: async () => worker.keyringHasBeenShared('chain', await keyringStore.load('mtree')),
   headRevision: async () => (await keyringStore.head('mtree'))?.revision ?? 0,
 });
-ok(await worker.keyringHasBeenShared(await keyringStore.load('mtree')), 'the member sees the tree as SHARED (first_shared_revision != 0)');
+ok(await worker.keyringHasBeenShared('chain', await keyringStore.load('mtree')), 'the member sees the tree as SHARED (first_shared_revision != 0)');
 
 // ── MEMBER: bootstrap from the SIGNED base, then pull only what it does not cover ──────────────────────
 const base = await memberRemote.readSnapshot(uuid);

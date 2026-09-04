@@ -197,10 +197,11 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
     },
 
     // Whether the tree HAS BEEN SHARED — the monotonic gate for attributed writes — read from the verified
-    // head keyring (chain: first_shared_revision != 0). Survives an un-share back to solo.
+    // head keyring (chain: first_shared_revision != 0; dag: the resolved anchor's ever_shared). Survives an
+    // un-share back to solo.
     async hasBeenShared(treeKey) {
       const k = await keyringStore.load(treeKey);
-      return k ? worker.keyringHasBeenShared(k) : false;
+      return k ? worker.keyringHasBeenShared(engine, k) : false;
     },
 
     // Whether THIS member may publish the authoritative snapshot base — Maintainer+ (role 1..3:
