@@ -1517,6 +1517,7 @@ pub fn verify_entry_wasm(
 pub struct EntryAttribution {
     keyring_revision: u32,
     key_id: Vec<u8>,
+    covers_through_seq: u64,
 }
 
 #[wasm_bindgen]
@@ -1530,6 +1531,14 @@ impl EntryAttribution {
     #[wasm_bindgen(getter, js_name = keyId)]
     pub fn key_id(&self) -> Vec<u8> {
         self.key_id.clone()
+    }
+    /// The server log head this entry SUBSUMES (a snapshot's coverage; 0 for a delta). AAD-bound, so a
+    /// verified snapshot's coverage is trustworthy — the reader adopts it as the pull-cursor floor so
+    /// pre-coverage deltas are never replayed. Returned as an f64 (a plain JS number, like the seal input);
+    /// a log seq is always well within 2^53.
+    #[wasm_bindgen(getter, js_name = coversThroughSeq)]
+    pub fn covers_through_seq(&self) -> f64 {
+        self.covers_through_seq as f64
     }
 }
 
@@ -1557,6 +1566,7 @@ pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
     Ok(EntryAttribution {
         keyring_revision,
         key_id: header.key_id.clone(),
+        covers_through_seq: header.covers_through_seq,
     })
 }
 

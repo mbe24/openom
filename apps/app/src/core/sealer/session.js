@@ -50,9 +50,9 @@ export class SealerSession {
    * `kind` ∈ {'snapshot','delta'}; defaults to 'snapshot'. Serialized against every other
    * seal on this session so the chain stays linear. Returns the wire-ready envelope bytes.
    */
-  seal(plaintext, _docId, { kind = 'snapshot', format = 'openom-ops' } = {}) {
+  seal(plaintext, _docId, { kind = 'snapshot', format = 'openom-ops', coversThroughSeq = 0 } = {}) {
     if (this.#locked) return Promise.reject(new Error('sealer is locked'));
-    const run = this.#queue.then(() => this.#doSeal(plaintext, kind, format));
+    const run = this.#queue.then(() => this.#doSeal(plaintext, kind, format, coversThroughSeq));
     // Keep the queue chained but don't let one rejection poison the next seal.
     this.#queue = run.then(
       () => {},
@@ -61,14 +61,16 @@ export class SealerSession {
     return run;
   }
 
-  async #doSeal(plaintext, kind, format) {
+  async #doSeal(plaintext, kind, format, coversThroughSeq) {
     const out = await this.#core.sealEntry(
       kind,
       format, // payload format — the claim engine's op batches seal as FORMAT_OPENOM_OPS
       'none', // compression handled by the caller when it lands; not in V1
       this.#counter,
       this.#prev,
-      0, // covers_through_seq — 0 in V1 (§8a)
+      // covers_through_seq: the server log head this entry subsumes (a first-share/re-key snapshot declares
+      // real coverage so readers bootstrap from it and skip the pre-share deltas); 0 for deltas (§8a).
+      coversThroughSeq,
       EMPTY, // blob_id — snapshot/delta only, never media here
       plaintext,
     );

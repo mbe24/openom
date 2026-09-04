@@ -150,7 +150,7 @@ const api = {
   async entryAttribution(envelope) {
     await ensureInit();
     const a = wasmEntryAttribution(envelope);
-    const out = { keyringRevision: a.keyringRevision, keyId: a.keyId };
+    const out = { keyringRevision: a.keyringRevision, keyId: a.keyId, coversThroughSeq: a.coversThroughSeq };
     a.free();
     return out;
   },

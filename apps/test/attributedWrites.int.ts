@@ -9,8 +9,10 @@ import init, {
   addMember as wasmAddMember,
   removeMember as wasmRemoveMember,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
+  entryAttribution as wasmEntryAttribution,
 } from '../app/src/vendor/vault/openom_vault.js';
 
+const enc = new TextEncoder();
 const TREE = new Uint8Array(16).fill(7);
 const OWNER = 'acct-owner';
 const replica = (n: number) => new Uint8Array(16).fill(n);
@@ -43,5 +45,28 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
     // Remove the only member → back to solo, but the signal is monotonic: still true.
     const solo = keyringOf(wasmRemoveMember(shared, 'owner pass', TREE, OWNER, 2, 'acct-m', replica(2)));
     expect(wasmKeyringHasBeenShared(solo)).toBe(true); // un-shared, still requires attribution
+  });
+});
+
+describe('covers_through_seq round-trip (A4)', () => {
+  it('a snapshot declares its coverage and it reads back through entryAttribution; a delta declares 0', () => {
+    const p = wasmProvision('chain', 'owner pass', TREE, OWNER, replica(1));
+    const sealer = p.takeSealer();
+    p.free();
+
+    // A snapshot sealed with covers_through_seq = 42 reads it back (AAD-bound).
+    const snap = sealer.sealEntry('snapshot', 'openom-json', 'none', 0, new Uint8Array(), 42, new Uint8Array(), enc.encode('{}'));
+    const sa = wasmEntryAttribution(snap.envelope);
+    expect(sa.coversThroughSeq).toBe(42);
+    sa.free();
+    snap.free();
+
+    // A delta subsumes nothing → 0.
+    const delta = sealer.sealEntry('delta', 'openom-ops', 'none', 1, new Uint8Array(), 0, new Uint8Array(), enc.encode('[]'));
+    const da = wasmEntryAttribution(delta.envelope);
+    expect(da.coversThroughSeq).toBe(0);
+    da.free();
+    delta.free();
+    sealer.free();
   });
 });

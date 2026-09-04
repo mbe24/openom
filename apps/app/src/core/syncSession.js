@@ -95,7 +95,10 @@ export class SyncSession {
  */
 export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, callbacks = {}, driverOptions = {} }) {
   const controller = vault.makeDeltaSync({ tree, remote, docId: uuid, session });
-  const sealSnapshot = (bytes) => session.seal(bytes, uuid, { kind: 'snapshot' });
+  // A snapshot may DECLARE the server log head it subsumes (covers_through_seq): a first-share / re-key base
+  // passes the freshly-read head so readers adopt it and skip the pre-coverage deltas. Defaults to 0 (a plain
+  // state snapshot that subsumes nothing — the pre-A7 behavior).
+  const sealSnapshot = (bytes, coversThroughSeq = 0) => session.seal(bytes, uuid, { kind: 'snapshot', coversThroughSeq });
 
   const pullKeyring = () =>
     vault.syncKeyring(uuid, treeId, async (since) => (await remote.readKeyring(uuid, since + 1)).revisions);
