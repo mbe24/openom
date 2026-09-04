@@ -12,7 +12,9 @@
 
 use keyeo_core::{CanonicalBytes, Postcard, Role, SignatureScheme};
 
-use crate::dag::resolver::{DekWrap, GroupId, MemberId, MemberInit, MembershipAction, OpId};
+use crate::dag::resolver::{
+    DekWrap, GroupId, GroupState, MemberInit, MemberState, MemberId, MembershipAction, OpId,
+};
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id, R, S> {
     #[deny(unused_variables)]
@@ -205,5 +207,94 @@ pub fn canonical_encode_epoch<OId: OpId, MId: MemberId>(
     for w in wraps {
         w.write_canonical(&mut buf);
     }
+    buf
+}
+
+impl<R: Role, S: SignatureScheme> CanonicalBytes for MemberState<R, S> {
+    #[deny(unused_variables)]
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        // Exhaustive destructure (no `..`): a new MemberState field is a compile error until it's bound into
+        // the signed snapshot bytes — the same crypto-review guard the op/epoch encoders carry.
+        let MemberState { role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
+        Postcard(role).write_canonical(out);
+        out.extend_from_slice(&member_counter.to_le_bytes());
+        out.extend_from_slice(&access_counter.to_le_bytes());
+        out.extend_from_slice(author_public_key.as_ref());
+        out.extend_from_slice(hpke_public_key);
+    }
+}
+
+impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id, R, S> {
+    #[deny(unused_variables)]
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        // Exhaustive destructure: a snapshot's signature must cover EVERY trust-relevant field of the state it
+        // checkpoints (membership + roles + keys, the epoch + its wraps, and the recovery authority), so a new
+        // field can't slip out of the signed bytes and be tampered on a pruned root. `_phantom` carries no data.
+        let GroupState {
+            members,
+            epoch,
+            history_commitment,
+            dek_wraps,
+            reset_authority,
+            group_id,
+            _phantom,
+        } = self;
+        // `members` is a HashMap (no stable iteration order) — sort by id so the encoding is deterministic
+        // across replicas, the property a content-addressed / signed artifact requires.
+        let mut ms: Vec<(&Id, &MemberState<R, S>)> = members.iter().collect();
+        ms.sort_by(|a, b| a.0.cmp(b.0));
+        out.extend_from_slice(&(ms.len() as u64).to_le_bytes());
+        for (id, st) in ms {
+            Postcard(id).write_canonical(out);
+            st.write_canonical(out);
+        }
+        out.extend_from_slice(&epoch.to_le_bytes());
+        out.extend_from_slice(history_commitment);
+        // dek_wraps sorted by member for the same determinism reason.
+        let mut ws: Vec<&DekWrap<Id>> = dek_wraps.iter().collect();
+        ws.sort_by(|a, b| a.member.cmp(&b.member));
+        out.extend_from_slice(&(ws.len() as u64).to_le_bytes());
+        for w in ws {
+            w.write_canonical(out);
+        }
+        match reset_authority {
+            Some(pk) => {
+                out.push(1);
+                out.extend_from_slice(pk.as_ref());
+            }
+            None => out.push(0),
+        }
+        let gid = group_id.as_bytes();
+        out.extend_from_slice(&(gid.len() as u64).to_le_bytes());
+        out.extend_from_slice(gid);
+    }
+}
+
+/// Deterministically encode the **signed content** of a compaction [`crate::gc::Snapshot`]: a version tag
+/// followed by `(frontier, prev_snapshot, ever_shared, state)`, the state through the exhaustive
+/// [`CanonicalBytes`] seam above. Both the author ([`crate::gc::Snapshot::author`]) and the verifier
+/// ([`crate::gc::verify_snapshot`]) build these from the snapshot's own fields, so the signature binds to
+/// exactly this checkpoint — the membership + RVK a pruned reader will trust — and can't be transplanted to a
+/// different frontier or state. Excludes the snapshot's own id/signature (signing over the id would be circular).
+pub fn canonical_encode_snapshot<OId: OpId, Id: MemberId, R: Role, S: SignatureScheme>(
+    frontier: &[OId],
+    prev_snapshot: &Option<[u8; 32]>,
+    ever_shared: bool,
+    state: &GroupState<Id, R, S>,
+) -> Vec<u8> {
+    let mut buf = b"keyeo:snapshot:v1".to_vec();
+    buf.extend_from_slice(&(frontier.len() as u64).to_le_bytes());
+    for p in frontier {
+        Postcard(p).write_canonical(&mut buf);
+    }
+    match prev_snapshot {
+        Some(h) => {
+            buf.push(1);
+            buf.extend_from_slice(h);
+        }
+        None => buf.push(0),
+    }
+    buf.push(u8::from(ever_shared));
+    state.write_canonical(&mut buf);
     buf
 }
