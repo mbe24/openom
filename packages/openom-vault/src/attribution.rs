@@ -122,11 +122,24 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
         .iter()
         .find(|m| m.role == MEMBER_OWNER)
         .map(|m| &m.member_id);
-    keyring
+    let mut present = false;
+    let attributed = keyring
         .epochs
         .iter()
         .filter(|e| e.key_id == key_id)
-        .any(|e| e.wraps.iter().any(|w| Some(&w.member_id) != founder))
+        .inspect(|_| present = true)
+        .any(|e| e.wraps.iter().any(|w| Some(&w.member_id) != founder));
+    // An epoch that ISN'T in this keyring at all means the entry misrepresents its provenance — an old
+    // `governing_ref` stamped on a seal made under a newer epoch (the epoch's key belongs to a later
+    // revision than the one it points at). Treat that as "requires attribution" so the caller runs
+    // `verify_entry`, whose epoch-consistency check (`key_id != newest_key_id → EpochMismatch`) rejects
+    // it — rather than accepting it UNSIGNED because the missing key_id looks "unattributed" (the §B3
+    // governing-ref downgrade: a keyless server or a DEK-holder stripping their signature must never be
+    // able to route an attributed entry down the accept-unsigned path).
+    if !present {
+        return true;
+    }
+    attributed
 }
 
 #[cfg(test)]
@@ -375,7 +388,11 @@ mod tests {
             &mk(vec![wrap("owner"), wrap("editor-1")]),
             KID
         ));
-        assert!(!epoch_is_attributed(
+        // An epoch that isn't present at this revision is treated as REQUIRING attribution (returns true),
+        // not as "unattributed" — else an entry stamping an old governing_ref onto a newer-epoch seal would
+        // be accepted unsigned (the §B3 downgrade). The caller's verify_entry then rejects it on the
+        // key_id-vs-newest epoch-consistency check.
+        assert!(epoch_is_attributed(
             &mk(vec![wrap("owner"), wrap("editor-1")]),
             b"no-such-key"
         ));
