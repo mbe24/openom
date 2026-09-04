@@ -1579,7 +1579,7 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 #[wasm_bindgen(js_name = keyringHasBeenShared)]
 pub fn keyring_has_been_shared(keyring: &[u8]) -> Result<bool, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
-    Ok(kr.first_shared_revision != 0)
+    Ok(crate::has_been_shared(&kr))
 }
 
 /// The moderator `did:key`s (members currently at Maintainer or above) from a keyring — the set the

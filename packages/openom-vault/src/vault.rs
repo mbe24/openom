@@ -235,9 +235,11 @@ pub fn unlock(
             .into_iter()
             .map(|(k, _e, d)| (k, d.into_inner()))
             .collect();
-    // Sign entries only on an ATTRIBUTED (shared) write epoch — one wrapped beyond the sole founder.
-    // A single-owner V1 tree's epoch is unattributed, so its entries stay unattributed (the launch gate
-    // skips verification for them); the moment the tree is shared, the sealer starts signing (§B3).
+    // Sign entries once the tree HAS BEEN SHARED (a non-founder member was ever admitted). A never-shared
+    // single-owner V1 tree stays unattributed (the launch gate skips verification for it); the moment it is
+    // shared the sealer starts signing, and it KEEPS signing even after an un-share back to solo — gating on
+    // `has_been_shared` (monotonic), not `epoch_is_attributed` (which a removal's re-key would reset,
+    // reopening the unattributed-write hole for ex-members holding old-epoch DEKs).
     // Commit to the write epoch's key MATERIAL (H(DEK)) for the recover watermark — this unlock is VERIFIED,
     // so it's the trusted witness of the real write epoch's DEK (OPE-286).
     let write_dek_hash = epochs
@@ -245,7 +247,7 @@ pub fn unlock(
         .find(|(k, _)| *k == write_key_id)
         .map(|(_, d)| dek_hash(&d[..]))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
-    let attributed = crate::epoch_is_attributed(&keyring, &write_key_id);
+    let attributed = crate::has_been_shared(&keyring);
     let mut sealer = SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
@@ -760,8 +762,15 @@ pub fn unlock_as_member(
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     let did_key = did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
+    let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
+    // A member is on a shared tree by definition (their admission set `first_shared_revision`), so they sign
+    // every entry — stamping their watermarked head as the governing_ref, exactly like the owner path. Gated
+    // on `has_been_shared` for symmetry (always true here), so the member and owner writers stay in lockstep.
+    if crate::has_been_shared(&keyring) {
+        let governing_ref = openom_keyring_chain::encode_governing_ref(keyring.revision);
+        sealer = sealer.with_author(root.identity, member_id.to_string(), governing_ref);
+    }
     Ok(Unlocked {
         sealer,
         revision: keyring.revision,
@@ -1530,6 +1539,37 @@ mod tests {
         let k = Keyring::decode(rem2.keyring.as_slice()).unwrap();
         assert_eq!(k.members.len(), 1, "solo again");
         assert_eq!(k.first_shared_revision, 2, "un-shared-back-to-solo still carries the marker");
+    }
+
+    #[test]
+    fn writer_signs_iff_the_tree_has_been_shared() {
+        use openom_protocol::v1::Envelope;
+        let pass = Passphrase::new(b"owner pass");
+        let owner = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+
+        // Solo (never shared): the sealer attaches no author → entries are unattributed.
+        let u_solo = unlock(&owner.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-b")).unwrap();
+        let solo = Envelope::decode(seal_open(&u_solo.sealer, b"solo edit").as_slice()).unwrap().header.unwrap();
+        assert!(solo.author_signature.is_empty(), "a never-shared tree writes unattributed");
+
+        // First share — admit an editor.
+        let m = provision_member(&Passphrase::new(b"m pass")).unwrap();
+        let add = add_member(&owner.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 1,
+            &MemberId::new("acct-m"), MemberRole::Editor, &m.hpke_public, &m.author_public).unwrap();
+
+        // Owner unlock on the shared keyring: now signs.
+        let u_owner = unlock(&add.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-c")).unwrap();
+        let owner_h = Envelope::decode(seal_open(&u_owner.sealer, b"owner edit").as_slice()).unwrap().header.unwrap();
+        assert!(!owner_h.author_signature.is_empty(), "shared tree: owner signs");
+        assert_eq!(owner_h.author_member_id, MEMBER);
+
+        // Member unlock: signs as the member.
+        let founder = founder_key(&add.keyring);
+        let u_member = unlock_as_member(&add.keyring, &Passphrase::new(b"m pass"), &m.kdf_params,
+            &TreeId::new(TREE), &MemberId::new("acct-m"), &[founder], &ReplicaId::new(b"r-m"), 0).unwrap();
+        let member_h = Envelope::decode(seal_open(&u_member.sealer, b"member edit").as_slice()).unwrap().header.unwrap();
+        assert!(!member_h.author_signature.is_empty(), "shared tree: member signs");
+        assert_eq!(member_h.author_member_id, "acct-m");
     }
 
     #[test]

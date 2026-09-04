@@ -114,6 +114,15 @@ pub fn verify_entry(
 /// an entry's own (server-visible, forgeable) emptiness — so a keyless hostile server can't downgrade an
 /// attributed epoch to "looks unattributed, skip the check" (the §B3 downgrade attack). `key_id` is
 /// AAD-bound, so a forger can't lie about which epoch they sealed under either.
+/// Whether the tree HAS BEEN SHARED — a non-founder member was ever admitted (`first_shared_revision != 0`).
+/// The MONOTONIC gate for attributed writes (§B3 slice 2): once true, the writer attaches an author to every
+/// entry and the reader requires one. Unlike [`epoch_is_attributed`] — a per-epoch property that a removal's
+/// re-key resets to founder-only — this never regresses, so a tree un-shared back to solo keeps signing +
+/// requiring signatures (ex-members still hold old-epoch DEKs, so its writes must stay attributed).
+pub fn has_been_shared(keyring: &Keyring) -> bool {
+    keyring.first_shared_revision != 0
+}
+
 pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
     // The founder is the sole OWNER-role member (the signer set is derived from members now, OPE-309),
     // so there is no separate authorized_signers roster to consult.

@@ -22,7 +22,7 @@ pub use app_vault::AppVault;
 // Landed-entry author verification (§B3) — moved out of the chain keyring engine (OPE-300): it consumes a
 // keyring, it isn't the membership engine.
 pub mod attribution;
-pub use attribution::{epoch_is_attributed, verify_entry, EntryError};
+pub use attribution::{epoch_is_attributed, has_been_shared, verify_entry, EntryError};
 
 // The moderator (Maintainer-or-above did:key) feed for the claim engine's authority — re-typed over the
 // engine-neutral MembershipView so it serves either keyring engine (OPE-308). Moved out of the chain
