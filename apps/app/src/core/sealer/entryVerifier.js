@@ -26,20 +26,67 @@ export class RetryableVerifyError extends Error {
   }
 }
 
+/** A PERMANENT rejection on a shared tree: an entry that cannot be a legitimately-attributed commit (an
+ *  unattributed/rev-0 entry, or one governed by a revision beyond the verified head). NOT retryable — the
+ *  caller drops it and advances, so a forged entry can't stall the whole tail (the livelock the invariant
+ *  exists to close). */
+export class SecurityVerifyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SecurityVerifyError';
+  }
+}
+
 /**
  * @param {object} deps
  * @param {number} deps.version   the envelope version (ENVELOPE_VERSION)
  * @param {object} deps.worker    the crypto worker proxy (entryAttribution / epochIsAttributed / verifyEntry)
  * @param {(revision: number) => Promise<Uint8Array|null>} deps.keyringAt  the client's verified keyring at a
  *        revision (from the retained chain); null if not (yet) available.
+ * @param {(() => Promise<boolean>)|null} [deps.hasBeenShared]  whether the tree HAS BEEN SHARED, from the
+ *        VERIFIED head keyring (monotonic). Re-read per call and STICKY: once observed true it stays true for
+ *        this verifier, so a later keyring withhold can't downgrade the rule. Omit ⇒ never-shared (V1).
+ * @param {(() => Promise<number>)|null} [deps.headRevision]  the verified head keyring revision — the ceiling
+ *        for a legitimate governing_ref (writers publish their keyring before the entries it governs, and the
+ *        keyring channel syncs before deltas, so a ref beyond the head isn't reachable). Omit ⇒ no ceiling.
  * @returns {(sealed: Uint8Array, plaintext: Uint8Array) => Promise<void>}  throws to reject (see errors above)
  */
-export function createEntryVerifier({ version, worker, keyringAt }) {
+export function createEntryVerifier({ version, worker, keyringAt, hasBeenShared = null, headRevision = null }) {
   if (!worker || !keyringAt || version == null) {
     throw new Error('createEntryVerifier needs { version, worker, keyringAt }');
   }
+  let stickyShared = false;
   return async function verify(sealed, plaintext) {
     const { keyringRevision, keyId } = await worker.entryAttribution(sealed);
+
+    // Live + sticky: once the tree is observed shared it stays shared for this session. The keyring carries
+    // the monotonic marker, so a fresh session re-derives it — this only guards a mid-session withhold.
+    if (!stickyShared && hasBeenShared) stickyShared = await hasBeenShared();
+
+    if (stickyShared) {
+      // SHARED: every authoritative entry MUST be attributed. rev 0 (empty governing_ref) can't be a
+      // legitimately-governed entry here — it's the direct backdate forge → HARD REJECT (a retryable hold
+      // would stall the whole tail forever). Pre-share unattributed history is reached via the adopted
+      // signed snapshot, never replayed as a rev-0 delta.
+      if (keyringRevision === 0) {
+        throw new SecurityVerifyError('unattributed entry (rev 0) on a shared tree');
+      }
+      const governing = await keyringAt(keyringRevision);
+      if (!governing) {
+        // A ref ABOVE the verified head isn't legitimately reachable (writers publish the keyring before the
+        // entries it governs, and the keyring channel syncs before this one) → reject, never a tail-blocking
+        // hold. A ref at/below the head that isn't retained is a transient gap → hold + retry.
+        const head = headRevision ? await headRevision() : keyringRevision;
+        if (keyringRevision > head) {
+          throw new SecurityVerifyError(`governing revision ${keyringRevision} is beyond the verified head ${head}`);
+        }
+        throw new RetryableVerifyError(`governing keyring revision ${keyringRevision} not retained yet`);
+      }
+      await worker.verifyEntry(version, sealed, plaintext, governing); // signature + role + epoch; throws → reject
+      return;
+    }
+
+    // NEVER SHARED (V1 single-owner): unchanged path — unattributed entries are acceptable.
     if (keyringRevision === 0) return; // unattributed V1 entry — no governing keyring, accept
     const governing = await keyringAt(keyringRevision);
     if (!governing) {

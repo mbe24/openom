@@ -33,6 +33,13 @@ export function createSyncedDeltaSync({ version, tree, remote, docId, seal, open
     version,
     worker,
     keyringAt: (revision) => keyringStore.at(docId, revision), // the client's verified, retained chain
+    // The monotonic shared signal + the head revision, from the VERIFIED head keyring — gate the attributed-
+    // writes rule and bound a legitimate governing_ref.
+    hasBeenShared: async () => {
+      const head = await keyringStore.load(docId);
+      return head ? worker.keyringHasBeenShared(head) : false;
+    },
+    headRevision: async () => (await keyringStore.head(docId))?.revision ?? 0,
   });
   return new SyncController({
     tree,
