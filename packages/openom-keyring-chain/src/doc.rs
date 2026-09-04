@@ -104,6 +104,7 @@ impl<'a> ChainDoc<'a> {
             recovery_keys,
             governance_kind,
             governance_threshold,
+            first_shared_revision,
         } = k;
         put_bytes(&mut out, tree_id);
         put_u32(&mut out, *revision);
@@ -146,6 +147,7 @@ impl<'a> ChainDoc<'a> {
         }
         put_u32(&mut out, *governance_kind);
         put_u32(&mut out, *governance_threshold);
+        put_u32(&mut out, *first_shared_revision);
 
         let mut h = Sha256::new();
         h.update(&out);

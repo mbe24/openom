@@ -63,6 +63,14 @@ pub struct Keyring {
     /// The `m` for the threshold kinds.
     #[prost(uint32, tag = "13")]
     pub governance_threshold: u32,
+    /// The revision at which this tree was FIRST shared — a non-founder member first admitted; 0 = never
+    /// shared. MONOTONIC: set once by `do_add_member`, carried forward onto every successor, NEVER cleared
+    /// by removal. Once non-zero the tree is a multi-author tree, so every authoritative entry must be
+    /// attributed (§B3 slice 2 — the reader requires signatures, the writer attaches them). Covered by the
+    /// canonical signing bytes (see `doc.rs`'s payload commitment), so a keyless server can neither forge
+    /// nor strip it.
+    #[prost(uint32, tag = "14")]
+    pub first_shared_revision: u32,
 }
 
 /// The signed role + key manifest for one member.

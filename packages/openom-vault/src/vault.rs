@@ -1321,6 +1321,13 @@ fn do_add_member(
         author_public_key: member_author_public.to_vec(),
         hpke_public_key: member_hpke_public.to_vec(),
     });
+    // First share: a founding-solo tree becomes multi-author the instant a non-founder member is admitted.
+    // Set the monotonic marker once, on that first add (later adds leave it — already non-zero). It is NEVER
+    // cleared (remove_member doesn't touch it), so an un-shared-back-to-solo tree still requires attribution.
+    // Set BEFORE sign_keyring so it is covered by the signature.
+    if keyring.first_shared_revision == 0 {
+        keyring.first_shared_revision = new_revision;
+    }
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
@@ -1486,6 +1493,54 @@ mod tests {
             .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), plaintext)
             .unwrap();
         out.envelope
+    }
+
+    fn first_shared(keyring_bytes: &[u8]) -> u32 {
+        Keyring::decode(keyring_bytes).unwrap().first_shared_revision
+    }
+
+    #[test]
+    fn first_shared_revision_is_set_once_carried_forward_and_never_cleared() {
+        let pass = Passphrase::new(b"owner pass");
+        let owner = provision(&pass, &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+        // Genesis (solo): never shared.
+        assert_eq!(first_shared(&owner.keyring), 0);
+
+        // First share — admit member 2 (rev 2): the marker is set to THIS revision.
+        let m2 = provision_member(&Passphrase::new(b"m2 pass")).unwrap();
+        let add1 = add_member(&owner.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 1,
+            &MemberId::new("acct-2"), MemberRole::Editor, &m2.hpke_public, &m2.author_public).unwrap();
+        assert_eq!(add1.revision, 2);
+        assert_eq!(first_shared(&add1.keyring), 2, "set on the first share");
+
+        // Second share — admit member 3 (rev 3): the marker does NOT move.
+        let m3 = provision_member(&Passphrase::new(b"m3 pass")).unwrap();
+        let add2 = add_member(&add1.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 2,
+            &MemberId::new("acct-3"), MemberRole::Editor, &m3.hpke_public, &m3.author_public).unwrap();
+        assert_eq!(first_shared(&add2.keyring), 2, "a later add leaves it unchanged");
+
+        // Remove member 3 (rev 4): removal never clears it.
+        let rem1 = remove_member(&add2.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 3,
+            &MemberId::new("acct-3"), &ReplicaId::new(b"r-owner")).unwrap();
+        assert_eq!(first_shared(&rem1.keyring), 2, "removal keeps the marker");
+
+        // Remove member 2 too — back to SOLO — the marker still stands (the un-share edge).
+        let rem2 = remove_member(&rem1.keyring, &pass, &TreeId::new(TREE), &MemberId::new(MEMBER), 4,
+            &MemberId::new("acct-2"), &ReplicaId::new(b"r-owner")).unwrap();
+        let k = Keyring::decode(rem2.keyring.as_slice()).unwrap();
+        assert_eq!(k.members.len(), 1, "solo again");
+        assert_eq!(k.first_shared_revision, 2, "un-shared-back-to-solo still carries the marker");
+    }
+
+    #[test]
+    fn first_shared_revision_is_covered_by_the_signature() {
+        let owner = provision(&Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER),
+            &ReplicaId::new(b"r-owner")).unwrap();
+        let founder = founder_key(&owner.keyring);
+        let mut k = Keyring::decode(owner.keyring.as_slice()).unwrap();
+        verify_keyring(&k, &founder).unwrap(); // the genesis verifies as-signed
+        k.first_shared_revision = 7; // tamper the marker
+        assert!(verify_keyring(&k, &founder).is_err(), "the marker is in the signed payload commitment");
     }
 
     #[test]
