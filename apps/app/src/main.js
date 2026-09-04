@@ -439,6 +439,7 @@ class App {
         session: this.sealer,
         vault: this.vault,
         remote,
+        memberId: this.auth.memberId(), // whose role gates the writer base self-heal (Maintainer+)
         callbacks: {
           onStatus: (s) => { this.syncStatus = s; },
           // A dead BACKEND session is independent of the vault (per-backend auth): stop syncing + record

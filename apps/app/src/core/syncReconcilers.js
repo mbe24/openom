@@ -43,9 +43,13 @@ export async function attempt(fn) {
  * @param {string} o.uuid    the server tree id
  * @param {object} o.remote  a RemoteStore (putSnapshot)
  * @param {(bytes: Uint8Array) => Promise<Uint8Array>} o.sealSnapshot  seal under kind:'snapshot'
- * @param {() => Promise<{rowExists:boolean,adopted?:boolean,deferred?:boolean}>} o.adopt  controller.adopt
+ * @param {() => Promise<{rowExists:boolean,adopted?:boolean,deferred?:boolean,coversThroughSeq?:number,version?:string}>} o.adopt  controller.adopt
+ * @param {((base:{coversThroughSeq:number,version:string}) => Promise<boolean>)|undefined} [o.selfHealBase]  a
+ *        writer's base self-heal: if the tree is shared and the base still subsumes nothing, seal + CAS-PUT a
+ *        signed base covering the shared history; returns true if it published one. Idempotent; a no-op for
+ *        readers / solo trees / a base already covering.
  */
-export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt }) {
+export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt, selfHealBase }) {
   let a;
   try {
     a = await adopt(); // reads the row; adopts a newer verified base; a network failure THROWS
@@ -54,6 +58,15 @@ export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adop
   }
   if (a.rowExists) {
     if (a.deferred) return Deferred('the snapshot base awaits a verifiable signed snapshot');
+    // A writer ensures a signed base covering the shared history exists (so members can bootstrap). The
+    // thunk owns the decision (shared + committer + base stale) and the CAS publish.
+    if (selfHealBase) {
+      try {
+        if (await selfHealBase(a)) return Ok('healed');
+      } catch (e) {
+        return classifyError(e);
+      }
+    }
     return Ok(a.adopted ? 'adopted' : 'exists');
   }
   // Origin: no server row yet → seal the current state and create it.

@@ -22,6 +22,7 @@ import init, {
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
+  keyringSummary as wasmKeyringSummary,
   entryAttribution as wasmEntryAttribution,
   WasmSealer,
 } from '../../vendor/vault/openom_vault.js';
@@ -143,6 +144,13 @@ const api = {
   async keyringHasBeenShared(keyring) {
     await ensureInit();
     return wasmKeyringHasBeenShared(keyring);
+  },
+
+  // The resolved advisory membership as a JSON string `{"members":[{"memberId","role"}],"basis":[...]}` —
+  // used to read this device's own role (Maintainer+ may publish the authoritative snapshot base).
+  async keyringSummary(engine, keyring) {
+    await ensureInit();
+    return wasmKeyringSummary(engine, keyring);
   },
 
   // An entry's attribution coordinates from its (AAD-bound) header: which keyring revision governs it and

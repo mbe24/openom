@@ -196,6 +196,24 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       return (await keyringStore.load(treeKey)) != null;
     },
 
+    // Whether the tree HAS BEEN SHARED — the monotonic gate for attributed writes — read from the verified
+    // head keyring (chain: first_shared_revision != 0). Survives an un-share back to solo.
+    async hasBeenShared(treeKey) {
+      const k = await keyringStore.load(treeKey);
+      return k ? worker.keyringHasBeenShared(k) : false;
+    },
+
+    // Whether THIS member may publish the authoritative snapshot base — Maintainer+ (role 1..3:
+    // Owner/CoOwner/Maintainer). Derived from the verified head keyring's membership, so an editor can't
+    // churn the base with a snapshot the readers would reject.
+    async canCommit(treeKey, memberId) {
+      const k = await keyringStore.load(treeKey);
+      if (!k) return false;
+      const summary = JSON.parse(await worker.keyringSummary(engine, k));
+      const me = summary.members.find((m) => m.memberId === memberId);
+      return !!me && me.role >= 1 && me.role <= 3;
+    },
+
     async provision(treeKey, treeId, passphrase, memberId) {
       const r = await worker.provision(engine, passphrase, treeId, memberId, makeReplicaId());
       await persist(treeKey, treeId, r.keyring, r.watermark);

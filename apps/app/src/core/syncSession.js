@@ -93,7 +93,7 @@ export class SyncSession {
  * @param {object} [o.driverOptions]  timer/tuning injection (tests)
  * @returns {SyncSession}
  */
-export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, callbacks = {}, driverOptions = {} }) {
+export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, memberId = null, callbacks = {}, driverOptions = {} }) {
   const controller = vault.makeDeltaSync({ tree, remote, docId: uuid, session });
   // A snapshot may DECLARE the server log head it subsumes (covers_through_seq): a first-share / re-key base
   // passes the freshly-read head so readers adopt it and skip the pre-coverage deltas. Defaults to 0 (a plain
@@ -110,7 +110,28 @@ export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, c
       serverBytesAt: async (rev) => (await remote.readKeyring(uuid, rev)).revisions.find((r) => r.revision === rev)?.bytes ?? null,
     });
 
-  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt: () => controller.adopt() });
+  // A writer's base self-heal: once the tree is SHARED, a signed snapshot covering the shared history must
+  // exist so members can bootstrap (skip the pre-share unsigned deltas). If the current base still subsumes
+  // nothing (covers 0 — the pre-share plain snapshot) and this device is a committer (Maintainer+), seal a
+  // signed base covering the caught-up log point and CAS-PUT it. Idempotent + one-shot: once a covering base
+  // exists (covers > 0) it's a no-op; a lost CAS race means a peer healed it. This is the convergence
+  // backstop — the admit flow will also seal it promptly at first-share (slice 2b), closing the join window.
+  const selfHealBase = async ({ coversThroughSeq, version }) => {
+    if (coversThroughSeq !== 0) return false;
+    if (!(await vault.hasBeenShared(uuid))) return false;
+    if (!memberId || !(await vault.canCommit(uuid, memberId))) return false;
+    const covers = controller.pulledSeq() + 1; // the local state is caught up to pulledSeq (exclusive bound)
+    const sealed = await sealSnapshot(tree.snapshotBytes(), covers);
+    try {
+      await remote.putSnapshot(uuid, sealed, version); // CAS-UPDATE against the base's etag
+      return true;
+    } catch (e) {
+      if (e?.name === 'ConflictError') return false; // a peer/racer published a base first
+      throw e;
+    }
+  };
+
+  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt: () => controller.adopt(), selfHealBase });
   const deltas = () => reconcileDeltas({ controller });
   const reconcile = (signal) => reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, signal });
 

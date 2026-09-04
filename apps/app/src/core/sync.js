@@ -195,13 +195,16 @@ export class SyncController {
     // A base with no declared coverage (or no attribution seam) subsumes nothing → 0. Guard against a
     // missing field so the cursor can never become NaN.
     const covers = (this.#attribution ? (await this.#attribution(snap.bytes)).coversThroughSeq : 0) || 0;
+    // Report the base's coverage + etag regardless of whether we adopt it, so the snapshot channel can
+    // decide a writer self-heal (a shared tree whose base still subsumes nothing needs a signed one).
+    const base = { rowExists: true, coversThroughSeq: covers, version: snap.version };
     const floor = covers - 1; // last seq the base subsumes; pull reads strictly after it
-    if (floor <= this.#pulledCursor) return { rowExists: true, adopted: false }; // not ahead of us
+    if (floor <= this.#pulledCursor) return { ...base, adopted: false }; // not ahead of us
     let plain;
     try {
       plain = await this.#open(snap.bytes);
     } catch (err) {
-      return { rowExists: true, deferred: true, reason: `snapshot open failed: ${String(err?.message ?? err)}` };
+      return { ...base, deferred: true, reason: `snapshot open failed: ${String(err?.message ?? err)}` };
     }
     if (this.#verify) {
       try {
@@ -210,13 +213,19 @@ export class SyncController {
         // A base we can't verify (yet) — never adopt it. Always retry (deferred, never a hard reject): a
         // retryable hold resolves after a keyring sync, and a crash-window/stale base resolves when the
         // owner's self-heal publishes a signed one.
-        return { rowExists: true, deferred: true, reason: String(err?.message ?? err) };
+        return { ...base, deferred: true, reason: String(err?.message ?? err) };
       }
     }
     await this.#tree.mergeRemote(plain);
     this.#pulledCursor = floor;
     this.#saveCursor();
-    return { rowExists: true, adopted: true, coversThroughSeq: covers };
+    return { ...base, adopted: true };
+  }
+
+  /** The delta cursor — the last log seq merged into the local tree. A self-healed base declares
+   *  `covers = pulledSeq + 1` (exclusive), the seq up to which the local state is caught up. */
+  pulledSeq() {
+    return this.#pulledCursor;
   }
 
   /** One tick: push local, then pull remote. */
