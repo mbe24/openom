@@ -32,7 +32,7 @@ struct PinnedConfig {
 }
 
 /// The DAG's opaque trust state: the pinned config + the admitted op closure (each entry the `blob_sync`
-/// op encoding). The keyring channel is `NeverPrune`, so at family scale this stays small.
+/// op encoding). The keyring channel uses `Retention::Never`, so at family scale this stays small.
 #[derive(Serialize, Deserialize)]
 struct DagTrustState {
     pinned: PinnedConfig,

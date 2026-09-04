@@ -40,38 +40,23 @@ pub struct Snapshot<
     pub frontier: Vec<OId>,
     pub state: crate::dag::resolver::GroupState<Id, R, S>,
     pub prev_snapshot: Option<[u8; 32]>,
+    /// The monotonic ever-shared marker, carried so it survives pruning: once the op history that first
+    /// shared the tree is dropped, `Keyeo::ever_shared`'s effective-Add scan can't see it, so the checkpoint
+    /// must record it. Verified monotone against the prior snapshot on adoption (the pruning slice).
+    pub ever_shared: bool,
 }
 
-/// When to snapshot and how much tail to retain. The pluggable *policy* (the fixed *mechanism* is the
-/// snapshot itself). Kept deliberately small; see the design doc's `RetentionPolicy`.
-pub trait RetentionPolicy<OId: crate::dag::resolver::OpId>: Send + Sync {
-    /// Whether a snapshot is warranted given how many ops exist and how many since the last one.
-    fn should_snapshot(&self, op_count: usize, since_last: usize) -> bool;
-    /// A prune horizon never beyond the host-supplied stable frontier.
-    fn prune_horizon(&self, stable: &Frontier<OId>) -> Frontier<OId>;
-}
-
-/// A `NeverPrune` default — high-security / full-audit: retain everything, never GC. This is the safe
-/// default until the resolver + stability vector are proven.
-pub struct NeverPrune;
-
-impl<OId: crate::dag::resolver::OpId> RetentionPolicy<OId> for NeverPrune {
-    fn should_snapshot(&self, _op_count: usize, _since_last: usize) -> bool {
-        false
-    }
-    fn prune_horizon(&self, stable: &Frontier<OId>) -> Frontier<OId> {
-        let _ = stable; // never prune; keep the stable frontier as-is
-        Frontier { ops: Vec::new() }
-    }
-}
-
-/// Reserve the seam. **No-op today** — it accepts the stable frontier + policy and returns nothing to
-/// prune. When item 5 is implemented it: (1) author a snapshot if `policy.should_snapshot`, (2) compute
-/// a horizon from `policy.prune_horizon(stable)`, (3) drop ops causally below that horizon, leaving the
-/// snapshot as the rebuild base.
+/// The retention POLICY now lives in `keyeo-core` — `keyeo_core::RetentionPolicy` (metrics→plan) + the
+/// `Retention` enum (`Never` = the full-retention default), shared by every engine. This module keeps only
+/// the dag-specific compaction MECHANISM: the [`Frontier`] cut, the [`Snapshot`] rebuild base, and `compact`.
+///
+/// Reserve the seam. **No-op today** — it accepts the stable frontier + the policy's plan and returns nothing
+/// to prune. When the pruning slice implements it (as the dag's `keyeo_core::Compaction` impl) it will:
+/// (1) author a signed [`Snapshot`] if the plan warrants one, (2) compute a horizon from `plan.keep_last`
+/// clamped to `stable`, (3) drop ops causally below that horizon, leaving the snapshot as the rebuild base.
 pub fn compact<OId: crate::dag::resolver::OpId>(
     _stable: &Frontier<OId>,
-    _policy: &impl RetentionPolicy<OId>,
+    _plan: keyeo_core::RetentionPlan,
 ) -> Vec<OId> {
     Vec::new()
 }

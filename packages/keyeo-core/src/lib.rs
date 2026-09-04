@@ -2,10 +2,14 @@
 
 pub mod canonical;
 pub mod quorum;
+pub mod retention;
 pub mod roles;
 pub mod signature;
 
 pub use canonical::{CanonicalBytes, Postcard};
 pub use quorum::Requirement;
+pub use retention::{
+    Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy,
+};
 pub use roles::Role;
 pub use signature::{Ed25519, SigError, SignatureScheme};
