@@ -21,6 +21,7 @@ import init, {
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   verifyEntry as wasmVerifyEntry,
   epochIsAttributed as wasmEpochIsAttributed,
+  keyringHasBeenShared as wasmKeyringHasBeenShared,
   entryAttribution as wasmEntryAttribution,
   WasmSealer,
 } from '../../vendor/vault/openom_vault.js';
@@ -134,6 +135,14 @@ const api = {
   async epochIsAttributed(keyring, keyId) {
     await ensureInit();
     return wasmEpochIsAttributed(keyring, keyId);
+  },
+
+  // Whether the tree HAS BEEN SHARED (monotonic; §B3 slice 2). Once true, the reader requires every
+  // authoritative entry to be attributed and the writer signs. Chain: first_shared_revision != 0 in the
+  // verified keyring. Survives an un-share back to solo.
+  async keyringHasBeenShared(keyring) {
+    await ensureInit();
+    return wasmKeyringHasBeenShared(keyring);
   },
 
   // An entry's attribution coordinates from its (AAD-bound) header: which keyring revision governs it and
