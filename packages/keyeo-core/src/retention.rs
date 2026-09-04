@@ -23,8 +23,6 @@ pub struct RetentionMetrics {
     pub items: usize,
     /// The retained history's serialized byte size.
     pub bytes: u64,
-    /// Items appended since the last checkpoint.
-    pub since_last: usize,
 }
 
 /// The policy's decision — pure data, no engine types. `keep_last` is a COUNT of the most-recent items to
@@ -118,7 +116,7 @@ mod tests {
     use super::*;
 
     fn m(items: usize, bytes: u64) -> RetentionMetrics {
-        RetentionMetrics { items, bytes, since_last: 0 }
+        RetentionMetrics { items, bytes }
     }
 
     #[test]
