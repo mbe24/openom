@@ -29,26 +29,34 @@ export async function attempt(fn) {
 }
 
 /**
- * Snapshot channel (V1): the snapshot's job is to CREATE the server tree row — put_tree/cas_create is the
- * only way a row comes into being, and the keyring PUT + delta append both FK it. It is NOT a live-synced
- * doc here: state convergence is the delta log's job (log GC is blocked, so the full log is always present
- * and a fresh device reconstructs by replaying it; a merged baseline snapshot is a post-GC optimization).
- * So: if the row already exists, nothing to do; otherwise seal a snapshot of the current state and create
- * it (expected=null → cas_create), tolerating a concurrent creator (a 409 just means the row now exists).
+ * Snapshot channel: reconcile our base with the server's snapshot row.
+ *  - ORIGIN (no row yet): seal the current state and create the row (cas_create; the keyring PUT + delta
+ *    append both FK it), tolerating a concurrent creator (a 409 just means the row now exists).
+ *  - READER (a row exists): ADOPT it — if the server base subsumes more of the log than our cursor, verify
+ *    it (§B3), merge its state, and jump the delta cursor past the subsumed prefix so those deltas are never
+ *    replayed. A base that isn't ahead is a no-op; a base we can't (yet) verify is Deferred, which — via the
+ *    tick's dependency order — makes the delta pull skip this tick (fail-closed on a shared tree: it never
+ *    pulls the pre-share deltas without a verified signed base).
+ * The read + the adopt are one `adopt()` call, so there's a single readSnapshot per tick.
  * @param {object} o
  * @param {object} o.tree    a FamilyTree (snapshotBytes)
  * @param {string} o.uuid    the server tree id
- * @param {object} o.remote  a RemoteStore (readSnapshot / putSnapshot)
+ * @param {object} o.remote  a RemoteStore (putSnapshot)
  * @param {(bytes: Uint8Array) => Promise<Uint8Array>} o.sealSnapshot  seal under kind:'snapshot'
+ * @param {() => Promise<{rowExists:boolean,adopted?:boolean,deferred?:boolean}>} o.adopt  controller.adopt
  */
-export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot }) {
-  let existing;
+export async function reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt }) {
+  let a;
   try {
-    existing = await remote.readSnapshot(uuid); // null = 404 = no row; a network failure THROWS
+    a = await adopt(); // reads the row; adopts a newer verified base; a network failure THROWS
   } catch (e) {
     return classifyError(e); // offline → defer; a permanent refusal → surface
   }
-  if (existing) return Ok('exists'); // row present — the delta log carries state; nothing to create in V1
+  if (a.rowExists) {
+    if (a.deferred) return Deferred('the snapshot base awaits a verifiable signed snapshot');
+    return Ok(a.adopted ? 'adopted' : 'exists');
+  }
+  // Origin: no server row yet → seal the current state and create it.
   const sealed = await sealSnapshot(tree.snapshotBytes());
   try {
     await remote.putSnapshot(uuid, sealed, null); // If-None-Match: create only

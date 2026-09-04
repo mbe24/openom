@@ -88,7 +88,7 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     expect(feed.changes.length).toBeGreaterThan(0);
   });
 
-  it('a second device catches up from the log via bootstrap()', async () => {
+  it('a second device catches up from the log via adopt() + pull()', async () => {
     const remote = new FakeRemote();
     const a = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await a.hydrate();
@@ -97,11 +97,13 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     await a.createPerson({ given: 'Hopper' });
     await sa.push();
 
-    // A brand-new device with an empty store catches up purely from the log.
+    // A brand-new device with an empty store catches up purely from the log. adopt() is a no-op (no server
+    // snapshot), so the whole state comes from replaying the log.
     const c = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await c.hydrate();
     const sc = new SyncController({ tree: c, remote, docId: 'doc', seal: identity, open: identity });
-    await sc.bootstrap();
+    expect(await sc.adopt()).toEqual({ rowExists: false });
+    await sc.pull();
     expect(c.allPeople().length).toBe(2);
     expect(c.allPeople().map((x) => x.given).sort()).toEqual(['Grace', 'Hopper']);
   });
@@ -199,36 +201,62 @@ describe.skipIf(!built)('SyncController — two replicas converge through the de
     expect(b.person(p.id)?.given).toBe('Ada');
   });
 
-  it('bootstrap DEFERS (no throw, no adopt) on a retryable snapshot verify', async () => {
-    const snapshot = new Uint8Array([0xbe, 0xef]);
-    const remote = {
-      readSnapshot: async () => ({ bytes: snapshot }),
-      readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
-    };
+  // A base that IS ahead of us (covers_through_seq=5 > our cursor) so adopt() actually opens + verifies it.
+  const aheadRemote = (bytes) => ({
+    readSnapshot: async () => ({ bytes, version: 'v1' }),
+    readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
+  });
+  const coversFive = async () => ({ keyringRevision: 1, keyId: new Uint8Array(), coversThroughSeq: 5 });
+
+  it('adopt DEFERS (no throw, no adopt, cursor unmoved) on a retryable snapshot verify', async () => {
     const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await b.hydrate();
     const verify = async () => { throw new RetryableVerifyError('governing keyring not retained yet'); };
-    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, verify });
-    // A transient failure must not abort bootstrap (that would strand an invited device forever) — it
-    // defers, unlike the genuine forged-snapshot case below which still throws.
-    const r = await sb.bootstrap();
-    expect(r.deferred).toBe(true);
-    expect(b.allPeople().length).toBe(0); // nothing adopted, but no throw either
+    const sb = new SyncController({
+      tree: b, remote: aheadRemote(new Uint8Array([0xbe, 0xef])), docId: 'doc',
+      seal: identity, open: identity, verify, attribution: coversFive,
+    });
+    // A transient failure must not adopt (that would swallow an unverified base) — it defers, so the tick's
+    // ordering skips the delta pull and a later tick (after a keyring sync) retries.
+    const r = await sb.adopt();
+    expect(r).toMatchObject({ rowExists: true, deferred: true });
+    expect(b.allPeople().length).toBe(0); // nothing adopted
   });
 
-  it('bootstrap refuses a snapshot that fails verification (never adopts it)', async () => {
-    const forged = new Uint8Array([0xde, 0xad]);
-    const remote = {
-      readSnapshot: async () => ({ bytes: forged }),
-      readLog: async () => ({ entries: [], nextCursor: -1, oldestRetainedSeq: 0, headSeq: -1 }),
-    };
+  it('adopt refuses a base that fails verification: defers (never adopts, never throws)', async () => {
     const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
     await b.hydrate();
-    const verify = async () => {
-      throw new Error('forged snapshot');
+    const verify = async () => { throw new Error('forged snapshot'); };
+    const sb = new SyncController({
+      tree: b, remote: aheadRemote(new Uint8Array([0xde, 0xad])), docId: 'doc',
+      seal: identity, open: identity, verify, attribution: coversFive,
+    });
+    // A genuine verification failure is fail-closed: the base is NOT adopted. It defers rather than throwing
+    // (a hostile server serving a bad base must not crash the tick — on a shared tree the reconcile just
+    // skips the delta pull and waits for a valid signed base).
+    const r = await sb.adopt();
+    expect(r).toMatchObject({ rowExists: true, deferred: true });
+    expect(b.allPeople().length).toBe(0); // nothing adopted from the unverified base
+  });
+
+  it('adopt merges the verified base and jumps the pull cursor past its coverage', async () => {
+    const b = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    await b.hydrate();
+    // A source tree whose snapshot batch is the base we adopt.
+    const src = new FamilyTree(new MemoryStore(), 'doc', null, 'did:key:zLocal');
+    await src.hydrate();
+    await src.createPerson({ given: 'Ada' });
+    const base = src.snapshotBytes();
+    const seenSince = [];
+    const remote = {
+      readSnapshot: async () => ({ bytes: base, version: 'v1' }),
+      readLog: async (_id, since) => { seenSince.push(since); return { entries: [], nextCursor: since, oldestRetainedSeq: 0, headSeq: 4 }; },
     };
-    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, verify });
-    await expect(sb.bootstrap()).rejects.toThrow(/forged snapshot/);
-    expect(b.allPeople().length).toBe(0); // nothing adopted from the unverified snapshot
+    const sb = new SyncController({ tree: b, remote, docId: 'doc', seal: identity, open: identity, attribution: coversFive });
+    const r = await sb.adopt();
+    expect(r).toMatchObject({ rowExists: true, adopted: true, coversThroughSeq: 5 });
+    expect(b.allPeople().length).toBe(1); // the base merged
+    await sb.pull();
+    expect(seenSince).toEqual([4]); // cursor jumped to covers-1 = 4; the next pull skips the subsumed prefix
   });
 });

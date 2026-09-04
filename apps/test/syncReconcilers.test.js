@@ -15,39 +15,45 @@ describe('syncReconcilers — channel mappings', () => {
     expect((await attempt(async () => { throw Object.assign(new Error('x'), { status: 403 }); })).tag).toBe(REJECTED);
   });
 
-  it('reconcileSnapshot: no-op when the row already exists', async () => {
-    const remote = {
-      readSnapshot: async () => ({ bytes: new Uint8Array([1]), version: 'v1' }),
-      putSnapshot: async () => { throw new Error('must not create when the row exists'); },
-    };
-    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote, sealSnapshot: async () => new Uint8Array() });
+  it('reconcileSnapshot: no-op when the row exists and the base is not ahead', async () => {
+    const remote = { putSnapshot: async () => { throw new Error('must not create when the row exists'); } };
+    const adopt = async () => ({ rowExists: true, adopted: false });
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote, sealSnapshot: async () => new Uint8Array(), adopt });
     expect(r).toEqual(Ok('exists'));
+  });
+
+  it('reconcileSnapshot: reports Ok(adopted) when a newer verified base was adopted', async () => {
+    const adopt = async () => ({ rowExists: true, adopted: true, coversThroughSeq: 5 });
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote: {}, sealSnapshot: async () => new Uint8Array(), adopt });
+    expect(r).toEqual(Ok('adopted'));
+  });
+
+  it('reconcileSnapshot: an unusable base Defers (so the tick skips the delta pull, fail-closed)', async () => {
+    const adopt = async () => ({ rowExists: true, deferred: true, reason: 'unsigned base on a shared tree' });
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote: {}, sealSnapshot: async () => new Uint8Array(), adopt });
+    expect(r.tag).toBe(DEFERRED);
   });
 
   it('reconcileSnapshot: creates the row (expected=null) when absent, sealing the current state', async () => {
     let put = null;
-    const remote = {
-      readSnapshot: async () => null,
-      putSnapshot: async (id, bytes, expected) => { put = { id, bytes: Array.from(bytes), expected }; },
-    };
+    const remote = { putSnapshot: async (id, bytes, expected) => { put = { id, bytes: Array.from(bytes), expected }; } };
     const tree = { snapshotBytes: () => new Uint8Array([9]) };
-    const r = await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => new Uint8Array([0xaa, ...b]) });
+    const adopt = async () => ({ rowExists: false });
+    const r = await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => new Uint8Array([0xaa, ...b]), adopt });
     expect(r).toEqual(Ok('created'));
     expect(put).toEqual({ id: 'u', bytes: [0xaa, 9], expected: null });
   });
 
   it('reconcileSnapshot: a concurrent creator (409) resolves to exists', async () => {
-    const remote = {
-      readSnapshot: async () => null,
-      putSnapshot: async () => { const e = new Error('conflict'); e.name = 'ConflictError'; throw e; },
-    };
+    const remote = { putSnapshot: async () => { const e = new Error('conflict'); e.name = 'ConflictError'; throw e; } };
     const tree = { snapshotBytes: () => new Uint8Array([9]) };
-    expect(await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => b })).toEqual(Ok('exists'));
+    const adopt = async () => ({ rowExists: false });
+    expect(await reconcileSnapshot({ tree, uuid: 'u', remote, sealSnapshot: async (b) => b, adopt })).toEqual(Ok('exists'));
   });
 
   it('reconcileSnapshot: a network failure defers (Offline)', async () => {
-    const remote = { readSnapshot: async () => { throw new TypeError('fetch failed'); } };
-    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote, sealSnapshot: async () => new Uint8Array() });
+    const adopt = async () => { throw new TypeError('fetch failed'); };
+    const r = await reconcileSnapshot({ tree: {}, uuid: 'u', remote: {}, sealSnapshot: async () => new Uint8Array(), adopt });
     expect(r.tag).toBe(OFFLINE);
   });
 

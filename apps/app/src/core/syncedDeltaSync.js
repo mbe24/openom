@@ -34,5 +34,17 @@ export function createSyncedDeltaSync({ version, tree, remote, docId, seal, open
     worker,
     keyringAt: (revision) => keyringStore.at(docId, revision), // the client's verified, retained chain
   });
-  return new SyncController({ tree, remote, docId, seal, open, replicaKey, persist, verify });
+  return new SyncController({
+    tree,
+    remote,
+    docId,
+    seal,
+    open,
+    replicaKey,
+    persist,
+    verify,
+    // Read an entry's AAD-bound header (coverage / well-formedness) without decrypting — for snapshot
+    // adoption and pull's open guard.
+    attribution: (sealed) => worker.entryAttribution(sealed),
+  });
 }

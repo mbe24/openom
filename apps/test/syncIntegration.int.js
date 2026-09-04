@@ -62,7 +62,7 @@ async function makeDevice(server, uuid, _label) {
   const keyringStore = memoryKeyringStore();
   // Unattributed V1 entries (keyringRevision 0) → the verifier accepts without a governing keyring, so no
   // real keyring/wasm is needed to exercise the delta channel.
-  const worker = { entryAttribution: async () => ({ keyringRevision: 0, keyId: new Uint8Array() }) };
+  const worker = { entryAttribution: async () => ({ keyringRevision: 0, keyId: new Uint8Array(), coversThroughSeq: 0 }) };
   // Each DEVICE has its own durable KV for the pull cursor. Real devices are separate browsers with
   // separate localStorage; in-process here they'd otherwise share jsdom's localStorage under the same
   // docId and clobber each other's cursor (a test artifact, not a production issue — two real devices
@@ -71,7 +71,7 @@ async function makeDevice(server, uuid, _label) {
   const persist = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, v) };
   const controller = createSyncedDeltaSync({ version: 1, tree, remote, docId: uuid, seal: identity, open: identity, worker, keyringStore, persist });
 
-  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot: identity });
+  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot: identity, adopt: () => controller.adopt() });
   const deltas = () => reconcileDeltas({ controller });
   const reconcile = () => reconcileTree({
     pullKeyring: async () => {}, // keyring channel stubbed (covered elsewhere)

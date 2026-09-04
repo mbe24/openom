@@ -6,7 +6,8 @@
 // Wiring (all functions exposed, even where no UI consumes them yet):
 //   * push()       — seal each locally-produced delta as KIND_DELTA and append it to the remote log.
 //   * pull()       — read the remote tail since our cursor, unseal, and merge each into the tree.
-//   * bootstrap()  — a fresh device: adopt the remote snapshot baseline (if any), then pull the tail.
+//   * adopt()      — reconcile our base with the server snapshot: adopt a base that subsumes more of the
+//                    log than our cursor (verify + merge + jump the cursor past the subsumed prefix).
 //   * sync()       — one tick: push then pull.
 //   * activity()   — the change-history / activity feed (log metadata), for a future activity UI.
 //
@@ -43,6 +44,7 @@ export class SyncController {
   #persist;
   #replicaKey;
   #verify;
+  #attribution;
   #outbox = [];
   #pulledCursor;
   #unsub;
@@ -63,7 +65,7 @@ export class SyncController {
    *        epoch. A rejected entry is dropped (not merged) and reported; the rest still merge (the engine
    *        is order-insensitive), so one bad entry can't stall the log.
    */
-  constructor({ tree, remote, docId, seal, open, persist, replicaKey = null, verify = null }) {
+  constructor({ tree, remote, docId, seal, open, persist, replicaKey = null, verify = null, attribution = null }) {
     this.#tree = tree;
     this.#remote = remote;
     this.#docId = docId;
@@ -72,6 +74,10 @@ export class SyncController {
     this.#persist = persist ?? defaultPersist();
     this.#replicaKey = replicaKey;
     this.#verify = verify;
+    // Reads an entry's AAD-bound header WITHOUT decrypting — { keyringRevision, keyId, coversThroughSeq }.
+    // Used to read a base snapshot's coverage (adopt) and to tell a malformed entry from a merely-
+    // undecryptable one (pull's open guard). Omitted ⇒ no coverage-driven adoption (V1).
+    this.#attribution = attribution;
     this.#pulledCursor = this.#loadCursor();
     this.#unsub = tree.onDelta((raw) => this.#outbox.push(raw));
   }
@@ -109,7 +115,31 @@ export class SyncController {
         this.#pulledCursor = e.seq;
         continue;
       }
-      const plain = await this.#open(e.payload);
+      let plain;
+      try {
+        plain = await this.#open(e.payload);
+      } catch (err) {
+        // Guard the open so one bad entry can't throw out of the whole pull. A STRUCTURALLY-malformed entry
+        // (bad envelope/header) can never be merged → drop it and advance. A WELL-FORMED but currently-
+        // undecryptable entry (an epoch we can't reach yet — e.g. a rotation we haven't re-unlocked through)
+        // is VALID → HOLD and retry, never drop. The header decoding is the discriminator.
+        let wellFormed = false;
+        try {
+          if (this.#attribution) {
+            await this.#attribution(e.payload);
+            wellFormed = true;
+          }
+        } catch {
+          /* header itself won't decode → malformed */
+        }
+        if (wellFormed) {
+          held = e.seq;
+          break;
+        }
+        rejected.push({ seq: e.seq, member: e.member ?? null, reason: `unopenable: ${String(err?.message ?? err)}` });
+        this.#pulledCursor = e.seq;
+        continue;
+      }
       if (this.#verify) {
         try {
           await this.#verify(e.payload, plain);
@@ -139,31 +169,54 @@ export class SyncController {
   }
 
   /**
-   * A fresh device: adopt the remote snapshot baseline (if any) then pull the tail. The snapshot is
-   * VERIFIED before adoption (§B3) — a forged snapshot is the worst injection (a fresh device swallows the
-   * whole tree from it), so a GENUINE verification failure does NOT adopt it and propagates (fail-closed).
-   * A TRANSIENT failure (`err.retryable` — governing keyring not retained yet) instead DEFERS: returns
-   * `{ deferred: true }` without adopting or throwing, so the driver can sync the keyring and retry.
+   * Reconcile our local base with the server's snapshot: if the server has a base that subsumes MORE of the
+   * log than our cursor, VERIFY it (§B3), merge its state, and jump the pull cursor past the subsumed prefix
+   * so those deltas are never replayed. This is the reader-half of the snapshot channel (the origin-half
+   * creates the row); idempotent + monotonic — a no-op when the server base isn't ahead, and the cursor only
+   * ever advances.
+   *
+   * `covers_through_seq` is EXCLUSIVE: the base subsumes every delta with seq < covers_through_seq (0 =
+   * subsumes nothing, a plain V1 state snapshot), so the last subsumed seq is covers-1 and pull reads after
+   * it. The coverage is read from the AAD-bound header BEFORE opening, only to decide "is this ahead of me?"
+   * — the cursor is advanced ONLY after the base VERIFIES, so a forged high-coverage base can't skip deltas.
+   *
+   * Fail-closed: a base we cannot verify OR open is NOT adopted and returns `{ deferred: true }` (never
+   * throws, never a permanent reject) — on a shared tree the reconcile then skips the delta pull (a base
+   * that won't verify ⇒ snapshot channel not-Ok), and the reader retries until a valid signed base lands
+   * (the owner's self-heal). Returns one of:
+   *   { rowExists:false }                              — no server row (caller's origin path creates one)
+   *   { rowExists:true, adopted:false }                — a row exists but isn't ahead of us; nothing to do
+   *   { rowExists:true, deferred:true, reason }         — a base exists but isn't (yet) usable; retry
+   *   { rowExists:true, adopted:true, coversThroughSeq } — adopted; the cursor jumped past the prefix
    */
-  async bootstrap() {
+  async adopt() {
     const snap = await this.#remote.readSnapshot(this.#docId);
-    if (snap && snap.bytes) {
-      const plain = await this.#open(snap.bytes);
-      if (this.#verify) {
-        try {
-          await this.#verify(snap.bytes, plain);
-        } catch (err) {
-          // TRANSIENT (`retryable`): the governing keyring isn't retained yet — DEFER the whole
-          // bootstrap (don't adopt, don't throw). The driver syncs the keyring and retries; a
-          // fresh device simply isn't caught up. A GENUINE failure still throws (fail-closed):
-          // a forged snapshot is the worst injection, so we never adopt one we can't verify.
-          if (err?.retryable) return { merged: 0, rejected: [], headSeq: -1, deferred: true };
-          throw err;
-        }
-      }
-      await this.#tree.mergeRemote(plain);
+    if (!snap || !snap.bytes) return { rowExists: false };
+    // A base with no declared coverage (or no attribution seam) subsumes nothing → 0. Guard against a
+    // missing field so the cursor can never become NaN.
+    const covers = (this.#attribution ? (await this.#attribution(snap.bytes)).coversThroughSeq : 0) || 0;
+    const floor = covers - 1; // last seq the base subsumes; pull reads strictly after it
+    if (floor <= this.#pulledCursor) return { rowExists: true, adopted: false }; // not ahead of us
+    let plain;
+    try {
+      plain = await this.#open(snap.bytes);
+    } catch (err) {
+      return { rowExists: true, deferred: true, reason: `snapshot open failed: ${String(err?.message ?? err)}` };
     }
-    return this.pull();
+    if (this.#verify) {
+      try {
+        await this.#verify(snap.bytes, plain);
+      } catch (err) {
+        // A base we can't verify (yet) — never adopt it. Always retry (deferred, never a hard reject): a
+        // retryable hold resolves after a keyring sync, and a crash-window/stale base resolves when the
+        // owner's self-heal publishes a signed one.
+        return { rowExists: true, deferred: true, reason: String(err?.message ?? err) };
+      }
+    }
+    await this.#tree.mergeRemote(plain);
+    this.#pulledCursor = floor;
+    this.#saveCursor();
+    return { rowExists: true, adopted: true, coversThroughSeq: covers };
   }
 
   /** One tick: push local, then pull remote. */

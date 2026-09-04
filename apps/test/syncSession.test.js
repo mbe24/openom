@@ -81,13 +81,14 @@ describe('SyncSession', () => {
     const clock = fakeClock();
     const calls = [];
     const controller = {
+      // The snapshot channel now reconciles the base via controller.adopt() (row exists → nothing to adopt).
+      adopt: async () => { calls.push('snap'); return { rowExists: true, adopted: false }; },
       sync: async () => { calls.push('deltas'); return { merged: 0, held: null }; },
       stop: () => calls.push('dispose'),
     };
     const tree = { onDelta: () => () => {}, snapshotBytes: () => new Uint8Array([7]) };
     const sealer = { seal: async (b, _id, { kind }) => new Uint8Array([kind === 'snapshot' ? 0x5 : 0xd, ...b]) };
     const remote = {
-      readSnapshot: async () => { calls.push('snap'); return { bytes: new Uint8Array([1]) }; }, // row exists → no create
       readKeyring: async () => ({ revisions: [], head: 0 }),
       putKeyring: async () => {},
     };

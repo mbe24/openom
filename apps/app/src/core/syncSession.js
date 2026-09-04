@@ -110,7 +110,7 @@ export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, c
       serverBytesAt: async (rev) => (await remote.readKeyring(uuid, rev)).revisions.find((r) => r.revision === rev)?.bytes ?? null,
     });
 
-  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot });
+  const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt: () => controller.adopt() });
   const deltas = () => reconcileDeltas({ controller });
   const reconcile = (signal) => reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, signal });
 
