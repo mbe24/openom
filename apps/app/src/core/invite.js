@@ -111,7 +111,7 @@ export async function mint({
   subtle = crypto.subtle,
   makeBytes = (n) => crypto.getRandomValues(new Uint8Array(n)),
 }) {
-  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1) throw new Error('mint: pinnedRevision must be a positive integer');
+  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1 || pinnedRevision > 0xffffffff) throw new Error('mint: pinnedRevision must be a u32 >= 1');
   if (!(pinnedHash instanceof Uint8Array) || pinnedHash.length !== 32) throw new Error('mint: pinnedHash must be 32 bytes');
   const s = makeBytes(32);
   const sMac = await hkdf(subtle, s, MAC_INFO);
@@ -143,7 +143,7 @@ export function parseLink(url) {
   const khB64 = p.get('kh');
   if (!uuid || !inviteId || !sB64 || !fp || !role || !revStr || !khB64) throw new Error('invalid invite link');
   const pinnedRevision = Number(revStr);
-  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1) throw new Error('invalid invite link: rev');
+  if (!Number.isInteger(pinnedRevision) || pinnedRevision < 1 || pinnedRevision > 0xffffffff) throw new Error('invalid invite link: rev');
   const pinnedHash = b64u.dec(khB64);
   if (pinnedHash.length !== 32) throw new Error('invalid invite link: kh');
   return { uuid, inviteId, s: b64u.dec(sB64), fp, role, pinnedRevision, pinnedHash };

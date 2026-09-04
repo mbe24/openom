@@ -1333,16 +1333,19 @@ struct WalkSignerDto {
 
 /// Verify a tree's WHOLE keyring history from GENESIS — a joining member's read-side bootstrap. Where
 /// [`accept_remote_keyring`] walks forward from an already-trusted stored anchor, this trusts the genesis
-/// founder on first use (TOFU: the sole owner-role member's author key) and then PINS the verified head's
-/// `(revision, keyring_hash)` to the values the owner published out-of-band in the invite link. The pin is
-/// what closes the co-owner-collusion gap that TOFU + a head-signer fingerprint alone leaves open: a
-/// colluding co-owner could sign a forged alternate history whose head signer-SET fingerprint matches, but
-/// not one whose head HASH matches (the hash chain commits every revision; the pin commits the head).
+/// founder on first use (TOFU: the sole owner-role member's author key) and then PINS the verified history
+/// to the `(revision, keyring_hash)` the owner published out-of-band in the invite link. The pin closes the
+/// co-owner-collusion gap that TOFU + a head-signer fingerprint alone leaves open: a colluding co-owner
+/// could sign a forged alternate history whose signer-SET fingerprint matches, but not one whose revision
+/// hashes match (the hash chain commits every revision through the pin). The pin names the tree's head AS
+/// OF INVITE MINT — an earlier revision than the joiner's head (admission mints a later one) — so it binds a
+/// PREFIX and the head need only be >= it (see the check below).
 ///
 /// `hops` is `[u32-be len][MembershipEnvelope bytes]…` for revisions 1..=head, ascending, no gaps. Returns
 /// the validated head, its signers, and every RAW per-revision body. Fails closed (throws — the caller
 /// persists nothing) on: an empty/truncated history, a first revision that isn't a genesis (revision 1) or
-/// lacks exactly one owner, any invalid transition, or a head that doesn't match the pin.
+/// lacks exactly one owner, any invalid transition, a wrong tree, or a pinned revision that's outside the
+/// history or whose hash doesn't match.
 #[wasm_bindgen(js_name = verifyKeyringWalk)]
 pub fn verify_keyring_walk(
     tree_id: &[u8],
@@ -1398,17 +1401,28 @@ pub fn verify_keyring_walk(
         bootstrap_from_genesis(genesis, &founder_key).map_err(|e| JsError::new(&e.to_string()))?;
     let head =
         verify_walk(&genesis_anchor, &decoded[1..]).map_err(|e| JsError::new(&e.to_string()))?;
-    // Bind the cryptographically-verified head to the invite's out-of-band pin.
     if head.tree_id != tree_id {
         return Err(JsError::new("keyring history is for a different tree"));
     }
-    if head.revision != pinned_revision {
+    // Bind the verified history to the invite's out-of-band pin. The pin is the tree's head AS OF INVITE
+    // MINT — necessarily an EARLIER revision than the head the joiner walks to, because the owner admits
+    // this member (minting a later revision that carries the member's HPKE wrap) only AFTER minting the
+    // invite. So the pin authenticates a PREFIX: the pinned revision must appear in the verified history
+    // with the pinned hash (committing the whole chain up to it — the pre-existing signer set the co-owner-
+    // collusion attack targets), while the head may be >= it (the member's own admission + any later ops
+    // chain onto that authenticated prefix via verify_walk).
+    if pinned_revision < 1 || pinned_revision > head.revision {
         return Err(JsError::new(
-            "keyring head revision does not match the invite pin",
+            "invite-pinned revision is outside the verified keyring history",
         ));
     }
-    if head.keyring_hash.as_slice() != pinned_hash {
-        return Err(JsError::new("keyring head hash does not match the invite pin"));
+    // genesis == revision 1 (checked) + verify_walk enforces contiguous ascending, so revision r is at
+    // index r-1 and decoded.len() == head.revision.
+    let pinned_body = &decoded[(pinned_revision - 1) as usize];
+    if keyring_hash(pinned_body).as_slice() != pinned_hash {
+        return Err(JsError::new(
+            "keyring at the invite-pinned revision does not match the pin",
+        ));
     }
     let signers = head
         .trusted_signers

@@ -118,7 +118,12 @@ describe('vault.syncKeyring', () => {
     const pin = pinnedWm(1);
     watermarks.observe(treeKey, { keyringCursor: pin }); // a pinned cursor from the last unlock/recover
     const vault = createVault({ worker, keyringStore, watermarks });
-    await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 3, bytes: bytes(3, 3) }]);
+    // A contiguous run 2,3 onto our anchor at revision 1 (a single hop to 3 would be a gap the real
+    // acceptRemoteKeyring rejects; the walk-derived retention numbering requires head == since + count).
+    await vault.syncKeyring(treeKey, treeId, async () => [
+      { revision: 2, bytes: bytes(2, 2) },
+      { revision: 3, bytes: bytes(3, 3) },
+    ]);
     const cursor = watermarks.current(treeKey).keyringCursor;
     expect(cursor.length).toBe(4 + 48); // still pinned — NOT erased to a bare revision
     expect(revOf(cursor)).toBe(3); // advanced to the synced head
@@ -292,7 +297,7 @@ describe('vault outbound keyring publish (OPE-301)', () => {
   it('the INBOUND accept path never republishes: syncKeyring adopts a served revision without a PUT', async () => {
     const publishKeyring = () => { throw new Error('syncKeyring must not publish inbound revisions'); };
     const worker = {
-      async acceptRemoteKeyring(_a, _t, _h) { return { keyring: bytes(3, 3), watermark: be32(3) }; },
+      async acceptRemoteKeyring(_a, _t, _h) { return { keyring: bytes(2, 2), watermark: be32(2) }; },
       async unwrapChainKeyring(b) { return b; },
     };
     const keyringStore = memoryKeyringStore();
@@ -301,8 +306,8 @@ describe('vault outbound keyring publish (OPE-301)', () => {
     await keyringStore.save(treeKey, 1, bytes(7, 7));
     watermarks.observe(treeKey, { keyringCursor: be32(1) });
     const vault = createVault({ worker, keyringStore, watermarks, publishKeyring });
-    const r = await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 3, bytes: bytes(3, 3) }]);
-    expect(r).toEqual({ revision: 3, changed: true }); // adopted, and publishKeyring was never invoked
+    const r = await vault.syncKeyring(treeKey, treeId, async () => [{ revision: 2, bytes: bytes(2, 2) }]);
+    expect(r).toEqual({ revision: 2, changed: true }); // adopted (contiguous 1→2), and publishKeyring was never invoked
   });
 });
 

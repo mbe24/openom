@@ -85,6 +85,7 @@ function concatSigners(signers) {
 // cross-check and the trustedSigners concat).
 function hexToBytes(hex) {
   if (hex.length % 2 !== 0) throw new KeyringJoinError('odd-length signer hex');
+  if (!/^[0-9a-fA-F]*$/.test(hex)) throw new KeyringJoinError('non-hex character in signer key');
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
@@ -224,9 +225,16 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
      */
     async joinAsMember(treeKey, treeId, passphrase, memberId, memberKdfParams, revisions, invite) {
       if (engine !== 'chain') throw new KeyringJoinError('genesis-walk join is chain-only');
+      // First-time action only: adopting a whole history at the invite's pin would OVERWRITE an existing
+      // local head + write-through the watermark, so a genuine-but-STALE link (pinning an earlier head)
+      // could roll an already-joined member backward. Refuse if the tree is already present — resync, don't
+      // re-join.
+      if (await keyringStore.load(treeKey)) {
+        throw new KeyringJoinError('tree already present locally — join is a first-time action, use sync');
+      }
       if (!revisions || revisions.length === 0) throw new KeyringJoinError('no keyring history to verify');
-      // 1. Verify the walk from genesis, bound to the invite's (revision, hash) pin. Any invalid transition
-      //    or a head that doesn't match the pin throws → terminal, persist nothing.
+      // 1. Verify the walk from genesis, bound to the invite's (revision, hash) prefix pin. Any invalid
+      //    transition or a pin mismatch throws → terminal, persist nothing.
       let walk;
       try {
         walk = await worker.verifyKeyringWalk(
@@ -246,7 +254,12 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       if ((await fingerprintSigners(signers)) !== invite.fp) {
         throw new KeyringJoinError('signer fingerprint does not match the invite');
       }
-      // 3. Unlock at the verified head BEFORE persisting (a wrong passphrase then leaves no partial state).
+      // 3. Unframe the walk's RAW per-revision bodies (verified by the wasm) BEFORE creating a sealer, so a
+      //    malformed walk fails without leaking one. The walk proved the history is genesis (revision 1) +
+      //    contiguous ascending, so bodies[i] is revision i+1 and there are exactly `walk.revision` of them.
+      const bodies = unframe(walk.bodiesFramed);
+      if (bodies.length !== walk.revision) throw new KeyringJoinError('walk returned a mismatched revision count');
+      // 4. Unlock at the verified head BEFORE persisting (a wrong passphrase then leaves no partial state).
       //    min_revision = the walked head (anti-rollback floor); the wasm returns the watermark already in
       //    the OPE-286 pinned form.
       const r = await worker.unlockAsMember(
@@ -259,15 +272,19 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
         makeReplicaId(),
         walk.revision,
       );
-      // 4. Retain every RAW revision (each is the governing keyring for entries stamped at it, §B3) + the
-      //    head, then watermark. The bodies come from the walk (already unwrapped AND verified by the wasm).
-      const bodies = unframe(walk.bodiesFramed);
-      if (bodies.length !== revisions.length) throw new KeyringJoinError('walk returned a mismatched revision count');
-      for (let i = 0; i < revisions.length; i++) {
-        await keyringStore.save(treeKey, revisions[i].revision, bodies[i]);
+      // 5. Retain every RAW revision under its WALK-DERIVED number (i+1 — never the server's revision label,
+      //    which is unverified and could misfile a governing keyring), save the head, then watermark. If any
+      //    of this throws (store IO), free the just-created sealer so no DEK-holder leaks.
+      try {
+        for (let i = 0; i < bodies.length; i++) {
+          await keyringStore.save(treeKey, i + 1, bodies[i]);
+        }
+        await keyringStore.saveHead(treeKey, engine, walk.headKeyring);
+        watermarks.observe(treeKey, { keyringCursor: r.watermark });
+      } catch (e) {
+        await worker.lock(r.sealerId);
+        throw e;
       }
-      await keyringStore.saveHead(treeKey, engine, walk.headKeyring);
-      watermarks.observe(treeKey, { keyringCursor: r.watermark });
       return { session: sessionFor(r.sealerId), didKey: r.didKey };
     },
 
@@ -311,8 +328,15 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // (verifyEntry/epochIsAttributed) decodes a raw Keyring, so storing the wrapped envelope would make
       // every attributed entry governed by this revision throw a hard (non-retryable) decode error, which
       // sync.js treats as a rejection → the edit is dropped and the cursor advanced past it (silent loss).
-      for (const s of successors) {
-        await keyringStore.save(treeKey, s.revision, await worker.unwrapChainKeyring(s.bytes));
+      // Key each body by its WALK-DERIVED number (the worker validated the run as contiguous ascending from
+      // the stored anchor at `since`, so successors[i] IS revision since+1+i), never the server's revision
+      // label, which is unverified and could misfile a governing keyring under the wrong revision.
+      const headRev = chainRevision(r.watermark);
+      if (headRev - successors.length !== since) {
+        throw new KeyringForkError(headRev); // the verified run doesn't sit contiguously on our anchor
+      }
+      for (let i = 0; i < successors.length; i++) {
+        await keyringStore.save(treeKey, since + 1 + i, await worker.unwrapChainKeyring(successors[i].bytes));
       }
       await keyringStore.saveHead(treeKey, engine, r.keyring);
       // The accept path advances the revision without opening the DEK — carry the stored write-epoch pin
