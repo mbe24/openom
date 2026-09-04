@@ -9,6 +9,7 @@ pub mod access;
 pub mod auth;
 pub mod authz;
 pub mod config;
+pub mod invites;
 pub mod jwks;
 pub mod keyring;
 pub mod log;
@@ -105,6 +106,15 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/access",
             get(access::get_access).put(access::put_access),
         )
+        // Mode A share invites (§B3): owner mints a pending invite; the invitee submits a MAC'd key claim;
+        // the owner lists + consumes. Advisory transport for the two-channel invite — the signed keyring
+        // PUT remains the security boundary.
+        .route(
+            "/trees/{tree_id}/invites",
+            post(invites::create_invite).get(invites::list_invites),
+        )
+        .route("/invites/{invite_id}/claim", put(invites::claim_invite))
+        .route("/invites/{invite_id}", delete(invites::delete_invite))
         // Media: entitlement-gated presigned upload/download (§12, §17). Bytes never
         // traverse the server, so the body limit below doesn't apply to them.
         .route("/trees/{tree_id}/media/intent", post(media::intent))
