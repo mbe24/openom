@@ -2225,3 +2225,44 @@ fn quorum_a_signer_added_after_the_proposal_does_not_raise_the_bar() {
         "carol was added after the proposal, so she is not in its denominator; alice+bob is unanimity"
     );
 }
+
+/// `op_depths` (the checkpoint author's source for `frontier_depths`) and the ancestor-invariance it relies on:
+/// a frontier tip's depth is purely ancestral, so it is IDENTICAL whether computed over the whole op set or
+/// over just the pre-cut ops. This is what lets the author read a tip's depth from the pre-cut engine it builds
+/// for the cut state.
+#[test]
+fn op_depth_of_a_frontier_tip_is_invariant_over_pre_cut_vs_full_ops() {
+    let genesis = [minit(alice_pk(), TestRole::Admin, [0xaa; 32])];
+    let reseal = |id: u64, parents: Vec<u64>| make_op(id, parents, &[1u8; 32], MembershipAction::Reseal);
+    // genesis(1) → 2 → 3 (branch A); 1 → 4 (branch B, fork); 3 → 5; 4 → 6 (5, 6 sit ABOVE the {3,4} frontier).
+    let ops = vec![
+        make_op(1, vec![], &[1u8; 32], MembershipAction::Create { initial_members: genesis.to_vec() }),
+        reseal(2, vec![1]),
+        reseal(3, vec![2]),
+        reseal(4, vec![1]),
+        reseal(5, vec![3]),
+        reseal(6, vec![4]),
+    ];
+
+    let mut full: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    for op in &ops {
+        full.apply(op.clone()).unwrap();
+    }
+    full.flush().unwrap();
+
+    // Pre-cut engine: only the ops at/below the {3,4} frontier (1..=4).
+    let mut pre: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    for op in ops.iter().take(4) {
+        pre.apply(op.clone()).unwrap();
+    }
+    pre.flush().unwrap();
+
+    let full_d = full.op_depths();
+    let pre_d = pre.op_depths();
+    for tip in [3u64, 4] {
+        assert_eq!(full_d.get(&tip), pre_d.get(&tip), "tip {tip} depth differs between full and pre-cut engines");
+    }
+    // The absolute depths the author would record: 1→2→3 gives depth 2; 1→4 gives depth 1.
+    assert_eq!(pre_d.get(&3), Some(&2));
+    assert_eq!(pre_d.get(&4), Some(&1));
+}

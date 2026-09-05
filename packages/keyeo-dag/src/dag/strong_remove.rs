@@ -412,7 +412,7 @@ where
 
 /// Lamport depth of every op: 0 at a root, else 1 + max parent depth. Used only as a deterministic
 /// tiebreak, so an unexpected cycle degrading to 0 is harmless.
-fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
+pub(crate) fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
     ops: &HashMap<OId, Op>,
     base_depths: &HashMap<OId, usize>,
 ) -> HashMap<OId, usize> {

@@ -430,6 +430,15 @@ where
         self.resolve_walk().map(|(_, e)| e).unwrap_or_default()
     }
 
+    /// The absolute lamport depth of every op — the engine's OWN `compute_depths` (`1 + max(parent depths)`),
+    /// so a checkpoint author records the exact values the strong-remove tiebreak uses (not a reimplementation
+    /// that could drift). A frontier tip's depth is purely ancestral, so it is identical whether computed here
+    /// (over the whole op set) or over just the pre-cut ops — the property `Keyeo::adopt`'s `frontier_depths`
+    /// seed relies on.
+    pub fn op_depths(&self) -> HashMap<Op::OpId, usize> {
+        crate::dag::strong_remove::compute_depths(&self.ops, &self.base_depths)
+    }
+
     /// Whether this group HAS EVER been shared beyond its founder — i.e. any EFFECTIVE `Add` op exists.
     /// MONOTONIC: an effective Add stays effective after the member is removed (a `Remove` is a separate
     /// op, it doesn't un-effect the Add), so this never regresses to false. This is the dag's analog of the
