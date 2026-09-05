@@ -4,7 +4,7 @@
 //! persisted `state`) is a openom-keyring-api `MembershipEnvelope` wrapping the candidate/head `Keyring`; `admit`
 //! unwraps it, rebuilds the anchor from the head, and runs `verify_transition` (falling back to
 //! `verify_reset` for a recovery). It exports the verified `tree_id` + `update_ref` the server keys on. `changed` is the honest membership diff; `reset_boundary` is set when the candidate was
-//! admitted as a reset. The chain's rich `ChainError` taxonomy is classed into the neutral
+//! admitted as a reset. The chain's rich `KeyringError` taxonomy is classed into the neutral
 //! [`VerifyError`] (the full detail stays available inside the chain layer for diagnostics).
 
 use openom_keyring_api::{
@@ -14,7 +14,7 @@ use prost::Message;
 
 use crate::wire::{Keyring, MEMBER_OWNER};
 use crate::{
-    bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, ChainError, KeyringAnchor,
+    bootstrap_from_genesis, keyring_hash, verify_reset, verify_transition, KeyringError, KeyringAnchor,
     VerifyingKey,
 };
 
@@ -64,19 +64,19 @@ fn prior_rvk(anchor: &KeyringAnchor) -> Option<&[u8]> {
 }
 
 /// Class the chain's error taxonomy into the neutral seam vocabulary.
-fn classify(e: ChainError) -> VerifyError {
+fn classify(e: KeyringError) -> VerifyError {
     match e {
-        ChainError::Fork => VerifyError::Rollback,
-        ChainError::NonSequential => VerifyError::Stale,
-        ChainError::UnendorsedOrdinaryChange
-        | ChainError::UnendorsedSetChange
-        | ChainError::FirstSharedRegressed => VerifyError::Unauthorized,
-        ChainError::TreeMismatch
-        | ChainError::LayoutAhead
-        | ChainError::BadStructure(_)
-        | ChainError::WrapIncomplete
-        | ChainError::BadBootstrap
-        | ChainError::RevisionOverflow => VerifyError::Malformed,
+        KeyringError::Fork => VerifyError::Rollback,
+        KeyringError::NonSequential => VerifyError::Stale,
+        KeyringError::UnendorsedOrdinaryChange
+        | KeyringError::UnendorsedSetChange
+        | KeyringError::FirstSharedRegressed => VerifyError::Unauthorized,
+        KeyringError::TreeMismatch
+        | KeyringError::LayoutAhead
+        | KeyringError::BadStructure(_)
+        | KeyringError::WrapIncomplete
+        | KeyringError::BadBootstrap
+        | KeyringError::RevisionOverflow => VerifyError::Malformed,
     }
 }
 

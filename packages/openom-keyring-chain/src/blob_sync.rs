@@ -19,7 +19,7 @@ use prost::Message;
 use crate::keyring::signing_bytes as keyring_signing_bytes;
 use crate::wire::Keyring;
 use crate::{
-    keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, ChainError,
+    keyring_hash, sign_keyring, verify_reset, verify_transition, verify_walk, KeyringError,
     KeyringAnchor, SigningKey,
 };
 
@@ -212,7 +212,7 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 Ok(Some(bytes))
             }
             // An unendorsed set change on the walk is a recovery reset — needs the OOB ceremony.
-            Err(ChainError::UnendorsedSetChange) => Err(PullError::ResetPending),
+            Err(KeyringError::UnendorsedSetChange) => Err(PullError::ResetPending),
             Err(e) => Err(PullError::Sync(SyncError::Chain(format!("{e:?}")))),
         }
     }
@@ -336,9 +336,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 }
             }
             // The draft no longer chains onto the head we trust — it moved; rebuild + re-propose.
-            Err(ChainError::Fork) | Err(ChainError::NonSequential) => Ok(Promotion::Stale),
+            Err(KeyringError::Fork) | Err(KeyringError::NonSequential) => Ok(Promotion::Stale),
             // A structurally-valid candidate that just lacks the quorum yet.
-            Err(ChainError::UnendorsedSetChange) | Err(ChainError::UnendorsedOrdinaryChange) => {
+            Err(KeyringError::UnendorsedSetChange) | Err(KeyringError::UnendorsedOrdinaryChange) => {
                 Ok(Promotion::NotReady)
             }
             Err(e) => Err(SyncError::Chain(format!("{e:?}"))),
@@ -350,6 +350,6 @@ fn decode(bytes: &[u8]) -> Result<Keyring, SyncError> {
     Keyring::decode(bytes).map_err(|e| SyncError::Decode(e.to_string()))
 }
 
-fn chain_err(e: ChainError) -> SyncError {
+fn chain_err(e: KeyringError) -> SyncError {
     SyncError::Chain(format!("{e:?}"))
 }

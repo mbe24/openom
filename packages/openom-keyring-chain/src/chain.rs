@@ -3,8 +3,8 @@
 //!
 //! Since OPE-300 the transition/walk/reset/bootstrap/governance/quorum LOGIC lives in the generic
 //! `keyeo-chain` engine; this module is the openom binding around it: it maps the chain's `KeyringAnchor`
-//! and proto `Keyring` (via [`ChainDoc`](crate::doc::ChainDoc)) to and from the engine's `Anchor`/
-//! `Doc`, and classes the engine's `Error` back into the chain's `ChainError` taxonomy so the
+//! and proto `Keyring` (via [`KeyringDoc`](crate::doc::KeyringDoc)) to and from the engine's `Anchor`/
+//! `Doc`, and classes the engine's `Error` back into the chain's `KeyringError` taxonomy so the
 //! accept/reject behavior is unchanged. The engine owns its signed bytes + a payload commitment; this
 //! binding owns the wire, the payload gates, and the governing-ref adapter.
 
@@ -12,7 +12,7 @@ use keyeo_chain::{
     Anchor, DocHash, Governance, GroupId, Error, Revision, Signer,
 };
 
-use crate::doc::{reset_rvk, to_pk32, ChainDoc, ChainRole, S_LAYOUT_AHEAD, S_WRAP_INCOMPLETE};
+use crate::doc::{reset_rvk, to_pk32, KeyringDoc, KeyringRole, S_LAYOUT_AHEAD, S_WRAP_INCOMPLETE};
 use crate::keyring::{keyring_hash, VerifyingKey};
 use crate::wire::Keyring;
 
@@ -83,7 +83,7 @@ impl KeyringAnchor {
 
 // ---- KeyringAnchor <-> keyeo_chain::Anchor ----
 
-type LinAnchor = Anchor<String, ChainRole, [u8; 32]>;
+type LinAnchor = Anchor<String, KeyringRole, [u8; 32]>;
 
 fn to_linear_anchor(prior: &KeyringAnchor) -> LinAnchor {
     Anchor {
@@ -95,7 +95,7 @@ fn to_linear_anchor(prior: &KeyringAnchor) -> LinAnchor {
             .iter()
             .map(|s| Signer {
                 id: s.member_id.clone(),
-                role: ChainRole(s.role as i16),
+                role: KeyringRole(s.role as i16),
                 public_key: to_pk32(&s.public_key),
             })
             .collect(),
@@ -134,23 +134,23 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
 /// Class the generic engine's `Error` into the chain's own error taxonomy, preserving the exact
 /// accept/reject behavior. The binding's `structure_ok` sentinels (see `crate::doc`) map back to the
 /// specific chain reasons (`LayoutAhead` / `WrapIncomplete` / else `BadStructure`).
-fn map_linear_err(e: Error) -> ChainError {
+fn map_linear_err(e: Error) -> KeyringError {
     match e {
-        Error::GroupMismatch => ChainError::TreeMismatch,
-        Error::LayoutAhead => ChainError::LayoutAhead,
-        Error::BadStructure(s) => ChainError::BadStructure(s),
+        Error::GroupMismatch => KeyringError::TreeMismatch,
+        Error::LayoutAhead => KeyringError::LayoutAhead,
+        Error::BadStructure(s) => KeyringError::BadStructure(s),
         Error::Structure(s) => match s {
-            S_LAYOUT_AHEAD => ChainError::LayoutAhead,
-            S_WRAP_INCOMPLETE => ChainError::WrapIncomplete,
-            other => ChainError::BadStructure(other),
+            S_LAYOUT_AHEAD => KeyringError::LayoutAhead,
+            S_WRAP_INCOMPLETE => KeyringError::WrapIncomplete,
+            other => KeyringError::BadStructure(other),
         },
-        Error::NonSequential => ChainError::NonSequential,
-        Error::RevisionOverflow => ChainError::RevisionOverflow,
-        Error::Fork => ChainError::Fork,
-        Error::UnendorsedOrdinaryChange => ChainError::UnendorsedOrdinaryChange,
-        Error::UnendorsedSetChange => ChainError::UnendorsedSetChange,
-        Error::WrapIncomplete => ChainError::WrapIncomplete,
-        Error::BadBootstrap => ChainError::BadBootstrap,
+        Error::NonSequential => KeyringError::NonSequential,
+        Error::RevisionOverflow => KeyringError::RevisionOverflow,
+        Error::Fork => KeyringError::Fork,
+        Error::UnendorsedOrdinaryChange => KeyringError::UnendorsedOrdinaryChange,
+        Error::UnendorsedSetChange => KeyringError::UnendorsedSetChange,
+        Error::WrapIncomplete => KeyringError::WrapIncomplete,
+        Error::BadBootstrap => KeyringError::BadBootstrap,
     }
 }
 
@@ -190,13 +190,13 @@ impl GoverningKeyring {
     }
 
     /// Mint by validating `candidate` as the successor of `prior` — see [`verify_transition`].
-    pub fn from_transition(prior: &KeyringAnchor, candidate: Keyring) -> Result<Self, ChainError> {
+    pub fn from_transition(prior: &KeyringAnchor, candidate: Keyring) -> Result<Self, KeyringError> {
         verify_transition(prior, &candidate)?;
         Ok(Self { keyring: candidate })
     }
 
     /// Mint a first-sight genesis the founder trusts by its own key — see [`bootstrap_from_genesis`].
-    pub fn from_genesis(genesis: Keyring, own_founder_key: &VerifyingKey) -> Result<Self, ChainError> {
+    pub fn from_genesis(genesis: Keyring, own_founder_key: &VerifyingKey) -> Result<Self, KeyringError> {
         bootstrap_from_genesis(&genesis, own_founder_key)?;
         Ok(Self { keyring: genesis })
     }
@@ -207,13 +207,13 @@ impl GoverningKeyring {
         pinned_tree_id: &[u8],
         pinned_revision: u32,
         pinned_hash: &[u8; 32],
-    ) -> Result<Self, ChainError> {
+    ) -> Result<Self, KeyringError> {
         bootstrap_from_oob(&head, pinned_tree_id, pinned_revision, pinned_hash)?;
         Ok(Self { keyring: head })
     }
 
     /// Mint a recovery / succession reset validated on its own terms — see [`verify_reset`].
-    pub fn from_reset(keyring: Keyring) -> Result<Self, ChainError> {
+    pub fn from_reset(keyring: Keyring) -> Result<Self, KeyringError> {
         verify_reset(None, &keyring)?;
         Ok(Self { keyring })
     }
@@ -222,7 +222,7 @@ impl GoverningKeyring {
 /// Why a candidate keyring was refused as a successor. Distinct variants so the client can react
 /// differently (a fork/rollback is an attack; a gap is availability; an unendorsed change is tampering).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ChainError {
+pub enum KeyringError {
     #[error("candidate is for a different tree")]
     TreeMismatch,
     #[error("keyring layout is newer than this build understands")]
@@ -248,24 +248,24 @@ pub enum ChainError {
 }
 
 /// Validate `candidate` as the successor of `prior` and return the new anchor. Pure; no I/O. Delegates to
-/// [`keyeo_chain::verify_transition`] over the chain's [`ChainDoc`].
+/// [`keyeo_chain::verify_transition`] over the chain's [`KeyringDoc`].
 pub fn verify_transition(
     prior: &KeyringAnchor,
     candidate: &Keyring,
-) -> Result<KeyringAnchor, ChainError> {
+) -> Result<KeyringAnchor, KeyringError> {
     // first_shared_revision is MONOTONIC: once a tree has been shared it can never un-share. The field rides
     // the signed payload commitment, but the binding treats it opaquely, so a valid signer (a compromised
     // co-owner) could otherwise author an ordinary successor that CLEARS it — silently disabling attributed
     // writes tree-wide. Enforce it here, on the trusted prior→candidate transition: it must name a real
     // revision, and once set it must never change.
     if candidate.first_shared_revision > candidate.revision {
-        return Err(ChainError::FirstSharedRegressed);
+        return Err(KeyringError::FirstSharedRegressed);
     }
     if prior.first_shared_revision != 0 && candidate.first_shared_revision != prior.first_shared_revision {
-        return Err(ChainError::FirstSharedRegressed);
+        return Err(KeyringError::FirstSharedRegressed);
     }
     let anchor = to_linear_anchor(prior);
-    let out = keyeo_chain::verify_transition(&anchor, &ChainDoc::new(candidate))
+    let out = keyeo_chain::verify_transition(&anchor, &KeyringDoc::new(candidate))
         .map_err(map_linear_err)?;
     let mut new_anchor = from_linear_anchor(out);
     new_anchor.first_shared_revision = candidate.first_shared_revision; // carry it forward on the anchor
@@ -274,7 +274,7 @@ pub fn verify_transition(
 
 /// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
 /// mandatory. `hops` must be in ascending revision order with no gaps; a gap surfaces as `NonSequential`.
-pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnchor, ChainError> {
+pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnchor, KeyringError> {
     let mut anchor = prior.clone();
     for hop in hops {
         anchor = verify_transition(&anchor, hop)?;
@@ -287,8 +287,8 @@ pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnc
 pub fn bootstrap_from_genesis(
     genesis: &Keyring,
     own_founder_key: &VerifyingKey,
-) -> Result<KeyringAnchor, ChainError> {
-    let out = keyeo_chain::bootstrap_genesis(&ChainDoc::new(genesis), &own_founder_key.to_bytes())
+) -> Result<KeyringAnchor, KeyringError> {
+    let out = keyeo_chain::bootstrap_genesis(&KeyringDoc::new(genesis), &own_founder_key.to_bytes())
         .map_err(map_linear_err)?;
     let mut a = from_linear_anchor(out);
     a.first_shared_revision = genesis.first_shared_revision; // seed the monotonic marker (0 at a true genesis)
@@ -302,9 +302,9 @@ pub fn bootstrap_from_oob(
     pinned_tree_id: &[u8],
     pinned_revision: u32,
     pinned_hash: &[u8; 32],
-) -> Result<KeyringAnchor, ChainError> {
+) -> Result<KeyringAnchor, KeyringError> {
     let out = keyeo_chain::bootstrap_pinned(
-        &ChainDoc::new(head),
+        &KeyringDoc::new(head),
         &GroupId(pinned_tree_id.to_vec()),
         Revision(pinned_revision),
         &DocHash(*pinned_hash),
@@ -321,9 +321,9 @@ pub fn bootstrap_from_oob(
 pub fn verify_reset(
     prior_rvk: Option<&[u8]>,
     keyring: &Keyring,
-) -> Result<KeyringAnchor, ChainError> {
+) -> Result<KeyringAnchor, KeyringError> {
     let rvk = prior_rvk.map(to_pk32);
-    let out = keyeo_chain::verify_reset(rvk.as_ref(), &ChainDoc::new(keyring))
+    let out = keyeo_chain::verify_reset(rvk.as_ref(), &KeyringDoc::new(keyring))
         .map_err(map_linear_err)?;
     let mut a = from_linear_anchor(out);
     // Seed the marker from the reset keyring. NOTE: a reset re-anchors on its own terms and verify_reset has
@@ -426,17 +426,17 @@ mod tests {
 
         // rev 3 CLEARING the marker (a compromised co-owner trying to un-share) → REJECTED.
         let rev3_clear = next(&rev2, |k| k.first_shared_revision = 0, &[&f]);
-        assert!(matches!(verify_transition(&anchor2, &rev3_clear), Err(ChainError::FirstSharedRegressed)));
+        assert!(matches!(verify_transition(&anchor2, &rev3_clear), Err(KeyringError::FirstSharedRegressed)));
 
         // rev 3 CHANGING the marker to another value → REJECTED.
         let rev3_change = next(&rev2, |k| k.first_shared_revision = 3, &[&f]);
-        assert!(matches!(verify_transition(&anchor2, &rev3_change), Err(ChainError::FirstSharedRegressed)));
+        assert!(matches!(verify_transition(&anchor2, &rev3_change), Err(KeyringError::FirstSharedRegressed)));
 
         // A marker naming a revision that doesn't exist yet (> candidate.revision) → REJECTED even from a 0 prior.
         let bad_range = next(&g, |k| k.first_shared_revision = 5, &[&f]); // rev 2, marker 5 > 2
         assert!(matches!(
             verify_transition(&KeyringAnchor::from_keyring(&g), &bad_range),
-            Err(ChainError::FirstSharedRegressed)
+            Err(KeyringError::FirstSharedRegressed)
         ));
     }
 
@@ -556,7 +556,7 @@ mod tests {
         assert!(verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&founder])).is_ok());
         assert!(matches!(
             verify_transition(&anchor, &next(&ruled, add_coowner(&d), &[&a])),
-            Err(ChainError::UnendorsedSetChange)
+            Err(KeyringError::UnendorsedSetChange)
         ));
     }
 
@@ -569,7 +569,7 @@ mod tests {
 
         assert!(matches!(
             verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a])),
-            Err(ChainError::UnendorsedSetChange)
+            Err(KeyringError::UnendorsedSetChange)
         ));
         assert!(verify_transition(&anchor, &next(&ruled, |k| k.governance_kind = 0, &[&a, &b])).is_ok());
     }
@@ -586,7 +586,7 @@ mod tests {
                 &anchor,
                 &next(&ruled, |k| { k.governance_kind = 3; k.governance_threshold = 5; }, &[&a, &b]),
             ),
-            Err(ChainError::UnendorsedSetChange)
+            Err(KeyringError::UnendorsedSetChange)
         ));
     }
 
@@ -682,7 +682,7 @@ mod tests {
         k.members[0].author_public_key = bad.to_vec();
         assert_eq!(
             verify_reset(None, &k),
-            Err(ChainError::BadStructure("signer key malformed"))
+            Err(KeyringError::BadStructure("signer key malformed"))
         );
     }
 
@@ -720,7 +720,7 @@ mod tests {
             },
             &[&f],
         );
-        assert!(matches!(verify_transition(&a, &bad), Err(ChainError::BadStructure(_))));
+        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
     }
 
     #[test]
@@ -739,7 +739,7 @@ mod tests {
             },
             &[&f],
         );
-        assert!(matches!(verify_transition(&a, &bad), Err(ChainError::BadStructure(_))));
+        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
     }
 
     #[test]
@@ -749,7 +749,7 @@ mod tests {
         assert!(verify_reset(None, &g).is_ok(), "honest genesis (epoch 0, len 1) is in range");
         let a = anchor(&g);
         let bad = next(&g, |k| k.epochs[0].epoch = u32::MAX, &[&f]);
-        assert!(matches!(verify_transition(&a, &bad), Err(ChainError::BadStructure(_))));
+        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
     }
 
     #[test]
@@ -759,7 +759,7 @@ mod tests {
         g.revision = 2;
         g.signatures.clear();
         sign_keyring(&mut g, &f);
-        assert_eq!(bootstrap_from_genesis(&g, &f.verifying_key()), Err(ChainError::BadBootstrap));
+        assert_eq!(bootstrap_from_genesis(&g, &f.verifying_key()), Err(KeyringError::BadBootstrap));
     }
 
     #[test]
@@ -769,13 +769,13 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
         let ahead = next(&g, |k| k.layout_version = KEYRING_LAYOUT_VERSION + 1, &[&f]);
-        assert_eq!(verify_transition(&a, &ahead), Err(ChainError::LayoutAhead));
+        assert_eq!(verify_transition(&a, &ahead), Err(KeyringError::LayoutAhead));
 
         let mut reset = genesis(&f, &[], &[]);
         reset.layout_version = KEYRING_LAYOUT_VERSION + 1;
         reset.signatures.clear();
         sign_keyring(&mut reset, &f);
-        assert_eq!(verify_reset(None, &reset), Err(ChainError::LayoutAhead));
+        assert_eq!(verify_reset(None, &reset), Err(KeyringError::LayoutAhead));
     }
 
     #[test]
@@ -791,7 +791,7 @@ mod tests {
             },
             &[&f],
         );
-        assert_eq!(verify_transition(&a, &bad), Err(ChainError::WrapIncomplete));
+        assert_eq!(verify_transition(&a, &bad), Err(KeyringError::WrapIncomplete));
     }
 
     #[test]
@@ -803,7 +803,7 @@ mod tests {
         while k.members.len() <= MAX_MEMBERS {
             k.members.push(d.clone());
         }
-        assert_eq!(verify_reset(None, &k), Err(ChainError::BadStructure("list too large")));
+        assert_eq!(verify_reset(None, &k), Err(KeyringError::BadStructure("list too large")));
     }
 
     #[test]
@@ -815,7 +815,7 @@ mod tests {
         while k.epochs.len() <= MAX_EPOCHS {
             k.epochs.push(e.clone());
         }
-        assert_eq!(verify_reset(None, &k), Err(ChainError::BadStructure("list too large")));
+        assert_eq!(verify_reset(None, &k), Err(KeyringError::BadStructure("list too large")));
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
 
         let stranger = key();
         let bad = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&stranger]);
-        assert_eq!(verify_transition(&a, &bad), Err(ChainError::UnendorsedOrdinaryChange));
+        assert_eq!(verify_transition(&a, &bad), Err(KeyringError::UnendorsedOrdinaryChange));
     }
 
     #[test]
@@ -853,10 +853,10 @@ mod tests {
         skip.prev_keyring_hash = keyring_hash(&g).to_vec();
         skip.signatures.clear();
         sign_keyring(&mut skip, &f);
-        assert_eq!(verify_transition(&a, &skip), Err(ChainError::NonSequential));
+        assert_eq!(verify_transition(&a, &skip), Err(KeyringError::NonSequential));
 
         let fork = next(&g, |k| k.prev_keyring_hash = vec![9; 32], &[&f]);
-        assert_eq!(verify_transition(&a, &fork), Err(ChainError::Fork));
+        assert_eq!(verify_transition(&a, &fork), Err(KeyringError::Fork));
     }
 
     #[test]
@@ -874,7 +874,7 @@ mod tests {
         verify_transition(&a, &promote).unwrap();
 
         let mutiny = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&carol]);
-        assert_eq!(verify_transition(&a, &mutiny), Err(ChainError::UnendorsedSetChange));
+        assert_eq!(verify_transition(&a, &mutiny), Err(KeyringError::UnendorsedSetChange));
     }
 
     #[test]
@@ -891,7 +891,7 @@ mod tests {
             },
             &[&rogue],
         );
-        assert_eq!(verify_transition(&a, &attack), Err(ChainError::UnendorsedSetChange));
+        assert_eq!(verify_transition(&a, &attack), Err(KeyringError::UnendorsedSetChange));
     }
 
     #[test]
@@ -906,10 +906,10 @@ mod tests {
         let a = anchor(&g);
 
         let ordinary = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&carol]);
-        assert_eq!(verify_transition(&a, &ordinary), Err(ChainError::UnendorsedOrdinaryChange));
+        assert_eq!(verify_transition(&a, &ordinary), Err(KeyringError::UnendorsedOrdinaryChange));
 
         let promote_self = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&carol]);
-        assert_eq!(verify_transition(&a, &promote_self), Err(ChainError::UnendorsedSetChange));
+        assert_eq!(verify_transition(&a, &promote_self), Err(KeyringError::UnendorsedSetChange));
     }
 
     #[test]
@@ -945,7 +945,7 @@ mod tests {
             },
             &[&carol],
         );
-        assert_eq!(verify_transition(&a, &bundled), Err(ChainError::UnendorsedSetChange));
+        assert_eq!(verify_transition(&a, &bundled), Err(KeyringError::UnendorsedSetChange));
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         verify_transition(&a, &next(&g, rotate, &[&f, &f2])).unwrap();
         assert_eq!(
             verify_transition(&a, &next(&g, rotate, &[&f2])),
-            Err(ChainError::UnendorsedSetChange)
+            Err(KeyringError::UnendorsedSetChange)
         );
     }
 
@@ -974,11 +974,11 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
         let no_wrap = next(&g, |k| k.members.push(dummy_member("bob")), &[&f]);
-        assert_eq!(verify_transition(&a, &no_wrap), Err(ChainError::WrapIncomplete));
+        assert_eq!(verify_transition(&a, &no_wrap), Err(KeyringError::WrapIncomplete));
 
         let carol = key();
         let two = next(&g, |k| { k.members.push(keyed_member(&carol, "carol", OWNER_MEMBER)); k.epochs[0].wraps.push(wrap("carol", HPKE)); }, &[&f]);
-        assert!(matches!(verify_transition(&a, &two), Err(ChainError::BadStructure(_))));
+        assert!(matches!(verify_transition(&a, &two), Err(KeyringError::BadStructure(_))));
     }
 
     #[test]
@@ -995,12 +995,12 @@ mod tests {
         reset.signatures.clear();
         sign_keyring(&mut reset, &f2);
         assert_eq!(verify_reset(None, &reset).unwrap().revision, 5);
-        assert_eq!(verify_transition(&anchor(&g), &reset).unwrap_err(), ChainError::NonSequential);
+        assert_eq!(verify_transition(&anchor(&g), &reset).unwrap_err(), KeyringError::NonSequential);
 
         let mut unsigned = g.clone();
         unsigned.signatures.clear();
         sign_keyring(&mut unsigned, &key());
-        assert_eq!(verify_reset(None, &unsigned), Err(ChainError::BadBootstrap));
+        assert_eq!(verify_reset(None, &unsigned), Err(KeyringError::BadBootstrap));
     }
 
     // --- Differential oracle ---------------------------------------------------------------
@@ -1139,13 +1139,13 @@ mod tests {
         bootstrap_from_oob(&g, TREE, 1, &h).unwrap();
         assert!(matches!(
             bootstrap_from_oob(&g, TREE, 1, &[0u8; 32]),
-            Err(ChainError::BadBootstrap)
+            Err(KeyringError::BadBootstrap)
         ));
 
         let c1 = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&f]);
         let c2 = next(&c1, |k| { k.members.push(dummy_member("eve")); k.epochs[0].wraps.push(wrap("eve", HPKE)); }, &[&f]);
         assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, 3);
-        assert_eq!(verify_walk(&a, &[c2]), Err(ChainError::NonSequential));
+        assert_eq!(verify_walk(&a, &[c2]), Err(KeyringError::NonSequential));
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
         let bad = next(&g, add_bob, &[&key()]);
         assert_eq!(
             GoverningKeyring::from_transition(&a, bad).unwrap_err(),
-            ChainError::UnendorsedOrdinaryChange
+            KeyringError::UnendorsedOrdinaryChange
         );
     }
 }

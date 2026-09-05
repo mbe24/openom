@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
-use openom_keyring_chain::{verify_transition, ChainError, KeyringAnchor, VerifyingKey};
+use openom_keyring_chain::{verify_transition, KeyringError, KeyringAnchor, VerifyingKey};
 // Re-exported: `with_engine` takes an `EngineKind`, so callers select the engine preset without a
 // direct openom-keyring-api dependency.
 pub use openom_keyring_api::EngineKind;
@@ -1442,9 +1442,9 @@ fn decode_keyring(bytes: &[u8]) -> Result<Keyring> {
 }
 
 /// A flow produced a keyring its own chain-walk rejects — a construction bug in this crate,
-/// caught before persistence. Deliberately Internal (with the ChainError for the log), never a
+/// caught before persistence. Deliberately Internal (with the KeyringError for the log), never a
 /// matchable user-facing code: the fix is our code, not the caller's input.
-fn self_check_failed(e: ChainError) -> VaultError {
+fn self_check_failed(e: KeyringError) -> VaultError {
     VaultError::new(
         VaultErrorCode::Internal,
         format!("produced keyring failed the chain-walk self-check: {e}"),
@@ -1455,8 +1455,8 @@ fn self_check_failed(e: ChainError) -> VaultError {
 /// [`self_check_failed`], this is the *counterparty's* fault, not ours — mapped to a granular,
 /// user-facing code so the JS side can react (fork = attack, gap = availability, unendorsed =
 /// tampering) rather than a blanket internal error.
-fn remote_chain_err(e: ChainError) -> VaultError {
-    use ChainError as E;
+fn remote_chain_err(e: KeyringError) -> VaultError {
+    use KeyringError as E;
     use VaultErrorCode as C;
     let code = match e {
         E::TreeMismatch => C::TreeMismatch,

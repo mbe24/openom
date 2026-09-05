@@ -208,7 +208,7 @@ pub struct Admitted {
     pub update_ref: Vec<u8>,
 }
 
-/// Why an update was refused — neutral vocabulary, neither chain's `ChainError` nor the DAG's op errors.
+/// Why an update was refused — neutral vocabulary, neither chain's `KeyringError` nor the DAG's op errors.
 /// The full engine-specific detail can be kept as diagnostics behind this classification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VerifyError {

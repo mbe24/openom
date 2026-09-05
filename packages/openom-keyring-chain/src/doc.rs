@@ -1,10 +1,10 @@
-//! The openom binding of `keyeo-chain`: `ChainRole` (openom's ordinal role) + `ChainDoc` (a `Keyring`
+//! The openom binding of `keyeo-chain`: `KeyringRole` (openom's ordinal role) + `KeyringDoc` (a `Keyring`
 //! viewed as a [`keyeo_chain::Doc`]). The generic engine reasons over the accessors here and signs
 //! the message it builds from them; the openom `Keyring` payload rides through `payload_commitment`.
 //!
 //! The engine owns the generic signed fields (group id, revision, prev-hash, layout, members, governance,
-//! recovery authority — see `keyeo_chain::signing_bytes`). This binding owns [`ChainDoc::payload_commit`]
-//! (an exhaustive `#[deny(unused_variables)]` hash of the WHOLE keyring payload) and [`ChainDoc::structure`]
+//! recovery authority — see `keyeo_chain::signing_bytes`). This binding owns [`KeyringDoc::payload_commit`]
+//! (an exhaustive `#[deny(unused_variables)]` hash of the WHOLE keyring payload) and [`KeyringDoc::structure`]
 //! (the payload/structural acceptance gate: layout bound, size caps, epochs, epoch ordinals,
 //! signer-key length, wrap-completeness).
 
@@ -25,7 +25,7 @@ pub(crate) const MAX_EPOCHS: usize = 4096;
 /// Domain separation for the chain's payload commitment (bound into the engine's signed bytes).
 const PAYLOAD_TAG: &[u8] = b"openom:keyring:payload:v1";
 
-// Structure-gate sentinels the chain maps back to its `ChainError` taxonomy (see `chain::map_linear_err`).
+// Structure-gate sentinels the chain maps back to its `KeyringError` taxonomy (see `chain::map_linear_err`).
 pub(crate) const S_LAYOUT_AHEAD: &str = "layout ahead";
 pub(crate) const S_WRAP_INCOMPLETE: &str = "wrap incomplete";
 pub(crate) const S_LIST_TOO_LARGE: &str = "list too large";
@@ -36,15 +36,15 @@ pub(crate) const S_SIGNER_KEY: &str = "signer key malformed";
 /// openom's single ordinal role, wrapping the proto `MemberRole` value (lower is stronger). The engine
 /// derives signer-ness/founder-ness from it; it never learns openom's specific ladder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
-pub struct ChainRole(pub i16);
+pub struct KeyringRole(pub i16);
 
-impl keyeo_core::Role for ChainRole {
+impl keyeo_core::Role for KeyringRole {
     fn grants_at_least(&self, other: &Self) -> bool {
         // Lower ordinal = stronger (Owner==1 is strongest).
         self.0 <= other.0
     }
 }
-impl SignerRole for ChainRole {
+impl SignerRole for KeyringRole {
     fn is_founder(&self) -> bool {
         self.0 == MEMBER_OWNER as i16
     }
@@ -54,7 +54,7 @@ impl SignerRole for ChainRole {
 }
 
 /// Coerce an arbitrary-length public-key byte string to the engine's `[u8; 32]`. A signer's key is always
-/// exactly 32 bytes (enforced in [`ChainDoc::structure`] before the engine's key checks run); a non-signer
+/// exactly 32 bytes (enforced in [`KeyringDoc::structure`] before the engine's key checks run); a non-signer
 /// member's key is cosmetic to the engine (bound in full through `payload_commitment`), so padding/
 /// truncation here is safe and cannot lose coverage.
 pub(crate) fn to_pk32(bytes: &[u8]) -> [u8; 32] {
@@ -66,14 +66,14 @@ pub(crate) fn to_pk32(bytes: &[u8]) -> [u8; 32] {
 
 /// A `Keyring` presented as a [`Doc`]. Holds owned `GroupId` / `DocHash` / `PayloadCommitment` so the
 /// by-reference accessors can hand out borrows (mirrors the reference `TestDoc`).
-pub(crate) struct ChainDoc<'a> {
+pub(crate) struct KeyringDoc<'a> {
     keyring: &'a Keyring,
     group_id: GroupId,
     prev_hash: DocHash,
     payload_commitment: PayloadCommitment,
 }
 
-impl<'a> ChainDoc<'a> {
+impl<'a> KeyringDoc<'a> {
     pub(crate) fn new(keyring: &'a Keyring) -> Self {
         Self {
             group_id: GroupId(keyring.tree_id.clone()),
@@ -186,9 +186,9 @@ impl<'a> ChainDoc<'a> {
     }
 }
 
-impl Doc for ChainDoc<'_> {
+impl Doc for KeyringDoc<'_> {
     type Id = String;
-    type R = ChainRole;
+    type R = KeyringRole;
     type S = Ed25519;
 
     fn group_id(&self) -> &GroupId {
@@ -203,13 +203,13 @@ impl Doc for ChainDoc<'_> {
     fn layout_version(&self) -> u32 {
         self.keyring.layout_version
     }
-    fn members(&self) -> Vec<Signer<String, ChainRole, [u8; 32]>> {
+    fn members(&self) -> Vec<Signer<String, KeyringRole, [u8; 32]>> {
         self.keyring
             .members
             .iter()
             .map(|m| Signer {
                 id: m.member_id.clone(),
-                role: ChainRole(m.role as i16),
+                role: KeyringRole(m.role as i16),
                 public_key: to_pk32(&m.author_public_key),
             })
             .collect()

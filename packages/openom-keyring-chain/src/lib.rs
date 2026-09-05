@@ -9,10 +9,10 @@ mod keyring;
 
 pub use chain::{
     bootstrap_from_genesis, bootstrap_from_oob, decode_governing_ref, encode_governing_ref,
-    verify_reset, verify_transition, verify_walk, AuthorizedSigner, ChainError, GoverningKeyring,
+    verify_reset, verify_transition, verify_walk, AuthorizedSigner, KeyringError, GoverningKeyring,
     KeyringAnchor,
 };
-pub use doc::ChainRole;
+pub use doc::KeyringRole;
 pub use verifier::membership_view;
 pub use keyring::{
     keyring_hash, sign_keyring, verify_keyring, verify_keyring_any, Signature, SigningKey,
