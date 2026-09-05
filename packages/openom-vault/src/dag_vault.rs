@@ -4,8 +4,9 @@
 //!
 //! The trust anchor is engine-opaque bytes: the dag's pinned genesis config + op closure, with the DEK
 //! epochs + recovery escrow riding the ops' `sealing` payloads (the design pass converged on this — one
-//! signed channel, folded alongside membership). `dag_vault.rs` never touches `keyeo` directly (a one-line
-//! import grep enforces it); it drives the facade.
+//! signed channel, folded alongside membership). The membership + op-graph engine lives behind the
+//! `dag_client` facade; the DEK epochs/wraps persisted in those payloads ARE keyeo's native key-material
+//! types (`Epoch`/`Wrap`/`RecipientDescriptor`), the shared layer the sealing core is lifted onto (OPE-376).
 //!
 //! STATUS: all four [`KeyringLifecycle`] flows are built — provision, unlock, recover (RVK-authorized
 //! ReFound), change_passphrase (current-key Retarget) — with membership authoring (add/remove with
@@ -27,9 +28,16 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
-    open_rrk_secret, rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap,
-    RecoveryEscrow, SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
+    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_keyeo, new_owner_secrets,
+    open_rrk_secret, rrk_wrap_keyeo, sealed_from_keyeo, sealer_set_from_deks, validate_kdf, CoreKdf,
+    RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
+};
+// The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
+// is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
+// sealing core is lifted onto, not the dag engine's op types behind the `dag_client` facade).
+use keyeo_crypto::{
+    covers_exact, missing, KeyId as KeyeoKeyId, RecipientDescriptor, WrapMethod as KeyeoWrapMethod,
+    X25519PublicKey,
 };
 use openom_keyring_api::MembershipView;
 use crate::VaultError;
@@ -42,7 +50,7 @@ use crate::VaultError;
 /// op codec; a compact/binary form is a later perf task.)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct SealingPayload {
-    new_epochs: Vec<SealedEpoch>,
+    new_epochs: Vec<keyeo_crypto::Epoch<String>>,
     added_wraps: Vec<AddedWrap>,
     escrow: Option<RecoveryEscrow>,
 }
@@ -52,7 +60,7 @@ pub(crate) struct SealingPayload {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AddedWrap {
     key_id: Vec<u8>,
-    wrap: CoreWrap,
+    wrap: keyeo_crypto::Wrap<String>,
 }
 
 impl SealingPayload {
@@ -78,9 +86,9 @@ impl SealingPayload {
 /// early would permanently lose an epoch a full-history replica keeps.
 #[derive(Default)]
 struct FoldState {
-    tagged: Vec<(SealedEpoch, dag_client::SealingOrigin, [u8; 32])>,
+    tagged: Vec<(keyeo_crypto::Epoch<String>, dag_client::SealingOrigin, [u8; 32])>,
     escrow: Option<RecoveryEscrow>,
-    minting_ops: u32,
+    minting_ops: u64,
 }
 
 /// Fold a run of sealing entries into `state`. `count_minting` = whether these entries increment the minting-op
@@ -113,7 +121,9 @@ fn fold_into(
         // added_wraps attach a member's wrap to an EXISTING epoch (an add-member's joiner wraps ride an
         // Other-origin Add op — legitimate, unlike minting) — applied during the fold so coverage sees them.
         for aw in payload.added_wraps {
-            if let Some((ep, _, _)) = state.tagged.iter_mut().find(|(e, _, _)| e.key_id == aw.key_id) {
+            if let Some((ep, _, _)) =
+                state.tagged.iter_mut().find(|(e, _, _)| e.key_id.as_bytes() == aw.key_id.as_slice())
+            {
                 ep.wraps.push(aw.wrap);
             }
         }
@@ -137,15 +147,19 @@ fn finalize_sealing(state: FoldState, members: &MembershipView) -> Result<Folded
     // future `max()+1` re-epoch with RevisionOverflow, a permanent DoS, and (b) permanently win the
     // write-epoch race. The bound never drops an honest epoch (its ordinal is always < M) and caps a hostile
     // one at M-1, so `checked_add` can only overflow after ~4e9 real ops.
-    tagged.retain(|(e, _, _)| e.epoch < minting_ops);
+    tagged.retain(|(e, _, _)| e.ordinal < minting_ops);
+
+    // The resolved membership as keyeo coverage descriptors (each ordinary member key-bound to their current
+    // key; the RRK addressed to the owner id), built once for the winner's coverage + the backfill check.
+    let (required, rrk) = coverage_descriptors(members);
 
     // The write epoch is the deterministic winner among ELIGIBLE epochs — genesis/remove are always
     // eligible (the legitimate baseline), a reseal only if it COVERS the resolved membership, so a
     // self-only or wrong-set reseal can never win regardless of ordinal grinding. Among eligible, the
     // greatest (ordinal, op-id). `needs_reseal` = the winner's wrap set is stale vs the resolved membership.
-    let mut winner: Option<(u32, [u8; 32], Vec<u8>, bool)> = None;
+    let mut winner: Option<(u64, [u8; 32], Vec<u8>, bool)> = None;
     for (ep, origin, op_id) in &tagged {
-        let covers = epoch_covers(ep, members);
+        let covers = covers_exact(ep, &required, &rrk);
         let eligible = match origin {
             SealingOrigin::Genesis | SealingOrigin::Remove => true,
             SealingOrigin::Reseal => covers,
@@ -154,15 +168,20 @@ fn finalize_sealing(state: FoldState, members: &MembershipView) -> Result<Folded
         if eligible
             && winner
                 .as_ref()
-                .is_none_or(|(we, wid, _, _)| (ep.epoch, *op_id) > (*we, *wid))
+                .is_none_or(|(we, wid, _, _)| (ep.ordinal, *op_id) > (*we, *wid))
         {
-            winner = Some((ep.epoch, *op_id, ep.key_id.clone(), covers));
+            winner = Some((ep.ordinal, *op_id, ep.key_id.as_bytes().to_vec(), covers));
         }
     }
     let (_, _, write_key_id, winner_covers) = winner.ok_or(VaultError::MissingWrap)?;
 
-    let epochs: Vec<SealedEpoch> = tagged.into_iter().map(|(e, _, _)| e).collect();
-    let needs_backfill = any_epoch_missing_a_member(&epochs, members);
+    let epochs: Vec<keyeo_crypto::Epoch<String>> = tagged.into_iter().map(|(e, _, _)| e).collect();
+    // needs_backfill: some retained epoch lacks a current-key wrap for a resolved MEMBER. The owner/RRK is
+    // reached via the RRK wrap (no per-epoch member wrap), so filter the rrk id out of keyeo's `missing`,
+    // which otherwise reports it whenever an epoch's RRK wrap is absent.
+    let needs_backfill = epochs
+        .iter()
+        .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id));
     Ok(FoldedSealing {
         epochs,
         escrow,
@@ -170,6 +189,13 @@ fn finalize_sealing(state: FoldState, members: &MembershipView) -> Result<Folded
         needs_reseal: !winner_covers,
         needs_backfill,
     })
+}
+
+/// Map the folded keyeo `Epoch`s to the `SealedEpoch` shape the engine-shared DEK openers
+/// ([`epoch_deks`] / [`member_epoch_deks`]) still consume. Read-side only — the dag persists the keyeo
+/// `Epoch`s directly; this adapter dies in U4 once the chain also opens over keyeo (U3).
+fn sealed_epochs(epochs: &[keyeo_crypto::Epoch<String>]) -> Vec<SealedEpoch> {
+    epochs.iter().map(sealed_from_keyeo).collect()
 }
 
 /// Fold the effective ops' sealing deltas into the current epochs + escrow + the deterministic write epoch.
@@ -210,7 +236,7 @@ fn author_checkpoint_sealing(
         origin: dag_client::SealingOrigin::Other,
         bytes: SealingPayload::escrow_only(escrow).to_bytes(),
     });
-    Ok((segment, state.minting_ops))
+    Ok((segment, state.minting_ops as u32))
 }
 
 /// Resolve-from-checkpoint fold: seed the minting count from the checkpoint `baseline`, fold the checkpoint
@@ -224,7 +250,7 @@ fn fold_from_checkpoint(
     tail: &[dag_client::SealingEntry],
     members: &MembershipView,
 ) -> Result<FoldedSealing, VaultError> {
-    let mut state = FoldState { minting_ops: baseline, ..Default::default() };
+    let mut state = FoldState { minting_ops: baseline as u64, ..Default::default() };
     fold_into(&mut state, segment, false)?;
     fold_into(&mut state, tail, true)?;
     finalize_sealing(state, members)
@@ -252,28 +278,28 @@ fn covering_reseal_sealing(
     owner_id: &str,
     escrow: &RecoveryEscrow,
     members: &MembershipView,
-    epochs: &[SealedEpoch],
+    epochs: &[keyeo_crypto::Epoch<String>],
 ) -> Result<Vec<u8>, VaultError> {
     let new_dek = generate_dek()?;
     let new_key_id = generate_salt()?.to_vec();
-    let new_epoch = epochs
+    let new_ordinal = epochs
         .iter()
-        .map(|e| e.epoch)
+        .map(|e| e.ordinal)
         .max()
         .map_or(Ok(0), |m| m.checked_add(1).ok_or(VaultError::RevisionOverflow))?;
-    let mut wraps = vec![rrk_wrap_epoch(&escrow.public_key, &new_dek, tree_id, owner_id, &new_key_id)?];
+    let mut wraps = vec![rrk_wrap_keyeo(&escrow.public_key, &new_dek, tree_id, owner_id, &new_key_id)?];
     for m in &members.members {
         // The owner reaches the DEK via the RRK wrap; a member with an empty/malformed key can't be wrapped
         // (excluded from coverage too, so this doesn't leave a permanent needs_reseal — OPE-290).
         if m.is_owner() || m.hpke_public_key.is_empty() {
             continue;
         }
-        wraps.push(member_wrap_epoch(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?);
+        wraps.push(member_wrap_keyeo(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?);
     }
     Ok(SealingPayload {
-        new_epochs: vec![SealedEpoch {
-            key_id: new_key_id,
-            epoch: new_epoch,
+        new_epochs: vec![keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(new_key_id),
+            ordinal: new_ordinal,
             wraps,
         }],
         added_wraps: vec![],
@@ -288,31 +314,36 @@ fn covering_reseal_sealing(
 /// leaks and lockouts), this is a MISSING-only, ALL-epochs check: an extra (now-removed) member still wrapped
 /// in an old epoch is fine — historical read was already granted and removal is forward-only. The owner
 /// reaches every DEK via the RRK, so it needs no per-epoch owner wrap.
-fn any_epoch_missing_a_member(epochs: &[SealedEpoch], members: &MembershipView) -> bool {
-    // Key-bound, MISSING-only (OPE-290): a member is "covered" in an epoch iff it has a wrap addressed to
-    // their CURRENT key. A wrap on their stale key (after a rekey race) counts as missing, so backfill
-    // re-wraps them. Missing-only (not set equality) because backfill only APPENDS — a leftover stale-key
-    // wrap is fine and must not read as an extra. Empty-key members are skipped (can't be wrapped/matched).
-    let need: Vec<(&str, &[u8])> = members
+/// The resolved membership as keyeo coverage descriptors. `required` = every ordinary member (the owner is
+/// excluded — reached via the RRK — and empty-hpke-key members are excluded), each KEY-BOUND to their
+/// CURRENT hpke key (`expected_key = Some`), which is the OPE-290 stale-key guard: a wrap on a member's old
+/// key doesn't count toward coverage. `rrk` = the owner id with no key binding (the RRK wrap is checked by
+/// presence at the owner id). Fed to keyeo `covers_exact` (winner coverage / needs_reseal) and `missing`
+/// (backfill). Replaces the hand-rolled `epoch_covers` / `any_epoch_missing_a_member`.
+fn coverage_descriptors(
+    members: &MembershipView,
+) -> (Vec<RecipientDescriptor<String>>, RecipientDescriptor<String>) {
+    let required = members
         .members
         .iter()
         .filter(|m| !m.is_owner() && !m.hpke_public_key.is_empty())
-        .map(|m| (m.member_id.as_str(), m.hpke_public_key.as_slice()))
-        .collect();
-    epochs.iter().any(|ep| {
-        need.iter().any(|(id, key)| {
-            !ep.wraps.iter().any(|w| {
-                w.wrap_method == HPKE && w.member_id == *id && w.recipient_public_key == *key
-            })
+        .map(|m| RecipientDescriptor {
+            id: m.member_id.clone(),
+            expected_key: X25519PublicKey::try_from(m.hpke_public_key.as_slice()).ok(),
         })
-    })
+        .collect();
+    let rrk = RecipientDescriptor {
+        id: members.owner().map(|o| o.member_id.clone()).unwrap_or_default(),
+        expected_key: None,
+    };
+    (required, rrk)
 }
 
 /// The result of folding the sealing deltas: the retained epochs (for reads), the recovery escrow, the
 /// deterministic write-epoch `key_id` (the winner), and whether the winner is stale vs the resolved
 /// membership (`needs_reseal`).
 struct FoldedSealing {
-    epochs: Vec<SealedEpoch>,
+    epochs: Vec<keyeo_crypto::Epoch<String>>,
     escrow: RecoveryEscrow,
     write_key_id: Vec<u8>,
     needs_reseal: bool,
@@ -335,46 +366,6 @@ pub struct Backfilled {
     pub anchor: Vec<u8>,
     pub watermark: Vec<u8>,
     pub backfilled: bool,
-}
-
-/// Whether `epoch`'s wraps serve the resolved membership: an RRK wrap for the owner, plus — for each resolved
-/// non-owner member — an HPKE wrap addressed to their CURRENT key, and no wrap for anyone NOT resolved. A
-/// mismatch means the epoch is stale vs the merged membership, so a reseal is due. Two independent checks:
-///  - **member-id set equality** catches a LEAK (a removed member still wrapped) or a LOCKOUT (a resolved
-///    member absent). Kept id-level so a benign leftover stale-key wrap for a still-current member (after a
-///    rekey/backfill) does NOT read as a leak.
-///  - **current-key EXISTS** (OPE-290): every resolved member has AT LEAST ONE wrap addressed to their
-///    current `hpke_public_key`. A wrap left on a member's STALE key after a rekey race passes id-equality
-///    but not this, so it is caught. Exists-form (not pair-set equality) so a coexisting old-key wrap is
-///    ignored, not treated as churn. `recipient_public_key` is an unauthenticated hint (see `CoreWrap`): this
-///    detects honest rekey races, not a malicious author who lies about the recipient over garbage ciphertext.
-///
-/// A resolved member with an empty/malformed `hpke_public_key` is EXCLUDED from both checks — it can be
-/// neither wrapped nor matched, so demanding its coverage would wedge `needs_reseal` permanently true.
-fn epoch_covers(epoch: &SealedEpoch, members: &MembershipView) -> bool {
-    use std::collections::HashSet;
-    let has_rrk = epoch.wraps.iter().any(|w| w.wrap_method == RRK_HPKE);
-    let need = || {
-        members
-            .members
-            .iter()
-            .filter(|m| !m.is_owner() && !m.hpke_public_key.is_empty())
-    };
-    let wrapped_ids: HashSet<&str> = epoch
-        .wraps
-        .iter()
-        .filter(|w| w.wrap_method == HPKE)
-        .map(|w| w.member_id.as_str())
-        .collect();
-    let resolved_ids: HashSet<&str> = need().map(|m| m.member_id.as_str()).collect();
-    let keys_current = need().all(|m| {
-        epoch.wraps.iter().any(|w| {
-            w.wrap_method == HPKE
-                && w.member_id == m.member_id
-                && w.recipient_public_key == m.hpke_public_key
-        })
-    });
-    has_rrk && wrapped_ids == resolved_ids && keys_current
 }
 
 /// Map a facade anti-rollback failure onto the sealer's error vocabulary: a rolled-back anchor and a
@@ -416,10 +407,10 @@ impl KeyringLifecycle for DagVault {
         let secrets = new_owner_secrets(passphrase.expose())?;
 
         // Epoch 0: the founder reaches the DEK via the RRK wrap (as on the chain).
-        let rrk_wrap = rrk_wrap_epoch(&rrk_public, &dek, tree_id, member_id, &key_id)?;
-        let epoch0 = SealedEpoch {
-            key_id: key_id.clone(),
-            epoch: 0,
+        let rrk_wrap = rrk_wrap_keyeo(&rrk_public, &dek, tree_id, member_id, &key_id)?;
+        let epoch0 = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(key_id.clone()),
+            ordinal: 0,
             wraps: vec![rrk_wrap],
         };
         let escrow = build_recovery_escrow(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?;
@@ -504,7 +495,7 @@ impl KeyringLifecycle for DagVault {
             member_id,
             PASSPHRASE,
         )?;
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
+        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &rrk_secret)?;
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let owner_key: [u8; 32] = founder
@@ -601,7 +592,7 @@ impl KeyringLifecycle for DagVault {
         .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
 
         // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
+        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &rrk_secret)?;
         let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
@@ -760,11 +751,12 @@ impl DagVault {
         )?;
 
         // Reach every epoch's DEK and wrap each to the new member's HPKE key.
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let sealed = sealed_epochs(&epochs);
+        let deks = epoch_deks(&sealed, tree_id, owner_id, &rrk_secret)?;
         let added_wraps: Vec<AddedWrap> = deks
             .iter()
             .map(|(key_id, _epoch, dek)| {
-                member_wrap_epoch(&new_member_hpke_public, dek, tree_id, new_member_id, key_id)
+                member_wrap_keyeo(&new_member_hpke_public, dek, tree_id, new_member_id, key_id)
                     .map(|wrap| AddedWrap {
                         key_id: key_id.clone(),
                         wrap,
@@ -822,7 +814,7 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
+        let deks = member_epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &root.hpke_secret)?;
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
         let my_key: [u8; 32] = me
             .author_public_key
@@ -889,12 +881,12 @@ impl DagVault {
         // Forward-secret re-epoch: a fresh DEK wrapped to the RRK (owner) + each REMAINING ordinary member.
         let new_dek = generate_dek()?;
         let new_key_id = generate_salt()?.to_vec();
-        let new_epoch = epochs
+        let new_ordinal = epochs
             .iter()
-            .map(|e| e.epoch)
+            .map(|e| e.ordinal)
             .max()
             .map_or(Ok(0), |m| m.checked_add(1).ok_or(VaultError::RevisionOverflow))?;
-        let mut wraps = vec![rrk_wrap_epoch(
+        let mut wraps = vec![rrk_wrap_keyeo(
             &escrow.public_key,
             &new_dek,
             tree_id,
@@ -905,7 +897,7 @@ impl DagVault {
             if m.member_id == remove_member_id || m.member_id == owner_id {
                 continue; // the removed member gets no wrap; the owner reaches it via the RRK
             }
-            wraps.push(member_wrap_epoch(
+            wraps.push(member_wrap_keyeo(
                 &m.hpke_public_key,
                 &new_dek,
                 tree_id,
@@ -914,9 +906,9 @@ impl DagVault {
             )?);
         }
         let sealing = SealingPayload {
-            new_epochs: vec![SealedEpoch {
-                key_id: new_key_id,
-                epoch: new_epoch,
+            new_epochs: vec![keyeo_crypto::Epoch {
+                key_id: KeyeoKeyId::new(new_key_id),
+                ordinal: new_ordinal,
                 wraps,
             }],
             added_wraps: vec![],
@@ -1190,23 +1182,29 @@ impl DagVault {
         // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
         // STALE key after a rekey race is re-wrapped too). (`epoch_deks` skips an un-openable epoch rather
         // than failing, so a corrupt epoch can't brick this.) Empty-key members are skipped — nothing to wrap.
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, owner_id, &rrk_secret)?;
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _epoch, dek) in &deks {
-            let epoch_wraps = epochs.iter().find(|e| &e.key_id == key_id).map(|e| e.wraps.as_slice()).unwrap_or(&[]);
+            let epoch_wraps = epochs
+                .iter()
+                .find(|e| e.key_id.as_bytes() == key_id.as_slice())
+                .map(|e| e.wraps.as_slice())
+                .unwrap_or(&[]);
             for m in &resolved.members.members {
                 if m.is_owner() || m.hpke_public_key.is_empty() {
                     continue;
                 }
+                // Covered = a MemberHpke wrap addressed to this member AND bound to their CURRENT key.
                 let covered = epoch_wraps.iter().any(|w| {
-                    w.wrap_method == HPKE
-                        && w.member_id == m.member_id
-                        && w.recipient_public_key == m.hpke_public_key
+                    w.recipient == m.member_id
+                        && matches!(&w.method,
+                            KeyeoWrapMethod::MemberHpke { recipient_key, .. }
+                                if recipient_key.as_ref() == m.hpke_public_key.as_slice())
                 });
                 if covered {
                     continue;
                 }
-                let wrap = member_wrap_epoch(&m.hpke_public_key, dek, tree_id, &m.member_id, key_id)?;
+                let wrap = member_wrap_keyeo(&m.hpke_public_key, dek, tree_id, &m.member_id, key_id)?;
                 added_wraps.push(AddedWrap {
                     key_id: key_id.clone(),
                     wrap,
@@ -1277,10 +1275,23 @@ mod tests {
         }
     }
 
+    /// Pad/truncate arbitrary test bytes into a 32-byte X25519 key. Real HPKE keys are already 32 bytes; the
+    /// tests use short readable labels, so this makes them well-formed (keyeo's `X25519PublicKey` is fixed
+    /// 32) yet distinct — the coverage checks are key-bound (OPE-290), so the byte value carries meaning.
+    fn key32(bytes: &[u8]) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        let n = bytes.len().min(32);
+        k[..n].copy_from_slice(&bytes[..n]);
+        k
+    }
+    fn x25519(bytes: &[u8]) -> X25519PublicKey {
+        X25519PublicKey::from_bytes(key32(bytes))
+    }
+
     /// A member's deterministic HPKE public key, so `membership` (the resolved view) and `member_wrap` (the
     /// epoch wrap) agree on what "the current key" is for the coverage checks (OPE-290).
     fn hpke_key(member: &str) -> Vec<u8> {
-        format!("hpke-{member}").into_bytes()
+        key32(format!("hpke-{member}").as_bytes()).to_vec()
     }
 
     /// A resolved membership: `owner` (role 1) plus each of `members` as an Editor (role 4).
@@ -1296,41 +1307,53 @@ mod tests {
         MembershipView::new(v, false)
     }
 
+    /// A placeholder wrap ciphertext — the fold-logic fixtures never open a wrap, only inspect its
+    /// recipient/method/key, so the DEK bytes are irrelevant (a real open is exercised by the opener tests).
+    fn placeholder_ct() -> keyeo_crypto::WrappedDek {
+        keyeo_crypto::WrappedDek::from_bytes([0u8; 48])
+    }
+    fn placeholder_encapped() -> keyeo_crypto::EncappedKey {
+        keyeo_crypto::EncappedKey::from_bytes([0u8; 32])
+    }
+
     /// An HPKE wrap addressed to `member`'s CURRENT key (matches `membership`).
-    fn member_wrap(member: &str) -> CoreWrap {
+    fn member_wrap(member: &str) -> keyeo_crypto::Wrap<String> {
         member_wrap_keyed(member, &hpke_key(member))
     }
     /// An HPKE wrap for `member` addressed to an explicit `recipient` key — pass a non-current key to model a
     /// STALE-key wrap left after a rekey race (OPE-290).
-    fn member_wrap_keyed(member: &str, recipient: &[u8]) -> CoreWrap {
-        CoreWrap {
-            member_id: member.to_string(),
-            wrap_method: HPKE,
-            nonce: vec![],
-            wrapped_dek: vec![],
-            kdf: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: recipient.to_vec(),
+    fn member_wrap_keyed(member: &str, recipient: &[u8]) -> keyeo_crypto::Wrap<String> {
+        keyeo_crypto::Wrap {
+            recipient: member.to_string(),
+            method: KeyeoWrapMethod::MemberHpke {
+                encapped: placeholder_encapped(),
+                recipient_key: x25519(recipient),
+            },
+            ciphertext: placeholder_ct(),
         }
     }
-    fn rrk_wrap() -> CoreWrap {
-        CoreWrap {
-            wrap_method: RRK_HPKE,
-            ..member_wrap("owner")
+    fn rrk_wrap() -> keyeo_crypto::Wrap<String> {
+        keyeo_crypto::Wrap {
+            recipient: "owner".to_string(),
+            method: KeyeoWrapMethod::RrkHpke {
+                encapped: placeholder_encapped(),
+                recipient_key: x25519(&hpke_key("owner")),
+            },
+            ciphertext: placeholder_ct(),
         }
     }
     fn sealing_entry(
         op_id: u8,
         key_id: &[u8],
-        ordinal: u32,
+        ordinal: u64,
         origin: dag_client::SealingOrigin,
-        wraps: Vec<CoreWrap>,
+        wraps: Vec<keyeo_crypto::Wrap<String>>,
         escrow: Option<RecoveryEscrow>,
     ) -> dag_client::SealingEntry {
         let payload = SealingPayload {
-            new_epochs: vec![SealedEpoch {
-                key_id: key_id.to_vec(),
-                epoch: ordinal,
+            new_epochs: vec![keyeo_crypto::Epoch {
+                key_id: KeyeoKeyId::new(key_id.to_vec()),
+                ordinal,
                 wraps,
             }],
             added_wraps: vec![],
@@ -1349,6 +1372,24 @@ mod tests {
             wraps: vec![],
             recovery_verifying_key: vec![2],
         }
+    }
+
+    /// Test lens over the production coverage: does this epoch cover the resolved membership exactly (the
+    /// winner/`needs_reseal` predicate)? Mirrors `finalize_sealing`'s use of `covers_exact`.
+    fn epoch_covers(ep: &keyeo_crypto::Epoch<String>, members: &MembershipView) -> bool {
+        let (required, rrk) = coverage_descriptors(members);
+        covers_exact(ep, &required, &rrk)
+    }
+    /// Test lens over the `needs_backfill` check: does any epoch lock a resolved MEMBER out (owner/RRK
+    /// excluded, exactly as `finalize_sealing` filters the rrk id from `missing`)?
+    fn any_epoch_missing_a_member(
+        epochs: &[keyeo_crypto::Epoch<String>],
+        members: &MembershipView,
+    ) -> bool {
+        let (required, rrk) = coverage_descriptors(members);
+        epochs
+            .iter()
+            .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id))
     }
 
     fn assert_folded_eq(a: &FoldedSealing, b: &FoldedSealing) {
@@ -1396,7 +1437,7 @@ mod tests {
         let full = fold_sealing(&[genesis, removed_hi, retained], &members).unwrap();
 
         assert!(
-            from_cp.epochs.iter().any(|e| e.key_id == b"k2".to_vec()),
+            from_cp.epochs.iter().any(|e| e.key_id.as_bytes() == b"k2"),
             "the transiently-dropped epoch (ordinal 2) is resurrected"
         );
         assert_folded_eq(&from_cp, &full);
@@ -1410,9 +1451,13 @@ mod tests {
     fn compact_to_checkpoint_round_trips_through_resolve() {
         let sk = edsign::SigningKey::from_seed(&[9u8; 32]);
         let pk = sk.verifying_key().to_bytes();
-        let seal = |key: &[u8], ord: u32, esc: Option<RecoveryEscrow>| {
+        let seal = |key: &[u8], ord: u64, esc: Option<RecoveryEscrow>| {
             SealingPayload {
-                new_epochs: vec![SealedEpoch { key_id: key.to_vec(), epoch: ord, wraps: vec![] }],
+                new_epochs: vec![keyeo_crypto::Epoch {
+                    key_id: KeyeoKeyId::new(key.to_vec()),
+                    ordinal: ord,
+                    wraps: vec![],
+                }],
                 added_wraps: vec![],
                 escrow: esc,
             }
@@ -1536,17 +1581,17 @@ mod tests {
         use dag_client::SealingOrigin::{Genesis, Remove};
         let members = membership("owner", &["bob"]);
 
-        // A Remove op grinds an epoch at u32::MAX. Two minting ops → bound 2, so u32::MAX (>= 2) is dropped:
+        // A Remove op grinds an epoch at u64::MAX. Two minting ops → bound 2, so u64::MAX (>= 2) is dropped:
         // without the guard it is eligible and its huge ordinal would win AND brick every future re-epoch.
         let attack = vec![
             sealing_entry(0, b"k0", 0, Genesis, vec![rrk_wrap(), member_wrap("bob")], Some(escrow())),
-            sealing_entry(9, b"evil", u32::MAX, Remove, vec![rrk_wrap(), member_wrap("bob")], None),
+            sealing_entry(9, b"evil", u64::MAX, Remove, vec![rrk_wrap(), member_wrap("bob")], None),
         ];
         let folded = fold_sealing(&attack, &members).unwrap();
         assert_eq!(folded.write_key_id, b"k0".to_vec(), "an implausible-ordinal epoch cannot win");
         assert!(
-            folded.epochs.iter().all(|e| e.epoch < 2),
-            "the u32::MAX epoch is dropped from the retained set, so max()+1 cannot overflow"
+            folded.epochs.iter().all(|e| e.ordinal < 2),
+            "the u64::MAX epoch is dropped from the retained set, so max()+1 cannot overflow"
         );
 
         // Boundary: a legit Remove epoch at ordinal 1 (bound 2, 1 < 2) is retained and legitimately wins.
@@ -1602,19 +1647,23 @@ mod tests {
     fn epoch_covers_binds_the_recipient_key() {
         let members = membership("owner", &["bob"]); // bob's current key = hpke_key("bob")
 
-        let ok = SealedEpoch { key_id: b"k".to_vec(), epoch: 0, wraps: vec![rrk_wrap(), member_wrap("bob")] };
+        let ok = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k".to_vec()),
+            ordinal: 0,
+            wraps: vec![rrk_wrap(), member_wrap("bob")],
+        };
         assert!(epoch_covers(&ok, &members), "a wrap to bob's current key covers");
 
-        let stale = SealedEpoch {
-            key_id: b"k".to_vec(),
-            epoch: 0,
+        let stale = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k".to_vec()),
+            ordinal: 0,
             wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
         };
         assert!(!epoch_covers(&stale, &members), "a wrap on bob's STALE key does not cover");
 
-        let both = SealedEpoch {
-            key_id: b"k".to_vec(),
-            epoch: 0,
+        let both = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k".to_vec()),
+            ordinal: 0,
             wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key"), member_wrap("bob")],
         };
         assert!(epoch_covers(&both, &members), "a coexisting current-key wrap covers; the old one is ignored");
@@ -1646,7 +1695,11 @@ mod tests {
             ],
             false,
         );
-        let ep = SealedEpoch { key_id: b"k".to_vec(), epoch: 0, wraps: vec![rrk_wrap()] };
+        let ep = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k".to_vec()),
+            ordinal: 0,
+            wraps: vec![rrk_wrap()],
+        };
         assert!(epoch_covers(&ep, &members), "an empty-keyed member is excluded, so an RRK-only epoch covers");
         assert!(!any_epoch_missing_a_member(&[ep], &members), "and it isn't reported as a backfill gap");
     }
@@ -1663,10 +1716,14 @@ mod tests {
         let (member, key_id) = ("bob", b"k0");
         // A dead wrap to a DIFFERENT key, listed FIRST; then the live wrap to bob's real key.
         let other = generate_hpke_keypair().unwrap();
-        let dead = member_wrap_epoch(&other.public, &dek, tree, member, key_id).unwrap();
-        let live = member_wrap_epoch(&root.hpke_public, &dek, tree, member, key_id).unwrap();
-        let ep = SealedEpoch { key_id: key_id.to_vec(), epoch: 0, wraps: vec![dead, live] };
-        let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret).unwrap();
+        let dead = member_wrap_keyeo(&other.public, &dek, tree, member, key_id).unwrap();
+        let live = member_wrap_keyeo(&root.hpke_public, &dek, tree, member, key_id).unwrap();
+        let ep = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(key_id.to_vec()),
+            ordinal: 0,
+            wraps: vec![dead, live],
+        };
+        let deks = member_epoch_deks(&sealed_epochs(&[ep]), tree, member, &root.hpke_secret).unwrap();
         assert_eq!(deks.len(), 1, "the epoch opens via the live wrap despite a dead wrap first");
     }
 
@@ -1679,26 +1736,25 @@ mod tests {
         let HpkeKeypair { secret, public } = generate_hpke_keypair().unwrap();
         let rrk_secret = RrkSecret::from(secret);
         let dek = generate_dek().unwrap();
-        let good = SealedEpoch {
-            key_id: b"good".to_vec(),
-            epoch: 0,
-            wraps: vec![rrk_wrap_epoch(&public, &dek, tree, "owner", b"good").unwrap()],
+        let good = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"good".to_vec()),
+            ordinal: 0,
+            wraps: vec![rrk_wrap_keyeo(&public, &dek, tree, "owner", b"good").unwrap()],
         };
-        // A garbage epoch: an RRK-method wrap the owner's RRK secret cannot open.
-        let garbage = SealedEpoch {
-            key_id: b"evil".to_vec(),
-            epoch: 1,
-            wraps: vec![CoreWrap {
-                member_id: "owner".into(),
-                wrap_method: RRK_HPKE,
-                nonce: vec![],
-                wrapped_dek: vec![9u8; 48],
-                kdf: None,
-                ephemeral_public_key: vec![9u8; 32],
-                recipient_public_key: vec![],
+        // A garbage epoch: an RRK-method wrap the owner's RRK secret cannot open (well-formed bytes, junk DEK).
+        let garbage = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"evil".to_vec()),
+            ordinal: 1,
+            wraps: vec![keyeo_crypto::Wrap {
+                recipient: "owner".into(),
+                method: KeyeoWrapMethod::RrkHpke {
+                    encapped: keyeo_crypto::EncappedKey::from_bytes([9u8; 32]),
+                    recipient_key: X25519PublicKey::from_bytes([9u8; 32]),
+                },
+                ciphertext: keyeo_crypto::WrappedDek::from_bytes([9u8; 48]),
             }],
         };
-        let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret).unwrap();
+        let deks = epoch_deks(&sealed_epochs(&[good, garbage]), tree, "owner", &rrk_secret).unwrap();
         assert_eq!(deks.len(), 1, "the un-openable garbage epoch is skipped, not fatal");
         assert_eq!(deks[0].0, b"good".to_vec(), "the legitimate epoch still opens");
     }

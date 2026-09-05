@@ -407,8 +407,24 @@ fn epoch_ctx<'a>(group_id: &'a KeyeoGroupId, key_id: &'a KeyeoKeyId) -> GroupCon
     GroupContext { group_id, key_id }
 }
 
-/// HPKE-wrap an epoch's `dek` to the founder's recovery root **public** key (needs no
-/// secret), as the `WRAP_METHOD_RRK_HPKE` wrap that gives the founder cross-epoch access.
+/// HPKE-wrap an epoch's `dek` to the founder's recovery root **public** key (needs no secret), as the
+/// `RrkHpke` wrap that gives the founder cross-epoch access — returning keyeo's native [`KeyeoWrap`]. The dag
+/// persists this directly; the chain adapts it via [`rrk_wrap_epoch`].
+pub(crate) fn rrk_wrap_keyeo(
+    rrk_public: &[u8],
+    dek: &Dek,
+    tree_id: &[u8],
+    founder_id: &str,
+    key_id: &[u8],
+) -> Result<KeyeoWrap<String>, VaultError> {
+    let group_id = KeyeoGroupId::new(tree_id.to_vec());
+    let kid = KeyeoKeyId::new(key_id.to_vec());
+    let rrk_public = X25519PublicKey::try_from(rrk_public)
+        .map_err(|_| VaultError::BadKeyring("rrk public key length".into()))?;
+    Ok(keyeo_rrk_wrap(dek, founder_id.to_string(), rrk_public, &epoch_ctx(&group_id, &kid))?)
+}
+
+/// The openom [`CoreWrap`] adapter over [`rrk_wrap_keyeo`] — the chain's persisted shape.
 pub(crate) fn rrk_wrap_epoch(
     rrk_public: &[u8],
     dek: &Dek,
@@ -416,16 +432,26 @@ pub(crate) fn rrk_wrap_epoch(
     founder_id: &str,
     key_id: &[u8],
 ) -> Result<CoreWrap, VaultError> {
-    let group_id = KeyeoGroupId::new(tree_id.to_vec());
-    let kid = KeyeoKeyId::new(key_id.to_vec());
-    let rrk_public = X25519PublicKey::try_from(rrk_public)
-        .map_err(|_| VaultError::BadKeyring("rrk public key length".into()))?;
-    let w = keyeo_rrk_wrap(dek, founder_id.to_string(), rrk_public, &epoch_ctx(&group_id, &kid))?;
-    Ok(core_from_keyeo(w))
+    Ok(core_from_keyeo(rrk_wrap_keyeo(rrk_public, dek, tree_id, founder_id, key_id)?))
 }
 
 /// HPKE-wrap an epoch's `dek` to a MEMBER's public key — the per-member wrap giving them access to this
-/// epoch (add-member). Mirror of [`rrk_wrap_epoch`] with the ordinary member HPKE method.
+/// epoch — returning keyeo's native [`KeyeoWrap`]. Mirror of [`rrk_wrap_keyeo`] with the member HPKE method.
+pub(crate) fn member_wrap_keyeo(
+    member_hpke_public: &[u8],
+    dek: &Dek,
+    tree_id: &[u8],
+    member_id: &str,
+    key_id: &[u8],
+) -> Result<KeyeoWrap<String>, VaultError> {
+    let group_id = KeyeoGroupId::new(tree_id.to_vec());
+    let kid = KeyeoKeyId::new(key_id.to_vec());
+    let recipient_key = X25519PublicKey::try_from(member_hpke_public)
+        .map_err(|_| VaultError::BadKeyring("member hpke key length".into()))?;
+    Ok(keyeo_member_wrap(dek, member_id.to_string(), recipient_key, &epoch_ctx(&group_id, &kid))?)
+}
+
+/// The openom [`CoreWrap`] adapter over [`member_wrap_keyeo`] — the chain's persisted shape.
 pub(crate) fn member_wrap_epoch(
     member_hpke_public: &[u8],
     dek: &Dek,
@@ -433,12 +459,18 @@ pub(crate) fn member_wrap_epoch(
     member_id: &str,
     key_id: &[u8],
 ) -> Result<CoreWrap, VaultError> {
-    let group_id = KeyeoGroupId::new(tree_id.to_vec());
-    let kid = KeyeoKeyId::new(key_id.to_vec());
-    let recipient_key = X25519PublicKey::try_from(member_hpke_public)
-        .map_err(|_| VaultError::BadKeyring("member hpke key length".into()))?;
-    let w = keyeo_member_wrap(dek, member_id.to_string(), recipient_key, &epoch_ctx(&group_id, &kid))?;
-    Ok(core_from_keyeo(w))
+    Ok(core_from_keyeo(member_wrap_keyeo(member_hpke_public, dek, tree_id, member_id, key_id)?))
+}
+
+/// Map a keyeo `Epoch<String>` back to a `SealedEpoch`, so the dag (which now persists keyeo `Epoch`s) can
+/// feed the still-`SealedEpoch`-based DEK openers ([`epoch_deks`] / [`member_epoch_deks`]) without
+/// duplicating them. Read-side adapter only.
+pub(crate) fn sealed_from_keyeo(e: &keyeo_crypto::Epoch<String>) -> SealedEpoch {
+    SealedEpoch {
+        key_id: e.key_id.as_bytes().to_vec(),
+        epoch: e.ordinal as u32,
+        wraps: e.wraps.iter().cloned().map(core_from_keyeo).collect(),
+    }
 }
 
 /// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.
