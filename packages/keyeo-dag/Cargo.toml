@@ -30,3 +30,5 @@ postcard = { version = "1", features = ["use-std"] }
 [dev-dependencies]
 # Adversarial property tests for the authority-aware resolver (an unauthorized op has no effect).
 proptest = "1"
+# The signing seam for `Signed`-based checkpoint tests (matches keyeo-core's Ed25519-via-edsign).
+edsign.workspace = true

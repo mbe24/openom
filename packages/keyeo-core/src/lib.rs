@@ -5,6 +5,7 @@ pub mod quorum;
 pub mod retention;
 pub mod roles;
 pub mod signature;
+pub mod signed;
 
 pub use canonical::{CanonicalBytes, Postcard};
 pub use quorum::Requirement;
@@ -13,3 +14,4 @@ pub use retention::{
 };
 pub use roles::Role;
 pub use signature::{Ed25519, SigError, SignatureScheme};
+pub use signed::Signed;
