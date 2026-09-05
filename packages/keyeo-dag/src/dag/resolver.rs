@@ -5,7 +5,6 @@ use crate::SignatureScheme;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 
 pub trait OpId:
     Debug + Clone + Copy + Eq + std::hash::Hash + Ord + Send + Sync + serde::Serialize
@@ -227,10 +226,6 @@ pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::Ed25519
     /// an op minted for another group can never resolve into this one. Empty (`&[]`) = an unassigned group
     /// (keyeo's own tests, single-group callers) — then the match is vacuous, by design.
     pub group_id: GroupId,
-    // `pub` (harmless — zero-sized) so the exhaustive `CanonicalBytes` destructure in `canonical` can name it;
-    // that destructure is the guard that a NEW trust-relevant state field can't silently escape a snapshot's
-    // signed bytes. All other fields are already `pub`, so this exposes nothing new.
-    pub _phantom: PhantomData<S>,
 }
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
@@ -242,7 +237,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             dek_wraps: Vec::new(),
             reset_authority: None,
             group_id: GroupId::unscoped(),
-            _phantom: PhantomData,
         }
     }
 }
@@ -281,7 +275,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             dek_wraps: wraps,
             reset_authority: self.reset_authority.clone(),
             group_id: self.group_id.clone(),
-            _phantom: PhantomData,
         }
     }
 

@@ -237,7 +237,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
             dek_wraps,
             reset_authority,
             group_id,
-            _phantom,
         } = self;
         // `members` is a HashMap (no stable iteration order) — sort by id so the encoding is deterministic
         // across replicas, the property a content-addressed / signed artifact requires.
