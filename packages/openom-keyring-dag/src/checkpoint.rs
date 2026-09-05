@@ -12,6 +12,7 @@
 // wiring lands — until then the types exist but have no in-crate caller besides tests.
 #![allow(dead_code)]
 
+use crate::client::{SealingEntry, SealingOrigin};
 use crate::{KeyringRole, KeyringState};
 use keyeo_dag::{CanonicalBytes, Ed25519, GroupId, MemberState, Signed};
 use serde::{Deserialize, Serialize};
@@ -98,6 +99,15 @@ pub(crate) struct Checkpoint {
     pub prev_snapshot: Option<[u8; 32]>,
     /// Monotone shared-marker, carried because the sharing `Add` is pruned below the cut.
     pub has_been_shared: bool,
+    /// The preserved folded sealing — the retained epochs + escrow, re-expressed as synthetic `SealingEntry`s
+    /// (fold order preserved). The vault authors this by folding to completion (merging any `added_wraps` into
+    /// the epochs) and emitting one entry per surviving epoch, so a below-cut joiner's wrap is NOT dropped. The
+    /// `bytes` stay opaque here — keyring-dag never interprets sealing.
+    pub sealing: Vec<SealingEntry>,
+    /// The count of epoch-minting ops pruned below the cut. `fold_sealing` seeds its `minting_ops` counter from
+    /// this so the OPE-289 ordinal-plausibility bound continues correctly across the prune (a retained epoch's
+    /// ordinal must stay below the true minting count, not the post-prune one).
+    pub minting_ops_baseline: u32,
     /// The signer (Owner/CoOwner) who authored the checkpoint — bound into the signed bytes so it can't be
     /// relabeled on a pruned root.
     pub author: String,
@@ -113,7 +123,7 @@ impl CanonicalBytes for Checkpoint {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded here,
         // so nothing trust-relevant can slip out of the signed bytes.
-        let Checkpoint { frontier, frontier_depths, state, prev_snapshot, has_been_shared, author } = self;
+        let Checkpoint { frontier, frontier_depths, state, prev_snapshot, has_been_shared, sealing, minting_ops_baseline, author } = self;
         out.extend_from_slice(b"openom:checkpoint:v1");
         // frontier — sorted for determinism, length-prefixed.
         let mut f = frontier.clone();
@@ -142,6 +152,21 @@ impl CanonicalBytes for Checkpoint {
             None => out.push(0),
         }
         out.push(u8::from(*has_been_shared));
+        // sealing — ORDERED (the fold order is part of what's signed), length-prefixed; each entry is
+        // op_id ‖ origin-tag ‖ length-prefixed opaque bytes.
+        out.extend_from_slice(&(sealing.len() as u64).to_le_bytes());
+        for e in sealing {
+            out.extend_from_slice(&e.op_id);
+            out.push(match e.origin {
+                SealingOrigin::Genesis => 0,
+                SealingOrigin::Remove => 1,
+                SealingOrigin::Reseal => 2,
+                SealingOrigin::Other => 3,
+            });
+            out.extend_from_slice(&(e.bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(&e.bytes);
+        }
+        out.extend_from_slice(&minting_ops_baseline.to_le_bytes());
         let a = author.as_bytes();
         out.extend_from_slice(&(a.len() as u64).to_le_bytes());
         out.extend_from_slice(a);
@@ -197,6 +222,8 @@ mod tests {
             state: GroupStateView::of(&sample_state()),
             prev_snapshot: Some([9u8; 32]),
             has_been_shared: true,
+            sealing: vec![SealingEntry { op_id: [8u8; 32], origin: SealingOrigin::Genesis, bytes: vec![1, 2, 3] }],
+            minting_ops_baseline: 2,
             author: "owner".into(),
         }
     }
@@ -237,6 +264,15 @@ mod tests {
         let mut t = base.clone();
         t.author = "mallory".into();
         assert_ne!(canon(&t), baseline, "author is signed");
+        let mut t = base.clone();
+        t.sealing[0].bytes.push(9);
+        assert_ne!(canon(&t), baseline, "sealing bytes are signed");
+        let mut t = base.clone();
+        t.sealing[0].origin = SealingOrigin::Reseal;
+        assert_ne!(canon(&t), baseline, "sealing origin is signed");
+        let mut t = base.clone();
+        t.minting_ops_baseline = 5;
+        assert_ne!(canon(&t), baseline, "minting_ops_baseline is signed");
 
         let mut other = sample_state();
         other.members.insert(

@@ -200,6 +200,7 @@ pub struct Resolved {
 /// same-ordinal epochs; it is attached here, at resolve time, because it cannot live inside the sealing —
 /// the op-id is a hash *of* the sealing. The origin lets the sealer's fold decide which epochs may win the
 /// write epoch WITHOUT keyeo ever interpreting the sealing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealingEntry {
     pub op_id: [u8; 32],
     pub origin: SealingOrigin,
@@ -211,7 +212,7 @@ pub struct SealingEntry {
 /// carried by any `Other` op (e.g. an Add's joiner wraps, or a Retarget's re-escrow) is anomalous and the
 /// sealer's fold refuses to let it win the write epoch. The facade maps the keyeo action to this — keyeo
 /// itself never sees the sealing (invariant).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SealingOrigin {
     Genesis,
     Remove,
