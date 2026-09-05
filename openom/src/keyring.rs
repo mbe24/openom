@@ -75,6 +75,9 @@ fn verify_err(e: VerifyError) -> ApiError {
             ApiError::BadRequest("keyring rejected: unauthenticated".into())
         }
         VerifyError::Unauthorized => ApiError::BadRequest("keyring rejected: unauthorized".into()),
+        VerifyError::SharedRegressed => {
+            ApiError::BadRequest("keyring rejected: shared-marker regressed".into())
+        }
     }
 }
 

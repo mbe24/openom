@@ -68,9 +68,12 @@ fn classify(e: KeyringError) -> VerifyError {
     match e {
         KeyringError::Fork => VerifyError::Rollback,
         KeyringError::NonSequential => VerifyError::Stale,
-        KeyringError::UnendorsedOrdinaryChange
-        | KeyringError::UnendorsedSetChange
-        | KeyringError::FirstSharedRegressed => VerifyError::Unauthorized,
+        KeyringError::UnendorsedOrdinaryChange | KeyringError::UnendorsedSetChange => {
+            VerifyError::Unauthorized
+        }
+        // A signed but monotonicity-violating change (un-sharing a shared tree) — its own category, not the
+        // author-lacked-authority bucket.
+        KeyringError::FirstSharedRegressed => VerifyError::SharedRegressed,
         KeyringError::TreeMismatch
         | KeyringError::LayoutAhead
         | KeyringError::BadStructure(_)

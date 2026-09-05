@@ -52,6 +52,10 @@ pub enum VaultErrorCode {
     /// A network-served keyring carries an unendorsed change — an ordinary revision by a
     /// non-signer, or a signer-set change without the founder / prior-set unanimity. Tampering.
     KeyringUnendorsed,
+    /// A network-served keyring is validly signed by a signer but regresses the has-been-shared marker —
+    /// an attempt to DOWNGRADE a shared tree back to unattributed writes. A signed monotonicity violation
+    /// (distinct from `KeyringUnendorsed`, which is an UNsigned change); an attack, not availability.
+    KeyringSharedRegressed,
     /// A network-served keyring is malformed as a successor — bad structure, an incomplete wrap
     /// set (silent lock-out), a too-new layout, or a failed bootstrap.
     KeyringMalformed,
@@ -1463,9 +1467,8 @@ fn remote_chain_err(e: KeyringError) -> VaultError {
         E::RevisionOverflow => C::RevisionOverflow,
         E::NonSequential => C::KeyringNonSequential,
         E::Fork => C::KeyringFork,
-        E::UnendorsedOrdinaryChange | E::UnendorsedSetChange | E::FirstSharedRegressed => {
-            C::KeyringUnendorsed
-        }
+        E::UnendorsedOrdinaryChange | E::UnendorsedSetChange => C::KeyringUnendorsed,
+        E::FirstSharedRegressed => C::KeyringSharedRegressed,
         E::LayoutAhead | E::BadStructure(_) | E::WrapIncomplete | E::BadBootstrap => {
             C::KeyringMalformed
         }

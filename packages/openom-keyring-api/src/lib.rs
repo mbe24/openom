@@ -221,6 +221,12 @@ pub enum VerifyError {
     Stale,
     /// Validly authenticated, but the author lacked the authority for this change.
     Unauthorized,
+    /// A validly-authenticated, authorized signer's change nonetheless regresses a MONOTONIC invariant that
+    /// NO signer may regress — the has-been-shared marker (once a tree is shared, attributed writes can't be
+    /// downgraded). Distinct from [`Unauthorized`](Self::Unauthorized) (which is about the *author's* authority,
+    /// not an invariant everyone is bound by) — this is a downgrade attack. Chain: `first_shared_revision`
+    /// regression. Dag: the has-been-shared monotonicity check (once its adoption path enforces it).
+    SharedRegressed,
     /// A detected rollback / withholding against already-trusted state (chain: fatal; dag: advisory —
     /// structurally it can't regress, so this is a loud signal, not data loss).
     Rollback,
