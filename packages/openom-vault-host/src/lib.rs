@@ -1463,7 +1463,9 @@ fn remote_chain_err(e: ChainError) -> VaultError {
         E::RevisionOverflow => C::RevisionOverflow,
         E::NonSequential => C::KeyringNonSequential,
         E::Fork => C::KeyringFork,
-        E::UnendorsedOrdinaryChange | E::UnendorsedSetChange => C::KeyringUnendorsed,
+        E::UnendorsedOrdinaryChange | E::UnendorsedSetChange | E::FirstSharedRegressed => {
+            C::KeyringUnendorsed
+        }
         E::LayoutAhead | E::BadStructure(_) | E::WrapIncomplete | E::BadBootstrap => {
             C::KeyringMalformed
         }
