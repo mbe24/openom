@@ -15,12 +15,11 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
-    hpke_wrap_dek, parse_recovery_code, unwrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
+    parse_recovery_code, unwrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
     HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use did::DidKey;
 use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
-use openom_crypto::aad::wrap_aad;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, MemberRole};
 // The keyring wire moved to openom-keyring-chain in OPE-300.
@@ -33,9 +32,9 @@ use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, member_epoch_deks, new_owner_secrets,
+    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
     owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealed_epochs,
-    sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, HPKE, PASSPHRASE, RECOVERY,
+    sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, PASSPHRASE, RECOVERY,
 };
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -1307,22 +1306,13 @@ fn do_add_member(
     member_author_public: &[u8],
 ) -> Result<MemberAdded, VaultError> {
     for (key_id, epoch, dek) in deks {
-        let info = wrap_aad(tree_id, key_id, new_member_id, HPKE);
-        let w = hpke_wrap_dek(member_hpke_public, dek, &info)?;
+        let core = member_wrap_epoch(member_hpke_public, dek, tree_id, new_member_id, key_id)?;
         let ep = keyring
             .epochs
             .iter_mut()
             .find(|e| e.epoch == *epoch)
             .ok_or_else(|| VaultError::BadKeyring("epoch vanished".into()))?;
-        ep.wraps.push(KeyWrap {
-            member_id: new_member_id.to_string(),
-            wrap_method: HPKE,
-            nonce: Vec::new(),
-            wrapped_dek: w.ciphertext.as_ref().to_vec(),
-            kdf_params: None,
-            ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
-            recipient_public_key: member_hpke_public.to_vec(),
-        });
+        ep.wraps.push(KeyWrap::from(&core));
     }
     keyring.members.push(Member {
         member_id: new_member_id.to_string(),
@@ -1390,17 +1380,8 @@ fn do_remove_member(
         if m.member_id == founder_id || m.member_id == remove_member_id {
             continue;
         }
-        let info = wrap_aad(tree_id, &new_key_id, &m.member_id, HPKE);
-        let w = hpke_wrap_dek(&m.hpke_public_key, &new_dek, &info)?;
-        wraps.push(KeyWrap {
-            member_id: m.member_id.clone(),
-            wrap_method: HPKE,
-            nonce: Vec::new(),
-            wrapped_dek: w.ciphertext.as_ref().to_vec(),
-            kdf_params: None,
-            ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
-            recipient_public_key: m.hpke_public_key.clone(),
-        });
+        let core = member_wrap_epoch(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?;
+        wraps.push(KeyWrap::from(&core));
     }
 
     keyring.epochs.push(KeyEpoch {
@@ -2246,7 +2227,7 @@ mod tests {
         assert!(k.epochs[0]
             .wraps
             .iter()
-            .any(|w| w.member_id == MEMBER2 && w.wrap_method == super::HPKE));
+            .any(|w| w.member_id == MEMBER2 && w.wrap_method == crate::vault_core::HPKE));
 
         // The member unlocks against the pinned founder key and reads the owner's data.
         let pinned = founder_key(&owner.keyring);
