@@ -7,8 +7,13 @@
 //! envelope, and the membership view (`view_of`) reads only `members`. So the checkpoint state is exactly the
 //! member map, plus the two counters a `MemberState` has that a `MemberInit` lacks.
 
+// WIP (compaction step 2a): these format types are built bottom-up and are consumed by the `DagAnchor`
+// checkpoint authoring / resolve-from-checkpoint path in the following steps. Remove this allow once that
+// wiring lands — until then the types exist but have no in-crate caller besides tests.
+#![allow(dead_code)]
+
 use crate::{KeyringRole, KeyringState};
-use keyeo_dag::{GroupId, MemberState};
+use keyeo_dag::{CanonicalBytes, Ed25519, GroupId, MemberState, Signed};
 use serde::{Deserialize, Serialize};
 
 /// A member's full resolved state at the anchor boundary. Mirrors `MemberInitDto` but adds `member_counter` +
@@ -75,6 +80,74 @@ impl GroupStateView {
     }
 }
 
+/// The signed body of an openom keyring compaction checkpoint (step 2a) — the GENERIC skeleton mirroring keyeo's
+/// `Snapshot`: the dominating cut, the membership base at that cut, the continuity pointer, the shared-marker,
+/// and the author. The openom-SPECIFIC sealing preservation (retained epochs + escrow + the minting-ops bound)
+/// is layered on next. Carried as `Signed<Checkpoint>` — the SOLE carrier, so every trust-relevant field is
+/// inside the signature (the exhaustive-destructure [`CanonicalBytes`] below makes a new unsigned field a
+/// compile error).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Checkpoint {
+    /// The dominating cut this checkpoint anchors at — the frontier op-ids the retained tail attaches to.
+    pub frontier: Vec<[u8; 32]>,
+    /// Each frontier op's absolute lamport depth, so the strong-remove tiebreak survives the prune.
+    pub frontier_depths: Vec<([u8; 32], u64)>,
+    /// The resolved membership at the cut.
+    pub state: GroupStateView,
+    /// Hash of the prior checkpoint — the continuity chain a returning member validates. None at the first.
+    pub prev_snapshot: Option<[u8; 32]>,
+    /// Monotone shared-marker, carried because the sharing `Add` is pruned below the cut.
+    pub has_been_shared: bool,
+    /// The signer (Owner/CoOwner) who authored the checkpoint — bound into the signed bytes so it can't be
+    /// relabeled on a pruned root.
+    pub author: String,
+}
+
+/// An authored, verifiable checkpoint. `verify()` (the only body accessor) binds the whole `Checkpoint` to the
+/// signer; adoption authority (that the signer was authorized, `prev_snapshot` continuity, monotonicity) is a
+/// separate, later gate.
+pub(crate) type SignedCheckpoint = Signed<Checkpoint, Ed25519>;
+
+impl CanonicalBytes for Checkpoint {
+    #[deny(unused_variables)]
+    fn write_canonical(&self, out: &mut Vec<u8>) {
+        // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded here,
+        // so nothing trust-relevant can slip out of the signed bytes.
+        let Checkpoint { frontier, frontier_depths, state, prev_snapshot, has_been_shared, author } = self;
+        out.extend_from_slice(b"openom:checkpoint:v1");
+        // frontier — sorted for determinism, length-prefixed.
+        let mut f = frontier.clone();
+        f.sort_unstable();
+        out.extend_from_slice(&(f.len() as u64).to_le_bytes());
+        for id in &f {
+            out.extend_from_slice(id);
+        }
+        // frontier_depths — sorted, length-prefixed.
+        let mut fd = frontier_depths.clone();
+        fd.sort_unstable();
+        out.extend_from_slice(&(fd.len() as u64).to_le_bytes());
+        for (id, d) in &fd {
+            out.extend_from_slice(id);
+            out.extend_from_slice(&d.to_le_bytes());
+        }
+        // membership view — deterministic postcard (its members are sorted by construction), length-prefixed.
+        let state_bytes = postcard::to_allocvec(state).expect("GroupStateView serialization is infallible");
+        out.extend_from_slice(&(state_bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(&state_bytes);
+        match prev_snapshot {
+            Some(h) => {
+                out.push(1);
+                out.extend_from_slice(h);
+            }
+            None => out.push(0),
+        }
+        out.push(u8::from(*has_been_shared));
+        let a = author.as_bytes();
+        out.extend_from_slice(&(a.len() as u64).to_le_bytes());
+        out.extend_from_slice(a);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +178,73 @@ mod tests {
         let bytes = postcard::to_allocvec(&view).unwrap();
         let back: GroupStateView = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back, view, "the view serde round-trips");
+    }
+
+    fn sample_state() -> KeyringState {
+        let mut state =
+            KeyringState::create(GroupId::new(b"tree".to_vec()), &[]).with_reset_authority(Some([9u8; 32]));
+        state.members.insert(
+            "owner".into(),
+            MemberState { role: KeyringRole(3), member_counter: 0, access_counter: 0, author_public_key: [1u8; 32], hpke_public_key: [2u8; 32] },
+        );
+        state
+    }
+
+    fn sample_checkpoint() -> Checkpoint {
+        Checkpoint {
+            frontier: vec![[5u8; 32], [6u8; 32]],
+            frontier_depths: vec![([5u8; 32], 2), ([6u8; 32], 1)],
+            state: GroupStateView::of(&sample_state()),
+            prev_snapshot: Some([9u8; 32]),
+            has_been_shared: true,
+            author: "owner".into(),
+        }
+    }
+
+    #[test]
+    fn checkpoint_signs_serde_round_trips_and_verifies() {
+        let cp = sample_checkpoint();
+        let sk = edsign::SigningKey::from_seed(&[7u8; 32]);
+        let signed: SignedCheckpoint = Signed::sign(cp.clone(), &sk);
+
+        let bytes = postcard::to_allocvec(&signed).unwrap();
+        let back: SignedCheckpoint = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.verify(), Some(&cp), "the checkpoint signs, serdes, and verifies end-to-end");
+    }
+
+    #[test]
+    fn every_checkpoint_field_is_in_the_signed_bytes() {
+        let canon = |c: &Checkpoint| {
+            let mut b = Vec::new();
+            c.write_canonical(&mut b);
+            b
+        };
+        let base = sample_checkpoint();
+        let baseline = canon(&base);
+
+        let mut t = base.clone();
+        t.frontier.push([7u8; 32]);
+        assert_ne!(canon(&t), baseline, "frontier is signed");
+        let mut t = base.clone();
+        t.frontier_depths[0].1 = 99;
+        assert_ne!(canon(&t), baseline, "frontier_depths is signed");
+        let mut t = base.clone();
+        t.prev_snapshot = None;
+        assert_ne!(canon(&t), baseline, "prev_snapshot is signed");
+        let mut t = base.clone();
+        t.has_been_shared = false;
+        assert_ne!(canon(&t), baseline, "has_been_shared is signed");
+        let mut t = base.clone();
+        t.author = "mallory".into();
+        assert_ne!(canon(&t), baseline, "author is signed");
+
+        let mut other = sample_state();
+        other.members.insert(
+            "bob".into(),
+            MemberState { role: KeyringRole(1), member_counter: 0, access_counter: 0, author_public_key: [3u8; 32], hpke_public_key: [4u8; 32] },
+        );
+        let mut t = base.clone();
+        t.state = GroupStateView::of(&other);
+        assert_ne!(canon(&t), baseline, "the membership state is signed");
     }
 }
