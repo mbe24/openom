@@ -221,9 +221,6 @@ fn author_checkpoint_sealing(
 /// normally, then finalize. The segment must be folded BEFORE the tail (fold order) so a retained `added_wrap`
 /// targeting a pre-cut epoch attaches to the checkpoint entry — guaranteed because the compaction cut is
 /// dominating (every pruned entry precedes every retained one).
-// Consumed by the DagAnchor resolve-from-checkpoint path (OPE-374); tests-only until then; allow removed with
-// OPE-374.
-#[allow(dead_code)]
 fn fold_from_checkpoint(
     segment: &[dag_client::SealingEntry],
     baseline: u32,
@@ -234,6 +231,18 @@ fn fold_from_checkpoint(
     fold_into(&mut state, segment, false)?;
     fold_into(&mut state, tail, true)?;
     finalize_sealing(state, members)
+}
+
+/// Fold a resolved anchor's sealing → `FoldedSealing`, routing a CHECKPOINT anchor (with a preserved segment)
+/// through `fold_from_checkpoint` and an un-compacted one through `fold_sealing`. The single seam every vault op
+/// folds through, so checkpoint-awareness lives in one place.
+fn fold_resolved(resolved: &dag_client::Resolved) -> Result<FoldedSealing, VaultError> {
+    match &resolved.checkpoint_sealing {
+        Some(segment) => {
+            fold_from_checkpoint(segment, resolved.minting_ops_baseline, &resolved.sealing, &resolved.members)
+        }
+        None => fold_sealing(&resolved.sealing, &resolved.members),
+    }
 }
 
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
@@ -468,7 +477,7 @@ impl KeyringLifecycle for DagVault {
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
 
-        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
         let pass_wrap = escrow
@@ -550,7 +559,7 @@ impl KeyringLifecycle for DagVault {
         // Resolve the current sealing → the escrow, and unwrap the RRK via the recovery code.
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
         let rec_wrap = escrow
             .wraps
             .iter()
@@ -634,7 +643,7 @@ impl KeyringLifecycle for DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
 
         // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
         let pass_wrap = escrow
@@ -727,7 +736,7 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { epochs, escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
 
         // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
         let pass_wrap = escrow
@@ -808,7 +817,7 @@ impl DagVault {
             .iter()
             .find(|m| m.member_id == member_id)
             .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
-        let FoldedSealing { epochs, write_key_id, needs_reseal, needs_backfill, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, write_key_id, needs_reseal, needs_backfill, .. } = fold_resolved(&resolved)?;
 
         validate_kdf(&CoreKdf::from(member_kdf))?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
@@ -861,7 +870,7 @@ impl DagVault {
             .members
             .owner()
             .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
-        let FoldedSealing { epochs, escrow, .. } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
 
         // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
         // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
@@ -950,7 +959,7 @@ impl DagVault {
             escrow,
             needs_reseal,
             ..
-        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        } = fold_resolved(&resolved)?;
 
         // Idempotent: nothing stale → return the anchor unchanged, no op appended.
         if !needs_reseal {
@@ -1030,7 +1039,7 @@ impl DagVault {
             escrow,
             needs_reseal,
             ..
-        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        } = fold_resolved(&resolved)?;
 
         // Idempotent: nothing stale → return the anchor unchanged, no op appended.
         if !needs_reseal {
@@ -1091,7 +1100,7 @@ impl DagVault {
             escrow,
             needs_backfill,
             ..
-        } = fold_sealing(&resolved.sealing, &resolved.members)?;
+        } = fold_resolved(&resolved)?;
 
         // Idempotent: every retained epoch already wraps every resolved member → nothing to do.
         let unchanged = || -> Result<Backfilled, VaultError> {
