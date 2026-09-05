@@ -1355,6 +1355,52 @@ mod tests {
         assert_folded_eq(&from_cp, &full);
     }
 
+    /// End-to-end: author a checkpoint-rooted anchor from a real provisioned anchor (the vault supplies the
+    /// sealing authoring as the callback), then resolve BOTH the checkpoint anchor and the full anchor and
+    /// assert they fold to the identical `FoldedSealing` + the same membership. Exercises the whole wired path:
+    /// compact_to_checkpoint → adopt → fold_from_checkpoint.
+    #[test]
+    fn compact_to_checkpoint_round_trips_through_resolve() {
+        let sk = edsign::SigningKey::from_seed(&[9u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        let seal = |key: &[u8], ord: u32, esc: Option<RecoveryEscrow>| {
+            SealingPayload {
+                new_epochs: vec![SealedEpoch { key_id: key.to_vec(), epoch: ord, wraps: vec![] }],
+                added_wraps: vec![],
+                escrow: esc,
+            }
+            .to_bytes()
+        };
+        // Provision (genesis epoch-0 + escrow), then two reseals (epoch 1, then 2).
+        let a1 = dag_client::provision_anchor(b"tree", "owner", pk, [0xaa; 32], [1u8; 32], seal(b"k0", 0, Some(escrow())), &sk);
+        let a2 = dag_client::append_reseal(&a1, "owner", seal(b"k1", 1, None), &sk).unwrap();
+        let a3 = dag_client::append_reseal(&a2, "owner", seal(b"k2", 2, None), &sk).unwrap();
+
+        // Cut at reseal1 (a2's single frontier tip): genesis + reseal1 are pruned into the checkpoint; reseal2
+        // is retained above the cut.
+        let wm = dag_client::watermark(&a2).unwrap();
+        let cut: [u8; 32] = wm[..32].try_into().unwrap();
+
+        let cp_anchor = dag_client::compact_to_checkpoint(
+            &a3,
+            &[cut],
+            None,
+            "owner".into(),
+            &sk,
+            |pre| author_checkpoint_sealing(pre).map_err(|e| format!("{e:?}")),
+        )
+        .unwrap();
+
+        let full = dag_client::resolve(&a3).unwrap();
+        let cp = dag_client::resolve(&cp_anchor).unwrap();
+        assert_folded_eq(&fold_resolved(&cp).unwrap(), &fold_resolved(&full).unwrap());
+        assert_eq!(
+            cp.members.members.len(),
+            full.members.members.len(),
+            "the checkpoint anchor resolves the same membership"
+        );
+    }
+
     /// The write epoch is the deterministic `(ordinal, minting op-id)` winner: among concurrent same-ordinal
     /// epochs the greater op-id wins, and the choice is independent of fold order — so every replica agrees
     /// without coordination (OPE-282). Fable's flagged `max_by_key` last-on-tie fragility is now explicit.
