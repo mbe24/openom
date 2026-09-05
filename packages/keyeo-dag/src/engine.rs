@@ -664,6 +664,82 @@ fn diff_events<Id: MemberId, R: Role>(
     events
 }
 
+/// Compaction ([`keyeo_core::Compaction`]) for the dag engine: decide a checkpoint + the prunable op set. This
+/// is the DECISION only — pure, no signing (the trait carries no key) and no mutation. The caller authors the
+/// signed [`crate::gc::Snapshot`] from the returned `(frontier, state, ever_shared)` and drops the returned
+/// `prune` ops from its store.
+impl<Op, AC, RS, QP> keyeo_core::Compaction for Keyeo<Op, AC, RS, QP>
+where
+    Op: SignedOp,
+    AC: AccessControl<Op::MemberId, Op::R, Op::S>,
+    RS: Resolver<Op::OpId, Op::R, Op, Op::S>,
+    QP: QuorumPolicy<Op::MemberId, Op::R, Op::S>,
+{
+    type State = Keyeo<Op, AC, RS, QP>;
+    type Cut = crate::gc::Frontier<Op::OpId>;
+    type Output = Option<crate::gc::DagCompaction<Op::OpId, Op::MemberId, Op::R, Op::S>>;
+
+    fn compact(
+        state: &Self::State,
+        stable: &Self::Cut,
+        plan: keyeo_core::RetentionPlan,
+    ) -> Result<Self::Output, keyeo_core::CompactionError> {
+        use std::collections::HashSet;
+        // The policy decides WHETHER to checkpoint (op/byte count); the stable frontier decides HOW FAR we may
+        // prune. keep_last (retain a recent tail past the checkpoint, a verification convenience) would only
+        // ever KEEP MORE than pruning to the frontier does, so honouring it is a later optimization — pruning to
+        // the stable frontier is the safe maximum.
+        let _keep_last = match plan {
+            keyeo_core::RetentionPlan::KeepAll => return Ok(None),
+            keyeo_core::RetentionPlan::Snapshot { keep_last } => keep_last,
+        };
+
+        let tips: HashSet<Op::OpId> = stable.ops.iter().copied().collect();
+        // subsumed = at or below the frontier (a tip, or a causal ancestor of some tip): every peer that has
+        // synced past the whole frontier holds these, so a checkpoint can stand in for them.
+        let subsumed = |x: &Op::OpId| {
+            tips.contains(x) || stable.ops.iter().any(|t| state.graph.has_path(*x, *t))
+        };
+        let all: Vec<Op::OpId> = state.ops.keys().copied().collect();
+        // Ops NOT subsumed (concurrent with / above the frontier) are still needed by a lagging peer. So are the
+        // ancestors they reach WITHOUT crossing the frontier: those are un-checkpointed history a retained op
+        // still hangs off (e.g. a fork branching off below the frontier). Ancestors a retained op reaches only
+        // THROUGH a frontier tip are shielded — the tip is the anchor, and the checkpoint subsumes below it —
+        // so they stay prunable. Walk parents from each un-subsumed op, stopping at the tips, to collect `keep`.
+        let mut keep: HashSet<Op::OpId> = HashSet::new();
+        let mut stack: Vec<Op::OpId> = all.iter().copied().filter(|x| !subsumed(x)).collect();
+        while let Some(x) = stack.pop() {
+            if let Some(op) = state.ops.get(&x) {
+                for p in op.parents() {
+                    if tips.contains(p) {
+                        continue; // the frontier shields everything below this tip
+                    }
+                    if keep.insert(*p) {
+                        stack.push(*p);
+                    }
+                }
+            }
+        }
+        let prune: Vec<Op::OpId> = all
+            .iter()
+            .copied()
+            // keep the frontier tips themselves — the anchor the retained tail attaches to
+            .filter(|x| !tips.contains(x))
+            // strictly below the frontier: an ancestor of some tip
+            .filter(|x| stable.ops.iter().any(|t| state.graph.has_path(*x, *t)))
+            // not still needed by a retained op via a frontier-avoiding path (would orphan it)
+            .filter(|x| !keep.contains(x))
+            .collect();
+
+        Ok(Some(crate::gc::DagCompaction {
+            frontier: stable.ops.clone(),
+            state: state.state().clone(),
+            ever_shared: state.ever_shared(),
+            prune,
+        }))
+    }
+}
+
 pub type StandardKeyeo<Op, R, RS = crate::dag::strong_remove::StrongRemove> =
     Keyeo<Op, DefaultAccessControl<R>, RS>;
 
@@ -681,4 +757,104 @@ where
         DefaultAccessControl::new(min_role),
         crate::dag::strong_remove::StrongRemove,
     )
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use crate::dag::resolver::{GroupId, GroupState, MemberInit, MembershipAction};
+    use crate::gc::Frontier;
+    use crate::op::Op;
+    use crate::{ContentId, Ed25519};
+    use keyeo_core::{Compaction, RetentionPlan};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+    struct TRole;
+    impl Role for TRole {
+        fn grants_at_least(&self, _: &Self) -> bool {
+            true
+        }
+    }
+
+    type TOp = Op<ContentId, [u8; 32], TRole, Ed25519>;
+    type TKeyeo = Keyeo<TOp, DefaultAccessControl<TRole>, crate::dag::strong_remove::StrongRemove>;
+
+    /// Build the DAG `a → b → c` with a fork `a → d` (d concurrent with b/c), all authored by the one genesis
+    /// member (membership-inert Reseal ops, just to shape the graph). Returns the engine + the four op ids.
+    fn dag() -> (TKeyeo, ContentId, ContentId, ContentId, ContentId) {
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let me = [3u8; 32];
+        let gid = GroupId(b"tree".to_vec());
+        let genesis = GroupState::create(
+            gid.clone(),
+            &[MemberInit {
+                id: me,
+                role: TRole,
+                author_public_key: sk.verifying_key().to_bytes(),
+                hpke_public_key: [0u8; 32],
+            }],
+        );
+        let mut k: TKeyeo = keyeo::<TOp, TRole, [u8; 32]>(genesis, TRole);
+        // A unique `sealing` tag per op so ops with the same parents (b and d both branch off a) don't collapse
+        // to one content id.
+        let mk = |tag: u8, parents: Vec<ContentId>| {
+            Op::content_addressed(gid.clone(), parents, me, MembershipAction::Reseal, vec![tag], &sk)
+        };
+        let a = mk(0, vec![]);
+        let b = mk(1, vec![a.id]);
+        let c = mk(2, vec![b.id]);
+        let d = mk(3, vec![a.id]); // fork off a, concurrent with b/c
+        let (aid, bid, cid, did) = (a.id, b.id, c.id, d.id);
+        for op in [a, b, c, d] {
+            let _ = k.apply(op);
+        }
+        let _ = k.flush();
+        assert_eq!(k.effective_ops().len(), 4, "all four ops applied");
+        (k, aid, bid, cid, did)
+    }
+
+    #[test]
+    fn keep_all_is_a_noop() {
+        let (k, ..) = dag();
+        let out = <TKeyeo as Compaction>::compact(&k, &Frontier { ops: vec![] }, RetentionPlan::KeepAll).unwrap();
+        assert!(out.is_none(), "KeepAll prunes nothing and authors no checkpoint");
+    }
+
+    #[test]
+    fn prunes_below_the_frontier_but_never_orphans_a_retained_fork() {
+        let (k, a, b, c, d) = dag();
+
+        // Frontier {c}: below it are a, b. The fork d (concurrent with c) is retained and reaches a WITHOUT
+        // crossing c, so a must stay. b is reached only through c (the anchor), so b is prunable.
+        let out = <TKeyeo as Compaction>::compact(
+            &k,
+            &Frontier { ops: vec![c] },
+            RetentionPlan::Snapshot { keep_last: 0 },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(out.prune.len(), 1, "exactly one op is prunable");
+        assert!(out.prune.contains(&b), "b (shielded by the frontier c) is prunable");
+        assert!(!out.prune.contains(&a), "a is kept — the fork d still hangs off it");
+        assert!(!out.prune.contains(&c), "the frontier tip is the anchor, never pruned");
+        assert!(!out.prune.contains(&d), "d is concurrent with the frontier, not below it");
+        assert_eq!(out.frontier, vec![c]);
+    }
+
+    #[test]
+    fn a_fork_below_the_frontier_keeps_its_whole_shared_ancestry() {
+        let (k, a, _b, _c, d) = dag();
+
+        // Frontier {d}: below it is only a. b/c are concurrent with d (retained) and reach a without crossing d,
+        // so a stays. Nothing is prunable — d's only strict ancestor is a, which b/c also need.
+        let out = <TKeyeo as Compaction>::compact(
+            &k,
+            &Frontier { ops: vec![d] },
+            RetentionPlan::Snapshot { keep_last: 0 },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(out.prune.is_empty(), "a is shared with the retained b/c branch, so nothing prunes");
+        assert!(!out.prune.contains(&a));
+    }
 }

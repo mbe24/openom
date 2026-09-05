@@ -109,20 +109,33 @@ pub fn verify_snapshot<
     S::verify(&snapshot.author_public_key, &canon, &snapshot.signature).is_ok()
 }
 
-/// The retention POLICY now lives in `keyeo-core` — `keyeo_core::RetentionPolicy` (metrics→plan) + the
-/// `Retention` enum (`Never` = the full-retention default), shared by every engine. This module keeps only
-/// the dag-specific compaction MECHANISM: the [`Frontier`] cut, the [`Snapshot`] rebuild base, and `compact`.
-///
-/// Reserve the seam. **No-op today** — it accepts the stable frontier + the policy's plan and returns nothing
-/// to prune. When the pruning slice implements it (as the dag's `keyeo_core::Compaction` impl) it will:
-/// (1) author a signed [`Snapshot`] if the plan warrants one, (2) compute a horizon from `plan.keep_last`
-/// clamped to `stable`, (3) drop ops causally below that horizon, leaving the snapshot as the rebuild base.
-pub fn compact<OId: crate::dag::resolver::OpId>(
-    _stable: &Frontier<OId>,
-    _plan: keyeo_core::RetentionPlan,
-) -> Vec<OId> {
-    Vec::new()
+/// The (UNSIGNED) decision the dag's [`keyeo_core::Compaction`] impl returns: the checkpoint to author (its
+/// frontier + resolved `state` + `ever_shared`) and the `prune` set — the ops the caller may drop. `compact`
+/// takes no signing key and no `&mut`, so it never signs and never mutates: the CALLER (which holds the
+/// member's key) authors the signed [`Snapshot`] from `(frontier, state, ever_shared)` via [`Snapshot::author`]
+/// and applies `prune` to its store. Kept engine-native (the prune is a causal-DAG computation) but returned as
+/// plain data so the vault owns the signing + the store owns the drop.
+#[derive(Clone, Debug)]
+pub struct DagCompaction<
+    OId: crate::dag::resolver::OpId,
+    Id: MemberId,
+    R: Role,
+    S: crate::SignatureScheme,
+> {
+    /// The stable frontier the checkpoint anchors at — the retained tail attaches to these tips.
+    pub frontier: Vec<OId>,
+    /// The resolved state to sign into the [`Snapshot`].
+    pub state: crate::dag::resolver::GroupState<Id, R, S>,
+    pub ever_shared: bool,
+    /// Op ids the caller may drop: strictly below the frontier AND not needed by any retained op.
+    pub prune: Vec<OId>,
 }
+
+// The dag's compaction MECHANISM (the `keyeo_core::Compaction` impl for `Keyeo`) lives in `engine.rs`, where it
+// can read the engine's causal graph to compute the prune set; it returns a [`DagCompaction`] decision the
+// caller signs (via [`Snapshot::author`]) and applies. The retention POLICY (`keyeo_core::RetentionPolicy` +
+// the `Retention` enum) is engine-neutral in keyeo-core. This module owns the [`Frontier`] cut + the
+// [`Snapshot`] rebuild base + [`DagCompaction`].
 
 #[cfg(test)]
 mod tests {
