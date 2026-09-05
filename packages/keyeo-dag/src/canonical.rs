@@ -268,34 +268,3 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
         out.extend_from_slice(gid);
     }
 }
-
-/// The **signed content** of a compaction [`crate::gc::Snapshot`]: a version tag followed by every field of
-/// the [`Snapshot`](crate::gc::Snapshot), the state through the exhaustive [`CanonicalBytes`] seam
-/// above. The signature (a [`keyeo_core::Signed`] over this) binds exactly this checkpoint — the membership +
-/// RVK a pruned reader will trust — so it can't be transplanted to a different frontier or state. The signer's
-/// own key/signature are the envelope's, not part of this body (signing over them would be circular).
-impl<OId: OpId, Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes
-    for crate::gc::Snapshot<OId, Id, R, S>
-{
-    #[deny(unused_variables)]
-    fn write_canonical(&self, out: &mut Vec<u8>) {
-        // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded
-        // here, so it cannot slip out of the signed bytes and be tampered on a pruned root.
-        let crate::gc::Snapshot { frontier, state, prev_snapshot, has_been_shared, author } = self;
-        out.extend_from_slice(b"keyeo:snapshot:v1");
-        out.extend_from_slice(&(frontier.len() as u64).to_le_bytes());
-        for p in frontier {
-            Postcard(p).write_canonical(out);
-        }
-        match prev_snapshot {
-            Some(h) => {
-                out.push(1);
-                out.extend_from_slice(h);
-            }
-            None => out.push(0),
-        }
-        out.push(u8::from(*has_been_shared));
-        state.write_canonical(out);
-        Postcard(author).write_canonical(out);
-    }
-}

@@ -443,7 +443,8 @@ where
     /// MONOTONIC: an effective Add stays effective after the member is removed (a `Remove` is a separate
     /// op, it doesn't un-effect the Add), so this never regresses to false. This is the dag's analog of the
     /// chain's `first_shared_revision != 0`: the gate for attributed writes. Scan-backed while nothing is
-    /// pruned; a compaction Snapshot carries the marker so it survives pruning (see `gc::Snapshot`). (Assumes
+    /// pruned; a compaction checkpoint carries the marker (in the `Compacted` decision) so it survives pruning.
+    /// (Assumes
     /// a solo genesis — openom's `Create` always has one initial member; a co-founder genesis would need the
     /// Create's `initial_members.len() > 1` folded in too.)
     pub fn has_been_shared(&self) -> bool {
@@ -783,7 +784,7 @@ where
 
 /// Compaction ([`keyeo_core::Compaction`]) for the dag engine, over the [`Retained`] view: decide a
 /// checkpoint + the prunable op set. This is the DECISION only — pure, no signing (the trait carries no key)
-/// and no mutation. The caller authors the signed [`crate::gc::Snapshot`] from the returned
+/// and no mutation. The caller authors its own signed checkpoint from the returned
 /// `(frontier, state, has_been_shared)` and drops the returned `prune` ops from its store.
 impl<'a, Op: SignedOp> keyeo_core::Compaction for Retained<'a, Op> {
     type State = Retained<'a, Op>;

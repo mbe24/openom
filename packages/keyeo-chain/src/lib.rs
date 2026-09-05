@@ -524,8 +524,9 @@ impl Retained {
 
 /// The chain's compaction DECISION: keep `checkpoint` as the base, drop every retained revision in `prune` (all
 /// strictly below it). The caller re-anchors on `checkpoint`'s retained doc and deletes the pruned revisions.
-/// Contrast the dag's `keyeo_dag::Compacted`, which must ALSO carry a resolved state to sign into a `Snapshot` —
-/// the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same trait, same shape.
+/// Contrast the dag's `keyeo_dag::Compacted`, which must ALSO carry a resolved state for the caller to sign into
+/// its checkpoint — the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same
+/// trait, same shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compacted {
     pub checkpoint: Revision,
