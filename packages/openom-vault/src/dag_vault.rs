@@ -70,54 +70,64 @@ impl SealingPayload {
     }
 }
 
-/// Fold the effective ops' sealing deltas into the current epochs + escrow + the deterministic write epoch
-/// + whether it needs a reseal. `new_epochs` are retained only from Genesis/Remove/Reseal ops (an epoch
-/// from any other op is anomalous — a smuggled self-only epoch — and dropped); `added_wraps` attach to the
-/// matching existing epoch (an unknown-epoch wrap is skipped); the latest escrow wins. The write epoch is
-/// the greatest `(ordinal, op-id)` among ELIGIBLE epochs (genesis/remove always, reseal iff it covers the
-/// resolved membership), so a concurrent same-ordinal tie resolves identically on every replica and a
-/// wrong-set reseal can never win. Errors if no escrow / no eligible epoch was ever set.
-fn fold_sealing(
+/// The PRE-retain intermediate of the sealing fold: the tagged epochs (`added_wraps` already merged) BEFORE the
+/// OPE-289 ordinal bound, the recovery escrow, and the effective minting-op count. Split out (OPE-348 step 2a)
+/// so a checkpoint can capture the pre-retain state and a resolve-from-checkpoint can resume the fold from a
+/// seeded baseline. The bound is deliberately NOT applied here — it is time-varying (`minting_ops` can shrink
+/// when a minting op is voided, then grow again), so an epoch dropped now may be resurrected later; freezing it
+/// early would permanently lose an epoch a full-history replica keeps.
+#[derive(Default)]
+struct FoldState {
+    tagged: Vec<(SealedEpoch, dag_client::SealingOrigin, [u8; 32])>,
+    escrow: Option<RecoveryEscrow>,
+    minting_ops: u32,
+}
+
+/// Fold a run of sealing entries into `state`. `count_minting` = whether these entries increment the minting-op
+/// count: `true` for real ops; `false` for a checkpoint segment whose mints are already reflected in the seeded
+/// baseline (so they are NOT double-counted).
+fn fold_into(
+    state: &mut FoldState,
     sealing: &[dag_client::SealingEntry],
-    members: &MembershipView,
-) -> Result<FoldedSealing, VaultError> {
+    count_minting: bool,
+) -> Result<(), VaultError> {
     use dag_client::SealingOrigin;
-    // Each retained epoch tagged with (origin, minting op-id). Only Genesis/Remove/Reseal ops may MINT an
-    // epoch — a new_epoch from any Other op is anomalous (a self-Retarget/self-Remove smuggling a self-only
-    // epoch) and is dropped: no legitimate write is ever sealed under it, so it never needs retaining.
-    let mut tagged: Vec<(SealedEpoch, SealingOrigin, [u8; 32])> = Vec::new();
-    let mut escrow: Option<RecoveryEscrow> = None;
-    // Count epoch-minting OPS (Genesis/Remove/Reseal) — the plausibility bound on epoch ordinals below
-    // (OPE-289). Counting ops not epochs means one op stuffing many epochs can't inflate the bound.
-    let mut minting_ops: u32 = 0;
     for entry in sealing {
         let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
-        if matches!(
+        // Only Genesis/Remove/Reseal ops may MINT an epoch — a new_epoch from any Other op is anomalous (a
+        // self-Retarget/self-Remove smuggling a self-only epoch) and is dropped. Counting OPS not epochs means
+        // one op stuffing many epochs can't inflate the bound (OPE-289).
+        let mints = matches!(
             entry.origin,
             SealingOrigin::Genesis | SealingOrigin::Remove | SealingOrigin::Reseal
-        ) {
-            minting_ops = minting_ops.saturating_add(1);
+        );
+        if count_minting && mints {
+            state.minting_ops = state.minting_ops.saturating_add(1);
         }
         for e in payload.new_epochs {
-            match entry.origin {
-                SealingOrigin::Genesis | SealingOrigin::Remove | SealingOrigin::Reseal => {
-                    tagged.push((e, entry.origin, entry.op_id));
-                }
-                SealingOrigin::Other => {}
+            if mints {
+                state.tagged.push((e, entry.origin, entry.op_id));
             }
         }
         // added_wraps attach a member's wrap to an EXISTING epoch (an add-member's joiner wraps ride an
-        // Other-origin Add op — legitimate, unlike minting) — applied post-fold so coverage sees them.
+        // Other-origin Add op — legitimate, unlike minting) — applied during the fold so coverage sees them.
         for aw in payload.added_wraps {
-            if let Some((ep, _, _)) = tagged.iter_mut().find(|(e, _, _)| e.key_id == aw.key_id) {
+            if let Some((ep, _, _)) = state.tagged.iter_mut().find(|(e, _, _)| e.key_id == aw.key_id) {
                 ep.wraps.push(aw.wrap);
             }
         }
         if payload.escrow.is_some() {
-            escrow = payload.escrow;
+            state.escrow = payload.escrow;
         }
     }
+    Ok(())
+}
+
+/// Apply the OPE-289 ordinal bound + select the deterministic write epoch → `FoldedSealing`.
+fn finalize_sealing(state: FoldState, members: &MembershipView) -> Result<FoldedSealing, VaultError> {
+    use dag_client::SealingOrigin;
+    let FoldState { mut tagged, escrow, minting_ops } = state;
     let escrow =
         escrow.ok_or_else(|| VaultError::BadKeyring("dag keyring has no recovery escrow".into()))?;
 
@@ -160,6 +170,17 @@ fn fold_sealing(
         needs_reseal: !winner_covers,
         needs_backfill,
     })
+}
+
+/// Fold the effective ops' sealing deltas into the current epochs + escrow + the deterministic write epoch.
+/// The non-checkpoint path: a fresh fold (baseline 0) over the whole stream, then finalize.
+fn fold_sealing(
+    sealing: &[dag_client::SealingEntry],
+    members: &MembershipView,
+) -> Result<FoldedSealing, VaultError> {
+    let mut state = FoldState::default();
+    fold_into(&mut state, sealing, true)?;
+    finalize_sealing(state, members)
 }
 
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
