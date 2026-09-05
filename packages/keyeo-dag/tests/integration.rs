@@ -2266,3 +2266,42 @@ fn op_depth_of_a_frontier_tip_is_invariant_over_pre_cut_vs_full_ops() {
     assert_eq!(pre_d.get(&3), Some(&2));
     assert_eq!(pre_d.get(&4), Some(&1));
 }
+
+/// SPIKE (is the adopt depth-seed load-bearing?): two ops that each continue just ONE branch of a multi-tip
+/// checkpoint — admitted because the merge horizon is `.any()` — get depths that DIFFER between a correctly
+/// seeded adopt and a zero-seeded one when the tips sit at different absolute depths. The seeded value equals
+/// what a full-history replica computes (the op descends from a deep tip), the zero-seeded one does not — so
+/// the seed is necessary for the `(depth, op_id)` tiebreak to match full history for such ops.
+#[test]
+fn depth_seed_changes_the_tiebreak_order_for_single_branch_ops_on_different_tips() {
+    use keyeo_dag::Individual;
+    use std::collections::HashMap;
+    let genesis = [minit(alice_pk(), TestRole::Admin, [0xaa; 32])];
+    let base = || GroupState::create(GroupId::unscoped(), &genesis);
+    let (tip1, tip2) = (100u64, 200u64);
+    let x = make_op(1, vec![tip1], &[1u8; 32], MembershipAction::Reseal); // continues tip1 only
+    let y = make_op(2, vec![tip2], &[1u8; 32], MembershipAction::Reseal); // continues tip2 only
+
+    // Correctly seeded: tip1 deep (5), tip2 shallow (0).
+    let mut seeded = Keyeo::adopt(base(), HashMap::from([(tip1, 5usize), (tip2, 0)]), false, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    seeded.apply(x.clone()).unwrap();
+    seeded.apply(y.clone()).unwrap();
+    seeded.flush().unwrap();
+    let sd = seeded.op_depths();
+
+    // Zero-seeded: both tips at 0 (what a naive prune would give).
+    let mut zero = Keyeo::adopt(base(), HashMap::from([(tip1, 0usize), (tip2, 0)]), false, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    zero.apply(x).unwrap();
+    zero.apply(y).unwrap();
+    zero.flush().unwrap();
+    let zd = zero.op_depths();
+
+    // Seeded: X (on deep tip1) = 6, Y (on shallow tip2) = 1 → X strictly deeper.
+    assert_eq!(sd.get(&1), Some(&6), "seeded X = tip1(5) + 1");
+    assert_eq!(sd.get(&2), Some(&1), "seeded Y = tip2(0) + 1");
+    assert!(sd[&1] > sd[&2], "seeded: X strictly deeper than Y");
+    // Zero-seeded: they tie at 1 → the (depth, op_id) order between X and Y is DIFFERENT without the seed.
+    assert_eq!(zd.get(&1), Some(&1));
+    assert_eq!(zd.get(&2), Some(&1));
+    assert_eq!(zd[&1], zd[&2], "zero-seed: X and Y tie — the seed is load-bearing for the tiebreak");
+}
