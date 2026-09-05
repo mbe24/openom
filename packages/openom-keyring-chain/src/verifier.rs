@@ -163,7 +163,11 @@ impl KeyringVerifier for ChainVerifier {
 mod tests {
     use super::*;
     use crate::{keyring_hash, sign_keyring, SigningKey};
-    use crate::wire::{KeyEpoch, KeyWrap, Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use crate::wire::{Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use keyeo_crypto::{
+        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        X25519PublicKey,
+    };
 
     const EDITOR: i32 = 4;
 
@@ -178,16 +182,15 @@ mod tests {
     fn pk(seed: u8) -> Vec<u8> {
         sk(seed).verifying_key().to_bytes().to_vec()
     }
-    fn wrap(id: &str, method: i32) -> KeyWrap {
-        KeyWrap {
-            member_id: id.into(),
-            wrap_method: method,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
-        }
+    fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
+        let encapped = EncappedKey::from_bytes([0u8; 32]);
+        let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
+        let m = if method == WRAP_RRK_HPKE {
+            WrapMethod::RrkHpke { encapped, recipient_key }
+        } else {
+            WrapMethod::MemberHpke { encapped, recipient_key }
+        };
+        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
     }
 
     /// A one-founder genesis re-keyed to `founder_seed`, self-signed — a valid genesis AND a valid reset.
@@ -205,11 +208,11 @@ mod tests {
             }],
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch {
-                key_id: vec![0],
-                epoch: 0,
+            epochs: codec::encode_epochs(&[KeyeoEpoch {
+                key_id: KeyId::new(vec![0]),
+                ordinal: 0,
                 wraps: vec![wrap("owner", WRAP_RRK_HPKE)],
-            }],
+            }]),
             ..Default::default()
         };
         sign_keyring(&mut g, &sk(founder_seed));
@@ -227,7 +230,9 @@ mod tests {
             author_public_key: pk(3),
             hpke_public_key: vec![9; 32],
         });
-        k.epochs[0].wraps.push(wrap("carol", WRAP_X25519_HPKE));
+        let mut eps = k.key_material().unwrap();
+        eps[0].wraps.push(wrap("carol", WRAP_X25519_HPKE));
+        k.epochs = codec::encode_epochs(&eps);
         k.signatures.clear();
         sign_keyring(&mut k, &sk(1));
         k

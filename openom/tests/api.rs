@@ -26,8 +26,8 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use base64::Engine as _;
 use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring, SigningKey};
-use openom_protocol::v1::{Aead, Envelope, Header, Kind, MemberRole, WrapMethod};
-use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member};
+use openom_protocol::v1::{Aead, Envelope, Header, Kind, MemberRole};
+use openom_keyring_chain::wire::{Keyring, Member};
 use openom_protocol::Message;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -275,16 +275,23 @@ fn build_keyring(
         author_public_key: fpub.clone(),
         hpke_public_key: vec![9; 32],
     }];
-    // Newest epoch: the founder's RRK wrap + an HPKE wrap per non-founder member.
-    let mut wraps = vec![KeyWrap {
-        member_id: owner_s.clone(),
-        wrap_method: WrapMethod::RrkHpke as i32,
-        nonce: vec![],
-        wrapped_dek: vec![1],
-        kdf_params: None,
-        ephemeral_public_key: vec![],
-        recipient_public_key: vec![],
-    }];
+    // Newest epoch: the founder's RRK wrap + an HPKE wrap per non-founder member. The DEK wraps are keyeo
+    // key material now, encoded into the keyring's `epochs` bytes.
+    let mkwrap = |id: &str, rrk: bool| {
+        let encapped = keyeo_crypto::EncappedKey::from_bytes([0u8; 32]);
+        let recipient_key = keyeo_crypto::X25519PublicKey::from_bytes([9u8; 32]);
+        let method = if rrk {
+            keyeo_crypto::WrapMethod::RrkHpke { encapped, recipient_key }
+        } else {
+            keyeo_crypto::WrapMethod::MemberHpke { encapped, recipient_key }
+        };
+        keyeo_crypto::Wrap {
+            recipient: id.to_string(),
+            method,
+            ciphertext: keyeo_crypto::WrappedDek::from_bytes([1u8; 48]),
+        }
+    };
+    let mut wraps = vec![mkwrap(&owner_s, true)];
     for (id, role) in extra {
         let s = id.to_string();
         members.push(Member {
@@ -293,15 +300,7 @@ fn build_keyring(
             author_public_key: vec![7; 32],
             hpke_public_key: vec![9; 32],
         });
-        wraps.push(KeyWrap {
-            member_id: s,
-            wrap_method: WrapMethod::X25519Hpke as i32,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
-        });
+        wraps.push(mkwrap(&s, false));
     }
     let mut k = Keyring {
         tree_id: tree.as_bytes().to_vec(),
@@ -312,11 +311,11 @@ fn build_keyring(
         members,
         signatures: vec![],
         recovery_keys: vec![],
-        epochs: vec![KeyEpoch {
-            key_id: vec![0],
-            epoch: 0,
+        epochs: keyeo_crypto::codec::encode_epochs(&[keyeo_crypto::Epoch {
+            key_id: keyeo_crypto::KeyId::new(vec![0]),
+            ordinal: 0,
             wraps,
-        }],
+        }]),
         ..Default::default()
     };
     sign_keyring(&mut k, founder);

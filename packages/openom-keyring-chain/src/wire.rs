@@ -4,9 +4,12 @@
 //! uses). The field numbers/shapes are byte-identical to the former `openom.v1.Keyring` and sub-messages,
 //! so semantics are unchanged.
 //!
-//! `KdfParams` is duplicated here (a tiny four-field message) so the chain doesn't pull in
-//! `openom-protocol`; `openom-crypto` keeps ITS own proto `KdfParams` for the sealer/vault path. The two
-//! are wire-identical and the vault marshals between them at its boundary.
+//! The DEK epochs and the recovery escrow's KEK wraps are NOT prost sub-messages: they carry keyeo's shared
+//! key-material types (`keyeo_crypto::{Epoch, Wrap}`) as their canonical `codec` encoding inside `bytes`
+//! fields, so both keyring engines share one key-material shape. The chain still owns the structural
+//! envelope (`Keyring`/`Member`/`KeyringSignature`/`RecoveryKey` identity fields) as prost.
+
+use keyeo_crypto::{codec, Epoch, Wrap};
 
 /// The `Keyring.layout_version` this build reads and writes (data-format spec §4) — the keyring's own
 /// version axis, independent of the envelope version. A keyring carrying a higher layout is opened
@@ -35,9 +38,12 @@ pub struct Keyring {
     /// Opaque tree id.
     #[prost(bytes = "vec", tag = "1")]
     pub tree_id: Vec<u8>,
-    /// Key generations (rotation produces a new epoch).
-    #[prost(message, repeated, tag = "2")]
-    pub epochs: Vec<KeyEpoch>,
+    /// Key generations (rotation produces a new epoch), as the canonical encoding of
+    /// `Vec<keyeo_crypto::Epoch<String>>` (`keyeo_crypto::codec`). The chain owns the wire envelope but the
+    /// key material itself is keyeo's shared type — hashed as opaque bytes in the payload commitment (§doc)
+    /// and decoded via [`Keyring::key_material`] for the structure gate + DEK access. Empty only pre-genesis.
+    #[prost(bytes = "vec", tag = "2")]
+    pub epochs: Vec<u8>,
     /// Monotonic anti-rollback counter, bumped on every revision.
     #[prost(uint32, tag = "3")]
     pub revision: u32,
@@ -111,69 +117,50 @@ pub struct RecoveryKey {
     /// The founder this recovery key belongs to.
     #[prost(string, tag = "2")]
     pub member_id: String,
-    /// The recovery root private key wrapped under the founder's two credentials.
-    #[prost(message, repeated, tag = "3")]
-    pub wraps: Vec<KeyWrap>,
+    /// The recovery root private key wrapped under the founder's two credentials, as the canonical encoding
+    /// of `Vec<keyeo_crypto::Wrap<String>>` (`keyeo_crypto::codec`). Decoded via [`RecoveryKey::escrow_wraps`].
+    #[prost(bytes = "vec", tag = "3")]
+    pub wraps: Vec<u8>,
     /// The Ed25519 Recovery Verification Key (RVK), HKDF-derived from the recovery-root secret. Empty on
-    /// pre-RVK keyrings.
+    /// pre-RVK keyrings. Stays a first-class prost field (NOT inside the `wraps` blob): `reset_rvk` feeds it
+    /// to the engine's recovery-authority via the trusted-path `KeyringAnchor::from_keyring`, which runs
+    /// WITHOUT the structure gate — so a corrupt `wraps` blob must never be able to degrade the RVK to absent.
     #[prost(bytes = "vec", tag = "4")]
     pub recovery_verifying_key: Vec<u8>,
 }
 
-/// One key generation.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KeyEpoch {
-    /// Matches `Header.key_id`.
-    #[prost(bytes = "vec", tag = "1")]
-    pub key_id: Vec<u8>,
-    /// Generation number, from 0.
-    #[prost(uint32, tag = "2")]
-    pub epoch: u32,
-    /// The DEK wrapped once per member.
-    #[prost(message, repeated, tag = "3")]
-    pub wraps: Vec<KeyWrap>,
+/// The maximum size of a stored key-material blob, checked BEFORE decode (a raw byte cap, the decode-side
+/// analog of `MAX_MEMBERS`/`MAX_EPOCHS`): bounds the work a hostile keyring can impose before the count-based
+/// caps in `structure` apply. Generous — a large real keyring is well under this.
+pub const MAX_KEY_MATERIAL_BYTES: usize = 4 * 1024 * 1024;
+
+impl Keyring {
+    /// Decode the epoch list from its canonical bytes — the ONE fallible accessor for the chain's key
+    /// material. Callers MUST propagate the error (never `unwrap_or_default`): an empty/defaulted fallback
+    /// on a corrupt blob would silently drop epochs past the acceptance gate. The size cap runs before the
+    /// postcard decode.
+    pub fn key_material(&self) -> Result<Vec<Epoch<String>>, KeyMaterialError> {
+        if self.epochs.len() > MAX_KEY_MATERIAL_BYTES {
+            return Err(KeyMaterialError);
+        }
+        codec::decode_epochs(&self.epochs).map_err(|_| KeyMaterialError)
+    }
 }
 
-/// The DEK sealed for one member.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KeyWrap {
-    /// Member account id.
-    #[prost(string, tag = "1")]
-    pub member_id: String,
-    /// How the DEK was wrapped (proto `WrapMethod` value; carried as `i32`).
-    #[prost(int32, tag = "2")]
-    pub wrap_method: i32,
-    /// AEAD nonce for the wrap.
-    #[prost(bytes = "vec", tag = "3")]
-    pub nonce: Vec<u8>,
-    /// AEAD(DEK).
-    #[prost(bytes = "vec", tag = "4")]
-    pub wrapped_dek: Vec<u8>,
-    /// Set for the Argon2id wrap methods.
-    #[prost(message, optional, tag = "5")]
-    pub kdf_params: Option<KdfParams>,
-    /// Set for `WRAP_METHOD_X25519_HPKE`: the sender's one-time public key.
-    #[prost(bytes = "vec", tag = "6")]
-    pub ephemeral_public_key: Vec<u8>,
-    /// Set for the HPKE wrap methods: the RECIPIENT's public key (an UNAUTHENTICATED coverage hint).
-    #[prost(bytes = "vec", tag = "7")]
-    pub recipient_public_key: Vec<u8>,
+impl RecoveryKey {
+    /// Decode this recovery key's escrow KEK wraps from their canonical bytes. Same propagate-don't-default
+    /// discipline as [`Keyring::key_material`]. Note the RVK ([`Self::recovery_verifying_key`]) is a separate
+    /// prost field and is NEVER gated on this decode succeeding.
+    pub fn escrow_wraps(&self) -> Result<Vec<Wrap<String>>, KeyMaterialError> {
+        if self.wraps.len() > MAX_KEY_MATERIAL_BYTES {
+            return Err(KeyMaterialError);
+        }
+        codec::decode_wraps(&self.wraps).map_err(|_| KeyMaterialError)
+    }
 }
 
-/// Argon2id parameters — the chain's own copy (wire-identical to `openom_crypto`'s proto `KdfParams`), so
-/// the chain crate needs no `openom-protocol` dep.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KdfParams {
-    /// Random per-member salt.
-    #[prost(bytes = "vec", tag = "1")]
-    pub salt: Vec<u8>,
-    /// Memory cost, KiB.
-    #[prost(uint32, tag = "2")]
-    pub memory_kib: u32,
-    /// Time cost (passes).
-    #[prost(uint32, tag = "3")]
-    pub iterations: u32,
-    /// Parallelism (lanes).
-    #[prost(uint32, tag = "4")]
-    pub parallelism: u32,
-}
+/// A stored key-material blob (epochs or escrow wraps) was malformed, had trailing bytes, or exceeded
+/// [`MAX_KEY_MATERIAL_BYTES`]. Opaque on purpose — every case is "this keyring's key material is unusable",
+/// which the structure gate turns into a rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyMaterialError;

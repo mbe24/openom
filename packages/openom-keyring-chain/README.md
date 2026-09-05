@@ -21,9 +21,10 @@ can't forge an Ed25519 signature — so every guarantee is a client-side check o
 
 It is **openom-domain-specific but openom-dependency-free** (like `openom-keyring-dag`): it depends on the
 generic `keyeo-chain`/`keyeo-core` engines, `openom-keyring-api` (the engine seam), `edsign`, and the
-substrate crates (`prost`/`sha2`/`blobstore`), but on **no `openom-*` crate**. The keyring wire, formerly
-in `openom-protocol`, now lives here in `wire.rs` (`Keyring` / `Member` / `KeyEpoch` / `KeyWrap` /
-`RecoveryKey` / `KeyringSignature` + a wire-identical `KdfParams`).
+substrate crates (`prost`/`sha2`/`blobstore`) plus `keyeo-crypto` (the shared key-material types), but on
+**no `openom-*` crate**. The structural keyring wire, formerly in `openom-protocol`, now lives here in
+`wire.rs` (`Keyring` / `Member` / `RecoveryKey` / `KeyringSignature`); the DEK epochs and the recovery
+escrow's KEK wraps ride as `keyeo_crypto::{Epoch, Wrap}` in their canonical `codec` bytes inside `Keyring`.
 
 Landed-entry authorship (`verify_entry` / `epoch_is_attributed`) is a *consumer* of the keyring and now
 lives in `openom-vault` (OPE-300), not here.
@@ -32,19 +33,22 @@ lives in `openom-vault` (OPE-300), not here.
 
 ```rust
 use openom_keyring_chain::{bootstrap_from_genesis, keyring_hash, sign_keyring, verify_transition, SigningKey};
-use openom_keyring_chain::wire::{KeyEpoch, Keyring, KeyWrap, Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE, MEMBER_OWNER};
+use openom_keyring_chain::wire::{Keyring, Member, WRAP_RRK_HPKE, WRAP_X25519_HPKE, MEMBER_OWNER};
+use keyeo_crypto::{codec, Epoch, EncappedKey, KeyId, Wrap, WrapMethod, WrappedDek, X25519PublicKey};
 
 // In production an identity is passphrase-derived; a fixed seed keeps this example deterministic.
 let founder = SigningKey::from_seed(&[7u8; 32]);
 let founder_key = founder.verifying_key().to_bytes().to_vec();
-let wrap = |id: &str, method: i32| KeyWrap {
-    member_id: id.into(),
-    wrap_method: method,
-    nonce: vec![],
-    wrapped_dek: vec![1],
-    kdf_params: None,
-    ephemeral_public_key: vec![],
-    recipient_public_key: vec![],
+// A DEK wrap addressed to `id` — the founder's via the recovery root (RRK) or a member's via HPKE.
+let wrap = |id: &str, method: i32| {
+    let encapped = EncappedKey::from_bytes([0u8; 32]);
+    let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
+    let m = if method == WRAP_RRK_HPKE {
+        WrapMethod::RrkHpke { encapped, recipient_key }
+    } else {
+        WrapMethod::MemberHpke { encapped, recipient_key }
+    };
+    Wrap { recipient: id.to_string(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
 };
 
 // A one-founder genesis keyring (revision 1), signed by the founder.
@@ -62,7 +66,7 @@ let mut genesis = Keyring {
     }],
     signatures: vec![],
     recovery_keys: vec![],
-    epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps: vec![wrap("owner", WRAP_RRK_HPKE)] }],
+    epochs: codec::encode_epochs(&[Epoch { key_id: KeyId::new(vec![0]), ordinal: 0, wraps: vec![wrap("owner", WRAP_RRK_HPKE)] }]),
     ..Default::default()
 };
 sign_keyring(&mut genesis, &founder);
@@ -81,7 +85,9 @@ next.members.push(Member {
     author_public_key: vec![7; 32],
     hpke_public_key: vec![9; 32],
 });
-next.epochs[0].wraps.push(wrap("bob", WRAP_X25519_HPKE));
+let mut epochs = next.key_material().unwrap();
+epochs[0].wraps.push(wrap("bob", WRAP_X25519_HPKE));
+next.epochs = codec::encode_epochs(&epochs);
 next.signatures.clear();
 sign_keyring(&mut next, &founder);
 

@@ -12,6 +12,9 @@ workspace = true
 [dependencies]
 # The generic linear signed-membership-chain engine this crate binds onto (OPE-300).
 keyeo-chain.workspace = true
+# The shared key-material types (Epoch/Wrap) + their canonical codec — the chain stores these as encoded
+# bytes inside its prost envelope and decodes them in the structure gate (OPE-377).
+keyeo-crypto.workspace = true
 # The engine-family seam types (Ed25519 / SigError / Role / SignatureScheme).
 keyeo-core.workspace = true
 # The storage swap seam — the Blob transport for the keyring document (OPE-265).

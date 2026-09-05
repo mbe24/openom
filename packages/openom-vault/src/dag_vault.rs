@@ -29,8 +29,8 @@ use crate::lifecycle::{
 };
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
-    new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealed_from_keyeo, sealer_set_from_deks,
-    validate_kdf, validated_proto_kdf, CoreKdf, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
+    new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf,
+    validated_proto_kdf, CoreKdf, RecoveryEscrow, PASSPHRASE, RECOVERY,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
@@ -189,13 +189,6 @@ fn finalize_sealing(state: FoldState, members: &MembershipView) -> Result<Folded
         needs_reseal: !winner_covers,
         needs_backfill,
     })
-}
-
-/// Map the folded keyeo `Epoch`s to the `SealedEpoch` shape the engine-shared DEK openers
-/// ([`epoch_deks`] / [`member_epoch_deks`]) still consume. Read-side only — the dag persists the keyeo
-/// `Epoch`s directly; this adapter dies in U4 once the chain also opens over keyeo (U3).
-fn sealed_epochs(epochs: &[keyeo_crypto::Epoch<String>]) -> Vec<SealedEpoch> {
-    epochs.iter().map(sealed_from_keyeo).collect()
 }
 
 /// Fold the effective ops' sealing deltas into the current epochs + escrow + the deterministic write epoch.
@@ -468,7 +461,7 @@ impl KeyringLifecycle for DagVault {
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(passphrase.expose(), &validated_proto_kdf(kdf)?)?;
 
         // Anti-substitution: the passphrase-derived identity must be the RESOLVED Owner's key (not the
@@ -479,7 +472,7 @@ impl KeyringLifecycle for DagVault {
         }
 
         let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, member_id, PASSPHRASE)?;
-        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let owner_key: [u8; 32] = founder
@@ -532,7 +525,7 @@ impl KeyringLifecycle for DagVault {
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
-        let (rec_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::RecoveryCode)?;
+        let (rec_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::RecoveryCode)?;
         let entropy = parse_recovery_code(recovery_code)?;
         let rec_kek = derive_kek(entropy.as_slice(), &validated_proto_kdf(rec_kdf)?)?;
         let rrk_secret = open_rrk_secret(&rec_kek, rrk_nonce, rrk_ct, tree_id, member_id, RECOVERY)?;
@@ -560,7 +553,7 @@ impl KeyringLifecycle for DagVault {
         .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
 
         // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
-        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
         let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
@@ -602,7 +595,7 @@ impl KeyringLifecycle for DagVault {
         let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
 
         // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
-        let (old_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (old_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let old_root = derive_root(old_passphrase.expose(), &validated_proto_kdf(old_kdf)?)?;
         if old_root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
         {
@@ -680,7 +673,7 @@ impl DagVault {
         let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
 
         // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -688,8 +681,7 @@ impl DagVault {
         let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, owner_id, PASSPHRASE)?;
 
         // Reach every epoch's DEK and wrap each to the new member's HPKE key.
-        let sealed = sealed_epochs(&epochs);
-        let deks = epoch_deks(&sealed, tree_id, owner_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
         let added_wraps: Vec<AddedWrap> = deks
             .iter()
             .map(|(key_id, _epoch, dek)| {
@@ -751,7 +743,7 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        let deks = member_epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &root.hpke_secret)?;
+        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
         let my_key: [u8; 32] = me
             .author_public_key
@@ -800,7 +792,7 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
         // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -889,7 +881,7 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived identity (anti-substitution); the fresh DEK is
         // wrapped to the RRK PUBLIC, so no RRK secret is needed to reseal.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -931,7 +923,7 @@ impl DagVault {
 
         // Owner authorizes via their passphrase-derived identity (anti-substitution) — the checkpoint is
         // Owner-signed.
-        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -1065,7 +1057,7 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived identity (anti-substitution vs the resolved
         // Owner key) and unwraps the RRK secret — the same open-all-DEKs path as `add_member`.
-        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
         let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -1076,7 +1068,7 @@ impl DagVault {
         // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
         // STALE key after a rekey race is re-wrapped too). (`epoch_deks` skips an un-openable epoch rather
         // than failing, so a corrupt epoch can't brick this.) Empty-key members are skipped — nothing to wrap.
-        let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, owner_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _epoch, dek) in &deks {
             let epoch_wraps = epochs
@@ -1617,7 +1609,7 @@ mod tests {
             ordinal: 0,
             wraps: vec![dead, live],
         };
-        let deks = member_epoch_deks(&sealed_epochs(&[ep]), tree, member, &root.hpke_secret).unwrap();
+        let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret).unwrap();
         assert_eq!(deks.len(), 1, "the epoch opens via the live wrap despite a dead wrap first");
     }
 
@@ -1648,7 +1640,7 @@ mod tests {
                 ciphertext: keyeo_crypto::WrappedDek::from_bytes([9u8; 48]),
             }],
         };
-        let deks = epoch_deks(&sealed_epochs(&[good, garbage]), tree, "owner", &rrk_secret).unwrap();
+        let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret).unwrap();
         assert_eq!(deks.len(), 1, "the un-openable garbage epoch is skipped, not fatal");
         assert_eq!(deks[0].0, b"good".to_vec(), "the legitimate epoch still opens");
     }

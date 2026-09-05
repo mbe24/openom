@@ -3607,6 +3607,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "jsonwebtoken",
+ "keyeo-crypto",
  "lambda_http",
  "openom-crypto",
  "openom-keyring-api",
@@ -3694,6 +3695,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyeo-chain",
  "keyeo-core",
+ "keyeo-crypto",
  "openom-keyring-api",
  "proptest",
  "prost",
@@ -3708,6 +3710,7 @@ version = "0.1.0"
 dependencies = [
  "blobstore",
  "edsign",
+ "keyeo-crypto",
  "keyeo-dag",
  "openom-keyring-api",
  "openom-keyring-chain",
@@ -3839,6 +3842,7 @@ dependencies = [
 name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
+ "keyeo-crypto",
  "openom-crypto",
  "openom-keyring-api",
  "openom-keyring-chain",

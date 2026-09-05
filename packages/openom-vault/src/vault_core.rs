@@ -30,28 +30,25 @@ use openom_protocol::v1::{KdfParams, WrapMethod};
 // openom KeyId name clashes).
 use keyeo_crypto::{
     kek_wrap as keyeo_kek_wrap, member_wrap as keyeo_member_wrap, rrk_wrap as keyeo_rrk_wrap,
-    unwrap_dek as keyeo_unwrap_dek, unwrap_kek as keyeo_unwrap_kek, EncappedKey, GroupContext,
-    GroupId as KeyeoGroupId, KdfBounds, KdfParams as KeyeoKdfParams, KekKind, KeyId as KeyeoKeyId,
-    Nonce as KeyeoNonce, Wrap as KeyeoWrap, WrapMethod as KeyeoWrapMethod,
+    unwrap_dek as keyeo_unwrap_dek, unwrap_kek as keyeo_unwrap_kek, Epoch as KeyeoEpoch,
+    GroupContext, GroupId as KeyeoGroupId, KdfBounds, KdfParams as KeyeoKdfParams, KekKind,
+    KeyId as KeyeoKeyId, Nonce as KeyeoNonce, Wrap as KeyeoWrap, WrapMethod as KeyeoWrapMethod,
     WrappedDek as KeyeoWrappedDek, X25519PublicKey,
 };
-// The keyring payload wire moved to openom-keyring-chain in OPE-300; the sealing core marshals its own
-// records to the CHAIN's proto shapes here. `ChainKdfParams` is the chain's wire-identical KdfParams (the
-// crypto/derive path keeps using openom-protocol's `KdfParams`).
-use openom_keyring_chain::wire::{
-    KdfParams as ChainKdfParams, KeyEpoch, KeyWrap, RecoveryKey,
-};
+// The chain keyring wire (openom-keyring-chain). `RecoveryKey` keeps its structural identity fields (public
+// key, member id, RVK) as prost; its escrow KEK wraps ride as keyeo `codec` bytes, encoded at the boundary
+// below. The DEK epochs are likewise keyeo `Epoch`s the chain stores as `codec` bytes — no proto sub-message
+// marshaling remains here.
+use openom_keyring_chain::wire::RecoveryKey;
 use serde::{Deserialize, Serialize};
 
 use crate::VaultError;
 use openom_sealer::SealerSet;
 
+// The credential-KEK discriminants `open_rrk_secret` maps to a keyeo `KekKind` (the escrow's passphrase /
+// recovery-code wraps). The HPKE method discriminants moved into keyeo's `WrapMethod` enum (matched directly).
 pub(crate) const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
 pub(crate) const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
-pub(crate) const HPKE: i32 = WrapMethod::X25519Hpke as i32;
-/// An epoch DEK wrapped to the founder's recovery root key — the founder's access to every
-/// epoch (past, future, and co-owner-minted) via one recovery-key private key.
-pub(crate) const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
 
 // The Argon2id window this build will actually run (checked before the KDF, on params read from an
 // unverified keyring). Rejects absurd values rather than clamping — clamping could silently weaken; a
@@ -72,33 +69,6 @@ pub(crate) struct CoreKdf {
     pub parallelism: u32,
 }
 
-/// One wrap of a secret (a DEK, or the RRK secret) to a credential: a passphrase/recovery-code KEK
-/// (`kdf` present) or an HPKE public key (`ephemeral_public_key` present). `wrap_method` is a
-/// [`WrapMethod`] discriminant (a plain `i32` so the record stays a dumb data carrier).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CoreWrap {
-    pub member_id: String,
-    pub wrap_method: i32,
-    pub nonce: Vec<u8>,
-    pub wrapped_dek: Vec<u8>,
-    pub kdf: Option<CoreKdf>,
-    pub ephemeral_public_key: Vec<u8>,
-    /// For HPKE / RRK-HPKE wraps: the RECIPIENT public key this wrap addresses (the member's or the RRK's).
-    /// An UNAUTHENTICATED hint — the op author writes it, it is NOT cryptographically bound to the ciphertext
-    /// — that the dag's `epoch_covers` heuristic reads to spot a wrap left addressed to a member's STALE key
-    /// after a rekey race. Never a proof of decryptability (real addressing is enforced by HPKE) (OPE-290).
-    pub recipient_public_key: Vec<u8>,
-}
-
-/// A DEK epoch: its random `key_id` (also the header's `key_id`), its ordinal, and the wraps that
-/// distribute the DEK to members + the founder's RRK.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SealedEpoch {
-    pub key_id: Vec<u8>,
-    pub epoch: u32,
-    pub wraps: Vec<CoreWrap>,
-}
-
 /// The founder's recovery escrow: the RRK public key, the two KEK wraps of the RRK secret (under the
 /// passphrase KEK and the recovery-code KEK — keyeo's native [`KeyeoWrap`], the shape the dag persists), and
 /// the pinned Ed25519 recovery verifying key (RVK).
@@ -110,7 +80,7 @@ pub(crate) struct RecoveryEscrow {
     pub recovery_verifying_key: Vec<u8>,
 }
 
-// ---- chain marshaling: the `From` impls that bridge the core records to the protobuf keyring wire ----
+// ---- KDF marshaling to the crypto/derive path's proto `KdfParams` (the member-KDF paths) ----
 
 impl From<&KdfParams> for CoreKdf {
     fn from(p: &KdfParams) -> Self {
@@ -132,88 +102,17 @@ impl From<&CoreKdf> for KdfParams {
         }
     }
 }
-// The chain's wire-identical KdfParams conversions (used only by the chain KeyWrap marshaling below).
-impl From<&ChainKdfParams> for CoreKdf {
-    fn from(k: &ChainKdfParams) -> Self {
-        Self {
-            salt: k.salt.clone(),
-            memory_kib: k.memory_kib,
-            iterations: k.iterations,
-            parallelism: k.parallelism,
-        }
-    }
-}
-impl From<&CoreKdf> for ChainKdfParams {
-    fn from(k: &CoreKdf) -> Self {
-        Self {
-            salt: k.salt.clone(),
-            memory_kib: k.memory_kib,
-            iterations: k.iterations,
-            parallelism: k.parallelism,
-        }
-    }
-}
-impl From<&KeyWrap> for CoreWrap {
-    fn from(w: &KeyWrap) -> Self {
-        Self {
-            member_id: w.member_id.clone(),
-            wrap_method: w.wrap_method,
-            nonce: w.nonce.clone(),
-            wrapped_dek: w.wrapped_dek.clone(),
-            kdf: w.kdf_params.as_ref().map(CoreKdf::from),
-            ephemeral_public_key: w.ephemeral_public_key.clone(),
-            recipient_public_key: w.recipient_public_key.clone(),
-        }
-    }
-}
-impl From<&CoreWrap> for KeyWrap {
-    fn from(w: &CoreWrap) -> Self {
-        Self {
-            member_id: w.member_id.clone(),
-            wrap_method: w.wrap_method,
-            nonce: w.nonce.clone(),
-            wrapped_dek: w.wrapped_dek.clone(),
-            kdf_params: w.kdf.as_ref().map(ChainKdfParams::from),
-            ephemeral_public_key: w.ephemeral_public_key.clone(),
-            recipient_public_key: w.recipient_public_key.clone(),
-        }
-    }
-}
-impl From<&KeyEpoch> for SealedEpoch {
-    fn from(e: &KeyEpoch) -> Self {
-        Self {
-            key_id: e.key_id.clone(),
-            epoch: e.epoch,
-            wraps: e.wraps.iter().map(CoreWrap::from).collect(),
-        }
-    }
-}
-impl From<&SealedEpoch> for KeyEpoch {
-    fn from(e: &SealedEpoch) -> Self {
-        Self {
-            key_id: e.key_id.clone(),
-            epoch: e.epoch,
-            wraps: e.wraps.iter().map(KeyWrap::from).collect(),
-        }
-    }
-}
 impl From<&RecoveryEscrow> for RecoveryKey {
     fn from(r: &RecoveryEscrow) -> Self {
         Self {
             public_key: r.public_key.clone(),
             member_id: r.member_id.clone(),
-            // The escrow's KEK wraps are keyeo `Wrap`s; the chain wire is the proto `KeyWrap`. Marshal each
-            // through the `CoreWrap` boundary (a Kek wrap → `wrap_method`/`nonce`/`kdf`/`wrapped_dek`).
-            wraps: r.wraps.iter().map(|w| KeyWrap::from(&core_from_keyeo(w.clone()))).collect(),
+            // The escrow's KEK wraps are keyeo `Wrap`s, stored as their canonical `codec` bytes (the chain's
+            // `RecoveryKey.wraps` is a bytes field). The RVK stays a separate first-class field.
+            wraps: keyeo_crypto::codec::encode_wraps(&r.wraps),
             recovery_verifying_key: r.recovery_verifying_key.clone(),
         }
     }
-}
-
-/// Convert a proto epoch list to the core's records — the chain's marshaling at every core call over
-/// its epochs.
-pub(crate) fn sealed_epochs(epochs: &[KeyEpoch]) -> Vec<SealedEpoch> {
-    epochs.iter().map(SealedEpoch::from).collect()
 }
 
 // ---- owner secrets + recovery escrow ----
@@ -312,38 +211,6 @@ pub(crate) fn build_recovery_escrow(
 
 // ---- epoch DEK wrap / unwrap (lifted onto keyeo's key-material layer) ----
 
-/// Map a keyeo wrap (any method) into the openom `CoreWrap` boundary record. U1 keeps `CoreWrap` as the
-/// record type both engines consume; retiring it is a later step.
-fn core_from_keyeo(w: KeyeoWrap<String>) -> CoreWrap {
-    let wrap_method = w.method.tag();
-    match w.method {
-        KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
-        | KeyeoWrapMethod::RrkHpke { encapped, recipient_key } => CoreWrap {
-            member_id: w.recipient,
-            wrap_method,
-            nonce: Vec::new(),
-            wrapped_dek: w.ciphertext.as_ref().to_vec(),
-            kdf: None,
-            ephemeral_public_key: encapped.as_ref().to_vec(),
-            recipient_public_key: recipient_key.as_ref().to_vec(),
-        },
-        KeyeoWrapMethod::Kek { kind: _, kdf, nonce } => CoreWrap {
-            member_id: w.recipient,
-            wrap_method,
-            nonce: nonce.as_ref().to_vec(),
-            wrapped_dek: w.ciphertext.as_ref().to_vec(),
-            kdf: Some(CoreKdf {
-                salt: kdf.salt,
-                memory_kib: kdf.memory_kib,
-                iterations: kdf.iterations,
-                parallelism: kdf.parallelism,
-            }),
-            ephemeral_public_key: Vec::new(),
-            recipient_public_key: Vec::new(),
-        },
-    }
-}
-
 fn keyeo_kdf(p: &CoreKdf) -> KeyeoKdfParams {
     KeyeoKdfParams {
         salt: p.salt.clone(),
@@ -387,34 +254,14 @@ pub(crate) fn open_rrk_secret(
     Ok(RrkSecret::new(*secret))
 }
 
-/// Reconstruct a keyeo HPKE wrap from a stored `CoreWrap`, so the DEK can be opened via keyeo's
-/// `unwrap_dek` (which rebuilds the AAD from the wrap's own recipient + method). Rejects a non-HPKE /
-/// malformed wrap.
-fn keyeo_hpke_from_core(c: &CoreWrap) -> Result<KeyeoWrap<String>, VaultError> {
-    let ciphertext = KeyeoWrappedDek::try_from(c.wrapped_dek.as_slice())
-        .map_err(|_| VaultError::BadKeyring("wrap ciphertext length".into()))?;
-    let encapped = EncappedKey::try_from(c.ephemeral_public_key.as_slice())
-        .map_err(|_| VaultError::BadKeyring("wrap encapped-key length".into()))?;
-    let recipient_key = X25519PublicKey::try_from(c.recipient_public_key.as_slice())
-        .map_err(|_| VaultError::BadKeyring("wrap recipient-key length".into()))?;
-    let method = if c.wrap_method == HPKE {
-        KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
-    } else if c.wrap_method == RRK_HPKE {
-        KeyeoWrapMethod::RrkHpke { encapped, recipient_key }
-    } else {
-        return Err(VaultError::BadKeyring("expected an HPKE wrap".into()));
-    };
-    Ok(KeyeoWrap { recipient: c.member_id.clone(), method, ciphertext })
-}
-
 /// The group-at-an-epoch binding context for the vault's `(tree_id, key_id)` pair.
 fn epoch_ctx<'a>(group_id: &'a KeyeoGroupId, key_id: &'a KeyeoKeyId) -> GroupContext<'a> {
     GroupContext { group_id, key_id }
 }
 
 /// HPKE-wrap an epoch's `dek` to the founder's recovery root **public** key (needs no secret), as the
-/// `RrkHpke` wrap that gives the founder cross-epoch access — returning keyeo's native [`KeyeoWrap`]. The dag
-/// persists this directly; the chain adapts it via [`rrk_wrap_epoch`].
+/// `RrkHpke` wrap that gives the founder cross-epoch access — keyeo's native [`KeyeoWrap`], which both
+/// engines persist directly (the chain via its `codec` bytes).
 pub(crate) fn rrk_wrap_keyeo(
     rrk_public: &[u8],
     dek: &Dek,
@@ -427,17 +274,6 @@ pub(crate) fn rrk_wrap_keyeo(
     let rrk_public = X25519PublicKey::try_from(rrk_public)
         .map_err(|_| VaultError::BadKeyring("rrk public key length".into()))?;
     Ok(keyeo_rrk_wrap(dek, founder_id.to_string(), rrk_public, &epoch_ctx(&group_id, &kid))?)
-}
-
-/// The openom [`CoreWrap`] adapter over [`rrk_wrap_keyeo`] — the chain's persisted shape.
-pub(crate) fn rrk_wrap_epoch(
-    rrk_public: &[u8],
-    dek: &Dek,
-    tree_id: &[u8],
-    founder_id: &str,
-    key_id: &[u8],
-) -> Result<CoreWrap, VaultError> {
-    Ok(core_from_keyeo(rrk_wrap_keyeo(rrk_public, dek, tree_id, founder_id, key_id)?))
 }
 
 /// HPKE-wrap an epoch's `dek` to a MEMBER's public key — the per-member wrap giving them access to this
@@ -456,46 +292,23 @@ pub(crate) fn member_wrap_keyeo(
     Ok(keyeo_member_wrap(dek, member_id.to_string(), recipient_key, &epoch_ctx(&group_id, &kid))?)
 }
 
-/// The openom [`CoreWrap`] adapter over [`member_wrap_keyeo`] — the chain's persisted shape.
-pub(crate) fn member_wrap_epoch(
-    member_hpke_public: &[u8],
-    dek: &Dek,
-    tree_id: &[u8],
-    member_id: &str,
-    key_id: &[u8],
-) -> Result<CoreWrap, VaultError> {
-    Ok(core_from_keyeo(member_wrap_keyeo(member_hpke_public, dek, tree_id, member_id, key_id)?))
-}
-
-/// Map a keyeo `Epoch<String>` back to a `SealedEpoch`, so the dag (which now persists keyeo `Epoch`s) can
-/// feed the still-`SealedEpoch`-based DEK openers ([`epoch_deks`] / [`member_epoch_deks`]) without
-/// duplicating them. Read-side adapter only.
-pub(crate) fn sealed_from_keyeo(e: &keyeo_crypto::Epoch<String>) -> SealedEpoch {
-    SealedEpoch {
-        key_id: e.key_id.as_bytes().to_vec(),
-        epoch: e.ordinal as u32,
-        wraps: e.wraps.iter().cloned().map(core_from_keyeo).collect(),
-    }
-}
-
 /// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.
 pub(crate) fn open_epoch_dek(
-    epoch: &SealedEpoch,
+    epoch: &KeyeoEpoch<String>,
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
 ) -> Result<Dek, VaultError> {
-    let w = epoch
+    let mut w = epoch
         .wraps
         .iter()
-        .find(|w| w.wrap_method == RRK_HPKE)
+        .find(|w| matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
+        .cloned()
         .ok_or_else(|| VaultError::BadKeyring("epoch missing rrk wrap".into()))?;
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
-    let kid = KeyeoKeyId::new(epoch.key_id.clone());
-    let mut kw = keyeo_hpke_from_core(w)?;
     // Bind the AAD to the founder (the wrap's recipient IS the founder; making it explicit matches wrap time).
-    kw.recipient = founder_id.to_string();
-    Ok(keyeo_unwrap_dek(&kw, rrk_secret.expose(), &epoch_ctx(&group_id, &kid))?)
+    w.recipient = founder_id.to_string();
+    Ok(keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id))?)
 }
 
 /// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
@@ -507,17 +320,17 @@ pub(crate) fn open_epoch_dek(
 /// anti-substitution check before this runs), so the chain — whose epochs are signature-protected — never
 /// skips, and the owner still reaches every real epoch.
 pub(crate) fn epoch_deks(
-    epochs: &[SealedEpoch],
+    epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, VaultError> {
+) -> Result<Vec<(Vec<u8>, u64, Dek)>, VaultError> {
     Ok(epochs
         .iter()
         .filter_map(|ep| {
             open_epoch_dek(ep, tree_id, founder_id, rrk_secret)
                 .ok()
-                .map(|dek| (ep.key_id.clone(), ep.epoch, dek))
+                .map(|dek| (ep.key_id.as_bytes().to_vec(), ep.ordinal, dek))
         })
         .collect())
 }
@@ -527,27 +340,27 @@ pub(crate) fn epoch_deks(
 /// a fresh RRK, then move the founder's cross-epoch access onto it so the old recovery secret no longer
 /// reaches any DEK.
 pub(crate) fn rewrap_epochs_to_new_rrk(
-    epochs: &[SealedEpoch],
+    epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
     founder_id: &str,
     old_rrk: &RrkSecret,
     new_rrk_public: &[u8],
-) -> Result<Vec<SealedEpoch>, VaultError> {
+) -> Result<Vec<KeyeoEpoch<String>>, VaultError> {
     epochs
         .iter()
         .map(|ep| {
             let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
-            let new_wrap = rrk_wrap_epoch(new_rrk_public, &dek, tree_id, founder_id, &ep.key_id)?;
-            let mut wraps: Vec<CoreWrap> = ep
+            let new_wrap = rrk_wrap_keyeo(new_rrk_public, &dek, tree_id, founder_id, ep.key_id.as_bytes())?;
+            let mut wraps: Vec<KeyeoWrap<String>> = ep
                 .wraps
                 .iter()
-                .filter(|w| w.wrap_method != RRK_HPKE)
+                .filter(|w| !matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
                 .cloned()
                 .collect();
             wraps.push(new_wrap);
-            Ok(SealedEpoch {
+            Ok(KeyeoEpoch {
                 key_id: ep.key_id.clone(),
-                epoch: ep.epoch,
+                ordinal: ep.ordinal,
                 wraps,
             })
         })
@@ -559,28 +372,24 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
 /// won't open (a garbage member-authored epoch, or one wrapping the member's stale key) is skipped, not
 /// fatal — one junk epoch must not brick a member's unlock (see [`epoch_deks`]).
 pub(crate) fn member_epoch_deks(
-    epochs: &[SealedEpoch],
+    epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
     member_id: &str,
     hpke_secret: &HpkePrivate,
-) -> Result<Vec<(Vec<u8>, u32, Dek)>, VaultError> {
+) -> Result<Vec<(Vec<u8>, u64, Dek)>, VaultError> {
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
     let mut out = Vec::new();
     for ep in epochs {
-        let kid = KeyeoKeyId::new(ep.key_id.clone());
         // Try EVERY HPKE wrap addressed to this member, not just the first (OPE-290). A backfill/retarget can
         // leave both a stale-key and a current-key wrap for the same member on one epoch; first-match could
         // land on the dead one and wrongly skip an epoch the member CAN open. Take the first that unwraps.
         let dek = ep
             .wraps
             .iter()
-            .filter(|w| w.member_id == member_id && w.wrap_method == HPKE)
-            .find_map(|w| {
-                let kw = keyeo_hpke_from_core(w).ok()?;
-                keyeo_unwrap_dek(&kw, hpke_secret.expose(), &epoch_ctx(&group_id, &kid)).ok()
-            });
+            .filter(|w| w.recipient == member_id && matches!(w.method, KeyeoWrapMethod::MemberHpke { .. }))
+            .find_map(|w| keyeo_unwrap_dek(w, hpke_secret.expose(), &epoch_ctx(&group_id, &ep.key_id)).ok());
         if let Some(dek) = dek {
-            out.push((ep.key_id.clone(), ep.epoch, dek));
+            out.push((ep.key_id.as_bytes().to_vec(), ep.ordinal, dek));
         }
     }
     Ok(out)
@@ -591,7 +400,7 @@ pub(crate) fn member_epoch_deks(
 pub(crate) fn sealer_set_from_deks(
     tree_id: &[u8],
     replica_id: &[u8],
-    deks: Vec<(Vec<u8>, u32, Dek)>,
+    deks: Vec<(Vec<u8>, u64, Dek)>,
     write_key_id: Vec<u8>,
 ) -> Result<SealerSet, VaultError> {
     // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
@@ -611,7 +420,7 @@ pub(crate) fn sealer_set_from_deks(
 /// sequence, so ordinals never collide — no tiebreak is needed (unlike the dag, which breaks concurrent
 /// same-ordinal ties by minting op-id). Choosing the write epoch is the ENGINE's call, not the neutral
 /// core's, so it is threaded into [`sealer_set_from_deks`].
-pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u32, Dek)]) -> Result<Vec<u8>, VaultError> {
+pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u64, Dek)]) -> Result<Vec<u8>, VaultError> {
     deks.iter()
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, _)| k.clone())
@@ -657,11 +466,10 @@ pub(crate) fn validated_proto_kdf(k: &KeyeoKdfParams) -> Result<KdfParams, Vault
 /// `(kdf, nonce, ciphertext)` — the pieces the owner/recoverer needs to re-derive the KEK and open the RRK
 /// (via [`validated_proto_kdf`] + [`open_rrk_secret`]).
 pub(crate) fn escrow_kek_wrap(
-    escrow: &RecoveryEscrow,
+    wraps: &[KeyeoWrap<String>],
     kind: KekKind,
 ) -> Result<(&KeyeoKdfParams, &[u8], &[u8]), VaultError> {
-    let wrap = escrow
-        .wraps
+    let wrap = wraps
         .iter()
         .find(|w| matches!(&w.method, KeyeoWrapMethod::Kek { kind: k, .. } if *k == kind))
         .ok_or(VaultError::MissingWrap)?;

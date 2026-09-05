@@ -21,6 +21,7 @@ pub const SALT_LEN: usize = 16;
 pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
 
 pub mod aead;
+pub mod codec;
 mod covers;
 mod escrow;
 mod hpke_wrap;
@@ -38,6 +39,7 @@ pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
+pub use codec::CodecError;
 pub use covers::{covers_exact, missing, RecipientDescriptor};
 pub use escrow::{kek_wrap, kek_wrap_with_nonce, unwrap_kek};
 pub use ids::{GroupId, KeyId};

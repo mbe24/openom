@@ -86,7 +86,26 @@ pub fn keyring_hash(keyring: &Keyring) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{KeyEpoch, KeyWrap, Member};
+    use crate::wire::Member;
+    use keyeo_crypto::{
+        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        X25519PublicKey,
+    };
+
+    fn sample_epochs() -> Vec<KeyeoEpoch<String>> {
+        vec![KeyeoEpoch {
+            key_id: KeyId::new(vec![1, 2, 3]),
+            ordinal: 0,
+            wraps: vec![KeyeoWrap {
+                recipient: "acct-1".into(),
+                method: WrapMethod::MemberHpke {
+                    encapped: EncappedKey::from_bytes([1u8; 32]),
+                    recipient_key: X25519PublicKey::from_bytes([2u8; 32]),
+                },
+                ciphertext: WrappedDek::from_bytes([9u8; 48]),
+            }],
+        }]
+    }
 
     fn sample_keyring() -> Keyring {
         Keyring {
@@ -102,19 +121,7 @@ mod tests {
             }],
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch {
-                key_id: vec![1, 2, 3],
-                epoch: 0,
-                wraps: vec![KeyWrap {
-                    member_id: "acct-1".into(),
-                    wrap_method: 1,
-                    nonce: vec![7; 24],
-                    wrapped_dek: vec![9; 48],
-                    kdf_params: None,
-                    ephemeral_public_key: vec![],
-                    recipient_public_key: vec![],
-                }],
-            }],
+            epochs: codec::encode_epochs(&sample_epochs()),
             ..Default::default()
         }
     }
@@ -174,12 +181,59 @@ mod tests {
         assert!(matches!(verify_keyring(&rolled, &id.verifying_key()), Err(SigError)));
 
         let mut swapped = kr.clone();
-        swapped.epochs[0].wraps[0].wrapped_dek = vec![0; 48];
+        let mut eps = swapped.key_material().unwrap();
+        eps[0].wraps[0].ciphertext = WrappedDek::from_bytes([0u8; 48]);
+        swapped.epochs = codec::encode_epochs(&eps);
         assert!(matches!(verify_keyring(&swapped, &id.verifying_key()), Err(SigError)));
 
         let mut escalated = kr.clone();
         escalated.members[0].role = 3; // OWNER -> ADMIN
         assert!(matches!(verify_keyring(&escalated, &id.verifying_key()), Err(SigError)));
+    }
+
+    /// Every field of the keyeo key material is bound in the signature via the payload commitment (it is
+    /// hashed as opaque `codec` bytes, so this is the end-to-end proof of what the codec's per-field
+    /// mutation test asserts at the byte level). Mutate one decoded field, re-encode WITHOUT re-signing, and
+    /// verification must reject. Extend this when a field/variant is added (the sentinel in `doc.rs` forces
+    /// the reminder).
+    #[test]
+    fn every_key_material_field_is_bound_in_the_signature() {
+        let id = generate_identity().unwrap();
+        let mut kr = sample_keyring();
+        kr.members[0].author_public_key = id.verifying_key().to_bytes().to_vec();
+        sign_keyring(&mut kr, &id);
+        verify_keyring(&kr, &id.verifying_key()).unwrap();
+
+        let fails = |f: &dyn Fn(&mut KeyeoEpoch<String>)| {
+            let mut k = kr.clone();
+            let mut eps = k.key_material().unwrap();
+            f(&mut eps[0]);
+            k.epochs = codec::encode_epochs(&eps);
+            matches!(verify_keyring(&k, &id.verifying_key()), Err(SigError))
+        };
+        assert!(fails(&|e| e.ordinal = 5), "ordinal");
+        assert!(fails(&|e| e.key_id = KeyId::new(vec![9, 9, 9])), "key_id");
+        assert!(fails(&|e| e.wraps[0].recipient = "someone-else".into()), "recipient");
+        assert!(
+            fails(&|e| e.wraps[0].ciphertext = WrappedDek::from_bytes([0u8; 48])),
+            "ciphertext"
+        );
+        assert!(
+            fails(&|e| {
+                if let WrapMethod::MemberHpke { encapped, .. } = &mut e.wraps[0].method {
+                    *encapped = EncappedKey::from_bytes([0u8; 32]);
+                }
+            }),
+            "encapped"
+        );
+        assert!(
+            fails(&|e| {
+                if let WrapMethod::MemberHpke { recipient_key, .. } = &mut e.wraps[0].method {
+                    *recipient_key = X25519PublicKey::from_bytes([0u8; 32]);
+                }
+            }),
+            "recipient_key"
+        );
     }
 
     #[test]

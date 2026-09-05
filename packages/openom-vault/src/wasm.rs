@@ -1502,10 +1502,11 @@ pub fn verify_entry_wasm(
     // two inputs verify_entry now takes (OPE-333); behaviour is identical.
     let view = openom_keyring_chain::membership_view(&kr);
     let newest_key_id = kr
-        .epochs
+        .key_material()
+        .map_err(|_| JsError::new("bad governing keyring: key material malformed"))?
         .iter()
-        .max_by_key(|e| e.epoch)
-        .map(|e| e.key_id.clone())
+        .max_by_key(|e| e.ordinal)
+        .map(|e| e.key_id.as_bytes().to_vec())
         .unwrap_or_default();
     verify_entry(version, header, plaintext, &view, &newest_key_id)
         .map_err(|e| JsError::new(&e.to_string()))

@@ -23,5 +23,7 @@ postcard = { version = "1", features = ["use-std"] }
 openom-keyring-chain.workspace = true
 openom-protocol.workspace = true
 openom-roles.workspace = true
+# The chain keyring's DEK epochs/wraps are keyeo key material now; the fixtures build them directly.
+keyeo-crypto.workspace = true
 proptest.workspace = true
 tempfile = "3"

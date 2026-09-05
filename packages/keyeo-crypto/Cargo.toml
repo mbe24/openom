@@ -17,6 +17,9 @@ getrandom.workspace = true
 thiserror.workspace = true
 # Serde for the shared wrap/epoch records (the material newtypes + Wrap/Epoch that are replicated).
 serde = { workspace = true, features = ["derive"] }
+# The canonical wire the shared wrap/epoch records serialize under (the `codec` module owns this choice, so
+# both keyring engines share one encoding). No field tags / varints — compact and deterministic.
+postcard = { version = "1", features = ["use-std"] }
 # Recovery code: base32 encoding + a SHA-256-derived checksum byte for typo detection.
 data-encoding.workspace = true
 sha2.workspace = true
@@ -29,9 +32,6 @@ rand_core.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-# The wire format the shared wrap/epoch records are replicated under — used to round-trip them in tests
-# (exercises the hand-rolled 48-byte serde via serialize_bytes/visit_bytes).
-postcard = { version = "1", features = ["use-std"] }
 
 # WASM (the web sealer) needs getrandom's browser backend enabled — only for wasm32;
 # native uses the OS RNG directly. Several getrandom majors reach this crate

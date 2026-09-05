@@ -30,3 +30,5 @@ sqlite = ["dep:rusqlite"]
 [dev-dependencies]
 # Tests mint ad-hoc signer identities via openom_keyring_chain::generate_identity (test-util gated).
 openom-keyring-chain = { workspace = true, features = ["test-util"] }
+# A chain-walk test injects a rogue member wrap into a keyring's keyeo key material.
+keyeo-crypto.workspace = true

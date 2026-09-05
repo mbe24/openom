@@ -65,5 +65,7 @@ tower-http.workspace = true
 tower = { version = "0.5", features = ["util"] }
 # tests/api.rs mints ad-hoc signer identities via openom_keyring_chain::generate_identity (test-util gated).
 openom-keyring-chain = { workspace = true, features = ["test-util"] }
+# tests/api.rs builds keyring fixtures whose DEK epochs/wraps are keyeo key material.
+keyeo-crypto.workspace = true
 # Metering tests seed accounts with tiny caps directly, to drive the rate/capacity gates.
 sqlx.workspace = true

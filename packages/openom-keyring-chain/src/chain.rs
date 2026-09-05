@@ -337,8 +337,27 @@ pub fn verify_reset(
 mod tests {
     use super::*;
     use crate::{keyring_hash, sign_keyring, SigningKey};
-    use crate::wire::{KeyEpoch, KeyWrap, Member, RecoveryKey};
+    use crate::wire::{Member, RecoveryKey};
     use crate::wire::{MEMBER_CO_OWNER, MEMBER_OWNER, WRAP_RRK_HPKE, WRAP_X25519_HPKE};
+    use keyeo_crypto::{
+        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        X25519PublicKey,
+    };
+
+    /// Decode a keyring's epochs (test helper; the fixtures build them well-formed).
+    fn epochs_of(k: &Keyring) -> Vec<KeyeoEpoch<String>> {
+        k.key_material().unwrap()
+    }
+    /// Re-encode epochs back into a keyring.
+    fn set_epochs(k: &mut Keyring, epochs: &[KeyeoEpoch<String>]) {
+        k.epochs = codec::encode_epochs(epochs);
+    }
+    /// Push a wrap onto epoch 0 (decode → push → re-encode) — the key material rides as `codec` bytes now.
+    fn push_wrap(k: &mut Keyring, w: KeyeoWrap<String>) {
+        let mut eps = epochs_of(k);
+        eps[0].wraps.push(w);
+        set_epochs(k, &eps);
+    }
 
     const TREE: &[u8] = b"tree-uuid-16byte";
     const HPKE: i32 = WRAP_X25519_HPKE;
@@ -369,16 +388,15 @@ mod tests {
             hpke_public_key: vec![9; 32],
         }
     }
-    fn wrap(id: &str, method: i32) -> KeyWrap {
-        KeyWrap {
-            member_id: id.into(),
-            wrap_method: method,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
-        }
+    fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
+        let encapped = EncappedKey::from_bytes([0u8; 32]);
+        let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
+        let m = if method == RRK_HPKE {
+            WrapMethod::RrkHpke { encapped, recipient_key }
+        } else {
+            WrapMethod::MemberHpke { encapped, recipient_key }
+        };
+        KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
     }
 
     /// A genesis keyring: founder "owner" + the given co-owner signers + the given plain members, with a
@@ -402,7 +420,11 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+            epochs: codec::encode_epochs(&[KeyeoEpoch {
+                key_id: KeyId::new(vec![0]),
+                ordinal: 0,
+                wraps,
+            }]),
             ..Default::default()
         };
         sign_keyring(&mut k, founder);
@@ -453,7 +475,7 @@ mod tests {
             k.recovery_keys = vec![RecoveryKey {
                 public_key: vec![5; 32],
                 member_id: "owner".into(),
-                wraps: vec![],
+                wraps: codec::encode_wraps::<String>(&[]),
                 recovery_verifying_key: pinned_rvk,
             }];
             k.signatures.clear();
@@ -482,7 +504,7 @@ mod tests {
         prior.recovery_keys = vec![RecoveryKey {
             public_key: vec![5; 32],
             member_id: "owner".into(),
-            wraps: vec![],
+            wraps: codec::encode_wraps::<String>(&[]),
             recovery_verifying_key: rvk1_pub.clone(),
         }];
         prior.signatures.clear();
@@ -523,7 +545,7 @@ mod tests {
             k.recovery_keys = vec![RecoveryKey {
                 public_key: vec![5; 32],
                 member_id: "owner".into(),
-                wraps: vec![],
+                wraps: codec::encode_wraps::<String>(&[]),
                 recovery_verifying_key: rvk_pub.clone(),
             }];
             k.signatures.clear();
@@ -538,7 +560,7 @@ mod tests {
     fn add_coowner(dk: &SigningKey) -> impl FnOnce(&mut Keyring) + '_ {
         move |k: &mut Keyring| {
             k.members.push(keyed_member(dk, "d", CO_OWNER_MEMBER));
-            k.epochs[0].wraps.push(wrap("d", HPKE));
+            push_wrap(k, wrap("d", HPKE));
         }
     }
 
@@ -716,7 +738,7 @@ mod tests {
             &g,
             |k| {
                 k.members.push(keyed_member(&x, "owner", CO_OWNER_MEMBER));
-                k.epochs[0].wraps.push(wrap("owner", HPKE));
+                push_wrap(k, wrap("owner", HPKE));
             },
             &[&f],
         );
@@ -748,8 +770,36 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         assert!(verify_reset(None, &g).is_ok(), "honest genesis (epoch 0, len 1) is in range");
         let a = anchor(&g);
-        let bad = next(&g, |k| k.epochs[0].epoch = u32::MAX, &[&f]);
-        assert!(matches!(verify_transition(&a, &bad), Err(KeyringError::BadStructure(_))));
+        let grind = |ordinal: u64| {
+            next(
+                &g,
+                move |k| {
+                    let mut eps = epochs_of(k);
+                    eps[0].ordinal = ordinal;
+                    set_epochs(k, &eps);
+                },
+                &[&f],
+            )
+        };
+        assert!(matches!(verify_transition(&a, &grind(u64::MAX)), Err(KeyringError::BadStructure(_))));
+        // 2^32 is the wasm32 tripwire: the bound compares in u64, so it is rejected on every target. An
+        // `as usize` cast would truncate this to 0 on wasm32 and wrongly accept it.
+        assert!(matches!(verify_transition(&a, &grind(1u64 << 32)), Err(KeyringError::BadStructure(_))));
+    }
+
+    #[test]
+    fn an_rrk_wrap_addressed_to_a_non_founder_does_not_satisfy_completeness() {
+        let f = key();
+        let mut g = genesis(&f, &[], &[]);
+        // Re-address the founder's RRK wrap to a stranger. keyeo's `rrk_covers` binds the RRK wrap's
+        // recipient to the founder id (a strictening over the old any-RRK-wrap check), so the founder is now
+        // uncovered and the newest epoch is incomplete.
+        let mut eps = epochs_of(&g);
+        eps[0].wraps[0].recipient = "not-the-owner".into();
+        set_epochs(&mut g, &eps);
+        g.signatures.clear();
+        sign_keyring(&mut g, &f);
+        assert_eq!(verify_reset(None, &g), Err(KeyringError::WrapIncomplete));
     }
 
     #[test]
@@ -786,8 +836,10 @@ mod tests {
         let bad = next(
             &g,
             |k| {
-                let w = k.epochs[0].wraps.iter_mut().find(|w| w.member_id == "bob").unwrap();
-                w.member_id = "carol".into();
+                let mut eps = epochs_of(k);
+                let w = eps[0].wraps.iter_mut().find(|w| w.recipient == "bob").unwrap();
+                w.recipient = "carol".into();
+                set_epochs(k, &eps);
             },
             &[&f],
         );
@@ -811,10 +863,12 @@ mod tests {
         use crate::doc::MAX_EPOCHS;
         let f = key();
         let mut k = genesis(&f, &[], &[]);
-        let e = k.epochs[0].clone();
-        while k.epochs.len() <= MAX_EPOCHS {
-            k.epochs.push(e.clone());
+        let mut eps = epochs_of(&k);
+        let e = eps[0].clone();
+        while eps.len() <= MAX_EPOCHS {
+            eps.push(e.clone());
         }
+        set_epochs(&mut k, &eps);
         assert_eq!(verify_reset(None, &k), Err(KeyringError::BadStructure("list too large")));
     }
 
@@ -824,11 +878,11 @@ mod tests {
         let g = genesis(&f, &[], &[]);
         let a = anchor(&g);
 
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&f]);
+        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&f]);
         assert_eq!(verify_transition(&a, &ok).unwrap().revision, 2);
 
         let stranger = key();
-        let bad = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&stranger]);
+        let bad = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&stranger]);
         assert_eq!(verify_transition(&a, &bad), Err(KeyringError::UnendorsedOrdinaryChange));
     }
 
@@ -838,7 +892,7 @@ mod tests {
         let c = key();
         let g = genesis(&f, &[(&c, "carol")], &[]);
         let a = anchor(&g);
-        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&c]);
+        let ok = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&c]);
         verify_transition(&a, &ok).unwrap();
     }
 
@@ -865,7 +919,7 @@ mod tests {
         let carol = key();
         let mut g = genesis(&f, &[], &[]);
         g.members.push(keyed_member(&carol, "carol", EDITOR));
-        g.epochs[0].wraps.push(wrap("carol", HPKE));
+        push_wrap(&mut g, wrap("carol", HPKE));
         g.signatures.clear();
         sign_keyring(&mut g, &f);
         let a = anchor(&g);
@@ -887,7 +941,7 @@ mod tests {
             &g,
             |k| {
                 k.members.push(keyed_member(&rogue, "rogue", CO_OWNER_MEMBER));
-                k.epochs[0].wraps.push(wrap("rogue", HPKE));
+                push_wrap(k, wrap("rogue", HPKE));
             },
             &[&rogue],
         );
@@ -900,12 +954,12 @@ mod tests {
         let carol = key();
         let mut g = genesis(&f, &[], &[]);
         g.members.push(keyed_member(&carol, "carol", EDITOR));
-        g.epochs[0].wraps.push(wrap("carol", HPKE));
+        push_wrap(&mut g, wrap("carol", HPKE));
         g.signatures.clear();
         sign_keyring(&mut g, &f);
         let a = anchor(&g);
 
-        let ordinary = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&carol]);
+        let ordinary = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&carol]);
         assert_eq!(verify_transition(&a, &ordinary), Err(KeyringError::UnendorsedOrdinaryChange));
 
         let promote_self = next(&g, |k| k.members.iter_mut().find(|m| m.member_id == "carol").unwrap().role = CO_OWNER_MEMBER, &[&carol]);
@@ -919,7 +973,7 @@ mod tests {
         let g = genesis(&f, &[(&bob, "bob")], &[]);
         assert!(verify_reset(None, &g).is_ok());
         let a = anchor(&g);
-        let ok = next(&g, |k| { k.members.push(dummy_member("carol")); k.epochs[0].wraps.push(wrap("carol", HPKE)); }, &[&bob]);
+        let ok = next(&g, |k| { k.members.push(dummy_member("carol")); push_wrap(k, wrap("carol", HPKE)); }, &[&bob]);
         assert_eq!(verify_transition(&a, &ok).unwrap().revision, 2);
     }
 
@@ -977,7 +1031,7 @@ mod tests {
         assert_eq!(verify_transition(&a, &no_wrap), Err(KeyringError::WrapIncomplete));
 
         let carol = key();
-        let two = next(&g, |k| { k.members.push(keyed_member(&carol, "carol", OWNER_MEMBER)); k.epochs[0].wraps.push(wrap("carol", HPKE)); }, &[&f]);
+        let two = next(&g, |k| { k.members.push(keyed_member(&carol, "carol", OWNER_MEMBER)); push_wrap(k, wrap("carol", HPKE)); }, &[&f]);
         assert!(matches!(verify_transition(&a, &two), Err(KeyringError::BadStructure(_))));
     }
 
@@ -1051,7 +1105,11 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+            epochs: codec::encode_epochs(&[KeyeoEpoch {
+                key_id: KeyId::new(vec![0]),
+                ordinal: 0,
+                wraps,
+            }]),
             ..Default::default()
         };
         sign_keyring(&mut k, &f);
@@ -1062,7 +1120,7 @@ mod tests {
         let mutate = |k: &mut Keyring| match m {
             Mutation::Ordinary => {
                 k.members.push(dummy_member("new"));
-                k.epochs[0].wraps.push(wrap("new", HPKE));
+                push_wrap(k, wrap("new", HPKE));
             }
             Mutation::Promote => {
                 k.members.iter_mut().find(|m| m.member_id == "pend").unwrap().role = CO_OWNER_MEMBER
@@ -1142,8 +1200,8 @@ mod tests {
             Err(KeyringError::BadBootstrap)
         ));
 
-        let c1 = next(&g, |k| { k.members.push(dummy_member("bob")); k.epochs[0].wraps.push(wrap("bob", HPKE)); }, &[&f]);
-        let c2 = next(&c1, |k| { k.members.push(dummy_member("eve")); k.epochs[0].wraps.push(wrap("eve", HPKE)); }, &[&f]);
+        let c1 = next(&g, |k| { k.members.push(dummy_member("bob")); push_wrap(k, wrap("bob", HPKE)); }, &[&f]);
+        let c2 = next(&c1, |k| { k.members.push(dummy_member("eve")); push_wrap(k, wrap("eve", HPKE)); }, &[&f]);
         assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, 3);
         assert_eq!(verify_walk(&a, &[c2]), Err(KeyringError::NonSequential));
     }
@@ -1161,7 +1219,7 @@ mod tests {
         let a = anchor(&g);
         let add_bob = |k: &mut Keyring| {
             k.members.push(dummy_member("bob"));
-            k.epochs[0].wraps.push(wrap("bob", HPKE));
+            push_wrap(k, wrap("bob", HPKE));
         };
         let ok = next(&g, add_bob, &[&f]);
         assert_eq!(GoverningKeyring::from_transition(&a, ok).unwrap().revision(), 2);

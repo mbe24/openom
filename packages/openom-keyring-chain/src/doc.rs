@@ -10,12 +10,10 @@
 
 use keyeo_core::Ed25519;
 use keyeo_chain::{DocHash, GroupId, Governance, Doc, SignerRole, PayloadCommitment, Revision, Signer};
+use keyeo_crypto::{missing, Epoch, RecipientDescriptor, Wrap, WrapMethod};
 use sha2::{Digest, Sha256};
 
-use crate::wire::{
-    KdfParams, KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey, KEYRING_LAYOUT_VERSION, MEMBER_OWNER,
-    WRAP_RRK_HPKE, WRAP_X25519_HPKE,
-};
+use crate::wire::{Keyring, Member, RecoveryKey, KEYRING_LAYOUT_VERSION, MEMBER_OWNER};
 
 /// Bounds on an accepted keyring's list sizes — a family tree is far under these; they only stop a hostile
 /// keyring from forcing pathological work before verification. (The signer set is a subset of `members`.)
@@ -32,6 +30,10 @@ pub(crate) const S_LIST_TOO_LARGE: &str = "list too large";
 pub(crate) const S_NO_EPOCHS: &str = "no epochs";
 pub(crate) const S_EPOCH_ORDINAL: &str = "epoch ordinal out of range";
 pub(crate) const S_SIGNER_KEY: &str = "signer key malformed";
+/// A stored key-material blob (epochs, or a recovery key's escrow wraps) is malformed, over-long, or has
+/// trailing bytes — decode failed. A hard reject: the acceptance gate must never proceed on key material it
+/// cannot read (an empty/defaulted fallback would silently drop epochs).
+pub(crate) const S_BAD_KEY_MATERIAL: &str = "key material malformed";
 
 /// openom's single ordinal role, wrapping the proto `MemberRole` value (lower is stronger). The engine
 /// derives signer-ness/founder-ness from it; it never learns openom's specific ladder.
@@ -121,17 +123,13 @@ impl<'a> KeyringDoc<'a> {
             put_bytes(&mut out, hpke_public_key);
         }
 
-        put_u32(&mut out, epochs.len() as u32);
-        for ep in epochs {
-            #[deny(unused_variables)]
-            let KeyEpoch { key_id, epoch, wraps } = ep;
-            put_bytes(&mut out, key_id);
-            put_u32(&mut out, *epoch);
-            put_u32(&mut out, wraps.len() as u32);
-            for w in wraps {
-                put_wrap(&mut out, w);
-            }
-        }
+        // The DEK epochs are keyeo key material carried as their canonical `codec` bytes — hash them
+        // DIRECTLY (length-prefixed), never decode+re-encode. The producer signs these exact bytes; every
+        // verifier hashes the same stored bytes, so postcard canonicity is not load-bearing for the signature
+        // (a mutated blob simply fails the signature), and serde-derive exhaustiveness — guarded by the
+        // sentinel `_key_material_fields_are_exhaustively_accounted_for` below + the codec's per-field
+        // mutation tests — keeps every field bound without a second hand-encoder that could drift.
+        put_bytes(&mut out, epochs);
 
         put_u32(&mut out, recovery_keys.len() as u32);
         for rk in recovery_keys {
@@ -139,10 +137,7 @@ impl<'a> KeyringDoc<'a> {
             let RecoveryKey { public_key, member_id, wraps, recovery_verifying_key } = rk;
             put_bytes(&mut out, public_key);
             put_bytes(&mut out, member_id.as_bytes());
-            put_u32(&mut out, wraps.len() as u32);
-            for w in wraps {
-                put_wrap(&mut out, w);
-            }
+            put_bytes(&mut out, wraps); // the escrow KEK wraps' canonical codec bytes, hashed directly
             put_bytes(&mut out, recovery_verifying_key);
         }
         put_u32(&mut out, *governance_kind);
@@ -161,7 +156,7 @@ impl<'a> KeyringDoc<'a> {
         if k.layout_version > KEYRING_LAYOUT_VERSION {
             return Err(S_LAYOUT_AHEAD);
         }
-        if k.members.len() > MAX_MEMBERS || k.epochs.len() > MAX_EPOCHS {
+        if k.members.len() > MAX_MEMBERS {
             return Err(S_LIST_TOO_LARGE);
         }
         // Every SIGNER-member must have a 32-byte author key (else it can't verify its own signatures);
@@ -171,15 +166,27 @@ impl<'a> KeyringDoc<'a> {
                 return Err(S_SIGNER_KEY);
             }
         }
-        if k.epochs.is_empty() {
+        // Decode the key material ONCE, fail-closed: a malformed / over-long / trailing-byte blob is a hard
+        // reject, never an empty fallback (which would silently drop epochs past this gate). Also validate
+        // each recovery key's escrow-wrap blob decodes, so no unusable key material passes.
+        let epochs = k.key_material().map_err(|_| S_BAD_KEY_MATERIAL)?;
+        for rk in &k.recovery_keys {
+            rk.escrow_wraps().map_err(|_| S_BAD_KEY_MATERIAL)?;
+        }
+        if epochs.len() > MAX_EPOCHS {
+            return Err(S_LIST_TOO_LARGE);
+        }
+        if epochs.is_empty() {
             return Err(S_NO_EPOCHS);
         }
-        // Epoch ordinals are plausibility-bounded: with N epochs every ordinal is in `0..N` (one per
-        // removal via `max()+1`). Reject an ordinal at/above the epoch count — a grinding-a-huge-ordinal DoS.
-        if k.epochs.iter().any(|e| e.epoch as usize >= k.epochs.len()) {
+        // Epoch ordinals are plausibility-bounded: with N epochs every ordinal is in `0..N` (one per removal
+        // via `max()+1`). Reject an ordinal at/above the epoch count — a grinding-a-huge-ordinal DoS. Compare
+        // in u64: the keyeo ordinal is u64 and `as usize` would TRUNCATE on wasm32 (a hostile ordinal of
+        // exactly 2^32 -> 0), silently bypassing the bound on the primary (browser) target.
+        if epochs.iter().any(|e| e.ordinal >= epochs.len() as u64) {
             return Err(S_EPOCH_ORDINAL);
         }
-        if !wrap_complete(k) {
+        if !wrap_complete(&epochs, &k.members) {
             return Err(S_WRAP_INCOMPLETE);
         }
         Ok(())
@@ -241,32 +248,56 @@ impl Doc for KeyringDoc<'_> {
 
 /// §2.6 wrap-completeness: in the newest epoch, the founder is reachable via a recovery-root (RRK) wrap and
 /// every other member via their own HPKE wrap. Stops a signature-valid revision that rotates the epoch but
-/// wraps the new key only to a subset — a silent lock-out.
-fn wrap_complete(k: &Keyring) -> bool {
-    let Some(newest) = k.epochs.iter().max_by_key(|e| e.epoch) else {
+/// wraps the new key only to a subset — a silent lock-out. Expressed as keyeo's `missing(..).is_empty()` so
+/// both engines share the completeness predicate.
+///
+/// The chain's descriptors are ID-LEVEL (`expected_key = None`), and this is EXACT for the chain, not a
+/// weakening of the dag's key-bound check: a linear signed chain has no concurrent-branch stale-key rekey
+/// race, and the only post-hoc `hpke_public_key` mutation is `refounder` (owner-only, so the founder — who
+/// is reached via the RRK, not a member wrap — is excluded anyway). There is NO non-founder member
+/// HPKE-rotation flow, so key-binding would be dead code; revisit only if one is added. Unlike the dag's
+/// `coverage_descriptors`, empty-hpke-key members are NOT excluded: this is an acceptance gate on a signed
+/// document, so a revision that strips a member's key and their wrap in one step must be REJECTED (the dag
+/// excludes them because a transient empty-key state is legitimate mid-merge — not so here).
+fn wrap_complete(epochs: &[Epoch<String>], members: &[Member]) -> bool {
+    let Some(newest) = epochs.iter().max_by_key(|e| e.ordinal) else {
         return false;
     };
-    let founder_id = match k.members.iter().find(|m| m.role == MEMBER_OWNER) {
-        Some(m) => &m.member_id,
-        None => return false,
-    };
-    if !newest.wraps.iter().any(|w| w.wrap_method == WRAP_RRK_HPKE) {
+    let Some(founder) = members.iter().find(|m| m.role == MEMBER_OWNER) else {
         return false;
-    }
-    for m in &k.members {
-        // The founder reaches epochs via the RRK, not a per-epoch member wrap.
-        if &m.member_id == founder_id && m.role == MEMBER_OWNER {
-            continue;
+    };
+    let required: Vec<RecipientDescriptor<String>> = members
+        .iter()
+        .filter(|m| m.member_id != founder.member_id)
+        .map(|m| RecipientDescriptor { id: m.member_id.clone(), expected_key: None })
+        .collect();
+    // The RRK wrap must be addressed to the founder id — a strictening over the old any-RRK-wrap check
+    // (keyeo's `rrk_covers` binds the recipient); producers always address the founder.
+    let rrk = RecipientDescriptor { id: founder.member_id.clone(), expected_key: None };
+    missing(newest, &required, &rrk).is_empty()
+}
+
+/// Compile-time tripwire (never called): an exhaustive, no-`..` destructure of keyeo's key-material records.
+/// `payload_commit` hashes these records as OPAQUE codec bytes, so a field/variant added to `Epoch`/`Wrap`/
+/// `WrapMethod` would otherwise ride into (or, via `#[serde(skip)]`, fall out of) the signature with no
+/// signal in this crate. This fn forces a compile error in exactly the file that owns the chain's signing,
+/// pointing whoever added the field at the guard tests (per-field mutation in `keyeo_crypto::codec`, the
+/// golden-bytes + per-field signature-fails tests here) they must extend.
+#[allow(dead_code)]
+fn _key_material_fields_are_exhaustively_accounted_for(epoch: &Epoch<String>, wrap: &Wrap<String>) {
+    let Epoch { key_id, ordinal, wraps } = epoch;
+    let _ = (key_id, ordinal, wraps);
+    let Wrap { recipient, method, ciphertext } = wrap;
+    let _ = (recipient, ciphertext);
+    match method {
+        WrapMethod::MemberHpke { encapped, recipient_key }
+        | WrapMethod::RrkHpke { encapped, recipient_key } => {
+            let _ = (encapped, recipient_key);
         }
-        if !newest
-            .wraps
-            .iter()
-            .any(|w| w.member_id == m.member_id && w.wrap_method == WRAP_X25519_HPKE)
-        {
-            return false;
+        WrapMethod::Kek { kind, kdf, nonce } => {
+            let _ = (kind, kdf, nonce);
         }
     }
-    true
 }
 
 /// The recovery verifying key (RVK) pinned in the keyring — the first non-empty
@@ -279,45 +310,8 @@ pub(crate) fn reset_rvk(keyring: &Keyring) -> Option<&[u8]> {
         .find(|rvk| !rvk.is_empty())
 }
 
-// ---- exhaustive payload encoders (shared by `payload_commit`) ----
-
-#[deny(unused_variables)]
-fn put_wrap(out: &mut Vec<u8>, w: &KeyWrap) {
-    let KeyWrap {
-        member_id,
-        wrap_method,
-        nonce,
-        wrapped_dek,
-        kdf_params,
-        ephemeral_public_key,
-        recipient_public_key,
-    } = w;
-    put_bytes(out, member_id.as_bytes());
-    put_u32(out, *wrap_method as u32);
-    put_bytes(out, nonce);
-    put_bytes(out, wrapped_dek);
-    match kdf_params {
-        Some(k) => {
-            let KdfParams { salt, memory_kib, iterations, parallelism } = k;
-            put_u32(out, 1);
-            put_bytes(out, salt);
-            put_u32(out, *memory_kib);
-            put_u32(out, *iterations);
-            put_u32(out, *parallelism);
-        }
-        None => {
-            put_u32(out, 0);
-            put_bytes(out, &[]);
-            put_u32(out, 0);
-            put_u32(out, 0);
-            put_u32(out, 0);
-        }
-    }
-    put_bytes(out, ephemeral_public_key);
-    // Unlike the old chain signing bytes, the payload commitment DOES cover recipient_public_key (a
-    // coverage hint) — it's part of the payload, and binding it costs nothing.
-    put_bytes(out, recipient_public_key);
-}
+// ---- length-prefixed encoders for the structural payload fields (shared by `payload_commit`); the key
+// material itself rides through as its opaque `codec` bytes, hashed directly ----
 
 #[inline]
 fn put_u32(out: &mut Vec<u8>, v: u32) {

@@ -2365,7 +2365,7 @@ mod tests {
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
         use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
-        use openom_keyring_chain::wire::{KeyWrap, Member};
+        use openom_keyring_chain::wire::Member;
 
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
@@ -2386,15 +2386,16 @@ mod tests {
             author_public_key: rogue_pub.clone(),
             hpke_public_key: vec![9; 32],
         });
-        bad.epochs[0].wraps.push(KeyWrap {
-            member_id: "rogue".into(),
-            wrap_method: openom_protocol::v1::WrapMethod::X25519Hpke as i32,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
+        let mut eps = bad.key_material().unwrap();
+        eps[0].wraps.push(keyeo_crypto::Wrap {
+            recipient: "rogue".into(),
+            method: keyeo_crypto::WrapMethod::MemberHpke {
+                encapped: keyeo_crypto::EncappedKey::from_bytes([0u8; 32]),
+                recipient_key: keyeo_crypto::X25519PublicKey::from_bytes([9u8; 32]),
+            },
+            ciphertext: keyeo_crypto::WrappedDek::from_bytes([1u8; 48]),
         });
+        bad.epochs = keyeo_crypto::codec::encode_epochs(&eps);
         bad.signatures.clear();
         sign_keyring(&mut bad, &rogue);
         let bad_bytes = bad.encode_to_vec();
@@ -2492,7 +2493,7 @@ mod tests {
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
         use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
-        use openom_keyring_chain::wire::{KeyWrap, Member};
+        use openom_keyring_chain::wire::Member;
 
         let a = host();
         let (rev1, _rev2, _rev3) = produce_three_revisions(&a);
@@ -2511,15 +2512,16 @@ mod tests {
             author_public_key: rogue_pub.clone(),
             hpke_public_key: vec![9; 32],
         });
-        bad.epochs[0].wraps.push(KeyWrap {
-            member_id: "rogue".into(),
-            wrap_method: openom_protocol::v1::WrapMethod::X25519Hpke as i32,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
+        let mut eps = bad.key_material().unwrap();
+        eps[0].wraps.push(keyeo_crypto::Wrap {
+            recipient: "rogue".into(),
+            method: keyeo_crypto::WrapMethod::MemberHpke {
+                encapped: keyeo_crypto::EncappedKey::from_bytes([0u8; 32]),
+                recipient_key: keyeo_crypto::X25519PublicKey::from_bytes([9u8; 32]),
+            },
+            ciphertext: keyeo_crypto::WrappedDek::from_bytes([1u8; 48]),
         });
+        bad.epochs = keyeo_crypto::codec::encode_epochs(&eps);
         bad.signatures.clear();
         sign_keyring(&mut bad, &rogue);
 

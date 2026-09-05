@@ -131,13 +131,17 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
         .iter()
         .find(|m| m.role == MEMBER_OWNER)
         .map(|m| &m.member_id);
+    // Fail CLOSED on unreadable key material: require attribution (the safe direction) explicitly, rather
+    // than let an empty/defaulted decode masquerade as an unattributed epoch (which routes to accept-unsigned).
+    let Ok(epochs) = keyring.key_material() else {
+        return true;
+    };
     let mut present = false;
-    let attributed = keyring
-        .epochs
+    let attributed = epochs
         .iter()
-        .filter(|e| e.key_id == key_id)
+        .filter(|e| e.key_id.as_bytes() == key_id)
         .inspect(|_| present = true)
-        .any(|e| e.wraps.iter().any(|w| Some(&w.member_id) != founder));
+        .any(|e| e.wraps.iter().any(|w| Some(&w.recipient) != founder));
     // An epoch that ISN'T in this keyring at all means the entry misrepresents its provenance — an old
     // `governing_ref` stamped on a seal made under a newer epoch (the epoch's key belongs to a later
     // revision than the one it points at). Treat that as "requires attribution" so the caller runs
@@ -156,21 +160,42 @@ mod tests {
     use super::*;
     use openom_keyring_chain::{encode_governing_ref, generate_identity};
     use edsign::SigningKey;
-    use openom_keyring_chain::wire::{KeyEpoch, Member};
+    use openom_keyring_chain::wire::Member;
     use openom_protocol::v1::MemberRole;
+    use keyeo_crypto::{
+        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        X25519PublicKey,
+    };
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;
+
+    /// One epoch (ordinal 0, given wraps) under `key_id`, as the canonical `codec` bytes the keyring stores.
+    fn enc_epoch(key_id: &[u8], wraps: Vec<KeyeoWrap<String>>) -> Vec<u8> {
+        codec::encode_epochs(&[KeyeoEpoch { key_id: KeyId::new(key_id.to_vec()), ordinal: 0, wraps }])
+    }
+    /// A member HPKE wrap addressed to `id` (placeholder key material — attribution only reads the recipient).
+    fn wrap_to(id: &str) -> KeyeoWrap<String> {
+        KeyeoWrap {
+            recipient: id.to_string(),
+            method: WrapMethod::MemberHpke {
+                encapped: EncappedKey::from_bytes([0u8; 32]),
+                recipient_key: X25519PublicKey::from_bytes([0u8; 32]),
+            },
+            ciphertext: WrappedDek::from_bytes([0u8; 48]),
+        }
+    }
 
     /// Drive `verify_entry` from a chain `Keyring` fixture: fold it to the engine-neutral `MembershipView`
     /// and compute the newest epoch's `key_id` — exactly what the wasm caller does (OPE-333).
     fn call(version: u32, header: &Header, plaintext: &[u8], kr: &Keyring) -> Result<(), EntryError> {
         let view = openom_keyring_chain::membership_view(kr);
         let newest = kr
-            .epochs
+            .key_material()
+            .unwrap()
             .iter()
-            .max_by_key(|e| e.epoch)
-            .map(|e| e.key_id.clone())
+            .max_by_key(|e| e.ordinal)
+            .map(|e| e.key_id.as_bytes().to_vec())
             .unwrap_or_default();
         verify_entry(version, header, plaintext, &view, &newest)
     }
@@ -195,11 +220,7 @@ mod tests {
             members,
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch {
-                key_id: KID.to_vec(),
-                epoch: 0,
-                wraps: vec![],
-            }],
+            epochs: enc_epoch(KID, vec![]),
             ..Default::default()
         }
     }
@@ -360,16 +381,6 @@ mod tests {
 
     #[test]
     fn epoch_attribution_tracks_who_the_dek_is_wrapped_to() {
-        use openom_keyring_chain::wire::KeyWrap;
-        let wrap = |id: &str| KeyWrap {
-            member_id: id.into(),
-            wrap_method: 0,
-            nonce: vec![],
-            wrapped_dek: vec![1],
-            kdf_params: None,
-            ephemeral_public_key: vec![],
-            recipient_public_key: vec![],
-        };
         // The founder is the OWNER-role member (the signer set derives from members now).
         let founder = Member {
             member_id: "owner".into(),
@@ -377,7 +388,7 @@ mod tests {
             author_public_key: vec![0; 32],
             hpke_public_key: vec![9; 32],
         };
-        let mk = |wraps: Vec<KeyWrap>| Keyring {
+        let mk = |wraps: Vec<KeyeoWrap<String>>| Keyring {
             tree_id: vec![],
             revision: 1,
             layout_version: 1,
@@ -385,16 +396,12 @@ mod tests {
             members: vec![founder.clone()],
             signatures: vec![],
             recovery_keys: vec![],
-            epochs: vec![KeyEpoch {
-                key_id: KID.to_vec(),
-                epoch: 0,
-                wraps,
-            }],
+            epochs: enc_epoch(KID, wraps),
             ..Default::default()
         };
-        assert!(!epoch_is_attributed(&mk(vec![wrap("owner")]), KID));
+        assert!(!epoch_is_attributed(&mk(vec![wrap_to("owner")]), KID));
         assert!(epoch_is_attributed(
-            &mk(vec![wrap("owner"), wrap("editor-1")]),
+            &mk(vec![wrap_to("owner"), wrap_to("editor-1")]),
             KID
         ));
         // An epoch that isn't present at this revision is treated as REQUIRING attribution (returns true),
@@ -402,7 +409,7 @@ mod tests {
         // be accepted unsigned (the §B3 downgrade). The caller's verify_entry then rejects it on the
         // key_id-vs-newest epoch-consistency check.
         assert!(epoch_is_attributed(
-            &mk(vec![wrap("owner"), wrap("editor-1")]),
+            &mk(vec![wrap_to("owner"), wrap_to("editor-1")]),
             b"no-such-key"
         ));
     }

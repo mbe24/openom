@@ -13,9 +13,31 @@ use openom_keyring_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
 use openom_protocol::v1::{MemberRole, WrapMethod};
-use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member};
+use openom_keyring_chain::wire::{Keyring, Member};
+use keyeo_crypto::{
+    codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap,
+    WrapMethod as KeyeoWrapMethod, WrappedDek, X25519PublicKey,
+};
 use openom_roles::{MEMBER_CO_OWNER, MEMBER_OWNER};
 use edsign::SigningKey;
+
+/// Decode a chain keyring's epochs (the fixtures build them well-formed).
+fn epochs_of(k: &Keyring) -> Vec<KeyeoEpoch<String>> {
+    k.key_material().unwrap()
+}
+fn set_epochs(k: &mut Keyring, epochs: &[KeyeoEpoch<String>]) {
+    k.epochs = codec::encode_epochs(epochs);
+}
+fn push_wrap(k: &mut Keyring, w: KeyeoWrap<String>) {
+    let mut eps = epochs_of(k);
+    eps[0].wraps.push(w);
+    set_epochs(k, &eps);
+}
+fn retain_wraps(k: &mut Keyring, keep: impl Fn(&KeyeoWrap<String>) -> bool) {
+    let mut eps = epochs_of(k);
+    eps[0].wraps.retain(|w| keep(w));
+    set_epochs(k, &eps);
+}
 
 const TREE: &[u8] = b"tree-uuid-16byte";
 const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
@@ -46,16 +68,15 @@ struct Cast {
 fn keyed_member(k: &SigningKey, id: &str, role: i32) -> Member {
     Member { member_id: id.into(), role, author_public_key: pubv(k), hpke_public_key: vec![9; 32] }
 }
-fn wrap(id: &str, method: i32) -> KeyWrap {
-    KeyWrap {
-        member_id: id.into(),
-        wrap_method: method,
-        nonce: vec![],
-        wrapped_dek: vec![1],
-        kdf_params: None,
-        ephemeral_public_key: vec![],
-        recipient_public_key: vec![],
-    }
+fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
+    let encapped = EncappedKey::from_bytes([0u8; 32]);
+    let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
+    let m = if method == RRK_HPKE {
+        KeyeoWrapMethod::RrkHpke { encapped, recipient_key }
+    } else {
+        KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
+    };
+    KeyeoWrap { recipient: id.into(), method: m, ciphertext: WrappedDek::from_bytes([1u8; 48]) }
 }
 
 /// The chain.rs genesis keyring for a cast (cast[0] is the founder: RRK-wrapped, FOUNDER signer).
@@ -75,7 +96,7 @@ fn chain_genesis(cast: &[Cast]) -> Keyring {
         members,
         signatures: vec![],
         recovery_keys: vec![],
-        epochs: vec![KeyEpoch { key_id: vec![0], epoch: 0, wraps }],
+        epochs: codec::encode_epochs(&[KeyeoEpoch { key_id: KeyId::new(vec![0]), ordinal: 0, wraps }]),
         ..Default::default()
     };
     sign_keyring(&mut g, &sk(cast[0].seed)); // founder signs genesis
@@ -158,7 +179,7 @@ fn founder_adds_a_co_owner_agrees() {
         |k| {
             // A CO_OWNER-role member IS a signer (derived from members) — no separate roster push.
             k.members.push(keyed_member(&sk(5), "erin", MEMBER_CO_OWNER));
-            k.epochs[0].wraps.push(wrap("erin", HPKE));
+            push_wrap(k, wrap("erin", HPKE));
         },
         &[1], // founder signs
     );
@@ -194,7 +215,7 @@ fn a_co_owner_adds_an_ordinary_member_agrees() {
         &g,
         |k| {
             k.members.push(keyed_member(&sk(3), "carol", EDITOR));
-            k.epochs[0].wraps.push(wrap("carol", HPKE));
+            push_wrap(k, wrap("carol", HPKE));
         },
         &[2], // co-owner bob signs
     );
@@ -231,7 +252,7 @@ fn a_non_signer_cannot_write_agrees() {
         &g,
         |k| {
             k.members.push(keyed_member(&sk(3), "carol", EDITOR));
-            k.epochs[0].wraps.push(wrap("carol", HPKE));
+            push_wrap(k, wrap("carol", HPKE));
         },
         &[4], // dave (a non-signer) signs
     );
@@ -269,7 +290,7 @@ fn founder_cannot_self_remove_agrees() {
         |k| {
             // Removing the owner member removes the derived founder signer too.
             k.members.retain(|m| m.member_id != "owner");
-            k.epochs[0].wraps.retain(|w| w.member_id != "owner");
+            retain_wraps(k, |w| w.recipient != "owner");
         },
         &[1],
     );
@@ -388,7 +409,7 @@ fn ordinary_self_removal_is_the_documented_v1_widen() {
         &g,
         |k| {
             k.members.retain(|m| m.member_id != "ed");
-            k.epochs[0].wraps.retain(|w| w.member_id != "ed");
+            retain_wraps(k, |w| w.recipient != "ed");
         },
         &[6], // ed signs their own removal — but ed is not a signer
     );

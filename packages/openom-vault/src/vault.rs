@@ -22,8 +22,10 @@ use did::DidKey;
 use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{KdfParams, MemberRole};
-// The keyring wire moved to openom-keyring-chain in OPE-300.
-use openom_keyring_chain::wire::{KeyEpoch, KeyWrap, Keyring, Member, RecoveryKey};
+// The keyring wire moved to openom-keyring-chain in OPE-300. The DEK epochs + recovery escrow wraps are
+// keyeo key material the chain stores as `codec` bytes (OPE-377).
+use openom_keyring_chain::wire::{Keyring, Member, RecoveryKey};
+use keyeo_crypto::{codec, Epoch as KeyeoEpoch, KekKind, KeyId as KeyeoKeyId};
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 // The founder is the owner (the sole OWNER-role member) of a freshly-built single-owner keyring. The
 // signer set is DERIVED from members now (OPE-309): a member at CO_OWNER or stronger IS a signer, so there
@@ -32,10 +34,10 @@ use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
-    open_rrk_secret, owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch,
-    sealed_epochs, sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, PASSPHRASE,
-    RECOVERY,
+    build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
+    new_owner_secrets, open_rrk_secret, owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk,
+    rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, validated_proto_kdf, write_epoch_by_ordinal,
+    CoreKdf, PASSPHRASE, RECOVERY,
 };
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -57,11 +59,20 @@ fn dek_hash(dek: &[u8]) -> Vec<u8> {
 /// the recover watermark's epoch pin (OPE-286). The DEKs come from a VERIFIED open, so this witnesses the
 /// real key material. Used by the membership flows so a chain add/remove carries the pin forward (an add
 /// leaves the write epoch unchanged; a removal mints a fresh one that this then commits to).
-fn write_epoch_pin(deks: &[(Vec<u8>, u32, Dek)]) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
+fn write_epoch_pin(deks: &[(Vec<u8>, u64, Dek)]) -> Result<(Vec<u8>, Vec<u8>), VaultError> {
     deks.iter()
         .max_by_key(|(_, e, _)| *e)
         .map(|(k, _, d)| (k.clone(), dek_hash(d.expose())))
         .ok_or(VaultError::MissingWrap)
+}
+
+/// Decode a keyring's DEK epochs from their canonical `codec` bytes — the ONE place the chain vault reads
+/// key material, propagating a decode failure (never defaulting to empty). On an already-verified keyring
+/// the structure gate has validated this decode; the error path guards the (rare) unverified caller.
+fn keyring_epochs(keyring: &Keyring) -> Result<Vec<KeyeoEpoch<String>>, VaultError> {
+    keyring
+        .key_material()
+        .map_err(|_| VaultError::BadKeyring("keyring key material malformed".into()))
 }
 
 
@@ -149,16 +160,10 @@ pub fn provision(
     let rrk_secret = RrkSecret::from(secret);
     let secrets = new_owner_secrets(passphrase)?;
 
-    let epoch0 = KeyEpoch {
-        key_id: key_id.clone(),
-        epoch: 0,
-        wraps: vec![KeyWrap::from(&rrk_wrap_epoch(
-            &rrk_public,
-            &dek,
-            tree_id,
-            member_id,
-            &key_id,
-        )?)],
+    let epoch0 = KeyeoEpoch {
+        key_id: KeyeoKeyId::new(key_id.clone()),
+        ordinal: 0,
+        wraps: vec![rrk_wrap_keyeo(&rrk_public, &dek, tree_id, member_id, &key_id)?],
     };
     let recovery_key =
         RecoveryKey::from(&build_recovery_escrow(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?);
@@ -180,7 +185,7 @@ pub fn provision(
         }],
         signatures: Vec::new(),
         recovery_keys: vec![recovery_key],
-        epochs: vec![epoch0],
+        epochs: codec::encode_epochs(&[epoch0]),
         // Governance defaults to founder-or-unanimity (kind 0) at genesis; a later revision may set it.
         ..Default::default()
     };
@@ -231,7 +236,7 @@ pub fn unlock(
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
     let did_key = did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
     let epochs: Vec<(Vec<u8>, openom_crypto::Key32)> =
-        epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
+        epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?
             .into_iter()
             .map(|(k, _e, d)| (k, d.into_inner()))
             .collect();
@@ -309,37 +314,19 @@ pub fn recover(
             got: keyring.revision,
         });
     }
-    // Pull the founder's recovery wrap of the RRK out (owned) so the keyring can be mutated.
-    let (rrk_public, kdf, rec_nonce, rec_wrapped) = {
+    // Pull the founder's recovery escrow (RRK public + the keyeo KEK wraps) out so the keyring can be mutated.
+    let (rrk_public, escrow_wraps) = {
         let rk = recovery_key_for(&keyring, member_id)?;
-        let w = rk
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == RECOVERY)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = w.kdf_params.clone().ok_or_else(|| {
-            VaultError::BadKeyring("rrk recovery wrap missing kdf_params".into())
-        })?;
-        (
-            rk.public_key.clone(),
-            kdf,
-            w.nonce.clone(),
-            w.wrapped_dek.clone(),
-        )
+        let wraps = rk
+            .escrow_wraps()
+            .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?;
+        (rk.public_key.clone(), wraps)
     };
-    validate_kdf(&CoreKdf::from(&kdf))?;
+    let (kdf, rec_nonce, rec_wrapped) = escrow_kek_wrap(&escrow_wraps, KekKind::RecoveryCode)?;
     let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
-    // The wrap's kdf_params is the CHAIN's KdfParams (the keyring wire); the crypto path takes
-    // openom-protocol's — convert through CoreKdf (OPE-300).
-    let recovery_kek = derive_kek(entropy.as_slice(), &KdfParams::from(&CoreKdf::from(&kdf)))?;
-    let rrk_secret = open_rrk_secret(
-        &recovery_kek,
-        &rec_nonce,
-        &rec_wrapped,
-        tree_id,
-        member_id,
-        RECOVERY,
-    )?;
+    let recovery_kek = derive_kek(entropy.as_slice(), &validated_proto_kdf(kdf)?)?;
+    let rrk_secret =
+        open_rrk_secret(&recovery_kek, rec_nonce, rec_wrapped, tree_id, member_id, RECOVERY)?;
 
     let new_revision = min_revision
         .max(keyring.revision)
@@ -362,7 +349,7 @@ pub fn recover(
     // across a recovery (re-wrap, not rotate), so this RVK matches the prior one — continuity holds.
     sign_keyring(&mut keyring, &openom_crypto::derive_rvk(rrk_secret.expose()));
 
-    let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?;
     // A legitimate keyring never repeats an epoch key_id (16 CSPRNG bytes). Reject duplicates: otherwise an
     // attacker could add a same-key_id epoch with an attacker-known DEK that `SealerSet`'s first-match
     // routing would pick over the authenticated one (OPE-286).
@@ -473,7 +460,7 @@ pub fn change_passphrase(
     sign_keyring(&mut keyring, &secrets.root.identity);
     // Carry the (unchanged) write epoch's key MATERIAL forward in the watermark (epochs are untouched by a
     // passphrase change), so a later recover keeps its pin (OPE-286).
-    let write_dek_hash = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &rrk_secret)?
+    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
@@ -517,7 +504,7 @@ pub fn rotate_recovery(
         .ok_or(VaultError::RevisionOverflow)?;
     // Commit the (unchanged) write epoch's key MATERIAL for the watermark, opened via the OLD RRK before the
     // epochs are re-wrapped onto the new one (the DEKs themselves are untouched by a rotation) (OPE-286).
-    let write_dek_hash = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &old_rrk)?
+    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &old_rrk)?
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
@@ -535,19 +522,21 @@ pub fn rotate_recovery(
     let new_rrk = RrkSecret::from(new_secret);
     // Reuse the CURRENT passphrase KDF (salt) so the founder identity + passphrase KEK are unchanged —
     // rotation keeps the founder, only the recovery root changes.
-    let current_pass_kdf = recovery_key_for(&keyring, member_id)?
-        .wraps
-        .iter()
-        .find(|w| w.wrap_method == PASSPHRASE)
-        .and_then(|w| w.kdf_params.clone())
-        .ok_or_else(|| VaultError::BadKeyring("recovery key has no passphrase wrap".into()))?;
-    let secrets = owner_secrets_reusing_pass_kdf(passphrase, CoreKdf::from(&current_pass_kdf))?;
+    let current_pass_kdf = {
+        let rk = recovery_key_for(&keyring, member_id)?;
+        let wraps = rk
+            .escrow_wraps()
+            .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?;
+        let (kdf, _, _) = escrow_kek_wrap(&wraps, KekKind::Passphrase)?;
+        CoreKdf::from(&validated_proto_kdf(kdf)?)
+    };
+    let secrets = owner_secrets_reusing_pass_kdf(passphrase, current_pass_kdf)?;
 
     // Move the founder's cross-epoch access onto the new RRK, then swap in the new RecoveryKey (new RRK
     // public + new RVK + freshly-wrapped secret).
     let rewrapped =
-        rewrap_epochs_to_new_rrk(&sealed_epochs(&keyring.epochs), tree_id, member_id, &old_rrk, &new_rrk_public)?;
-    keyring.epochs = rewrapped.iter().map(KeyEpoch::from).collect();
+        rewrap_epochs_to_new_rrk(&keyring_epochs(&keyring)?, tree_id, member_id, &old_rrk, &new_rrk_public)?;
+    keyring.epochs = codec::encode_epochs(&rewrapped);
     let new_rk =
         RecoveryKey::from(&build_recovery_escrow(&new_rrk, &new_rrk_public, tree_id, member_id, &secrets)?);
     replace_recovery_key(&mut keyring, member_id, new_rk);
@@ -642,7 +631,7 @@ pub fn add_member(
 
     // The owner reaches every epoch's DEK via the RRK; wrap them all for the new member so
     // they see the full history.
-    let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret)?;
     do_add_member(
         keyring,
         tree_id,
@@ -702,7 +691,7 @@ pub fn add_member_as_co_owner(
         .checked_add(1)
         .ok_or(VaultError::RevisionOverflow)?;
     let deks =
-        member_epoch_deks(&sealed_epochs(&acc.keyring.epochs), tree_id, co_owner_member_id, &acc.hpke_secret)?;
+        member_epoch_deks(&keyring_epochs(&acc.keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret)?;
     do_add_member(
         acc.keyring,
         tree_id,
@@ -755,7 +744,7 @@ pub fn unlock_as_member(
 
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
-    let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, member_id, &root.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &root.hpke_secret)?;
     let write_key_id = write_epoch_by_ordinal(&deks)?;
     let write_dek_hash = deks
         .iter()
@@ -850,7 +839,7 @@ pub fn remove_member(
 
     // The owner re-seals with a set spanning every epoch (reached via the RRK); the new epoch
     // is the highest, so the set writes under it.
-    let deks = epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret)?;
     // Pin the freshly-minted write epoch (key_id + H(DEK)) into the result so the watermark commits to it
     // for the next recover (OPE-286 phase 2), before `deks` is moved into the sealer.
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
@@ -927,7 +916,7 @@ pub fn remove_member_as_co_owner(
 
     // The co-owner re-seals with a set spanning the epochs their own wraps reach (including
     // the new one they were re-wrapped into); the new epoch is the highest, so it's the write.
-    let deks = member_epoch_deks(&sealed_epochs(&keyring.epochs), tree_id, co_owner_member_id, &acc.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret)?;
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
     let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
     Ok(MemberRemoved {
@@ -1127,22 +1116,16 @@ fn open_with_passphrase(
     if keyring.tree_id != tree_id {
         return Err(VaultError::TreeMismatch);
     }
-    // The owner reaches DEKs through the recovery root key: find its passphrase wrap.
-    let (kdf, nonce, wrapped) = {
+    // The owner reaches DEKs through the recovery root key: decode the escrow's keyeo KEK wraps and open via
+    // the passphrase one. `escrow_wraps` is owned (not borrowing the keyring), so the anti-substitution +
+    // signature checks below can still read the keyring while the wrap refs are live.
+    let escrow_wraps = {
         let rk = recovery_key_for(&keyring, member_id)?;
-        let w = rk
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = w.kdf_params.clone().ok_or_else(|| {
-            VaultError::BadKeyring("rrk passphrase wrap missing kdf_params".into())
-        })?;
-        (kdf, w.nonce.clone(), w.wrapped_dek.clone())
+        rk.escrow_wraps()
+            .map_err(|_| VaultError::BadKeyring("recovery key material malformed".into()))?
     };
-    validate_kdf(&CoreKdf::from(&kdf))?;
-    // Chain KdfParams (keyring wire) → openom-protocol KdfParams (crypto path) via CoreKdf (OPE-300).
-    let root = derive_root(passphrase, &KdfParams::from(&CoreKdf::from(&kdf)))?;
+    let (kdf, nonce, wrapped) = escrow_kek_wrap(&escrow_wraps, KekKind::Passphrase)?;
+    let root = derive_root(passphrase, &validated_proto_kdf(kdf)?)?;
     // Our own derived identity must be the founder entry (a wrong passphrase yields a wrong
     // key; the server can't swap the founder). The keyring must then be signed by SOME current
     // authorized signer — a co-owner may have signed the latest ordinary (any-of) change, so
@@ -1157,16 +1140,16 @@ fn open_with_passphrase(
         return Err(CryptoError::Signature.into());
     }
     verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
-    let rrk_secret =
-        open_rrk_secret(&root.kek, &nonce, &wrapped, tree_id, member_id, PASSPHRASE)?;
+    let rrk_secret = open_rrk_secret(&root.kek, nonce, wrapped, tree_id, member_id, PASSPHRASE)?;
 
-    let key_id = keyring
-        .epochs
+    let epochs = keyring_epochs(&keyring)?;
+    let key_id = epochs
         .iter()
-        .max_by_key(|e| e.epoch)
+        .max_by_key(|e| e.ordinal)
         .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?
         .key_id
-        .clone();
+        .as_bytes()
+        .to_vec();
     let prev_hash = keyring_hash(&keyring).to_vec();
     let revision = keyring.revision;
     Ok(Opened {
@@ -1297,7 +1280,7 @@ fn founder_member_id(keyring: &Keyring) -> Result<String, VaultError> {
 fn do_add_member(
     mut keyring: Keyring,
     tree_id: &[u8],
-    deks: &[(Vec<u8>, u32, Dek)],
+    deks: &[(Vec<u8>, u64, Dek)],
     identity: &SigningKey,
     prev_hash: Vec<u8>,
     new_revision: u32,
@@ -1306,15 +1289,16 @@ fn do_add_member(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<MemberAdded, VaultError> {
+    let mut epochs = keyring_epochs(&keyring)?;
     for (key_id, epoch, dek) in deks {
-        let core = member_wrap_epoch(member_hpke_public, dek, tree_id, new_member_id, key_id)?;
-        let ep = keyring
-            .epochs
+        let wrap = member_wrap_keyeo(member_hpke_public, dek, tree_id, new_member_id, key_id)?;
+        let ep = epochs
             .iter_mut()
-            .find(|e| e.epoch == *epoch)
+            .find(|e| e.ordinal == *epoch)
             .ok_or_else(|| VaultError::BadKeyring("epoch vanished".into()))?;
-        ep.wraps.push(KeyWrap::from(&core));
+        ep.wraps.push(wrap);
     }
+    keyring.epochs = codec::encode_epochs(&epochs);
     keyring.members.push(Member {
         member_id: new_member_id.to_string(),
         role: role as i32,
@@ -1357,10 +1341,10 @@ fn do_remove_member(
     new_revision: u32,
 ) -> Result<(Keyring, Vec<u8>), VaultError> {
     let founder_id = founder_member_id(&keyring)?;
-    let old_epoch = keyring
-        .epochs
+    let mut epochs = keyring_epochs(&keyring)?;
+    let old_epoch = epochs
         .iter()
-        .map(|e| e.epoch)
+        .map(|e| e.ordinal)
         .max()
         .ok_or_else(|| VaultError::BadKeyring("no epochs".into()))?;
     let new_dek = generate_dek()?;
@@ -1370,31 +1354,25 @@ fn do_remove_member(
         .ok_or(VaultError::RevisionOverflow)?;
 
     let rrk_public = recovery_key_for(&keyring, &founder_id)?.public_key.clone();
-    let mut wraps = vec![KeyWrap::from(&rrk_wrap_epoch(
-        &rrk_public,
-        &new_dek,
-        tree_id,
-        &founder_id,
-        &new_key_id,
-    )?)];
+    let mut wraps = vec![rrk_wrap_keyeo(&rrk_public, &new_dek, tree_id, &founder_id, &new_key_id)?];
     for m in &keyring.members {
         if m.member_id == founder_id || m.member_id == remove_member_id {
             continue;
         }
-        let core = member_wrap_epoch(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?;
-        wraps.push(KeyWrap::from(&core));
+        wraps.push(member_wrap_keyeo(&m.hpke_public_key, &new_dek, tree_id, &m.member_id, &new_key_id)?);
     }
 
-    keyring.epochs.push(KeyEpoch {
-        key_id: new_key_id.clone(),
-        epoch: new_epoch,
+    epochs.push(KeyeoEpoch {
+        key_id: KeyeoKeyId::new(new_key_id.clone()),
+        ordinal: new_epoch,
         wraps,
     });
     // Removing the member removes them from the derived signer set too (no separate roster to retain).
     keyring.members.retain(|m| m.member_id != remove_member_id);
-    for ep in &mut keyring.epochs {
-        ep.wraps.retain(|w| w.member_id != remove_member_id);
+    for ep in &mut epochs {
+        ep.wraps.retain(|w| w.recipient != remove_member_id);
     }
+    keyring.epochs = codec::encode_epochs(&epochs);
     keyring.revision = new_revision;
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
@@ -1821,7 +1799,9 @@ mod tests {
         )
         .unwrap();
         let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        k.epochs[0].wraps[0].wrapped_dek[0] ^= 0xFF;
+        // The epoch DEK wraps ride in the signed key-material blob now; tampering a byte of it breaks the
+        // payload commitment, so unlock's signature check rejects it.
+        k.epochs[0] ^= 0xFF;
         let bytes = k.encode_to_vec();
         assert!(unlock(
             &bytes,
@@ -1982,8 +1962,10 @@ mod tests {
         // (4) DUPLICATE key_id in the served keyring → refused (SealerSet routes by first match, so a
         // same-key_id attacker epoch could otherwise be picked).
         let mut dup = Keyring::decode(p.keyring.as_slice()).unwrap();
-        let e0 = dup.epochs[0].clone();
-        dup.epochs.push(e0);
+        let mut epochs = dup.key_material().unwrap();
+        let e0 = epochs[0].clone();
+        epochs.push(e0);
+        dup.epochs = keyeo_crypto::codec::encode_epochs(&epochs);
         assert!(
             matches!(rec(&dup.encode_to_vec(), &u.write_key_id, &u.write_dek_hash), Err(VaultError::BadKeyring(_))),
             "a duplicate epoch key_id is refused",
@@ -2116,12 +2098,16 @@ mod tests {
         )
         .unwrap();
         let mut k = Keyring::decode(p.keyring.as_slice()).unwrap();
-        // The owner's KDF params live in the recovery key's passphrase wrap now.
-        k.recovery_keys[0].wraps[0]
-            .kdf_params
-            .as_mut()
-            .unwrap()
-            .memory_kib = 4_000_000; // ~4 GiB
+        // The owner's KDF params live in the recovery key's passphrase KEK wrap (a keyeo Kek wrap) now.
+        // `validated_proto_kdf` rejects the absurd window BEFORE the signature check, so the specific
+        // BadKdfParams reason still surfaces.
+        let mut wraps = k.recovery_keys[0].escrow_wraps().unwrap();
+        for w in &mut wraps {
+            if let keyeo_crypto::WrapMethod::Kek { kdf, .. } = &mut w.method {
+                kdf.memory_kib = 4_000_000; // ~4 GiB
+            }
+        }
+        k.recovery_keys[0].wraps = keyeo_crypto::codec::encode_wraps(&wraps);
         let bytes = k.encode_to_vec();
         assert!(matches!(
             unlock(
@@ -2225,10 +2211,12 @@ mod tests {
             .members
             .iter()
             .any(|mm| mm.member_id == MEMBER2 && mm.role == MemberRole::Editor as i32));
-        assert!(k.epochs[0]
+        let epochs = k.key_material().unwrap();
+        assert!(epochs[0]
             .wraps
             .iter()
-            .any(|w| w.member_id == MEMBER2 && w.wrap_method == crate::vault_core::HPKE));
+            .any(|w| w.recipient == MEMBER2
+                && matches!(w.method, keyeo_crypto::WrapMethod::MemberHpke { .. })));
 
         // The member unlocks against the pinned founder key and reads the owner's data.
         let pinned = founder_key(&owner.keyring);
