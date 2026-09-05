@@ -15,7 +15,7 @@
 
 use openom_crypto::{
     derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
-    parse_recovery_code, unwrap_rrk_secret, CryptoError, HpkeKeypair, Passphrase, RecoveryCode,
+    parse_recovery_code, CryptoError, HpkeKeypair, Passphrase, RecoveryCode,
     RrkSecret,
 };
 use did::DidKey;
@@ -28,8 +28,8 @@ use crate::lifecycle::{
 };
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
-    rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap, RecoveryEscrow,
-    SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
+    open_rrk_secret, rrk_wrap_epoch, sealer_set_from_deks, validate_kdf, CoreKdf, CoreWrap,
+    RecoveryEscrow, SealedEpoch, HPKE, PASSPHRASE, RECOVERY, RRK_HPKE,
 };
 use openom_keyring_api::MembershipView;
 use crate::VaultError;
@@ -496,7 +496,7 @@ impl KeyringLifecycle for DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        let rrk_secret = unwrap_rrk_secret(
+        let rrk_secret = open_rrk_secret(
             &root.kek,
             &pass_wrap.nonce,
             &pass_wrap.wrapped_dek,
@@ -569,7 +569,7 @@ impl KeyringLifecycle for DagVault {
         validate_kdf(rec_kdf)?;
         let entropy = parse_recovery_code(recovery_code)?;
         let rec_kek = derive_kek(entropy.as_slice(), &KdfParams::from(rec_kdf))?;
-        let rrk_secret = unwrap_rrk_secret(
+        let rrk_secret = open_rrk_secret(
             &rec_kek,
             &rec_wrap.nonce,
             &rec_wrap.wrapped_dek,
@@ -658,7 +658,7 @@ impl KeyringLifecycle for DagVault {
         {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = unwrap_rrk_secret(
+        let rrk_secret = open_rrk_secret(
             &old_root.kek,
             &pass_wrap.nonce,
             &pass_wrap.wrapped_dek,
@@ -750,7 +750,7 @@ impl DagVault {
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = unwrap_rrk_secret(
+        let rrk_secret = open_rrk_secret(
             &root.kek,
             &pass_wrap.nonce,
             &pass_wrap.wrapped_dek,
@@ -1177,7 +1177,7 @@ impl DagVault {
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = unwrap_rrk_secret(
+        let rrk_secret = open_rrk_secret(
             &root.kek,
             &pass_wrap.nonce,
             &pass_wrap.wrapped_dek,

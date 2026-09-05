@@ -21,7 +21,7 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,
-    parse_recovery_code, recovery_kdf_params, wrap_rrk_secret, Dek,
+    parse_recovery_code, recovery_kdf_params, Dek,
     HpkePrivate, Kek, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
@@ -29,9 +29,10 @@ use openom_protocol::v1::{KdfParams, WrapMethod};
 // The keyring key-material layer the vault crypto is lifted onto (aliased to avoid the proto WrapMethod /
 // openom KeyId name clashes).
 use keyeo_crypto::{
-    member_wrap as keyeo_member_wrap, rrk_wrap as keyeo_rrk_wrap, unwrap_dek as keyeo_unwrap_dek,
-    EncappedKey, GroupContext, GroupId as KeyeoGroupId, KdfBounds, KdfParams as KeyeoKdfParams,
-    KeyId as KeyeoKeyId, Wrap as KeyeoWrap, WrapMethod as KeyeoWrapMethod,
+    kek_wrap as keyeo_kek_wrap, member_wrap as keyeo_member_wrap, rrk_wrap as keyeo_rrk_wrap,
+    unwrap_dek as keyeo_unwrap_dek, unwrap_kek as keyeo_unwrap_kek, EncappedKey, GroupContext,
+    GroupId as KeyeoGroupId, KdfBounds, KdfParams as KeyeoKdfParams, KekKind, KeyId as KeyeoKeyId,
+    Nonce as KeyeoNonce, Wrap as KeyeoWrap, WrapMethod as KeyeoWrapMethod,
     WrappedDek as KeyeoWrappedDek, X25519PublicKey,
 };
 // The keyring payload wire moved to openom-keyring-chain in OPE-300; the sealing core marshals its own
@@ -273,31 +274,27 @@ pub(crate) fn build_recovery_escrow(
     member_id: &str,
     s: &NewOwnerSecrets,
 ) -> Result<RecoveryEscrow, VaultError> {
-    let pass = wrap_rrk_secret(&s.root.kek, rrk_secret, tree_id, member_id, PASSPHRASE)?;
-    let rec = wrap_rrk_secret(&s.recovery_kek, rrk_secret, tree_id, member_id, RECOVERY)?;
+    let group_id = KeyeoGroupId::new(tree_id.to_vec());
+    let pass = keyeo_kek_wrap(
+        rrk_secret.expose(),
+        member_id.to_string(),
+        KekKind::Passphrase,
+        &s.root.kek,
+        keyeo_kdf(&s.pass_kdf),
+        &group_id,
+    )?;
+    let rec = keyeo_kek_wrap(
+        rrk_secret.expose(),
+        member_id.to_string(),
+        KekKind::RecoveryCode,
+        &s.recovery_kek,
+        keyeo_kdf(&s.recovery_kdf),
+        &group_id,
+    )?;
     Ok(RecoveryEscrow {
         public_key: rrk_public.to_vec(),
         member_id: member_id.to_string(),
-        wraps: vec![
-            CoreWrap {
-                member_id: member_id.to_string(),
-                wrap_method: PASSPHRASE,
-                nonce: pass.nonce,
-                wrapped_dek: pass.wrapped_dek,
-                kdf: Some(s.pass_kdf.clone()),
-                ephemeral_public_key: Vec::new(),
-                recipient_public_key: Vec::new(), // KDF wrap — no HPKE recipient
-            },
-            CoreWrap {
-                member_id: member_id.to_string(),
-                wrap_method: RECOVERY,
-                nonce: rec.nonce,
-                wrapped_dek: rec.wrapped_dek,
-                kdf: Some(s.recovery_kdf.clone()),
-                ephemeral_public_key: Vec::new(),
-                recipient_public_key: Vec::new(),
-            },
-        ],
+        wraps: vec![core_from_keyeo(pass), core_from_keyeo(rec)],
         // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
         // openom_crypto::derive_rvk (so the chain and dag pin an identical RVK). Covered by the keyring
         // signature; a future reset is verified for continuity + authorization against it.
@@ -310,24 +307,79 @@ pub(crate) fn build_recovery_escrow(
 
 // ---- epoch DEK wrap / unwrap (lifted onto keyeo's key-material layer) ----
 
-/// Map a keyeo HPKE wrap (member or rrk method) into the openom `CoreWrap` boundary record. U1 keeps
-/// `CoreWrap` as the record type both engines consume; retiring it is a later step.
-fn core_from_keyeo_hpke(w: KeyeoWrap<String>) -> CoreWrap {
+/// Map a keyeo wrap (any method) into the openom `CoreWrap` boundary record. U1 keeps `CoreWrap` as the
+/// record type both engines consume; retiring it is a later step.
+fn core_from_keyeo(w: KeyeoWrap<String>) -> CoreWrap {
     let wrap_method = w.method.tag();
-    let (encapped, recipient_key) = match w.method {
+    match w.method {
         KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
-        | KeyeoWrapMethod::RrkHpke { encapped, recipient_key } => (encapped, recipient_key),
-        KeyeoWrapMethod::Kek { .. } => unreachable!("epoch-DEK wraps are HPKE only"),
-    };
-    CoreWrap {
-        member_id: w.recipient,
-        wrap_method,
-        nonce: Vec::new(),
-        wrapped_dek: w.ciphertext.as_ref().to_vec(),
-        kdf: None,
-        ephemeral_public_key: encapped.as_ref().to_vec(),
-        recipient_public_key: recipient_key.as_ref().to_vec(),
+        | KeyeoWrapMethod::RrkHpke { encapped, recipient_key } => CoreWrap {
+            member_id: w.recipient,
+            wrap_method,
+            nonce: Vec::new(),
+            wrapped_dek: w.ciphertext.as_ref().to_vec(),
+            kdf: None,
+            ephemeral_public_key: encapped.as_ref().to_vec(),
+            recipient_public_key: recipient_key.as_ref().to_vec(),
+        },
+        KeyeoWrapMethod::Kek { kind: _, kdf, nonce } => CoreWrap {
+            member_id: w.recipient,
+            wrap_method,
+            nonce: nonce.as_ref().to_vec(),
+            wrapped_dek: w.ciphertext.as_ref().to_vec(),
+            kdf: Some(CoreKdf {
+                salt: kdf.salt,
+                memory_kib: kdf.memory_kib,
+                iterations: kdf.iterations,
+                parallelism: kdf.parallelism,
+            }),
+            ephemeral_public_key: Vec::new(),
+            recipient_public_key: Vec::new(),
+        },
     }
+}
+
+fn keyeo_kdf(p: &CoreKdf) -> KeyeoKdfParams {
+    KeyeoKdfParams {
+        salt: p.salt.clone(),
+        memory_kib: p.memory_kib,
+        iterations: p.iterations,
+        parallelism: p.parallelism,
+    }
+}
+
+/// Open a recovery-escrow KEK wrap of the RRK secret via keyeo (tree-scoped rrk AAD; the derived `kek` is
+/// supplied by the caller, so the wrap's `kdf` is irrelevant here). Same signature as the openom
+/// `unwrap_rrk_secret` it replaces, so the call sites are a rename.
+pub(crate) fn open_rrk_secret(
+    kek: &Kek,
+    nonce: &[u8],
+    wrapped: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    wrap_method: i32,
+) -> Result<RrkSecret, VaultError> {
+    let kind = if wrap_method == PASSPHRASE {
+        KekKind::Passphrase
+    } else if wrap_method == RECOVERY {
+        KekKind::RecoveryCode
+    } else {
+        return Err(VaultError::BadKeyring("escrow wrap is not a KEK method".into()));
+    };
+    let wrap = KeyeoWrap {
+        recipient: member_id.to_string(),
+        method: KeyeoWrapMethod::Kek {
+            kind,
+            // Unused by unwrap (the KEK is already derived); a placeholder so the record is well-formed.
+            kdf: KeyeoKdfParams { salt: Vec::new(), memory_kib: 0, iterations: 0, parallelism: 0 },
+            nonce: KeyeoNonce::try_from(nonce).map_err(|_| VaultError::BadKeyring("escrow nonce length".into()))?,
+        },
+        ciphertext: KeyeoWrappedDek::try_from(wrapped)
+            .map_err(|_| VaultError::BadKeyring("escrow ciphertext length".into()))?,
+    };
+    let group_id = KeyeoGroupId::new(tree_id.to_vec());
+    let secret = keyeo_unwrap_kek(&wrap, kek, &group_id)?;
+    Ok(RrkSecret::new(*secret))
 }
 
 /// Reconstruct a keyeo HPKE wrap from a stored `CoreWrap`, so the DEK can be opened via keyeo's
@@ -369,7 +421,7 @@ pub(crate) fn rrk_wrap_epoch(
     let rrk_public = X25519PublicKey::try_from(rrk_public)
         .map_err(|_| VaultError::BadKeyring("rrk public key length".into()))?;
     let w = keyeo_rrk_wrap(dek, founder_id.to_string(), rrk_public, &epoch_ctx(&group_id, &kid))?;
-    Ok(core_from_keyeo_hpke(w))
+    Ok(core_from_keyeo(w))
 }
 
 /// HPKE-wrap an epoch's `dek` to a MEMBER's public key — the per-member wrap giving them access to this
@@ -386,7 +438,7 @@ pub(crate) fn member_wrap_epoch(
     let recipient_key = X25519PublicKey::try_from(member_hpke_public)
         .map_err(|_| VaultError::BadKeyring("member hpke key length".into()))?;
     let w = keyeo_member_wrap(dek, member_id.to_string(), recipient_key, &epoch_ctx(&group_id, &kid))?;
-    Ok(core_from_keyeo_hpke(w))
+    Ok(core_from_keyeo(w))
 }
 
 /// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.

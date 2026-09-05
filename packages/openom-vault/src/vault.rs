@@ -15,7 +15,7 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
-    parse_recovery_code, unwrap_rrk_secret, CryptoError, Dek, HpkeKeypair,
+    parse_recovery_code, CryptoError, Dek, HpkeKeypair,
     HpkePrivate, Passphrase, RecoveryCode, RootKeys, RrkSecret,
 };
 use did::DidKey;
@@ -33,8 +33,9 @@ use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_epoch, new_owner_secrets,
-    owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch, sealed_epochs,
-    sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, PASSPHRASE, RECOVERY,
+    open_rrk_secret, owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk, rrk_wrap_epoch,
+    sealed_epochs, sealer_set_from_deks, validate_kdf, write_epoch_by_ordinal, CoreKdf, PASSPHRASE,
+    RECOVERY,
 };
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -331,7 +332,7 @@ pub fn recover(
     // The wrap's kdf_params is the CHAIN's KdfParams (the keyring wire); the crypto path takes
     // openom-protocol's — convert through CoreKdf (OPE-300).
     let recovery_kek = derive_kek(entropy.as_slice(), &KdfParams::from(&CoreKdf::from(&kdf)))?;
-    let rrk_secret = unwrap_rrk_secret(
+    let rrk_secret = open_rrk_secret(
         &recovery_kek,
         &rec_nonce,
         &rec_wrapped,
@@ -1157,7 +1158,7 @@ fn open_with_passphrase(
     }
     verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
     let rrk_secret =
-        unwrap_rrk_secret(&root.kek, &nonce, &wrapped, tree_id, member_id, PASSPHRASE)?;
+        open_rrk_secret(&root.kek, &nonce, &wrapped, tree_id, member_id, PASSPHRASE)?;
 
     let key_id = keyring
         .epochs
