@@ -30,6 +30,28 @@ pub struct KdfParams {
     pub parallelism: u32,
 }
 
+/// The window a consumer requires Argon2id params to fall in, checked before deriving a KEK from params
+/// read off an UNVERIFIED keyring — a hostile keyring could otherwise pick values that OOM or CPU-burn the
+/// client before any signature is checked. The window values are the CONSUMER's policy (what its platform
+/// will run); keyeo owns only the check.
+pub struct KdfBounds {
+    pub memory_kib: std::ops::RangeInclusive<u32>,
+    pub iterations: std::ops::RangeInclusive<u32>,
+    pub parallelism: std::ops::RangeInclusive<u32>,
+    pub salt_len: std::ops::RangeInclusive<usize>,
+}
+
+impl KdfParams {
+    /// True iff every parameter is inside `bounds`. A consumer runs this before deriving a KEK from
+    /// untrusted params, and REJECTS (never clamps — clamping could silently weaken) when it returns false.
+    pub fn validate(&self, bounds: &KdfBounds) -> bool {
+        bounds.memory_kib.contains(&self.memory_kib)
+            && bounds.iterations.contains(&self.iterations)
+            && bounds.parallelism.contains(&self.parallelism)
+            && bounds.salt_len.contains(&self.salt.len())
+    }
+}
+
 /// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt +
 /// costs). Deterministic in its inputs — the same passphrase + params yield the same
 /// KEK, which is what lets a second device join from the passphrase alone (§4).

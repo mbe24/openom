@@ -46,7 +46,7 @@ pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
 pub use material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 pub use kdf::{
-    derive_kek, generate_dek, generate_salt, KdfParams, DEFAULT_ARGON2_ITERATIONS,
+    derive_kek, generate_dek, generate_salt, KdfBounds, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
 pub use recovery::{
