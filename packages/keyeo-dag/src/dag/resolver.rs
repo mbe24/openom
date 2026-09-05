@@ -195,26 +195,9 @@ impl<R: Role, S: SignatureScheme> MemberState<R, S> {
     }
 }
 
-/// A per-member HPKE wrap of the epoch DEK, carried in the resolved `GroupState` (item 3). It is
-/// public, replicated data: the wrapped DEK for the epoch that the state commits to. A member recovers
-/// the DEK with their own HPKE secret (see `epoch::recover_epoch_dek`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DekWrap<Id: MemberId> {
-    pub member: Id,
-    pub hpke_public_key: [u8; 32],
-    pub encapped_key: Vec<u8>,
-    pub ciphertext: Vec<u8>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::Ed25519> {
     pub members: HashMap<Id, MemberState<R, S>>,
-    /// Monotonic epoch, bumped by the engine when the resolved active membership changes (item 3).
-    pub epoch: u64,
-    /// Deterministic commitment to the active membership that produced the current epoch (item 4).
-    pub history_commitment: [u8; 32],
-    /// Per-active-member HPKE wraps of the current epoch DEK (item 3).
-    pub dek_wraps: Vec<DekWrap<Id>>,
     /// The group's **recovery authority**: the public half of the key (openom: the RVK) that alone may
     /// authorize a [`MembershipAction::ReFound`]. Pinned at genesis (in openom, on the construction base
     /// via [`Self::with_reset_authority`]) and preserved across every op, so a recovery is verifiable by
@@ -232,9 +215,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     pub fn new() -> Self {
         Self {
             members: HashMap::new(),
-            epoch: 0,
-            history_commitment: [0u8; 32],
-            dek_wraps: Vec::new(),
             reset_authority: None,
             group_id: GroupId::unscoped(),
         }
@@ -264,20 +244,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
         state
     }
 
-    /// Attach a generated epoch (number, membership commitment, per-member DEK wraps) to the group.
-    /// This is how the resolved state carries the current epoch's key material (item 3) — callers that
-    /// rotate call `epoch::generate_epoch` and land the result here.
-    pub fn with_epoch(&self, epoch: u64, commitment: [u8; 32], wraps: Vec<DekWrap<Id>>) -> Self {
-        Self {
-            members: self.members.clone(),
-            epoch,
-            history_commitment: commitment,
-            dek_wraps: wraps,
-            reset_authority: self.reset_authority.clone(),
-            group_id: self.group_id.clone(),
-        }
-    }
-
     /// Pin the group's [`group_id`](Self::group_id) — the opaque identifier every op in this group must
     /// carry. openom sets this on the engine's construction base (the genesis) to the tree id, so the engine
     /// refuses any op minted for a different tree from first sight, exactly as it trusts the genesis members.
@@ -302,18 +268,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
             .map(|(id, s)| (id.clone(), s.role.clone()))
             .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));
-        result
-    }
-
-    /// Active members with their HPKE public key — the input to `epoch::membership_commitment` and
-    /// `epoch::generate_epoch` rotation wiring.
-    pub fn active_with_keys(&self) -> Vec<(Id, R, [u8; 32])> {
-        let result: Vec<_> = self
-            .members
-            .iter()
-            .filter(|(_, s)| s.is_active())
-            .map(|(id, s)| (id.clone(), s.role.clone(), s.hpke_public_key))
-            .collect();
         result
     }
 

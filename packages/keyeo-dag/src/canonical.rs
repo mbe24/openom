@@ -2,9 +2,9 @@
 //! signatures and content-addressed ids bind to.
 //!
 //! The [`CanonicalBytes`] seam and its postcard default ([`Postcard`]) live in `keyeo-core`; this module
-//! owns the concrete block-layout encoders ([`canonical_encode`] / [`canonical_encode_epoch`]) and the
-//! by-hand impls for keyeo's own payload types (`MemberInit`, `MembershipAction`, `DekWrap`), which name
-//! engine types and route their `Serialize` sub-fields through `Postcard`.
+//! owns the concrete block-layout encoder ([`canonical_encode`]) and the by-hand impls for keyeo's own
+//! payload types (`MemberInit`, `MembershipAction`), which name engine types and route their `Serialize`
+//! sub-fields through `Postcard`.
 //!
 //! The signed content is `(parents, author, action)` — **not** the op id. A content-addressed id is
 //! `H(this ‖ signature ‖ author_public_key)`, so signing over the id would be circular; and a
@@ -13,7 +13,7 @@
 use keyeo_core::{CanonicalBytes, Postcard, Role, SignatureScheme};
 
 use crate::dag::resolver::{
-    DekWrap, GroupId, GroupState, MemberInit, MemberState, MemberId, MembershipAction, OpId,
+    GroupId, GroupState, MemberInit, MemberState, MemberId, MembershipAction, OpId,
 };
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id, R, S> {
@@ -117,24 +117,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
     }
 }
 
-impl<Id: MemberId> CanonicalBytes for DekWrap<Id> {
-    #[deny(unused_variables)]
-    fn write_canonical(&self, out: &mut Vec<u8>) {
-        // The member label is bound too: otherwise an attacker could permute which member each wrap
-        // targets on a signed epoch and it would still verify, handing members wraps under the wrong
-        // HPKE key — a group-wide lockout via a still-"valid" artifact. The variable-length byte
-        // fields are length-prefixed so adjacent wraps can't be re-partitioned into a colliding blob.
-        // Exhaustive destructure (no `..`): a new field can't slip out of the signed bytes. Order unchanged.
-        let DekWrap { member, hpke_public_key, encapped_key, ciphertext } = self;
-        Postcard(member).write_canonical(out);
-        out.extend_from_slice(hpke_public_key);
-        out.extend_from_slice(&(encapped_key.len() as u64).to_le_bytes());
-        out.extend_from_slice(encapped_key);
-        out.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
-        out.extend_from_slice(ciphertext);
-    }
-}
-
 /// Deterministically encode the **signed content** of a block: a version tag followed by the postcard
 /// encoding of `parents` and `author`, then the action's own canonical bytes, then the opaque `sealing`
 /// payload. Excludes the op id (see module docs). Both the signer ([`crate::op::Op::sign`]) and the
@@ -177,39 +159,6 @@ pub fn canonical_encode<OId: OpId, MId: MemberId, A: CanonicalBytes>(
     buf
 }
 
-/// Deterministically encode the **signed content** of an epoch artifact: a version tag followed by
-/// `(parents, commitment, epoch, wraps)`, through the same [`CanonicalBytes`] seam as ops (G-S5 — no
-/// second hand-rolled encoder). Both the author ([`crate::epoch::Epoch::author`]) and the verifier
-/// ([`crate::epoch::verify_epoch`]) call this over the epoch's own fields, so a signature binds to
-/// exactly this content and can't be transplanted to a different frontier, membership, or wrap set.
-pub fn canonical_encode_epoch<OId: OpId, MId: MemberId>(
-    group_id: &GroupId,
-    parents: &[OId],
-    commitment: &[u8; 32],
-    epoch: u64,
-    wraps: &[DekWrap<MId>],
-) -> Vec<u8> {
-    // v2 adds the leading length-prefixed group_id — an epoch artifact is signature-bound to its group, so
-    // an epoch authored for group A can never be admitted into group B (two groups with an identical active
-    // membership have an identical membership_commitment; without this, group A's signed epoch could be
-    // transplanted into B and win reconciliation — a cross-tree DEK collapse). Matches the op layout (v3).
-    let group_id = group_id.as_bytes();
-    let mut buf = b"keyeo:epoch:v2".to_vec();
-    buf.extend_from_slice(&(group_id.len() as u64).to_le_bytes());
-    buf.extend_from_slice(group_id);
-    buf.extend_from_slice(&(parents.len() as u64).to_le_bytes());
-    for p in parents {
-        Postcard(p).write_canonical(&mut buf);
-    }
-    buf.extend_from_slice(commitment);
-    buf.extend_from_slice(&epoch.to_le_bytes());
-    buf.extend_from_slice(&(wraps.len() as u64).to_le_bytes());
-    for w in wraps {
-        w.write_canonical(&mut buf);
-    }
-    buf
-}
-
 impl<R: Role, S: SignatureScheme> CanonicalBytes for MemberState<R, S> {
     #[deny(unused_variables)]
     fn write_canonical(&self, out: &mut Vec<u8>) {
@@ -228,13 +177,10 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
     #[deny(unused_variables)]
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure: a snapshot's signature must cover EVERY trust-relevant field of the state it
-        // checkpoints (membership + roles + keys, the epoch + its wraps, and the recovery authority), so a new
-        // field can't slip out of the signed bytes and be tampered on a pruned root. `_phantom` carries no data.
+        // checkpoints (membership + roles + keys, and the recovery authority), so a new field can't slip out of
+        // the signed bytes and be tampered on a pruned root.
         let GroupState {
             members,
-            epoch,
-            history_commitment,
-            dek_wraps,
             reset_authority,
             group_id,
         } = self;
@@ -246,15 +192,6 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
         for (id, st) in ms {
             Postcard(id).write_canonical(out);
             st.write_canonical(out);
-        }
-        out.extend_from_slice(&epoch.to_le_bytes());
-        out.extend_from_slice(history_commitment);
-        // dek_wraps sorted by member for the same determinism reason.
-        let mut ws: Vec<&DekWrap<Id>> = dek_wraps.iter().collect();
-        ws.sort_by(|a, b| a.member.cmp(&b.member));
-        out.extend_from_slice(&(ws.len() as u64).to_le_bytes());
-        for w in ws {
-            w.write_canonical(out);
         }
         match reset_authority {
             Some(pk) => {

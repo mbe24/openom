@@ -6,7 +6,6 @@ pub mod canonical;
 pub mod content;
 pub mod dag;
 pub mod engine;
-pub mod epoch;
 pub mod gc;
 pub mod op;
 pub mod quorum;
@@ -17,15 +16,11 @@ pub use content::{content_id, verify_content_id, ContentId};
 pub use blocklace::Graph;
 pub use dag::lamport::LamportTiebreak;
 pub use dag::resolver::{
-    ApplyOutcome, DekWrap, Error, GroupId, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
+    ApplyOutcome, Error, GroupId, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
     MembershipEvent, OpId, SignedOp,
 };
 pub use dag::strong_remove::StrongRemove;
 pub use engine::{keyeo, Keyeo, Retained, StandardKeyeo};
-pub use epoch::{
-    epoch_context, generate_epoch, membership_commitment, reconcile_epochs, recover_epoch_dek,
-    wraps_complete, Epoch,
-};
 pub use gc::{Compacted, Frontier};
 // The retention POLICY vocabulary is engine-neutral — re-export keyeo-core's so dag callers have it here.
 pub use keyeo_core::{Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy};

@@ -7,7 +7,6 @@ use crate::dag::resolver::{
     ApplyOutcome, Error, GroupState, MemberId, MembershipAction, MembershipEvent, Resolver,
     SignedOp,
 };
-use crate::epoch::{membership_commitment, reconcile_epochs, Epoch};
 use crate::quorum::{Individual, QuorumPolicy};
 use crate::Role;
 use crate::SignatureScheme;
@@ -17,15 +16,6 @@ type ApplyResult<Op> = Result<
     ApplyOutcome<
         <Op as crate::dag::resolver::SignedOp>::MemberId,
         <Op as crate::dag::resolver::SignedOp>::OpId,
-    >,
-    Error<<Op as crate::dag::resolver::SignedOp>::MemberId>,
->;
-
-type ForgeResult<Op> = Result<
-    GroupState<
-        <Op as crate::dag::resolver::SignedOp>::MemberId,
-        <Op as crate::dag::resolver::SignedOp>::R,
-        <Op as crate::dag::resolver::SignedOp>::S,
     >,
     Error<<Op as crate::dag::resolver::SignedOp>::MemberId>,
 >;
@@ -50,12 +40,6 @@ where
     resolver_state: RS::State,
     events: Vec<MembershipEvent<Op::MemberId>>,
     max_pending: usize,
-    /// Replicated epoch-artifact candidates (authored into the DAG). Reced on membership change. The
-    /// engine reconciles them — filtered to the resolved active membership (strong-remove: a removed
-    /// author's concurrent epoch is discarded) and tie-broken deterministically — to the single
-    /// winning epoch, whose wraps are attached to the group state.
-    replica_epochs: Vec<Epoch<Op::OpId, Op::MemberId, Op::S>>,
-    genesis_epoch: u64,
     /// The multi-signer quorum policy (v2). `Individual` (the default) means no change needs quorum.
     quorum: QP,
     /// The bounded fork-merge horizon (OPE-270): a stable compaction frontier below which the DAG will no
@@ -115,8 +99,6 @@ where
             resolver_state: RS::State::default(),
             events: Vec::new(),
             max_pending: 1024,
-            replica_epochs: Vec::new(),
-            genesis_epoch: 0,
             quorum,
             merge_horizon: Vec::new(),
             base_frontier: HashSet::new(),
@@ -137,10 +119,9 @@ where
     /// SAFETY: the caller must supply a DOMINATING cut — every retained op descends from every frontier tip
     /// (the same condition [`Compaction::compact`](keyeo_core::Compaction::compact) enforces at author time).
     ///
-    /// NOTE: this preserves MEMBERSHIP + the shared-marker, matching openom's members-only checkpoint. It does
-    /// NOT carry keyeo's own `epoch`/`dek_wraps` (openom carries its DEK material in the opaque `sealing`
-    /// envelope, not `GroupState`) — the first `apply`'s `forge_epoch` resets those to empty, which is inert
-    /// for a consumer that reads only membership. A consumer using keyeo's typed epochs would need them seeded.
+    /// NOTE: this preserves MEMBERSHIP + the shared-marker, matching openom's members-only checkpoint. The
+    /// keyring's DEK material rides the op's opaque `sealing` envelope (folded by the consumer), not
+    /// `GroupState`, so nothing epoch-related needs seeding here.
     #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         base_state: GroupState<Op::MemberId, Op::R, Op::S>,
@@ -167,8 +148,6 @@ where
             resolver_state,
             events: Vec::new(),
             max_pending: 1024,
-            replica_epochs: Vec::new(),
-            genesis_epoch: 0,
             quorum,
             merge_horizon: base_frontier.iter().copied().collect(),
             base_frontier,
@@ -413,12 +392,10 @@ where
         Ok((new_state, effective))
     }
 
-    /// Rebuild state from scratch (via [`Self::resolve_walk`]), then rotate (or stabilize) the epoch for the
-    /// resolved membership — so the epoch the group settles on is a function of the resolved membership and
-    /// a peer that resolves the same membership converges to the same commitment.
+    /// Rebuild state from scratch (via [`Self::resolve_walk`]) — the resolved membership a peer converges to.
     fn rebuild_state(&mut self) -> Result<(), Error<Op::MemberId>> {
         let (new_state, _effective) = self.resolve_walk()?;
-        self.state = self.forge_epoch(&new_state)?;
+        self.state = new_state;
         Ok(())
     }
 
@@ -608,103 +585,6 @@ where
         requirement.satisfied_by(&approvers).then_some(target)
     }
 
-    /// Attach the correct epoch key material to a resolved state. The commitment is derived from the
-    /// active membership (deterministic under arrival order). Candidates are filtered by the resolved
-    /// membership — a concurrent epoch authored by a member no longer active is discarded (the
-    /// strong-remove semantic: an eviction invalidates its author's concurrent rotations) — and the
-    /// survivors are reconciled deterministically to a single winner. That winner's wraps are the
-    /// group's current key material: every replica that has replicated the same candidates resolves
-    /// to the same DEK.
-    fn forge_epoch(&mut self, state: &GroupState<Op::MemberId, Op::R, Op::S>) -> ForgeResult<Op>
-    where
-        Op::MemberId: MemberId,
-    {
-        let active = state.active_with_keys();
-        if active.is_empty() {
-            return Ok(state.clone()); // nothing to wrap to
-        }
-        let active_ids: std::collections::HashSet<&Op::MemberId> =
-            active.iter().map(|(id, _, _)| id).collect();
-        let active_id_vec: Vec<Op::MemberId> = active.iter().map(|(id, _, _)| id.clone()).collect();
-        let commitment = membership_commitment(&active);
-
-        // Candidate epochs must, against the RESOLVED membership:
-        //   - be for this membership (same commitment) and authored by a still-active member;
-        //   - carry the author's *registered* key, not a self-asserted one (G-E2 anti-spoof) — an
-        //     ingest-time signature check (G-E1) only proves the artifact matches its own claimed key,
-        //     so authority is decided here, where we know each member's registered key;
-        //   - wrap the DEK to exactly the active set (G-E3) — no locked-out member, no ghost wrap to a
-        //     non-member.
-        // A removed member's concurrent epoch is filtered out by the active-author check (the
-        // strong-remove semantic: an eviction invalidates its author's concurrent rotations).
-        let candidates: Vec<Epoch<Op::OpId, Op::MemberId, Op::S>> = self
-            .replica_epochs
-            .iter()
-            .filter(|e| {
-                e.commitment == commitment
-                    && active_ids.contains(&e.author)
-                    && state
-                        .members
-                        .get(&e.author)
-                        .map(|m| m.author_public_key == e.author_public_key)
-                        .unwrap_or(false)
-                    && crate::epoch::wraps_complete(&e.wraps, &active_id_vec)
-            })
-            .cloned()
-            .collect();
-
-        match reconcile_epochs(&candidates) {
-            Some(winner) => {
-                Ok(state
-                    .clone()
-                    .with_epoch(winner.epoch, winner.commitment, winner.wraps.clone()))
-            }
-            None => {
-                // No replicated epoch covers this membership yet (e.g. a caller that never authors
-                // epochs): fall back to a stable genesis epoch with no wraps rather than failing.
-                Ok(state
-                    .clone()
-                    .with_epoch(self.genesis_epoch, commitment, Vec::new()))
-            }
-        }
-    }
-
-    /// Add an authored epoch artifact to the replicated candidate set. Callers author an `Epoch`
-    /// (via `Epoch::author`) when the membership rotates and hand it here to the engine; replicas
-    /// reconcile the accumulated candidates on rebuild.
-    ///
-    /// Ingest verifies the epoch's **author signature** over its canonical content (goal G-E1):
-    /// a bad-signature artifact is rejected with [`Error::BadSignature`] and never enters the
-    /// candidate set, so it can't win reconciliation. Authority — that this key is the author
-    /// member's *registered* key (G-E2) and that the wraps are complete (G-E3) — is enforced later,
-    /// against the resolved membership, in `forge_epoch`. Accepting a new candidate re-runs the
-    /// resolver so the group re-forges its epoch immediately.
-    pub fn apply_epoch(
-        &mut self,
-        epoch: Epoch<Op::OpId, Op::MemberId, Op::S>,
-    ) -> Result<(), Error<Op::MemberId>> {
-        if !crate::epoch::verify_epoch::<Op::OpId, Op::MemberId, Op::S>(&epoch) {
-            return Err(Error::BadSignature);
-        }
-        // Group gate: an epoch authored for a different group is refused before it can enter the candidate
-        // set. Its `group_id` is part of the signed bytes (verified just above), so this checks an authentic
-        // value — closing the cross-group DEK-transplant vector (two groups with an identical active
-        // membership share a membership_commitment; the group gate is what keeps A's epoch out of B).
-        if epoch.group_id != self.genesis.group_id {
-            return Err(Error::WrongGroup);
-        }
-        // Structural: an epoch's parents must be ops this engine holds. `forge_epoch` tie-breaks candidates
-        // by `parents.len()`, so an unchecked/forged parent set could steer reconciliation; requiring
-        // parents ⊆ ops removes that lever.
-        if !epoch.parents.iter().all(|p| self.ops.contains_key(p)) {
-            return Err(Error::InvalidAction("epoch parents not in the DAG".into()));
-        }
-        if !self.replica_epochs.iter().any(|e| e.id == epoch.id) {
-            self.replica_epochs.push(epoch);
-            self.rebuild_state()?;
-        }
-        Ok(())
-    }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }

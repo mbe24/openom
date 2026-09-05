@@ -4,7 +4,7 @@ pub mod strong_remove;
 
 pub use lamport::LamportTiebreak;
 pub use resolver::{
-    ApplyOutcome, DekWrap, Error, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
+    ApplyOutcome, Error, GroupState, MemberId, MemberInit, MemberState, MembershipAction,
     MembershipEvent, OpId, Resolver, SignedOp,
 };
 pub use strong_remove::StrongRemove;
