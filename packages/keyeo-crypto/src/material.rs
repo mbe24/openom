@@ -50,6 +50,73 @@ impl TryFrom<&[u8]> for EncappedKey {
     }
 }
 
+/// A recipient's static X25519 public key — a member's or the recovery root's. Distinct from
+/// [`EncappedKey`] (both are 32-byte X25519 points, but this is a stable identity, that a per-wrap
+/// ephemeral) so the two can't be swapped in a wrap.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct X25519PublicKey([u8; 32]);
+
+impl X25519PublicKey {
+    /// The fixed length of an X25519 public key.
+    pub const LEN: usize = 32;
+    /// Wrap a known-length array (no validation needed — the length is in the type).
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+    /// The raw bytes, by value.
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for X25519PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for X25519PublicKey {
+    type Error = CryptoError;
+    /// Length-checked at the wire boundary: a slice that isn't exactly 32 bytes is rejected.
+    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
+        bytes.try_into().map(Self).map_err(|_| CryptoError::Hpke)
+    }
+}
+
+/// A symmetric-wrap nonce — 24 bytes, the width XChaCha20-Poly1305 (the KEK-wrap AEAD) takes. Only the
+/// KEK wrap method surfaces a nonce; HPKE carries its own internally.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Nonce([u8; 24]);
+
+impl Nonce {
+    /// The fixed length of an XChaCha20-Poly1305 nonce.
+    pub const LEN: usize = 24;
+    /// Wrap a known-length array (no validation needed — the length is in the type).
+    pub fn from_bytes(bytes: [u8; 24]) -> Self {
+        Self(bytes)
+    }
+    /// The raw bytes, by value.
+    pub fn to_bytes(self) -> [u8; 24] {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for Nonce {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for Nonce {
+    type Error = CryptoError;
+    /// Length-checked at the wire boundary: a slice that isn't exactly 24 bytes is rejected.
+    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
+        bytes.try_into().map(Self).map_err(|_| CryptoError::NonceLength)
+    }
+}
+
 /// A wrapped 32-byte secret (a DEK or the RRK secret) + its 16-byte AEAD tag = 48 bytes, whether sealed
 /// via HPKE (ChaCha20Poly1305) or the symmetric KEK wrap (XChaCha20-Poly1305) — both land on 48.
 #[repr(transparent)]

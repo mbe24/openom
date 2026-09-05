@@ -27,12 +27,14 @@ mod material;
 mod recovery;
 mod root;
 mod secret;
+mod wrap_aad;
 
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
-pub use material::{EncappedKey, WrappedDek};
+pub use material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
+pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
