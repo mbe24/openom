@@ -183,6 +183,59 @@ fn fold_sealing(
     finalize_sealing(state, members)
 }
 
+/// Author a checkpoint's preserved sealing from the pre-cut sealing stream (OPE-348 step 2a): fold to the
+/// PRE-retain intermediate and re-express it as synthetic `SealingEntry`s — one per tagged epoch (its
+/// `added_wraps` already merged, so a below-cut joiner wrap is NOT lost) carrying the epoch's real origin +
+/// op_id (the winner tiebreak), plus one `Other`-origin escrow entry. Returns the segment (fold order
+/// preserved) + the `minting_ops` baseline. PRE-retain, deliberately: the OPE-289 bound is time-varying, so
+/// dropping epochs at author time would permanently lose an epoch a full-history replica later resurrects.
+// Consumed by the DagAnchor checkpoint-authoring path (OPE-374); until that wiring lands it is exercised only by
+// tests. This allow is removed together with the checkpoint.rs one when OPE-374 completes.
+#[allow(dead_code)]
+fn author_checkpoint_sealing(
+    pre_cut_sealing: &[dag_client::SealingEntry],
+) -> Result<(Vec<dag_client::SealingEntry>, u32), VaultError> {
+    let mut state = FoldState::default();
+    fold_into(&mut state, pre_cut_sealing, true)?;
+    let escrow = state
+        .escrow
+        .ok_or_else(|| VaultError::BadKeyring("cannot checkpoint sealing with no recovery escrow".into()))?;
+
+    let mut segment = Vec::with_capacity(state.tagged.len() + 1);
+    for (epoch, origin, op_id) in state.tagged {
+        let payload = SealingPayload { new_epochs: vec![epoch], added_wraps: vec![], escrow: None };
+        segment.push(dag_client::SealingEntry { op_id, origin, bytes: payload.to_bytes() });
+    }
+    // The escrow rides one Other-origin entry (mint-INELIGIBLE + not counted): last-wins folds it in, and a
+    // retained recover/change_passphrase escrow op still overrides it.
+    segment.push(dag_client::SealingEntry {
+        op_id: [0u8; 32],
+        origin: dag_client::SealingOrigin::Other,
+        bytes: SealingPayload::escrow_only(escrow).to_bytes(),
+    });
+    Ok((segment, state.minting_ops))
+}
+
+/// Resolve-from-checkpoint fold: seed the minting count from the checkpoint `baseline`, fold the checkpoint
+/// `segment` WITHOUT counting its mints (they are already in the baseline), then fold the retained `tail`
+/// normally, then finalize. The segment must be folded BEFORE the tail (fold order) so a retained `added_wrap`
+/// targeting a pre-cut epoch attaches to the checkpoint entry — guaranteed because the compaction cut is
+/// dominating (every pruned entry precedes every retained one).
+// Consumed by the DagAnchor resolve-from-checkpoint path (OPE-374); tests-only until then; allow removed with
+// OPE-374.
+#[allow(dead_code)]
+fn fold_from_checkpoint(
+    segment: &[dag_client::SealingEntry],
+    baseline: u32,
+    tail: &[dag_client::SealingEntry],
+    members: &MembershipView,
+) -> Result<FoldedSealing, VaultError> {
+    let mut state = FoldState { minting_ops: baseline, ..Default::default() };
+    fold_into(&mut state, segment, false)?;
+    fold_into(&mut state, tail, true)?;
+    finalize_sealing(state, members)
+}
+
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
 /// (owner) + every resolved ordinary member. Minting needs only PUBLIC keys — the RRK public in the escrow
 /// + each member's HPKE key — so both the owner (passphrase) and any active member (member_kdf) can produce
@@ -1240,6 +1293,57 @@ mod tests {
             wraps: vec![],
             recovery_verifying_key: vec![2],
         }
+    }
+
+    fn assert_folded_eq(a: &FoldedSealing, b: &FoldedSealing) {
+        assert_eq!(a.epochs, b.epochs, "epochs differ");
+        assert_eq!(a.escrow, b.escrow, "escrow differs");
+        assert_eq!(a.write_key_id, b.write_key_id, "write_key_id differs");
+        assert_eq!(a.needs_reseal, b.needs_reseal, "needs_reseal differs");
+        assert_eq!(a.needs_backfill, b.needs_backfill, "needs_backfill differs");
+    }
+
+    /// The load-bearing claim: folding an authored checkpoint segment + the retained tail reproduces the EXACT
+    /// `FoldedSealing` that folding the full history does.
+    #[test]
+    fn checkpoint_sealing_folds_identically_to_full_history() {
+        use dag_client::SealingOrigin::{Genesis, Remove};
+        let members = membership("owner", &[]);
+        let genesis = sealing_entry(1, b"k0", 0, Genesis, vec![], Some(escrow()));
+        let removed = sealing_entry(2, b"k1", 1, Remove, vec![], None);
+
+        // Cut after genesis: author from [genesis], retained tail = [removed].
+        let (segment, baseline) = author_checkpoint_sealing(&[genesis.clone()]).unwrap();
+        let from_cp = fold_from_checkpoint(&segment, baseline, &[removed.clone()], &members).unwrap();
+        let full = fold_sealing(&[genesis, removed], &members).unwrap();
+        assert_folded_eq(&from_cp, &full);
+    }
+
+    /// Pre-retain preservation (review F1): an epoch transiently dropped by the time-varying OPE-289 bound must
+    /// be RESURRECTED when the minting count grows — exactly as full history does. A checkpoint that stored
+    /// POST-retain epochs would lose it permanently; storing PRE-retain preserves it.
+    #[test]
+    fn checkpoint_preserves_a_transiently_dropped_then_resurrected_epoch() {
+        use dag_client::SealingOrigin::{Genesis, Remove};
+        let members = membership("owner", &[]);
+        // 2 minting entries below the cut, but a Remove carries ordinal 2 (models a post-void state where a
+        // minting op was voided, so its ordinal momentarily exceeds the shrunk count). The bound drops it at
+        // the cut (2 >= minting_ops 2). A retained mint grows the count to 3, resurrecting ordinal 2 (2 < 3).
+        let genesis = sealing_entry(1, b"k0", 0, Genesis, vec![], Some(escrow()));
+        let removed_hi = sealing_entry(2, b"k2", 2, Remove, vec![], None);
+        let retained = sealing_entry(3, b"k3", 3, Remove, vec![], None);
+
+        let (segment, baseline) = author_checkpoint_sealing(&[genesis.clone(), removed_hi.clone()]).unwrap();
+        assert_eq!(baseline, 2, "two minting entries below the cut");
+
+        let from_cp = fold_from_checkpoint(&segment, baseline, &[retained.clone()], &members).unwrap();
+        let full = fold_sealing(&[genesis, removed_hi, retained], &members).unwrap();
+
+        assert!(
+            from_cp.epochs.iter().any(|e| e.key_id == b"k2".to_vec()),
+            "the transiently-dropped epoch (ordinal 2) is resurrected"
+        );
+        assert_folded_eq(&from_cp, &full);
     }
 
     /// The write epoch is the deterministic `(ordinal, minting op-id)` winner: among concurrent same-ordinal
