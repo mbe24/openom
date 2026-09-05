@@ -10,7 +10,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use keyeo_dag::{Keyeo, MembershipAction, StrongRemove};
+use keyeo_dag::{
+    Compacted, Compaction, Ed25519, Frontier, Keyeo, MembershipAction, Retained, RetentionPlan,
+    StrongRemove,
+};
 use openom_keyring_api::MembershipView;
 use serde::{Deserialize, Serialize};
 
@@ -280,6 +283,47 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     }
     let has_been_shared = engine.has_been_shared();
     Ok(Resolved { members, sealing, has_been_shared })
+}
+
+/// The dag's compaction DECISION for a concrete openom keyring: the checkpoint to author + the ops that may be
+/// dropped. See [`keyeo_dag::Compacted`].
+pub type KeyringCompacted = Compacted<[u8; 32], String, KeyringRole, Ed25519>;
+
+/// Compute a compaction DECISION for `anchor_bytes`: rebuild the engine (exactly as [`resolve`] does), then ask
+/// keyeo-dag which checkpoint to author and which ops may be pruned, given the host's `stable` frontier + the
+/// retention `plan`. This is the DECISION ONLY — no signing, no anchor mutation: the caller (the vault) authors
+/// the signed `Snapshot` from the returned resolved state and applies the prune to its stored anchor.
+///
+/// `stable` is the frontier every peer has synced past — the data-loss guard `compact` never prunes above.
+/// Until the sync layer supplies a real one, callers pass a conservative frontier. `None` = KeepAll / nothing to
+/// drop.
+pub fn compact(
+    anchor_bytes: &[u8],
+    stable: &Frontier<[u8; 32]>,
+    plan: RetentionPlan,
+) -> Result<Option<KeyringCompacted>, ClientError> {
+    let anchor: DagAnchor =
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let genesis: Vec<KeyringMemberInit> = anchor
+        .genesis
+        .iter()
+        .map(dto_to_minit)
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
+        .with_reset_authority(anchor.reset_authority);
+    let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
+    for bytes in &anchor.ops {
+        let op = decode_op(bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        engine
+            .apply(op)
+            .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+    }
+    engine
+        .flush()
+        .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+    <Retained<'_, KeyringOp> as Compaction>::compact(&engine.retained(), stable, plan)
+        .map_err(|e| ClientError::Engine(e.to_string()))
 }
 
 /// Map a keyeo action to the coarse [`SealingOrigin`] the sealer's fold uses to decide epoch eligibility.
@@ -591,5 +635,30 @@ mod tests {
             resolve(&a2).unwrap().has_been_shared,
             "an un-shared-back-to-solo dag still reports has_been_shared (monotonic)"
         );
+    }
+
+    #[test]
+    fn compact_computes_a_decision_over_the_rebuilt_engine() {
+        let a0 =
+            provision_anchor(b"tree-cp", "founder", vk(1), [1; 32], vk(3), b"g".to_vec(), &sk(1));
+        let a1 = append_add(
+            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"w".to_vec(), &sk(1),
+        )
+        .unwrap();
+
+        // KeepAll → the engine builds, but there's nothing to compact.
+        assert!(compact(&a1, &Frontier { ops: vec![] }, RetentionPlan::KeepAll)
+            .unwrap()
+            .is_none());
+
+        // With the current head as the stable frontier, the decision carries the resolved state (has_been_shared
+        // for this now-shared tree) and marks the subsumed history below the head as prunable.
+        let wm = watermark(&a1).unwrap();
+        let tips: Vec<[u8; 32]> = wm.chunks(32).map(|c| c.try_into().unwrap()).collect();
+        let out = compact(&a1, &Frontier { ops: tips }, RetentionPlan::Snapshot { keep_last: 0 })
+            .unwrap()
+            .expect("a shared tree with history below the head has a compaction decision");
+        assert!(out.has_been_shared, "the checkpoint records the shared marker");
+        assert!(!out.prune.is_empty(), "history below the head frontier is prunable");
     }
 }

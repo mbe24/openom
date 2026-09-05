@@ -21,7 +21,7 @@ pub use dag::resolver::{
     MembershipEvent, OpId, SignedOp,
 };
 pub use dag::strong_remove::StrongRemove;
-pub use engine::{keyeo, Keyeo, StandardKeyeo};
+pub use engine::{keyeo, Keyeo, Retained, StandardKeyeo};
 pub use epoch::{
     epoch_context, generate_epoch, membership_commitment, reconcile_epochs, recover_epoch_dek,
     wraps_complete, Epoch,
