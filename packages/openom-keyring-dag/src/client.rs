@@ -125,6 +125,11 @@ struct DagAnchor {
     reset_authority: Option<[u8; 32]>,
     genesis_op_id: [u8; 32],
     ops: Vec<Vec<u8>>,
+    /// A compaction checkpoint (OPE-348 step 2a): when present, the ops below its frontier are pruned and this
+    /// signed checkpoint stands in for them — `resolve()` adopts its membership base + resumes the sealing fold
+    /// from its preserved epochs instead of walking the pinned genesis. `None` for an un-compacted anchor.
+    #[serde(default)]
+    checkpoint: Option<crate::checkpoint::SignedCheckpoint>,
 }
 
 /// Mint a signed, content-addressed op carrying an opaque `sealing` payload, using keyeo's unified
@@ -178,6 +183,7 @@ pub fn provision_anchor(
         reset_authority: Some(reset_authority),
         genesis_op_id: op.id,
         ops: vec![encode_op(&op)],
+        checkpoint: None,
     };
     postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible")
 }
@@ -193,6 +199,12 @@ pub struct Resolved {
     /// Whether this tree HAS EVER been shared (any effective Add) — the dag's monotonic attributed-writes
     /// gate, the analog of the chain's `first_shared_revision != 0`. Never regresses after an un-share.
     pub has_been_shared: bool,
+    /// On a CHECKPOINT anchor: the checkpoint's preserved sealing entries (retained epochs + escrow), folded
+    /// BEFORE `sealing` and WITHOUT counting their mints (already in `minting_ops_baseline`). `None` on an
+    /// un-compacted anchor. The vault picks `fold_from_checkpoint` vs `fold_sealing` on this.
+    pub checkpoint_sealing: Option<Vec<SealingEntry>>,
+    /// The checkpoint's minting-op baseline (0 on an un-compacted anchor) — seeds the OPE-289 count.
+    pub minting_ops_baseline: u32,
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
@@ -230,15 +242,38 @@ pub enum SealingOrigin {
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let genesis: Vec<KeyringMemberInit> = anchor
-        .genesis
-        .iter()
-        .map(dto_to_minit)
-        .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
-        .with_reset_authority(anchor.reset_authority);
-    let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
+    // Build the engine: from an adopted CHECKPOINT base (its pre-frontier history pruned), or from the pinned
+    // genesis. Both arms produce the same engine type (Individual governance).
+    let (mut engine, checkpoint_sealing, minting_ops_baseline) = if let Some(signed_cp) = &anchor.checkpoint {
+        let cp = signed_cp
+            .verify()
+            .ok_or_else(|| ClientError::Malformed("checkpoint signature does not verify".into()))?;
+        let base = cp.state.clone().into_state(
+            keyeo_dag::GroupId::new(anchor.group_id.clone()),
+            anchor.reset_authority,
+        );
+        let base_frontier_depths: HashMap<[u8; 32], usize> =
+            cp.frontier_depths.iter().map(|(id, d)| (*id, *d as usize)).collect();
+        let engine = Keyeo::adopt(
+            base,
+            base_frontier_depths,
+            cp.has_been_shared,
+            KeyringAccess,
+            StrongRemove,
+            keyeo_dag::Individual,
+        );
+        (engine, Some(cp.sealing.clone()), cp.minting_ops_baseline)
+    } else {
+        let genesis: Vec<KeyringMemberInit> = anchor
+            .genesis
+            .iter()
+            .map(dto_to_minit)
+            .collect::<Result<_, _>>()
+            .map_err(|e| ClientError::Malformed(e.to_string()))?;
+        let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
+            .with_reset_authority(anchor.reset_authority);
+        (Keyeo::new(base, KeyringAccess, StrongRemove), None, 0)
+    };
     // Pass 1: decode + replay every op (authorization resolves only once the whole closure is applied).
     let mut ops = Vec::with_capacity(anchor.ops.len());
     for bytes in &anchor.ops {
@@ -257,16 +292,21 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     // `effective_ops` (not a re-derived authorization check) means a carve-out-voided op or an unmet quorum
     // Commit contributes no sealing, and concurrent branches fold in the same order membership resolves.
     let by_id: HashMap<[u8; 32], &KeyringOp> = ops.iter().map(|o| (o.id, o)).collect();
-    let genesis_op = by_id.get(&anchor.genesis_op_id).ok_or_else(|| {
-        ClientError::Malformed("pinned genesis op not present in the closure".into())
-    })?;
     let mut sealing = Vec::new();
-    if !genesis_op.sealing.is_empty() {
-        sealing.push(SealingEntry {
-            op_id: anchor.genesis_op_id,
-            origin: SealingOrigin::Genesis,
-            bytes: genesis_op.sealing.clone(),
-        });
+    // The pinned genesis op contributes its sealing ONLY on an un-compacted anchor. On a checkpoint anchor the
+    // genesis is pruned and its epoch-0 + escrow ride the checkpoint segment (`checkpoint_sealing`) instead —
+    // so both the genesis-presence check and the genesis fold are suppressed here.
+    if anchor.checkpoint.is_none() {
+        let genesis_op = by_id.get(&anchor.genesis_op_id).ok_or_else(|| {
+            ClientError::Malformed("pinned genesis op not present in the closure".into())
+        })?;
+        if !genesis_op.sealing.is_empty() {
+            sealing.push(SealingEntry {
+                op_id: anchor.genesis_op_id,
+                origin: SealingOrigin::Genesis,
+                bytes: genesis_op.sealing.clone(),
+            });
+        }
     }
     for op_id in engine.effective_ops() {
         if op_id == anchor.genesis_op_id {
@@ -283,7 +323,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         }
     }
     let has_been_shared = engine.has_been_shared();
-    Ok(Resolved { members, sealing, has_been_shared })
+    Ok(Resolved { members, sealing, has_been_shared, checkpoint_sealing, minting_ops_baseline })
 }
 
 /// The dag's compaction DECISION for a concrete openom keyring: the checkpoint to author + the ops that may be
@@ -569,6 +609,7 @@ mod tests {
                 encode_op(&thief),
                 encode_op(&recovery_op),
             ],
+            checkpoint: None,
         };
         let resolved = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap();
 
