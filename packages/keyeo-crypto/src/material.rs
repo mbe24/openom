@@ -14,13 +14,15 @@
 //! blanket array impls stop at 32) land when the shared wrap/epoch types that ARE serialized arrive.
 
 use crate::CryptoError;
+use serde::{Deserialize, Serialize};
 
 /// The HPKE encapsulated key (`enc`) — the ephemeral X25519 public produced by a seal, replayed to the
 /// opener. A DISTINCT type from a recipient's static public key: both are 32-byte X25519 points, but one
 /// is per-wrap ephemeral output and the other a stable identity, and keeping them non-swappable is the
 /// point.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct EncappedKey([u8; 32]);
 
 impl EncappedKey {
@@ -54,7 +56,8 @@ impl TryFrom<&[u8]> for EncappedKey {
 /// [`EncappedKey`] (both are 32-byte X25519 points, but this is a stable identity, that a per-wrap
 /// ephemeral) so the two can't be swapped in a wrap.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct X25519PublicKey([u8; 32]);
 
 impl X25519PublicKey {
@@ -87,7 +90,8 @@ impl TryFrom<&[u8]> for X25519PublicKey {
 /// A symmetric-wrap nonce — 24 bytes, the width XChaCha20-Poly1305 (the KEK-wrap AEAD) takes. Only the
 /// KEK wrap method surfaces a nonce; HPKE carries its own internally.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Nonce([u8; 24]);
 
 impl Nonce {
@@ -147,5 +151,38 @@ impl TryFrom<&[u8]> for WrappedDek {
     /// Length-checked at the wire boundary: a slice that isn't exactly 48 bytes is rejected.
     fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
         bytes.try_into().map(Self).map_err(|_| CryptoError::Hpke)
+    }
+}
+
+// serde's blanket array impls stop at 32, so the 48-byte array is hand-rolled. Serialized as raw bytes
+// (postcard/bincode take `serialize_bytes`; the seq path covers formats that render bytes as sequences).
+impl Serialize for WrappedDek {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WrappedDek {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct WrappedDekVisitor;
+        impl<'de> serde::de::Visitor<'de> for WrappedDekVisitor {
+            type Value = WrappedDek;
+            fn expecting(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                f.write_str("exactly 48 bytes")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<WrappedDek, E> {
+                WrappedDek::try_from(v).map_err(|_| E::invalid_length(v.len(), &self))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<WrappedDek, A::Error> {
+                let mut buf = [0u8; 48];
+                for (i, slot) in buf.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(i, &self))?;
+                }
+                Ok(WrappedDek(buf))
+            }
+        }
+        deserializer.deserialize_bytes(WrappedDekVisitor)
     }
 }

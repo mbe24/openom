@@ -23,6 +23,7 @@ pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
 pub mod aead;
 mod hpke_wrap;
 mod kdf;
+mod keyring;
 mod material;
 mod recovery;
 mod root;
@@ -33,6 +34,7 @@ pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
+pub use keyring::{Epoch, KekKind, RecipientId, Wrap, WrapMethod};
 pub use material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 pub use kdf::{

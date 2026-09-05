@@ -29,12 +29,12 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 /// can't be transplanted between members, epochs, or trees. `key_id` is a fresh per-epoch salt, so it
 /// already identifies the epoch. The leading domain tag makes it byte-disjoint from [`rrk_wrap_aad`] and
 /// from any content AAD.
-pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
+pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &[u8], wrap_method: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     put_bytes(&mut out, b"keyeo:wrap:v1");
     put_bytes(&mut out, group_id);
     put_bytes(&mut out, key_id);
-    put_bytes(&mut out, member_id.as_bytes());
+    put_bytes(&mut out, member_id);
     put_u32(&mut out, wrap_method as u32);
     out
 }
@@ -43,11 +43,11 @@ pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &str, wrap_method: i3
 /// tree-scoped, not epoch-scoped, so it binds only `(group_id, member_id, wrap_method)` under its own
 /// `keyeo:rrk:v1` tag — byte-disjoint from [`wrap_aad`], so an RRK wrap can never be reinterpreted as an
 /// epoch-DEK wrap even when it reuses the passphrase/recovery `wrap_method` values.
-pub fn rrk_wrap_aad(group_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
+pub fn rrk_wrap_aad(group_id: &[u8], member_id: &[u8], wrap_method: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
     put_bytes(&mut out, b"keyeo:rrk:v1");
     put_bytes(&mut out, group_id);
-    put_bytes(&mut out, member_id.as_bytes());
+    put_bytes(&mut out, member_id);
     put_u32(&mut out, wrap_method as u32);
     out
 }
@@ -58,35 +58,35 @@ mod tests {
 
     #[test]
     fn wrap_aad_binds_every_context_field() {
-        let base = wrap_aad(b"tree", b"key", "member", 1);
-        assert_eq!(base, wrap_aad(b"tree", b"key", "member", 1)); // deterministic
-        assert_ne!(base, wrap_aad(b"TREE", b"key", "member", 1)); // group_id
-        assert_ne!(base, wrap_aad(b"tree", b"KEY", "member", 1)); // key_id (also the per-epoch identity)
-        assert_ne!(base, wrap_aad(b"tree", b"key", "other", 1)); // member_id
-        assert_ne!(base, wrap_aad(b"tree", b"key", "member", 2)); // wrap_method
+        let base = wrap_aad(b"tree", b"key", b"member", 1);
+        assert_eq!(base, wrap_aad(b"tree", b"key", b"member", 1)); // deterministic
+        assert_ne!(base, wrap_aad(b"TREE", b"key", b"member", 1)); // group_id
+        assert_ne!(base, wrap_aad(b"tree", b"KEY", b"member", 1)); // key_id (also the per-epoch identity)
+        assert_ne!(base, wrap_aad(b"tree", b"key", b"other", 1)); // member_id
+        assert_ne!(base, wrap_aad(b"tree", b"key", b"member", 2)); // wrap_method
     }
 
     #[test]
     fn rrk_wrap_aad_binds_each_input() {
-        let base = rrk_wrap_aad(b"tree-16-byte-abc", "member", 1);
+        let base = rrk_wrap_aad(b"tree-16-byte-abc", b"member", 1);
         assert!(!base.is_empty());
-        assert_ne!(base, rrk_wrap_aad(b"other-16byte-abc", "member", 1), "group_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "other", 1), "member_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "member", 2), "wrap_method is bound");
+        assert_ne!(base, rrk_wrap_aad(b"other-16byte-abc", b"member", 1), "group_id is bound");
+        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", b"other", 1), "member_id is bound");
+        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", b"member", 2), "wrap_method is bound");
     }
 
     #[test]
     fn wrap_and_rrk_aads_are_byte_disjoint() {
         // The distinct domain tags keep an epoch-DEK wrap and an RRK-secret wrap from ever colliding,
         // even with identical (group, member, method) — so one can never be reinterpreted as the other.
-        assert_ne!(wrap_aad(b"g", b"k", "m", 1), rrk_wrap_aad(b"g", "m", 1));
-        assert_ne!(wrap_aad(b"", b"", "", 0), rrk_wrap_aad(b"", "", 0));
+        assert_ne!(wrap_aad(b"g", b"k", b"m", 1), rrk_wrap_aad(b"g", b"m", 1));
+        assert_ne!(wrap_aad(b"", b"", b"", 0), rrk_wrap_aad(b"", b"", 0));
     }
 
     #[test]
     fn length_framing_prevents_concatenation_forgery() {
         // `("a","bc") != ("ab","c")` — the length prefixes make adjacent fields unambiguous, so two
         // different field splits can never produce the same AAD.
-        assert_ne!(wrap_aad(b"a", b"bc", "m", 1), wrap_aad(b"ab", b"c", "m", 1));
+        assert_ne!(wrap_aad(b"a", b"bc", b"m", 1), wrap_aad(b"ab", b"c", b"m", 1));
     }
 }
