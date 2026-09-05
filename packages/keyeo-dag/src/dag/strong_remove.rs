@@ -90,7 +90,18 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         genesis_state: &GroupState<Op::MemberId, R, S>,
     ) -> Result<Self::State, Self::Error> {
         let depth = compute_depths(ops);
-        let genesis = genesis_members(ops);
+        // Baseline-active set = the members ACTIVE in the construction base (`genesis_state`), NOT the result
+        // of scanning `ops` for a `Create`. The two agree for a normally-constructed engine (whose base IS the
+        // founding members, and which often carries no `Create` op in the DAG at all — the founders are seeded
+        // into the base state, not authored as an op). But when the engine is constructed from an ADOPTED
+        // CHECKPOINT base, the founding `Create` has been pruned away — there is nothing to scan, yet the base
+        // state still carries the real active membership. Reading it from the base is correct in both cases.
+        let genesis: HashSet<Op::MemberId> = genesis_state
+            .members
+            .iter()
+            .filter(|(_, m)| m.is_active())
+            .map(|(id, _)| id.clone())
+            .collect();
 
         // Authorization at each op's CAUSAL POSITION: fold the op's authorized ancestors onto the base
         // state and ask `AccessControl`. Well-founded over the ancestor DAG — it does NOT depend on the
@@ -428,19 +439,6 @@ fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
 }
 
 /// Members present at genesis (from the `Create` op's initial members).
-fn genesis_members<OId: OpId, Op: SignedOp<OpId = OId>>(
-    ops: &HashMap<OId, Op>,
-) -> HashSet<Op::MemberId> {
-    let mut g = HashSet::new();
-    for op in ops.values() {
-        if let MembershipAction::Create { initial_members } = op.action() {
-            for m in initial_members {
-                g.insert(m.id.clone());
-            }
-        }
-    }
-    g
-}
 
 /// Is `author` an active member in `target`'s causal ancestry? Replay the author's valid
 /// `Add`/`Remove` events that happen-before `target`, in depth order; genesis members start active.
