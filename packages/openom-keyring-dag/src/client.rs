@@ -468,7 +468,6 @@ pub fn compact_to_checkpoint(
         frontier.iter().map(|t| (*t, *depths.get(t).unwrap_or(&0) as u64)).collect();
 
     let checkpoint = crate::checkpoint::Checkpoint {
-        frontier: frontier.to_vec(),
         frontier_depths,
         state: crate::checkpoint::GroupStateView::of(engine.state()),
         prev_snapshot,
