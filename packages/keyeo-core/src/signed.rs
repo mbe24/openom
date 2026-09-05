@@ -58,13 +58,52 @@ impl<T: CanonicalBytes, S: SignatureScheme> Signed<T, S> {
     }
 }
 
+// Wire serialization — `(body, signer, signature)`. The Ed25519 signature is a `[u8; 64]`, which has NO serde
+// derive (serde covers `[u8; N]` only for N <= 32), so it rides as a length-checked byte vec. Deserialize
+// populates the PRIVATE `body` but grants no read access — `verify()` is still the only way in, so a
+// wire-supplied `Signed` with a mismatched body/signature simply fails `verify()`. Serde is a CONSTRUCTION path
+// (like `sign`), not a read path: the sole-carrier invariant is unchanged. Concrete to `Ed25519` (keyeo's only
+// scheme); add another impl if a second scheme ever needs the wire form.
+impl<T: serde::Serialize> serde::Serialize for Signed<T, crate::Ed25519> {
+    fn serialize<Sz: serde::Serializer>(&self, s: Sz) -> Result<Sz::Ok, Sz::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("Signed", 3)?;
+        st.serialize_field("body", &self.body)?;
+        st.serialize_field("signer", &self.signer)?;
+        st.serialize_field("signature", &&self.signature[..])?;
+        st.end()
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Signed<T, crate::Ed25519> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Repr<T> {
+            body: T,
+            signer: [u8; 32],
+            signature: Vec<u8>,
+        }
+        let r = Repr::<T>::deserialize(d)?;
+        let signature: [u8; 64] = r
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("Signed: signature must be 64 bytes"))?;
+        Ok(Signed {
+            body: r.body,
+            signer: r.signer,
+            signature,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Ed25519;
 
     /// A trivial signed body with an exhaustive-destructure encoding — the shape every real signed body uses.
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct Body {
         n: u64,
         flag: bool,
@@ -97,6 +136,35 @@ mod tests {
         let mut wrong_key = signed.clone();
         wrong_key.signer = edsign::SigningKey::from_seed(&[8u8; 32]).verifying_key().to_bytes();
         assert_eq!(wrong_key.verify(), None);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_the_verifiable_envelope() {
+        let sk = edsign::SigningKey::from_seed(&[7u8; 32]);
+        let signed: Signed<Body, Ed25519> = Signed::sign(Body { n: 42, flag: true }, &sk);
+
+        let bytes = postcard::to_allocvec(&signed).unwrap();
+        let back: Signed<Body, Ed25519> = postcard::from_bytes(&bytes).unwrap();
+
+        // The deserialized envelope still verifies and yields the same body — deserialize is a construction
+        // path, not a read path, so `verify()` remains the gate.
+        assert_eq!(back.verify(), Some(&Body { n: 42, flag: true }));
+        assert_eq!(back, signed, "the whole envelope round-trips");
+
+        // A 63-byte signature is rejected at deserialize (length is checked on the way into the [u8; 64]).
+        #[derive(serde::Serialize)]
+        struct BadRepr {
+            body: Body,
+            signer: [u8; 32],
+            signature: Vec<u8>,
+        }
+        let bad = postcard::to_allocvec(&BadRepr {
+            body: Body { n: 1, flag: false },
+            signer: [0u8; 32],
+            signature: vec![0u8; 63],
+        })
+        .unwrap();
+        assert!(postcard::from_bytes::<Signed<Body, Ed25519>>(&bad).is_err(), "a wrong-length signature is rejected");
     }
 
     #[test]
