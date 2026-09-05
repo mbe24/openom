@@ -1,21 +1,21 @@
-//! Reserved seam for GC / snapshot compaction (item 5) — **not yet implemented**.
+//! GC / snapshot compaction for the dag engine — the persistable data types.
 //!
-//! This module records the planned shape of snapshot-and-prune so the integration surface is stable,
-//! without building the prune itself. Per `plan/local-first/design.gc-snapshots.md`, pruning is
-//! Phase-3 and must be gated on a host-supplied *stable frontier* — keyeo is transport-agnostic and
-//! does not know which frontier all peers have synced past, so a bare `gc()` is data-loss territory.
-//! The entry point takes the frontier + a retention policy instead:
+//! Compaction must be gated on a host-supplied *stable frontier* — keyeo is transport-agnostic and does not
+//! know which frontier all peers have synced past, so pruning below an arbitrary point is data-loss territory.
+//! The `keyeo_core::Compaction` impl (in `engine.rs`, over the [`Retained`](crate::engine::Retained) view)
+//! takes that frontier + the retention plan and returns a [`Compacted`] decision the CALLER signs (via
+//! [`Snapshot::author`]) and applies.
 //!
-//! ```ignore
-//! k.compact(&stable_frontier, &policy)
-//! ```
+//! This module owns the data types the mechanism produces/consumes:
+//! - [`Frontier`] — at what point in the op DAG a peer may be pruned below (the stable cut).
+//! - [`Snapshot`] — the authenticated checkpoint a compaction anchors to (a signed materialized state);
+//!   [`Snapshot::author`] / [`verify_snapshot`] are BUILT (signature layer). Authority-on-adoption (the
+//!   `prev_snapshot` continuity + `has_been_shared` monotonicity checks) is still pending — the reader/adopt
+//!   wiring, not this module.
+//! - [`Compacted`] — the decision `compact` returns.
 //!
-//! The seam today:
-//! - [`Frontier`] is at what point in the op DAG a peer may be pruned below.
-//! - [`Snapshot`] is the signed materialized state + epoch a compaction anchors to.
-//! - [`RetentionPolicy`] decides when to snapshot and how much tail to keep.
-//! - [`compact`] is a **no-op** today (nothing prunes), reserving the call shape. The DAG still keeps
-//!   history; a snapshot/`compact` that actually drops op's lands with the sync layer (FLO-81).
+//! What is NOT built yet: the caller-side flow (author the snapshot, drop the pruned ops, produce the new
+//! anchor) and the adoption/verification path. The compaction DECISION itself is implemented and tested.
 
 use crate::dag::resolver::MemberId;
 use crate::Role;
@@ -42,9 +42,15 @@ pub struct Snapshot<
     pub frontier: Vec<OId>,
     pub state: crate::dag::resolver::GroupState<Id, R, S>,
     pub prev_snapshot: Option<[u8; 32]>,
-    /// The monotonic ever-shared marker, carried so it survives pruning: once the op history that first
+    /// The monotonic has-been-shared marker, carried so it survives pruning: once the op history that first
     /// shared the tree is dropped, `Keyeo::has_been_shared`'s effective-Add scan can't see it, so the checkpoint
     /// must record it. Verified monotone against the prior snapshot on adoption (the pruning slice).
+    ///
+    /// Deliberately a BOOL, not an ordinal. The chain records `first_shared_revision` (WHICH revision sharing
+    /// began at); the dag has no natural single ordinal for that (a genesis + effective-Add scan doesn't map
+    /// onto "revision N"), so a compacted dag checkpoint keeps "it was shared" but not "since when" — an
+    /// accepted, deliberate scope difference. If forensic "shared since X" is ever wanted for dag trees, capture
+    /// it before first compaction; it can't be reconstructed after.
     pub has_been_shared: bool,
     /// The member (a signer: Owner/CoOwner) who authored this checkpoint. The signature binds to their key.
     pub author: Id,

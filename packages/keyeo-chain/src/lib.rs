@@ -9,6 +9,12 @@ use signing::{sha256, verify_all, verify_any, verify_threshold};
 use keyeo_core::{Role, SignatureScheme};
 use serde::Serialize;
 
+// Re-export the shared retention/compaction vocabulary so callers reach it via `keyeo_chain::` — matching
+// keyeo-dag, so the compaction wiring needs no per-engine import path.
+pub use keyeo_core::{
+    Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy,
+};
+
 /// Convenience aliases for a doc's public-key / signature types.
 type Pk<D> = <<D as Doc>::S as SignatureScheme>::PublicKey;
 type Sig<D> = <<D as Doc>::S as SignatureScheme>::Signature;
@@ -496,13 +502,24 @@ pub fn bootstrap_pinned<D: Doc>(
 
 // ---- compaction (retention) — the chain arm of `keyeo_core::Compaction`, symmetric with keyeo-dag ----
 
-/// The chain's Compaction STATE: the revision numbers a client currently retains (each has a stored, verified
-/// doc). A chain "checkpoint" is simply the revision the client keeps as its new base — an ALREADY-SIGNED
-/// revision, so (unlike the dag's net-new signed `Snapshot`) nothing needs authoring: the client re-adopts it
-/// via [`bootstrap_pinned`] and drops the revisions below it.
+/// The chain's Compaction STATE: the revisions a client currently retains (each has a stored, verified doc),
+/// deduped + sorted ascending. A chain "checkpoint" is simply the revision the client keeps as its new base —
+/// an ALREADY-SIGNED revision, so (unlike the dag's net-new signed `Snapshot`) nothing needs authoring: the
+/// client re-adopts it via [`bootstrap_pinned`] and drops the revisions below it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Retained {
-    pub revisions: Vec<u32>,
+    // Private: built via `new`, which dedups + sorts, so a caller can't hand `compact` duplicate or out-of-order
+    // revisions — mirroring the dag's `Retained` view, which is only constructible from a real engine.
+    revisions: Vec<Revision>,
+}
+
+impl Retained {
+    /// The retained revisions in any order — deduped + sorted ascending on the way in.
+    pub fn new(mut revisions: Vec<Revision>) -> Self {
+        revisions.sort_unstable();
+        revisions.dedup();
+        Self { revisions }
+    }
 }
 
 /// The chain's compaction DECISION: keep `checkpoint` as the base, drop every retained revision in `prune` (all
@@ -511,15 +528,15 @@ pub struct Retained {
 /// the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same trait, same shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Compacted {
-    pub checkpoint: u32,
-    pub prune: Vec<u32>,
+    pub checkpoint: Revision,
+    pub prune: Vec<Revision>,
 }
 
 impl keyeo_core::Compaction for Retained {
     type State = Retained;
     /// The stable revision every peer has synced past — `compact` never prunes above it (the data-loss guard),
     /// mirroring the dag's frontier cut.
-    type Cut = u32;
+    type Cut = Revision;
     type Output = Option<Compacted>;
 
     fn compact(
@@ -527,8 +544,8 @@ impl keyeo_core::Compaction for Retained {
         stable: &Self::Cut,
         plan: keyeo_core::RetentionPlan,
     ) -> Result<Self::Output, keyeo_core::CompactionError> {
-        // The policy decides WHETHER + how much tail to keep (op/rev count); the stable cut decides HOW FAR we
-        // may prune. Same split as the dag.
+        // The policy decides WHETHER + how much tail to keep (rev count); the stable cut decides HOW FAR we may
+        // prune. Same split as the dag.
         let keep_last = match plan {
             keyeo_core::RetentionPlan::KeepAll => return Ok(None),
             keyeo_core::RetentionPlan::Snapshot { keep_last } => keep_last as u32,
@@ -538,12 +555,12 @@ impl keyeo_core::Compaction for Retained {
         };
         // The checkpoint horizon = keep the last `keep_last` revisions, clamped so we never prune above the
         // stable cut (the more conservative — keeps MORE — of the two).
-        let horizon = head.saturating_sub(keep_last).min(*stable);
+        let horizon = Revision(head.0.saturating_sub(keep_last).min(stable.0));
         // The checkpoint must be an actual retained revision — its doc is the re-anchor base.
         let Some(&checkpoint) = state.revisions.iter().filter(|r| **r <= horizon).max() else {
             return Ok(None);
         };
-        let prune: Vec<u32> = state.revisions.iter().copied().filter(|r| *r < checkpoint).collect();
+        let prune: Vec<Revision> = state.revisions.iter().copied().filter(|r| *r < checkpoint).collect();
         if prune.is_empty() {
             return Ok(None); // horizon is at/below the oldest retained revision — nothing to drop
         }
@@ -556,31 +573,45 @@ mod compaction_tests {
     use super::*;
     use keyeo_core::{Compaction, RetentionPlan};
 
+    fn revs(rs: &[u32]) -> Vec<Revision> {
+        rs.iter().map(|&r| Revision(r)).collect()
+    }
+
     fn compact(revisions: &[u32], stable: u32, keep_last: usize) -> Option<Compacted> {
-        let state = Retained { revisions: revisions.to_vec() };
-        <Retained as Compaction>::compact(&state, &stable, RetentionPlan::Snapshot { keep_last })
+        let state = Retained::new(revs(revisions));
+        <Retained as Compaction>::compact(&state, &Revision(stable), RetentionPlan::Snapshot { keep_last })
             .unwrap()
     }
 
     #[test]
     fn keep_all_is_a_noop() {
-        let state = Retained { revisions: vec![1, 2, 3] };
-        assert!(<Retained as Compaction>::compact(&state, &3, RetentionPlan::KeepAll)
+        let state = Retained::new(revs(&[1, 2, 3]));
+        assert!(<Retained as Compaction>::compact(&state, &Revision(3), RetentionPlan::KeepAll)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn new_dedups_and_sorts_so_compact_is_order_independent() {
+        let state = Retained::new(revs(&[5, 1, 3, 2, 5, 4, 1]));
+        let out = <Retained as Compaction>::compact(&state, &Revision(5), RetentionPlan::Snapshot { keep_last: 2 })
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.checkpoint, Revision(3));
+        assert_eq!(out.prune, revs(&[1, 2]));
     }
 
     #[test]
     fn keeps_a_checkpoint_and_prunes_below_it_clamped_to_the_stable_revision() {
         // head 5, keep last 2 → horizon 3; stable well ahead → checkpoint 3, prune {1,2}.
         let out = compact(&[1, 2, 3, 4, 5], 5, 2).unwrap();
-        assert_eq!(out.checkpoint, 3);
-        assert_eq!(out.prune, vec![1, 2]);
+        assert_eq!(out.checkpoint, Revision(3));
+        assert_eq!(out.prune, revs(&[1, 2]));
 
         // A lagging peer pins the stable revision back at 2 → may not prune above 2: checkpoint 2, prune {1}.
         let out = compact(&[1, 2, 3, 4, 5], 2, 2).unwrap();
-        assert_eq!(out.checkpoint, 2);
-        assert_eq!(out.prune, vec![1]);
+        assert_eq!(out.checkpoint, Revision(2));
+        assert_eq!(out.prune, revs(&[1]));
 
         // Stable at the oldest retained revision → horizon 1, nothing strictly below it → no-op.
         assert!(compact(&[1, 2, 3, 4, 5], 1, 2).is_none());
