@@ -221,8 +221,7 @@ fn keyeo_kdf(p: &CoreKdf) -> KeyeoKdfParams {
 }
 
 /// Open a recovery-escrow KEK wrap of the RRK secret via keyeo (tree-scoped rrk AAD; the derived `kek` is
-/// supplied by the caller, so the wrap's `kdf` is irrelevant here). Same signature as the openom
-/// `unwrap_rrk_secret` it replaces, so the call sites are a rename.
+/// supplied by the caller, so the wrap's `kdf` is irrelevant here).
 pub(crate) fn open_rrk_secret(
     kek: &Kek,
     nonce: &[u8],

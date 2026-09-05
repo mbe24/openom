@@ -134,35 +134,9 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
     out
 }
 
-/// Domain-separated, length-prefixed AAD binding a DEK wrap to its context (§4):
-/// `(tree_id, key_id, member_id, wrap_method)`, so a wrap can't be transplanted between members,
-/// epochs, or trees. `key_id` is a fresh random per-epoch salt, so it already identifies the epoch — no
-/// epoch scalar is needed here (and the epoch counter is signature-covered upstream: `keyring_signing_bytes`
-/// on the chain, the op signature over `sealing` on the dag). The leading domain tag makes it byte-disjoint
-/// from the header AAD (which starts with a bare version integer).
-pub fn wrap_aad(tree_id: &[u8], key_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
-    put_bytes(&mut out, b"openom:wrap:v2");
-    put_bytes(&mut out, tree_id);
-    put_bytes(&mut out, key_id);
-    put_bytes(&mut out, member_id.as_bytes());
-    put_u32(&mut out, wrap_method as u32);
-    out
-}
-
-/// Domain-separated AAD for a **recovery-root-key private-key wrap** (§4). Unlike a
-/// per-epoch DEK wrap, the recovery root key is tree-scoped, not epoch-scoped, so it binds
-/// only `(tree_id, member_id, wrap_method)` under its own `openom:rrk:v1` tag — byte-
-/// disjoint from `wrap_aad` (so an RRK wrap can never be reinterpreted as an epoch-DEK
-/// wrap even when it reuses the passphrase/recovery `wrap_method` values).
-pub fn rrk_wrap_aad(tree_id: &[u8], member_id: &str, wrap_method: i32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(48);
-    put_bytes(&mut out, b"openom:rrk:v1");
-    put_bytes(&mut out, tree_id);
-    put_bytes(&mut out, member_id.as_bytes());
-    put_u32(&mut out, wrap_method as u32);
-    out
-}
+// The DEK/RRK wrap AADs moved to `keyeo_crypto::{wrap_aad, rrk_wrap_aad}` (retagged `keyeo:wrap:v1` /
+// `keyeo:rrk:v1`) when the key-material layer was lifted into keyeo (OPE-377); this module keeps only the
+// header / author / signing AADs the envelope layer owns.
 
 #[inline]
 fn put_u32(out: &mut Vec<u8>, v: u32) {
@@ -375,30 +349,4 @@ mod tests {
         assert_ne!(asb[..4], header_aad(1, &h)[..4]);
     }
 
-    #[test]
-    fn wrap_aad_binds_every_context_field() {
-        let base = wrap_aad(b"tree", b"key", "member", 1);
-        assert_eq!(base, wrap_aad(b"tree", b"key", "member", 1)); // deterministic
-        assert_ne!(base, wrap_aad(b"TREE", b"key", "member", 1)); // tree_id
-        assert_ne!(base, wrap_aad(b"tree", b"KEY", "member", 1)); // key_id (also the per-epoch identity)
-        assert_ne!(base, wrap_aad(b"tree", b"key", "other", 1)); // member_id
-        assert_ne!(base, wrap_aad(b"tree", b"key", "member", 2)); // wrap_method
-    }
-
-    #[test]
-    fn wrap_aad_is_disjoint_from_header_aad() {
-        // The domain tag prevents a header AAD from ever colliding with a wrap AAD.
-        assert_ne!(wrap_aad(b"", b"", "", 0), header_aad(0, &Header::default()));
-    }
-
-    #[test]
-    fn rrk_wrap_aad_binds_each_input() {
-        // The rrk wrap AAD must bind (tree_id, member_id, wrap_method) so a wrap can't be transplanted.
-        // Kills a constant/empty rrk_wrap_aad: non-empty, and every input moves the bytes.
-        let base = rrk_wrap_aad(b"tree-16-byte-abc", "member", 1);
-        assert!(!base.is_empty());
-        assert_ne!(base, rrk_wrap_aad(b"other-16byte-abc", "member", 1), "tree_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "other", 1), "member_id is bound");
-        assert_ne!(base, rrk_wrap_aad(b"tree-16-byte-abc", "member", 2), "wrap_method is bound");
-    }
 }

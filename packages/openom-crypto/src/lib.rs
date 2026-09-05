@@ -36,7 +36,6 @@ mod kdf;
 mod recovery;
 mod root;
 mod seal;
-mod wrap;
 
 // The generic primitives, re-exported so `openom_crypto::X` still resolves for every consumer.
 pub use keyeo_crypto::{
@@ -54,7 +53,6 @@ pub use kdf::{default_kdf_params, derive_kek};
 pub use recovery::recovery_kdf_params;
 pub use root::derive_root;
 pub use seal::{open, seal};
-pub use wrap::{unwrap_dek, unwrap_rrk_secret, wrap_dek, wrap_rrk_secret, WrapContext, WrappedDek};
 
 #[cfg(test)]
 mod tests {
