@@ -99,13 +99,14 @@ pub(crate) struct SealedEpoch {
     pub wraps: Vec<CoreWrap>,
 }
 
-/// The founder's recovery escrow: the RRK public key, the two wraps of the RRK secret (under the
-/// passphrase KEK and the recovery-code KEK), and the pinned Ed25519 recovery verifying key (RVK).
+/// The founder's recovery escrow: the RRK public key, the two KEK wraps of the RRK secret (under the
+/// passphrase KEK and the recovery-code KEK — keyeo's native [`KeyeoWrap`], the shape the dag persists), and
+/// the pinned Ed25519 recovery verifying key (RVK).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RecoveryEscrow {
     pub public_key: Vec<u8>,
     pub member_id: String,
-    pub wraps: Vec<CoreWrap>,
+    pub wraps: Vec<KeyeoWrap<String>>,
     pub recovery_verifying_key: Vec<u8>,
 }
 
@@ -201,7 +202,9 @@ impl From<&RecoveryEscrow> for RecoveryKey {
         Self {
             public_key: r.public_key.clone(),
             member_id: r.member_id.clone(),
-            wraps: r.wraps.iter().map(KeyWrap::from).collect(),
+            // The escrow's KEK wraps are keyeo `Wrap`s; the chain wire is the proto `KeyWrap`. Marshal each
+            // through the `CoreWrap` boundary (a Kek wrap → `wrap_method`/`nonce`/`kdf`/`wrapped_dek`).
+            wraps: r.wraps.iter().map(|w| KeyWrap::from(&core_from_keyeo(w.clone()))).collect(),
             recovery_verifying_key: r.recovery_verifying_key.clone(),
         }
     }
@@ -294,7 +297,9 @@ pub(crate) fn build_recovery_escrow(
     Ok(RecoveryEscrow {
         public_key: rrk_public.to_vec(),
         member_id: member_id.to_string(),
-        wraps: vec![core_from_keyeo(pass), core_from_keyeo(rec)],
+        // keyeo's native KEK wraps — the dag persists these directly; the chain marshals them to proto via
+        // `RecoveryKey::from`.
+        wraps: vec![pass, rec],
         // The Ed25519 recovery verifying key, derived from the RRK secret via the shared
         // openom_crypto::derive_rvk (so the chain and dag pin an identical RVK). Covered by the keyring
         // signature; a future reset is verified for continuity + authorization against it.
@@ -613,25 +618,58 @@ pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u32, Dek)]) -> Result<Vec
         .ok_or(VaultError::MissingWrap)
 }
 
-/// Reject Argon2id `kdf` outside the window this build will run — a hostile keyring could otherwise
-/// OOM/CPU-burn the client before any verification. Rejects rather than clamps (clamping could silently
+/// The Argon2id window this build will run — anything outside it (a hostile keyring) could OOM/CPU-burn the
+/// client before any verification, so both KDF validators reject rather than clamp (clamping could silently
 /// weaken).
-pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), VaultError> {
-    let bounds = KdfBounds {
+fn kdf_bounds() -> KdfBounds {
+    KdfBounds {
         memory_kib: MIN_MEMORY_KIB..=MAX_MEMORY_KIB,
         iterations: 1..=MAX_ITERATIONS,
         parallelism: 1..=MAX_PARALLELISM,
         salt_len: 8..=64,
-    };
-    let kp = KeyeoKdfParams {
-        salt: p.salt.clone(),
-        memory_kib: p.memory_kib,
-        iterations: p.iterations,
-        parallelism: p.parallelism,
-    };
-    if kp.validate(&bounds) {
+    }
+}
+
+/// Reject an out-of-window `CoreKdf` (a member's own passphrase KDF, proto-sourced).
+pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), VaultError> {
+    if keyeo_kdf(p).validate(&kdf_bounds()) {
         Ok(())
     } else {
         Err(VaultError::BadKdfParams)
+    }
+}
+
+/// Validate a keyeo KDF (from an escrow KEK wrap) against the same window and return the proto `KdfParams`
+/// the crypto derivations (`derive_root` / `derive_kek`) consume.
+pub(crate) fn validated_proto_kdf(k: &KeyeoKdfParams) -> Result<KdfParams, VaultError> {
+    if !k.validate(&kdf_bounds()) {
+        return Err(VaultError::BadKdfParams);
+    }
+    Ok(KdfParams {
+        salt: k.salt.clone(),
+        memory_kib: k.memory_kib,
+        iterations: k.iterations,
+        parallelism: k.parallelism,
+    })
+}
+
+/// The escrow's KEK wrap of the RRK secret for a credential (`Passphrase` / `RecoveryCode`), returned as its
+/// `(kdf, nonce, ciphertext)` — the pieces the owner/recoverer needs to re-derive the KEK and open the RRK
+/// (via [`validated_proto_kdf`] + [`open_rrk_secret`]).
+pub(crate) fn escrow_kek_wrap(
+    escrow: &RecoveryEscrow,
+    kind: KekKind,
+) -> Result<(&KeyeoKdfParams, &[u8], &[u8]), VaultError> {
+    let wrap = escrow
+        .wraps
+        .iter()
+        .find(|w| matches!(&w.method, KeyeoWrapMethod::Kek { kind: k, .. } if *k == kind))
+        .ok_or(VaultError::MissingWrap)?;
+    match &wrap.method {
+        KeyeoWrapMethod::Kek { kdf, nonce, .. } => {
+            Ok((kdf, nonce.as_ref(), wrap.ciphertext.as_ref()))
+        }
+        // `find` already matched a Kek wrap.
+        _ => Err(VaultError::MissingWrap),
     }
 }

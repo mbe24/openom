@@ -28,16 +28,16 @@ use crate::lifecycle::{
     KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
 };
 use crate::vault_core::{
-    build_recovery_escrow, epoch_deks, member_epoch_deks, member_wrap_keyeo, new_owner_secrets,
-    open_rrk_secret, rrk_wrap_keyeo, sealed_from_keyeo, sealer_set_from_deks, validate_kdf, CoreKdf,
-    RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
+    build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
+    new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealed_from_keyeo, sealer_set_from_deks,
+    validate_kdf, validated_proto_kdf, CoreKdf, RecoveryEscrow, SealedEpoch, PASSPHRASE, RECOVERY,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
 // sealing core is lifted onto, not the dag engine's op types behind the `dag_client` facade).
 use keyeo_crypto::{
-    covers_exact, missing, KeyId as KeyeoKeyId, RecipientDescriptor, WrapMethod as KeyeoWrapMethod,
-    X25519PublicKey,
+    covers_exact, missing, KekKind, KeyId as KeyeoKeyId, RecipientDescriptor,
+    WrapMethod as KeyeoWrapMethod, X25519PublicKey,
 };
 use openom_keyring_api::MembershipView;
 use crate::VaultError;
@@ -468,17 +468,8 @@ impl KeyringLifecycle for DagVault {
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(passphrase.expose(), &validated_proto_kdf(kdf)?)?;
 
         // Anti-substitution: the passphrase-derived identity must be the RESOLVED Owner's key (not the
         // pinned genesis — a Retarget/ReFound legitimately retargets it), so a wrong passphrase — or a
@@ -487,14 +478,7 @@ impl KeyringLifecycle for DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            &pass_wrap.nonce,
-            &pass_wrap.wrapped_dek,
-            tree_id,
-            member_id,
-            PASSPHRASE,
-        )?;
+        let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, member_id, PASSPHRASE)?;
         let deks = epoch_deks(&sealed_epochs(&epochs), tree_id, member_id, &rrk_secret)?;
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
 
@@ -548,26 +532,10 @@ impl KeyringLifecycle for DagVault {
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
         let FoldedSealing { epochs, escrow, write_key_id, needs_reseal, needs_backfill } = fold_resolved(&resolved)?;
-        let rec_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == RECOVERY)
-            .ok_or(VaultError::MissingWrap)?;
-        let rec_kdf = rec_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow recovery wrap missing kdf".into()))?;
-        validate_kdf(rec_kdf)?;
+        let (rec_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::RecoveryCode)?;
         let entropy = parse_recovery_code(recovery_code)?;
-        let rec_kek = derive_kek(entropy.as_slice(), &KdfParams::from(rec_kdf))?;
-        let rrk_secret = open_rrk_secret(
-            &rec_kek,
-            &rec_wrap.nonce,
-            &rec_wrap.wrapped_dek,
-            tree_id,
-            member_id,
-            RECOVERY,
-        )?;
+        let rec_kek = derive_kek(entropy.as_slice(), &validated_proto_kdf(rec_kdf)?)?;
+        let rrk_secret = open_rrk_secret(&rec_kek, rrk_nonce, rrk_ct, tree_id, member_id, RECOVERY)?;
 
         // Re-establish owner access under the new passphrase, re-wrapping the SAME RRK.
         let secrets = new_owner_secrets(new_passphrase.expose())?;
@@ -634,29 +602,14 @@ impl KeyringLifecycle for DagVault {
         let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
 
         // Unwrap the RRK via the OLD passphrase, checking the derived identity is the resolved Owner.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let old_kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(old_kdf)?;
-        let old_root = derive_root(old_passphrase.expose(), &KdfParams::from(old_kdf))?;
+        let (old_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let old_root = derive_root(old_passphrase.expose(), &validated_proto_kdf(old_kdf)?)?;
         if old_root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
         {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = open_rrk_secret(
-            &old_root.kek,
-            &pass_wrap.nonce,
-            &pass_wrap.wrapped_dek,
-            tree_id,
-            member_id,
-            PASSPHRASE,
-        )?;
+        let rrk_secret =
+            open_rrk_secret(&old_root.kek, rrk_nonce, rrk_ct, tree_id, member_id, PASSPHRASE)?;
 
         // Re-establish under the new passphrase, re-wrapping the SAME RRK (re-wrap, not rotate).
         let secrets = new_owner_secrets(new_passphrase.expose())?;
@@ -727,28 +680,12 @@ impl DagVault {
         let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
 
         // The owner unwraps the RRK via their passphrase (anti-substitution vs the resolved Owner key).
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            &pass_wrap.nonce,
-            &pass_wrap.wrapped_dek,
-            tree_id,
-            owner_id,
-            PASSPHRASE,
-        )?;
+        let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, owner_id, PASSPHRASE)?;
 
         // Reach every epoch's DEK and wrap each to the new member's HPKE key.
         let sealed = sealed_epochs(&epochs);
@@ -863,17 +800,8 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived signing identity (anti-substitution). Removing
         // needs no RRK secret — the new DEK is wrapped to the RRK PUBLIC.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
@@ -961,17 +889,8 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived identity (anti-substitution); the fresh DEK is
         // wrapped to the RRK PUBLIC, so no RRK secret is needed to reseal.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
@@ -1012,17 +931,8 @@ impl DagVault {
 
         // Owner authorizes via their passphrase-derived identity (anti-substitution) — the checkpoint is
         // Owner-signed.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
@@ -1155,28 +1065,12 @@ impl DagVault {
 
         // The owner authorizes via their passphrase-derived identity (anti-substitution vs the resolved
         // Owner key) and unwraps the RRK secret — the same open-all-DEKs path as `add_member`.
-        let pass_wrap = escrow
-            .wraps
-            .iter()
-            .find(|w| w.wrap_method == PASSPHRASE)
-            .ok_or(VaultError::MissingWrap)?;
-        let kdf = pass_wrap
-            .kdf
-            .as_ref()
-            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
-        validate_kdf(kdf)?;
-        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow, KekKind::Passphrase)?;
+        let root = derive_root(owner_passphrase.expose(), &validated_proto_kdf(kdf)?)?;
         if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
         }
-        let rrk_secret = open_rrk_secret(
-            &root.kek,
-            &pass_wrap.nonce,
-            &pass_wrap.wrapped_dek,
-            tree_id,
-            owner_id,
-            PASSPHRASE,
-        )?;
+        let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, owner_id, PASSPHRASE)?;
 
         // Open every epoch the RRK can reach; for each, add a wrap for any resolved non-owner member not
         // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
