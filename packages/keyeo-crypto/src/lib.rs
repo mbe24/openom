@@ -30,13 +30,15 @@ mod recovery;
 mod root;
 mod secret;
 mod wrap_aad;
+mod wrap_ops;
 
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
-pub use ids::GroupId;
-pub use keyring::{Epoch, KekKind, RecipientId, Wrap, WrapMethod};
+pub use ids::{GroupId, KeyId};
+pub use keyring::{Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
+pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
 pub use material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 pub use kdf::{

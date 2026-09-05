@@ -9,8 +9,19 @@ use std::hash::Hash;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::ids::{GroupId, KeyId};
 use crate::material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 use crate::KdfParams;
+
+/// The group-at-an-epoch binding context (the MLS `GroupContext` role): the two coordinates a DEK wrap is
+/// bound to, so a wrap can't be transplanted across groups or epochs. The other two AAD fields come from
+/// elsewhere — the recipient supplies the member id, the wrap its method. Borrows, so a rewrap over many
+/// recipients builds each wrap against the same context with no clones.
+#[derive(Clone, Copy, Debug)]
+pub struct GroupContext<'a> {
+    pub group_id: &'a GroupId,
+    pub key_id: &'a KeyId,
+}
 
 /// A recipient's identity — what a wrap is addressed to (a member, the recovery root). Generic, so a
 /// consumer chooses its own id type (a string did:key, a number, a custom key), because a keyring library
@@ -55,14 +66,22 @@ pub enum WrapMethod {
 }
 
 impl WrapMethod {
-    /// The pinned discriminant fed into the wrap AAD (and used as a lookup key). The four values mirror
-    /// the format's wrap methods; keyeo owns them, so nothing here depends on an application enum.
+    /// The pinned discriminants fed into the wrap AAD (and used as lookup keys). The four values mirror the
+    /// format's wrap methods; keyeo owns them, so nothing here depends on an application enum. The wrap ops
+    /// reference these when building the AAD (before a method value exists), keeping [`Self::tag`] the sole
+    /// source of truth.
+    pub const TAG_PASSPHRASE_KEK: i32 = 1;
+    pub const TAG_MEMBER_HPKE: i32 = 2;
+    pub const TAG_RECOVERY_KEK: i32 = 3;
+    pub const TAG_RRK_HPKE: i32 = 4;
+
+    /// The discriminant fed into the wrap AAD (and used as a lookup key).
     pub fn tag(&self) -> i32 {
         match self {
-            WrapMethod::Kek { kind: KekKind::Passphrase, .. } => 1,
-            WrapMethod::MemberHpke { .. } => 2,
-            WrapMethod::Kek { kind: KekKind::RecoveryCode, .. } => 3,
-            WrapMethod::RrkHpke { .. } => 4,
+            WrapMethod::Kek { kind: KekKind::Passphrase, .. } => Self::TAG_PASSPHRASE_KEK,
+            WrapMethod::MemberHpke { .. } => Self::TAG_MEMBER_HPKE,
+            WrapMethod::Kek { kind: KekKind::RecoveryCode, .. } => Self::TAG_RECOVERY_KEK,
+            WrapMethod::RrkHpke { .. } => Self::TAG_RRK_HPKE,
         }
     }
 }
@@ -83,7 +102,7 @@ pub struct Wrap<Id: RecipientId> {
 #[serde(bound = "Id: RecipientId")]
 pub struct Epoch<Id: RecipientId> {
     /// The epoch DEK's identity — a fresh random salt, so it doubles as the per-epoch AAD binding.
-    pub key_id: Vec<u8>,
+    pub key_id: KeyId,
     /// A monotone generation counter (bumped on each rewrap).
     pub ordinal: u64,
     /// The DEK wrapped once per recipient.
@@ -96,7 +115,7 @@ mod tests {
 
     fn sample_epoch() -> Epoch<String> {
         Epoch {
-            key_id: vec![1, 2, 3, 4],
+            key_id: KeyId::new(vec![1, 2, 3, 4]),
             ordinal: 7,
             wraps: vec![
                 Wrap {

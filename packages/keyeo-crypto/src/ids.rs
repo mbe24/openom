@@ -28,3 +28,18 @@ impl GroupId {
         self.0.is_empty()
     }
 }
+
+/// An epoch DEK's identity — a fresh random salt minted per epoch, so it uniquely identifies the epoch and
+/// doubles as the per-epoch binding in the wrap AAD (no separate epoch scalar is needed). An opaque byte
+/// string the caller assigns.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct KeyId(pub Vec<u8>);
+
+impl KeyId {
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
