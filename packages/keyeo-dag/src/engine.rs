@@ -720,6 +720,24 @@ impl<'a, Op: SignedOp> keyeo_core::Compaction for Retained<'a, Op> {
         };
 
         let tips: HashSet<Op::OpId> = stable.ops.iter().copied().collect();
+
+        // The cut must be DOMINATING: every op is either AT/BELOW the frontier (a tip, or an ancestor of some
+        // tip) or STRICTLY ABOVE it (descends from EVERY tip). An op CONCURRENT with the frontier — descending
+        // from some tips but not all, or from none — is fatal: it would be retained while an op below the
+        // frontier that is concurrent with IT gets pruned, so that pruned op's effect (e.g. a strong-remove
+        // that should void the retained op, or a reset-merge carve-out) is silently lost on a compacted replica
+        // — a membership / sealing split-brain vs a full-history replica. Reject rather than prune unsafely: the
+        // caller must supply a COMPLETE cut across all concurrent branches (walk the frontier down until every
+        // retained op descends from it). A single-branch tip in a forked DAG is not a valid cut.
+        let below_or_at = |o: &Op::OpId| stable.ops.iter().any(|t| t == o || state.graph.has_path(*o, *t));
+        let above_all = |o: &Op::OpId| stable.ops.iter().all(|t| state.graph.has_path(*t, *o));
+        if let Some(bad) = state.ops.keys().find(|o| !below_or_at(o) && !above_all(o)) {
+            return Err(keyeo_core::CompactionError(format!(
+                "non-dominating cut: op {bad:?} is concurrent with the frontier — supply a complete cut across \
+                 all concurrent tips (every retained op must descend from every tip)"
+            )));
+        }
+
         // subsumed = at or below the frontier (a tip, or a causal ancestor of some tip): every peer that has
         // synced past the whole frontier holds these, so a checkpoint can stand in for them.
         let subsumed = |x: &Op::OpId| {
@@ -846,40 +864,37 @@ mod compaction_tests {
     }
 
     #[test]
-    fn prunes_below_the_frontier_but_never_orphans_a_retained_fork() {
-        let (k, a, b, c, d) = dag();
+    fn rejects_a_partial_cut_that_leaves_a_concurrent_fork() {
+        let (k, _a, _b, c, _d) = dag();
 
-        // Frontier {c}: below it are a, b. The fork d (concurrent with c) is retained and reaches a WITHOUT
-        // crossing c, so a must stay. b is reached only through c (the anchor), so b is prunable.
-        let out = <Retained<'_, TOp> as Compaction>::compact(
+        // Frontier {c} is a SINGLE branch tip while d is a concurrent, un-captured fork. Pruning below c (b)
+        // while retaining d — which is concurrent with b — would silently drop b's effect on a compacted
+        // replica (if b were a strong-remove voiding d, that voiding is lost). The cut is non-dominating and
+        // must be REFUSED, not pruned around. (This is the Fable review counterexample.)
+        let err = <Retained<'_, TOp> as Compaction>::compact(
             &k.retained(),
             &Frontier { ops: vec![c] },
             RetentionPlan::Snapshot { keep_last: 0 },
         )
-        .unwrap()
-        .unwrap();
-        assert_eq!(out.prune.len(), 1, "exactly one op is prunable");
-        assert!(out.prune.contains(&b), "b (shielded by the frontier c) is prunable");
-        assert!(!out.prune.contains(&a), "a is kept — the fork d still hangs off it");
-        assert!(!out.prune.contains(&c), "the frontier tip is the anchor, never pruned");
-        assert!(!out.prune.contains(&d), "d is concurrent with the frontier, not below it");
-        assert_eq!(out.frontier, vec![c]);
+        .unwrap_err();
+        assert!(err.0.contains("non-dominating"), "a partial cut leaving a concurrent fork is rejected: {}", err.0);
     }
 
     #[test]
-    fn a_fork_below_the_frontier_keeps_its_whole_shared_ancestry() {
-        let (k, a, _b, _c, d) = dag();
+    fn accepts_a_complete_cut_across_all_tips_and_prunes_below_it() {
+        let (k, a, b, c, d) = dag();
 
-        // Frontier {d}: below it is only a. b/c are concurrent with d (retained) and reach a without crossing d,
-        // so a stays. Nothing is prunable — d's only strict ancestor is a, which b/c also need.
+        // Frontier {c, d} captures BOTH concurrent tips — a complete cut. Now a and b are below the whole
+        // frontier and nothing retained is concurrent with them, so both prune; the tips c, d are the anchors.
         let out = <Retained<'_, TOp> as Compaction>::compact(
             &k.retained(),
-            &Frontier { ops: vec![d] },
+            &Frontier { ops: vec![c, d] },
             RetentionPlan::Snapshot { keep_last: 0 },
         )
         .unwrap()
         .unwrap();
-        assert!(out.prune.is_empty(), "a is shared with the retained b/c branch, so nothing prunes");
-        assert!(!out.prune.contains(&a));
+        assert_eq!(out.prune.len(), 2, "a and b are below the complete cut");
+        assert!(out.prune.contains(&a) && out.prune.contains(&b), "both ancestors prune");
+        assert!(!out.prune.contains(&c) && !out.prune.contains(&d), "the frontier tips are the anchors, never pruned");
     }
 }
