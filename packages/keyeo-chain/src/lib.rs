@@ -10,8 +10,8 @@ use keyeo_core::{Role, SignatureScheme};
 use serde::Serialize;
 
 /// Convenience aliases for a doc's public-key / signature types.
-type Pk<D> = <<D as LinearDoc>::S as SignatureScheme>::PublicKey;
-type Sig<D> = <<D as LinearDoc>::S as SignatureScheme>::Signature;
+type Pk<D> = <<D as Doc>::S as SignatureScheme>::PublicKey;
+type Sig<D> = <<D as Doc>::S as SignatureScheme>::Signature;
 
 // ---- newtypes (zero-cost; a caller can't cross a group-id for a hash, a revision for a version, …) ----
 
@@ -35,7 +35,7 @@ pub struct PayloadCommitment(pub [u8; 32]);
 // ---- membership + governance ----
 
 /// A member of the group: an identity, its role, and its author public key. The engine derives the SIGNER
-/// set from the full member set by [`LinearRole::is_signer`] — signer authority and member role can never
+/// set from the full member set by [`SignerRole::is_signer`] — signer authority and member role can never
 /// drift apart (there is no separate signer roster).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signer<Id, R, PK> {
@@ -57,7 +57,7 @@ pub struct Governance {
 /// engine never learns a domain's specific role ladder. `is_founder` marks the unique strongest role
 /// (exactly one member must hold it); `is_signer` marks founder-or-co-owner (who may author revisions).
 /// In openom's chain these are `role == 1` and `role in 1..=2`, but the engine only ever calls these.
-pub trait LinearRole: Role + Copy {
+pub trait SignerRole: Role + Copy {
     /// The unique strongest role — the founder. Exactly one member must hold it (enforced structurally).
     fn is_founder(&self) -> bool;
     /// A role that may author revisions — founder or co-owner. Signers are DERIVED via this predicate.
@@ -83,10 +83,10 @@ pub struct Anchor<Id, R, PK> {
 /// signed message from these SAME accessor values (see [`signing_bytes`]), so "what decides == what is
 /// signed". `structure_ok` is the binding's payload/structural gate (wrap-completeness, epoch ordinals,
 /// layout-version bound) and the engine invokes it at EVERY entry point.
-pub trait LinearDoc {
+pub trait Doc {
     /// A member identity — comparable and canonically-serializable (it is signed).
     type Id: Clone + std::fmt::Debug + Eq + Ord + Serialize;
-    type R: LinearRole;
+    type R: SignerRole;
     type S: SignatureScheme;
 
     fn group_id(&self) -> &GroupId;
@@ -94,7 +94,7 @@ pub trait LinearDoc {
     fn prev_hash(&self) -> &DocHash;
     /// Engine-owned, fail-closed pre-signature layout selector — signed, so a future layout is byte-disjoint.
     fn layout_version(&self) -> u32;
-    /// ALL members with roles + author keys; the engine derives the signer set via [`LinearRole::is_signer`].
+    /// ALL members with roles + author keys; the engine derives the signer set via [`SignerRole::is_signer`].
     fn members(&self) -> Vec<Signer<Self::Id, Self::R, Pk<Self>>>;
     fn governance(&self) -> Governance;
     fn recovery_authority(&self) -> Option<Pk<Self>>;
@@ -104,7 +104,7 @@ pub trait LinearDoc {
     fn payload_commitment(&self) -> PayloadCommitment;
     /// The binding's payload/structural acceptance gate. The engine calls it at every entry point (incl.
     /// per hop in [`verify_walk`]); a binding cannot forget to wire it. Return `Err(&'static str)` to
-    /// reject with [`LinearError::Structure`].
+    /// reject with [`Error::Structure`].
     fn structure_ok(&self) -> Result<(), &'static str>;
 }
 
@@ -112,7 +112,7 @@ pub trait LinearDoc {
 /// is an attack; a gap is availability; an unendorsed change is tampering) and each guard gets a 1-to-1
 /// negative test. Generalizes openom-keyring-chain's `ChainError`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum LinearError {
+pub enum Error {
     #[error("candidate is for a different group")]
     GroupMismatch,
     #[error("doc layout is newer than this build understands")]
@@ -142,36 +142,36 @@ pub enum LinearError {
 /// The engine-generic structural checks (from chain.rs `check_structure`): exactly one founder, members
 /// deduped by id, each signer's key accepted by the scheme, and signers deduped by public key. Payload
 /// checks (size caps, epoch ordinals, wrap-completeness, layout bound) are the binding's `structure_ok`.
-fn check_structure_generic<D: LinearDoc>(doc: &D) -> Result<(), LinearError> {
+fn check_structure_generic<D: Doc>(doc: &D) -> Result<(), Error> {
     let members = doc.members();
     // Exactly one founder — a co-owner can't masquerade as the founder, and zero/two founders is malformed.
     if members.iter().filter(|m| m.role.is_founder()).count() != 1 {
-        return Err(LinearError::BadStructure("must have exactly one founder"));
+        return Err(Error::BadStructure("must have exactly one founder"));
     }
     for (i, m) in members.iter().enumerate() {
         // No two members share an id (a decoy duplicate could otherwise inject a shadow role).
         if members[..i].iter().any(|o| o.id == m.id) {
-            return Err(LinearError::BadStructure("duplicate member"));
+            return Err(Error::BadStructure("duplicate member"));
         }
         if m.role.is_signer() {
             // A signer's key must be well-formed (else it could never verify its own signatures).
             if !<D::S>::accepts_key(&m.public_key) {
-                return Err(LinearError::BadStructure("signer key malformed"));
+                return Err(Error::BadStructure("signer key malformed"));
             }
             // No two signers share a key (a repeated key must not make a quorum easier).
             if members[..i]
                 .iter()
                 .any(|o| o.role.is_signer() && o.public_key.as_ref() == m.public_key.as_ref())
             {
-                return Err(LinearError::BadStructure("duplicate signer"));
+                return Err(Error::BadStructure("duplicate signer"));
             }
         }
     }
     Ok(())
 }
 
-/// The signer set derived from a member set: every member whose role [`is_signer`](LinearRole::is_signer).
-fn derived_signers<Id: Clone, R: LinearRole, PK: Clone>(
+/// The signer set derived from a member set: every member whose role [`is_signer`](SignerRole::is_signer).
+fn derived_signers<Id: Clone, R: SignerRole, PK: Clone>(
     members: &[Signer<Id, R, PK>],
 ) -> Vec<Signer<Id, R, PK>> {
     members.iter().filter(|m| m.role.is_signer()).cloned().collect()
@@ -206,7 +206,7 @@ fn is_self_removal<Id, R, S>(
 ) -> bool
 where
     Id: Eq,
-    R: LinearRole,
+    R: SignerRole,
     S: SignatureScheme,
 {
     let removed: Vec<&Signer<Id, R, S::PublicKey>> = prior
@@ -234,7 +234,7 @@ fn prior_governance_met<Id, R, S>(
 ) -> bool
 where
     Id: Eq,
-    R: LinearRole,
+    R: SignerRole,
     S: SignatureScheme,
 {
     let founder = prior.signers.iter().find(|s| s.role.is_founder());
@@ -285,7 +285,7 @@ fn rule_is_satisfiable(g: Governance, signer_count: usize) -> bool {
 }
 
 /// The revision-successor rule as a pure helper: a legitimate successor's revision is EXACTLY `prior + 1`.
-/// `u32::MAX` has no in-range successor (→ `None`, surfaced as [`LinearError::RevisionOverflow`]); every
+/// `u32::MAX` has no in-range successor (→ `None`, surfaced as [`Error::RevisionOverflow`]); every
 /// other prior maps to `Some(prior + 1)`. Extracted so the arithmetic is provable in isolation and so
 /// [`verify_transition`] and the proof share one definition — behaviour is identical to the inline
 /// `checked_add(1)` it replaced.
@@ -293,7 +293,7 @@ fn next_revision(prior: u32) -> Option<u32> {
     prior.checked_add(1)
 }
 
-fn anchor_from_doc<D: LinearDoc>(doc: &D, msg: &[u8]) -> Anchor<D::Id, D::R, Pk<D>> {
+fn anchor_from_doc<D: Doc>(doc: &D, msg: &[u8]) -> Anchor<D::Id, D::R, Pk<D>> {
     Anchor {
         group_id: doc.group_id().clone(),
         revision: doc.revision(),
@@ -308,25 +308,25 @@ fn anchor_from_doc<D: LinearDoc>(doc: &D, msg: &[u8]) -> Anchor<D::Id, D::R, Pk<
 
 /// Validate `cand` as the successor of `prior` and return the new verified [`Anchor`]. Pure; no I/O.
 /// Reproduces chain.rs `verify_transition` generalized over `<Id, Role, Sig>`.
-pub fn verify_transition<D: LinearDoc>(
+pub fn verify_transition<D: Doc>(
     prior: &Anchor<D::Id, D::R, Pk<D>>,
     cand: &D,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, LinearError> {
+) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
     if cand.group_id() != &prior.group_id {
-        return Err(LinearError::GroupMismatch);
+        return Err(Error::GroupMismatch);
     }
     // The binding's payload/structural gate (wrap-completeness, epoch ordinals, layout bound), then the
     // engine-generic structural checks. Structure runs BEFORE the signature policy at every entry point.
-    cand.structure_ok().map_err(LinearError::Structure)?;
+    cand.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(cand)?;
 
     // Exactly one past the anchor — never `>=`, so a withheld hop can't hide a set change.
-    let expected = next_revision(prior.revision.0).ok_or(LinearError::RevisionOverflow)?;
+    let expected = next_revision(prior.revision.0).ok_or(Error::RevisionOverflow)?;
     if cand.revision().0 != expected {
-        return Err(LinearError::NonSequential);
+        return Err(Error::NonSequential);
     }
     if cand.prev_hash() != &prior.doc_hash {
-        return Err(LinearError::Fork);
+        return Err(Error::Fork);
     }
 
     // The signed message + policy — always against the PRIOR trusted set, never the candidate's own claim.
@@ -352,15 +352,15 @@ pub fn verify_transition<D: LinearDoc>(
         if !(self_removal
             || prior_governance_met::<D::Id, D::R, D::S>(prior, &candidate_signers, &msg, &sigs))
         {
-            return Err(LinearError::UnendorsedSetChange);
+            return Err(Error::UnendorsedSetChange);
         }
         // Lockout guard: the doc's own signer set must be able to satisfy its own rule, or governance is
         // permanently bricked (no future privileged change could ever pass).
         if !rule_is_satisfiable(cand.governance(), candidate_signers.len()) {
-            return Err(LinearError::UnendorsedSetChange);
+            return Err(Error::UnendorsedSetChange);
         }
     } else if !verify_any::<D::S>(&msg, &sigs, &prior_keys) {
-        return Err(LinearError::UnendorsedOrdinaryChange);
+        return Err(Error::UnendorsedOrdinaryChange);
     }
 
     // ROTATING an existing recovery authority (old present, new differs — a change or a removal) requires
@@ -370,7 +370,7 @@ pub fn verify_transition<D: LinearDoc>(
         if new_rvk.as_ref() != Some(old)
             && !verify_any::<D::S>(&msg, &sigs, std::slice::from_ref(old))
         {
-            return Err(LinearError::UnendorsedSetChange);
+            return Err(Error::UnendorsedSetChange);
         }
     }
 
@@ -387,10 +387,10 @@ pub fn verify_transition<D: LinearDoc>(
 /// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
 /// mandatory — a signature at N+k proves authorship under the set at N+k−1 — so `structure_ok` runs each
 /// hop (via `verify_transition`). `hops` must be ascending with no gaps; a gap surfaces as `NonSequential`.
-pub fn verify_walk<D: LinearDoc>(
+pub fn verify_walk<D: Doc>(
     prior: &Anchor<D::Id, D::R, Pk<D>>,
     hops: &[D],
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, LinearError> {
+) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
     let mut anchor = prior.clone();
     for hop in hops {
         anchor = verify_transition(&anchor, hop)?;
@@ -404,11 +404,11 @@ pub fn verify_walk<D: LinearDoc>(
 /// self-signed by one of its own current signers. When `prior_rvk` is present (the PRIOR doc pinned a
 /// recovery authority) the reset must carry the SAME authority (continuity) AND be signed by it
 /// (authorization). Generalizes chain.rs `verify_reset`.
-pub fn verify_reset<D: LinearDoc>(
+pub fn verify_reset<D: Doc>(
     prior_rvk: Option<&Pk<D>>,
     doc: &D,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, LinearError> {
-    doc.structure_ok().map_err(LinearError::Structure)?;
+) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+    doc.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(doc)?;
 
     let msg = signing_bytes(doc);
@@ -421,15 +421,15 @@ pub fn verify_reset<D: LinearDoc>(
     // Self-consistency: signed by one of its own signers (the CALLER, not a signature, supplies the trust
     // that this reset is authorized).
     if !verify_any::<D::S>(&msg, &sigs, &signer_keys) {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     if let Some(prior) = prior_rvk {
-        let rvk = doc.recovery_authority().ok_or(LinearError::UnendorsedSetChange)?;
+        let rvk = doc.recovery_authority().ok_or(Error::UnendorsedSetChange)?;
         if rvk.as_ref() != prior.as_ref() {
-            return Err(LinearError::UnendorsedSetChange); // continuity: no forged takeover under a fresh root
+            return Err(Error::UnendorsedSetChange); // continuity: no forged takeover under a fresh root
         }
         if !verify_any::<D::S>(&msg, &sigs, std::slice::from_ref(prior)) {
-            return Err(LinearError::UnendorsedSetChange); // authorization: the resetter holds the recovery secret
+            return Err(Error::UnendorsedSetChange); // authorization: the resetter holds the recovery secret
         }
     }
     Ok(anchor_from_doc(doc, &msg))
@@ -438,27 +438,27 @@ pub fn verify_reset<D: LinearDoc>(
 /// Seed an anchor from a GENESIS doc (revision 1, all-zero `prev_hash`) as the founder: exactly one
 /// founder whose key is the caller's own, signed by it. Cryptographic first-sight for the founder path.
 /// Generalizes chain.rs `bootstrap_from_genesis`.
-pub fn bootstrap_genesis<D: LinearDoc>(
+pub fn bootstrap_genesis<D: Doc>(
     genesis: &D,
     own_founder_key: &Pk<D>,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, LinearError> {
-    genesis.structure_ok().map_err(LinearError::Structure)?;
+) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+    genesis.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(genesis)?;
     if genesis.revision().0 != 1 || genesis.prev_hash() != &DocHash([0u8; 32]) {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     let members = genesis.members();
     let founder = members
         .iter()
         .find(|m| m.role.is_founder())
-        .ok_or(LinearError::BadStructure("no founder"))?;
+        .ok_or(Error::BadStructure("no founder"))?;
     if founder.public_key.as_ref() != own_founder_key.as_ref() {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     let msg = signing_bytes(genesis);
     let sigs = genesis.signatures();
     if !verify_any::<D::S>(&msg, &sigs, std::slice::from_ref(own_founder_key)) {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     Ok(anchor_from_doc(genesis, &msg))
 }
@@ -466,21 +466,21 @@ pub fn bootstrap_genesis<D: LinearDoc>(
 /// Seed an anchor from a head doc pinned OUT-OF-BAND: the caller supplies `(group_id, revision, doc_hash)`
 /// and the doc must match exactly — the OOB channel, not any signature, is the trust root for this first
 /// revision. A hygiene self-signature is still checked. Generalizes chain.rs `bootstrap_from_oob`.
-pub fn bootstrap_pinned<D: LinearDoc>(
+pub fn bootstrap_pinned<D: Doc>(
     head: &D,
     pinned_group: &GroupId,
     pinned_revision: Revision,
     pinned_hash: &DocHash,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, LinearError> {
+) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
     if head.group_id() != pinned_group {
-        return Err(LinearError::GroupMismatch);
+        return Err(Error::GroupMismatch);
     }
-    head.structure_ok().map_err(LinearError::Structure)?;
+    head.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(head)?;
     let msg = signing_bytes(head);
     let hash = DocHash(sha256(&msg));
     if head.revision() != pinned_revision || &hash != pinned_hash {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     let sigs = head.signatures();
     let members = head.members();
@@ -489,7 +489,7 @@ pub fn bootstrap_pinned<D: LinearDoc>(
         .map(|s| s.public_key)
         .collect();
     if !verify_any::<D::S>(&msg, &sigs, &signer_keys) {
-        return Err(LinearError::BadBootstrap);
+        return Err(Error::BadBootstrap);
     }
     Ok(anchor_from_doc(head, &msg))
 }
@@ -598,7 +598,7 @@ mod compaction_tests {
 /// property for ALL inputs in a bounded range at once (not sampled, as a proptest would). We deliberately do
 /// NOT prove `verify_transition`/`verify_walk` end-to-end, `bootstrap_*`/`verify_reset`, or the
 /// `check_structure_generic` path: those route through the `SignatureScheme` crypto (SHA-256 + Ed25519
-/// verify) and `LinearDoc` trait dispatch, which Kani cannot bit-blast tractably.
+/// verify) and `Doc` trait dispatch, which Kani cannot bit-blast tractably.
 #[cfg(kani)]
 mod verification {
     use super::*;

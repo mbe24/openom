@@ -4,12 +4,12 @@
 //! Since OPE-300 the transition/walk/reset/bootstrap/governance/quorum LOGIC lives in the generic
 //! `keyeo-chain` engine; this module is the openom binding around it: it maps the chain's `KeyringAnchor`
 //! and proto `Keyring` (via [`ChainDoc`](crate::doc::ChainDoc)) to and from the engine's `Anchor`/
-//! `LinearDoc`, and classes the engine's `LinearError` back into the chain's `ChainError` taxonomy so the
+//! `Doc`, and classes the engine's `Error` back into the chain's `ChainError` taxonomy so the
 //! accept/reject behavior is unchanged. The engine owns its signed bytes + a payload commitment; this
 //! binding owns the wire, the payload gates, and the governing-ref adapter.
 
 use keyeo_chain::{
-    Anchor, DocHash, Governance, GroupId, LinearError, Revision, Signer,
+    Anchor, DocHash, Governance, GroupId, Error, Revision, Signer,
 };
 
 use crate::doc::{reset_rvk, to_pk32, ChainDoc, ChainRole, S_LAYOUT_AHEAD, S_WRAP_INCOMPLETE};
@@ -131,26 +131,26 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
     }
 }
 
-/// Class the generic engine's `LinearError` into the chain's own error taxonomy, preserving the exact
+/// Class the generic engine's `Error` into the chain's own error taxonomy, preserving the exact
 /// accept/reject behavior. The binding's `structure_ok` sentinels (see `crate::doc`) map back to the
 /// specific chain reasons (`LayoutAhead` / `WrapIncomplete` / else `BadStructure`).
-fn map_linear_err(e: LinearError) -> ChainError {
+fn map_linear_err(e: Error) -> ChainError {
     match e {
-        LinearError::GroupMismatch => ChainError::TreeMismatch,
-        LinearError::LayoutAhead => ChainError::LayoutAhead,
-        LinearError::BadStructure(s) => ChainError::BadStructure(s),
-        LinearError::Structure(s) => match s {
+        Error::GroupMismatch => ChainError::TreeMismatch,
+        Error::LayoutAhead => ChainError::LayoutAhead,
+        Error::BadStructure(s) => ChainError::BadStructure(s),
+        Error::Structure(s) => match s {
             S_LAYOUT_AHEAD => ChainError::LayoutAhead,
             S_WRAP_INCOMPLETE => ChainError::WrapIncomplete,
             other => ChainError::BadStructure(other),
         },
-        LinearError::NonSequential => ChainError::NonSequential,
-        LinearError::RevisionOverflow => ChainError::RevisionOverflow,
-        LinearError::Fork => ChainError::Fork,
-        LinearError::UnendorsedOrdinaryChange => ChainError::UnendorsedOrdinaryChange,
-        LinearError::UnendorsedSetChange => ChainError::UnendorsedSetChange,
-        LinearError::WrapIncomplete => ChainError::WrapIncomplete,
-        LinearError::BadBootstrap => ChainError::BadBootstrap,
+        Error::NonSequential => ChainError::NonSequential,
+        Error::RevisionOverflow => ChainError::RevisionOverflow,
+        Error::Fork => ChainError::Fork,
+        Error::UnendorsedOrdinaryChange => ChainError::UnendorsedOrdinaryChange,
+        Error::UnendorsedSetChange => ChainError::UnendorsedSetChange,
+        Error::WrapIncomplete => ChainError::WrapIncomplete,
+        Error::BadBootstrap => ChainError::BadBootstrap,
     }
 }
 

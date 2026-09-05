@@ -1,5 +1,5 @@
 //! The engine's canonical, domain-separated signing bytes — the exact byte string a signer's key signs
-//! over a [`LinearDoc`](crate::LinearDoc). Same branchless, length-prefixed, fixed-width discipline as the
+//! over a [`Doc`](crate::Doc). Same branchless, length-prefixed, fixed-width discipline as the
 //! chain's `keyring_signing_bytes` (openom-keyring-chain) and the envelope AAD, so a Rust and a JS/WASM verifier
 //! agree byte-for-byte.
 //!
@@ -8,7 +8,7 @@
 //! structurally impossible. Every generic field is covered here; the rest of the binding's payload is
 //! bound through the opaque `payload_commitment` the binding computes.
 
-use crate::{DocHash, Governance, GroupId, LinearDoc, PayloadCommitment, Revision, Signer};
+use crate::{DocHash, Governance, GroupId, Doc, PayloadCommitment, Revision, Signer};
 use keyeo_core::{CanonicalBytes, Postcard, SignatureScheme};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 /// be replayed across contexts.
 const DOMAIN_TAG: &[u8] = b"keyeo:linear:v1";
 
-/// The exhaustive set of engine-signed fields, gathered from a [`LinearDoc`]'s accessors. Kept as a struct
+/// The exhaustive set of engine-signed fields, gathered from a [`Doc`]'s accessors. Kept as a struct
 /// (rather than positional args) so [`write_signed_bytes`] can destructure it under
 /// `#[deny(unused_variables)]`: adding a signed field is a compile error until it is written below — the
 /// same compile-time-exhaustiveness security control the chain's `keyring_signing_bytes` carries.
@@ -36,7 +36,7 @@ struct SignedFields<'a, Id, R, Pk> {
 /// The canonical bytes an authorized signer signs over `doc`. Public because a binding that *authors*
 /// revisions must sign these exact bytes (and hash them for the next revision's `prev_hash`, see
 /// [`doc_hash`]); the engine and the binding therefore agree by construction.
-pub fn signing_bytes<D: LinearDoc>(doc: &D) -> Vec<u8> {
+pub fn signing_bytes<D: Doc>(doc: &D) -> Vec<u8> {
     // Owned holders for the accessor values that return by value, so `SignedFields` can borrow them.
     let members = doc.members();
     let recovery = doc.recovery_authority();
@@ -55,7 +55,7 @@ pub fn signing_bytes<D: LinearDoc>(doc: &D) -> Vec<u8> {
 /// SHA-256 of `doc`'s [`signing_bytes`] — the value the *next* revision records as its `prev_hash`, and the
 /// `doc_hash` a verified [`Anchor`](crate::Anchor) carries. Hashing the signing bytes (not any wire form)
 /// keeps the chain reproducible across Rust/wasm.
-pub fn doc_hash<D: LinearDoc>(doc: &D) -> DocHash {
+pub fn doc_hash<D: Doc>(doc: &D) -> DocHash {
     DocHash(sha256(&signing_bytes(doc)))
 }
 

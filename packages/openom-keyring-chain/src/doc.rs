@@ -1,5 +1,5 @@
 //! The openom binding of `keyeo-chain`: `ChainRole` (openom's ordinal role) + `ChainDoc` (a `Keyring`
-//! viewed as a [`keyeo_chain::LinearDoc`]). The generic engine reasons over the accessors here and signs
+//! viewed as a [`keyeo_chain::Doc`]). The generic engine reasons over the accessors here and signs
 //! the message it builds from them; the openom `Keyring` payload rides through `payload_commitment`.
 //!
 //! The engine owns the generic signed fields (group id, revision, prev-hash, layout, members, governance,
@@ -9,7 +9,7 @@
 //! signer-key length, wrap-completeness).
 
 use keyeo_core::Ed25519;
-use keyeo_chain::{DocHash, GroupId, Governance, LinearDoc, LinearRole, PayloadCommitment, Revision, Signer};
+use keyeo_chain::{DocHash, GroupId, Governance, Doc, SignerRole, PayloadCommitment, Revision, Signer};
 use sha2::{Digest, Sha256};
 
 use crate::wire::{
@@ -44,7 +44,7 @@ impl keyeo_core::Role for ChainRole {
         self.0 <= other.0
     }
 }
-impl LinearRole for ChainRole {
+impl SignerRole for ChainRole {
     fn is_founder(&self) -> bool {
         self.0 == MEMBER_OWNER as i16
     }
@@ -64,7 +64,7 @@ pub(crate) fn to_pk32(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// A `Keyring` presented as a [`LinearDoc`]. Holds owned `GroupId` / `DocHash` / `PayloadCommitment` so the
+/// A `Keyring` presented as a [`Doc`]. Holds owned `GroupId` / `DocHash` / `PayloadCommitment` so the
 /// by-reference accessors can hand out borrows (mirrors the reference `TestDoc`).
 pub(crate) struct ChainDoc<'a> {
     keyring: &'a Keyring,
@@ -186,7 +186,7 @@ impl<'a> ChainDoc<'a> {
     }
 }
 
-impl LinearDoc for ChainDoc<'_> {
+impl Doc for ChainDoc<'_> {
     type Id = String;
     type R = ChainRole;
     type S = Ed25519;

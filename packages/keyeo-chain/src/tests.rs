@@ -18,7 +18,7 @@ impl keyeo_core::Role for TestRole {
         self.0 <= other.0
     }
 }
-impl LinearRole for TestRole {
+impl SignerRole for TestRole {
     fn is_founder(&self) -> bool {
         self.0 == 1
     }
@@ -49,7 +49,7 @@ struct TestDoc {
     payload: Vec<u8>,
 }
 
-impl LinearDoc for TestDoc {
+impl Doc for TestDoc {
     type Id = String;
     type R = TestRole;
     type S = Ed25519;
@@ -235,7 +235,7 @@ fn happy_path_transition_and_walk() {
 
     assert_eq!(verify_walk(&a, &[c1.clone(), c2.clone()]).unwrap().revision, Revision(3));
     // A gap (skipping the first hop) is rejected.
-    assert_eq!(verify_walk(&a, &[c2]), Err(LinearError::NonSequential));
+    assert_eq!(verify_walk(&a, &[c2]), Err(Error::NonSequential));
 }
 
 // ---- ordering / chaining gates ----
@@ -251,21 +251,21 @@ fn non_sequential_fork_and_overflow_are_distinct() {
     skip.revision = Revision(3);
     skip.prev_hash = doc_hash(&g);
     sign(&mut skip, &[&f]);
-    assert_eq!(verify_transition(&a, &skip), Err(LinearError::NonSequential));
+    assert_eq!(verify_transition(&a, &skip), Err(Error::NonSequential));
 
     // Right revision, wrong prev hash.
     let fork = next(&g, |d| d.prev_hash = DocHash([9u8; 32]), &[&f]);
-    assert_eq!(verify_transition(&a, &fork), Err(LinearError::Fork));
+    assert_eq!(verify_transition(&a, &fork), Err(Error::Fork));
 
     // At u32::MAX, every candidate overflows before the sequential check.
     let mut at_max = anchor(&g);
     at_max.revision = Revision(u32::MAX);
-    assert_eq!(verify_transition(&at_max, &g), Err(LinearError::RevisionOverflow));
+    assert_eq!(verify_transition(&at_max, &g), Err(Error::RevisionOverflow));
 
     // Different group.
     let mut other = anchor(&g);
     other.group_id = GroupId(b"other".to_vec());
-    assert_eq!(verify_transition(&other, &g), Err(LinearError::GroupMismatch));
+    assert_eq!(verify_transition(&other, &g), Err(Error::GroupMismatch));
 }
 
 // ---- ordinary change ----
@@ -285,7 +285,7 @@ fn ordinary_change_by_a_prior_signer_accepted_stranger_rejected() {
     let stranger = sk(7);
     assert_eq!(
         verify_transition(&a, &next(&g, add_editor(&sk(9), "bob"), &[&stranger])),
-        Err(LinearError::UnendorsedOrdinaryChange)
+        Err(Error::UnendorsedOrdinaryChange)
     );
 }
 
@@ -302,7 +302,7 @@ fn governance_kind0_founder_or_unanimity_gates_a_privileged_change() {
     // A lone co-owner cannot.
     assert_eq!(
         verify_transition(&a, &next(&g, promote_to_coowner("pend"), &[&aa])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -319,7 +319,7 @@ fn governance_kind1_founder_only() {
     // Even both co-owners together cannot (no unanimity path under founder-only).
     assert_eq!(
         verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&aa, &bb])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -336,7 +336,7 @@ fn governance_kind2_founder_or_threshold_gates_a_signer_change() {
     verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&f])).unwrap();
     assert_eq!(
         verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&aa])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -353,7 +353,7 @@ fn governance_kind3_pure_threshold_has_no_founder_path() {
     verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&aa, &bb])).unwrap();
     assert_eq!(
         verify_transition(&a, &next(&ruled, promote_to_coowner("pend"), &[&f])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -367,7 +367,7 @@ fn governance_change_is_anti_downgrade() {
     // Weakening (2-of -> founder-or-unanimity) must still satisfy the CURRENT (2-of) rule.
     assert_eq!(
         verify_transition(&a, &next(&ruled, set_rule(0, 0), &[&aa])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
     verify_transition(&a, &next(&ruled, set_rule(0, 0), &[&aa, &bb])).unwrap();
 }
@@ -379,7 +379,7 @@ fn governance_lockout_is_refused() {
     // 4 signers; threshold(5) can never be satisfied even though the founder authorizes the change.
     assert_eq!(
         verify_transition(&anchor(&g), &next(&g, set_rule(3, 5), &[&f])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -406,7 +406,7 @@ fn self_removal_accepted_but_bundled_removal_rejected() {
         },
         &[&carol],
     );
-    assert_eq!(verify_transition(&a, &bundled), Err(LinearError::UnendorsedSetChange));
+    assert_eq!(verify_transition(&a, &bundled), Err(Error::UnendorsedSetChange));
 }
 
 // ---- the HOLE case: a non-signer role cannot authorize ----
@@ -421,12 +421,12 @@ fn an_editor_member_cannot_authorize_anything() {
     // An ordinary change signed by the editor → rejected (she is not a derived signer).
     assert_eq!(
         verify_transition(&a, &next(&g, add_editor(&sk(9), "bob"), &[&carol])),
-        Err(LinearError::UnendorsedOrdinaryChange)
+        Err(Error::UnendorsedOrdinaryChange)
     );
     // Self-promotion to co-owner, self-signed → rejected (no phantom authority).
     assert_eq!(
         verify_transition(&a, &next(&g, promote_to_coowner("carol"), &[&carol])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -440,11 +440,11 @@ fn structural_gates_reject_bad_docs() {
 
     // Two founders.
     let two = next(&g, |d| d.members.push(member(&sk(2), "co", FOUNDER)), &[&f]);
-    assert!(matches!(verify_transition(&a, &two), Err(LinearError::BadStructure(_))));
+    assert!(matches!(verify_transition(&a, &two), Err(Error::BadStructure(_))));
 
     // Duplicate member id.
     let dup = next(&g, |d| d.members.push(member(&sk(2), "owner", EDITOR)), &[&f]);
-    assert!(matches!(verify_transition(&a, &dup), Err(LinearError::BadStructure(_))));
+    assert!(matches!(verify_transition(&a, &dup), Err(Error::BadStructure(_))));
 
     // A signer with a non-curve-point key (malformed) — caught by the scheme's accepts_key gate.
     let mut bad_pt = [0u8; 32];
@@ -458,7 +458,7 @@ fn structural_gates_reject_bad_docs() {
     );
     assert_eq!(
         verify_transition(&a, &malformed),
-        Err(LinearError::BadStructure("signer key malformed"))
+        Err(Error::BadStructure("signer key malformed"))
     );
 
     // The binding's structure_ok gate fires (a member without a wrap).
@@ -469,7 +469,7 @@ fn structural_gates_reject_bad_docs() {
     };
     assert_eq!(
         verify_transition(&a, &unwrapped),
-        Err(LinearError::Structure("wrap incomplete"))
+        Err(Error::Structure("wrap incomplete"))
     );
 }
 
@@ -485,7 +485,7 @@ fn establishing_a_recovery_authority_is_a_privileged_change() {
     // A lone co-owner cannot plant a recovery authority; the founder can (kind 0 founder path).
     assert_eq!(
         verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk), &[&aa])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
     let out = verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk), &[&f])).unwrap();
     assert_eq!(out.recovery_authority, Some(rvk));
@@ -512,7 +512,7 @@ fn rotating_a_recovery_authority_needs_the_old_authority_signature() {
     // Founder-signed but NOT old-RVK-signed → rejected.
     assert_eq!(
         verify_transition(&a, &next(&g, |d| d.recovery_authority = Some(rvk2), &[&f])),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
 }
 
@@ -525,20 +525,20 @@ fn bootstrap_genesis_and_pinned() {
 
     // Founder bootstraps with their own key; a stranger's key fails.
     assert_eq!(bootstrap_genesis(&g, &vk(&f)).unwrap().revision, Revision(1));
-    assert_eq!(bootstrap_genesis(&g, &vk(&sk(2))), Err(LinearError::BadBootstrap));
+    assert_eq!(bootstrap_genesis(&g, &vk(&sk(2))), Err(Error::BadBootstrap));
 
     // A non-genesis revision is refused.
     let mut r2 = g.clone();
     r2.revision = Revision(2);
     sign(&mut r2, &[&f]);
-    assert_eq!(bootstrap_genesis(&r2, &vk(&f)), Err(LinearError::BadBootstrap));
+    assert_eq!(bootstrap_genesis(&r2, &vk(&f)), Err(Error::BadBootstrap));
 
     // OOB pin: matching (group, revision, hash) accepted; a wrong hash rejected.
     let h = doc_hash(&g);
     bootstrap_pinned(&g, &GroupId(b"group-1".to_vec()), Revision(1), &h).unwrap();
     assert_eq!(
         bootstrap_pinned(&g, &GroupId(b"group-1".to_vec()), Revision(1), &DocHash([0u8; 32])),
-        Err(LinearError::BadBootstrap)
+        Err(Error::BadBootstrap)
     );
 }
 
@@ -562,7 +562,7 @@ fn verify_reset_accepts_a_reset_and_enforces_the_rvk_gate() {
     // A doc signed by nobody in its own signer set is not a valid reset.
     let mut unsigned = g.clone();
     sign(&mut unsigned, &[&sk(3)]);
-    assert_eq!(verify_reset(None, &unsigned), Err(LinearError::BadBootstrap));
+    assert_eq!(verify_reset(None, &unsigned), Err(Error::BadBootstrap));
 
     // RVK gate: once a prior RVK is pinned, the reset must carry the SAME authority AND be signed by it.
     let rvk = sk(8);
@@ -583,12 +583,12 @@ fn verify_reset_accepts_a_reset_and_enforces_the_rvk_gate() {
     // Signed by the fresh founder but not the RVK → rejected (authorization).
     assert_eq!(
         verify_reset(Some(&rvk_pub), &build(rvk_pub, false)),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
     // A different recovery root pinned → rejected (continuity).
     assert_eq!(
         verify_reset(Some(&rvk_pub), &build(vk(&sk(11)), true)),
-        Err(LinearError::UnendorsedSetChange)
+        Err(Error::UnendorsedSetChange)
     );
     // No prior RVK → the gate is inert.
     assert!(verify_reset(None, &build(rvk_pub, false)).is_ok());
