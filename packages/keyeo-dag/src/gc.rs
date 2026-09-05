@@ -43,14 +43,14 @@ pub struct Snapshot<
     pub state: crate::dag::resolver::GroupState<Id, R, S>,
     pub prev_snapshot: Option<[u8; 32]>,
     /// The monotonic ever-shared marker, carried so it survives pruning: once the op history that first
-    /// shared the tree is dropped, `Keyeo::ever_shared`'s effective-Add scan can't see it, so the checkpoint
+    /// shared the tree is dropped, `Keyeo::has_been_shared`'s effective-Add scan can't see it, so the checkpoint
     /// must record it. Verified monotone against the prior snapshot on adoption (the pruning slice).
-    pub ever_shared: bool,
+    pub has_been_shared: bool,
     /// The member (a signer: Owner/CoOwner) who authored this checkpoint. The signature binds to their key.
     pub author: Id,
-    /// Author signature over the canonical `(frontier, prev_snapshot, ever_shared, state)` — proves the
+    /// Author signature over the canonical `(frontier, prev_snapshot, has_been_shared, state)` — proves the
     /// checkpoint was signed by the holder of `author_public_key`. AUTHORITY (that this key is an authorized
-    /// signer at the prior checkpoint / genesis, and `ever_shared` monotonicity across `prev_snapshot`) is
+    /// signer at the prior checkpoint / genesis, and `has_been_shared` monotonicity across `prev_snapshot`) is
     /// checked on ADOPTION, not here — the same self-contained-signature / separate-authority split as epochs.
     pub signature: <S as crate::SignatureScheme>::Signature,
     pub author_public_key: <S as crate::SignatureScheme>::PublicKey,
@@ -67,7 +67,7 @@ impl<OId: crate::dag::resolver::OpId, Id: MemberId, R: Role, S: crate::Signature
         frontier: Vec<OId>,
         state: crate::dag::resolver::GroupState<Id, R, S>,
         prev_snapshot: Option<[u8; 32]>,
-        ever_shared: bool,
+        has_been_shared: bool,
         author: Id,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self
@@ -77,19 +77,19 @@ impl<OId: crate::dag::resolver::OpId, Id: MemberId, R: Role, S: crate::Signature
         let canon = crate::canonical::canonical_encode_snapshot::<OId, Id, R, S>(
             &frontier,
             &prev_snapshot,
-            ever_shared,
+            has_been_shared,
             &state,
         );
         use ed25519_dalek::Signer;
         let signature = signing_key.sign(&canon).to_bytes();
         let author_public_key = signing_key.verifying_key().to_bytes();
-        Snapshot { frontier, state, prev_snapshot, ever_shared, author, signature, author_public_key }
+        Snapshot { frontier, state, prev_snapshot, has_been_shared, author, signature, author_public_key }
     }
 }
 
 /// Verify a snapshot's **author signature** over its canonical content: proves the checkpoint was signed by
 /// the holder of its self-asserted `author_public_key`. Self-contained — it does NOT establish AUTHORITY (that
-/// the key is an authorized signer at the prior checkpoint / genesis, nor `ever_shared` monotonicity across
+/// the key is an authorized signer at the prior checkpoint / genesis, nor `has_been_shared` monotonicity across
 /// `prev_snapshot`); that is the adoption path's job (the pruning slice). Mirrors [`crate::epoch::verify_epoch`].
 /// Run at ingest so a bad-signature checkpoint never enters the adoption candidate set.
 pub fn verify_snapshot<
@@ -103,16 +103,16 @@ pub fn verify_snapshot<
     let canon = crate::canonical::canonical_encode_snapshot::<OId, Id, R, S>(
         &snapshot.frontier,
         &snapshot.prev_snapshot,
-        snapshot.ever_shared,
+        snapshot.has_been_shared,
         &snapshot.state,
     );
     S::verify(&snapshot.author_public_key, &canon, &snapshot.signature).is_ok()
 }
 
 /// The (UNSIGNED) decision the dag's [`keyeo_core::Compaction`] impl returns: the checkpoint to author (its
-/// frontier + resolved `state` + `ever_shared`) and the `prune` set — the ops the caller may drop. `compact`
+/// frontier + resolved `state` + `has_been_shared`) and the `prune` set — the ops the caller may drop. `compact`
 /// takes no signing key and no `&mut`, so it never signs and never mutates: the CALLER (which holds the
-/// member's key) authors the signed [`Snapshot`] from `(frontier, state, ever_shared)` via [`Snapshot::author`]
+/// member's key) authors the signed [`Snapshot`] from `(frontier, state, has_been_shared)` via [`Snapshot::author`]
 /// and applies `prune` to its store. Kept engine-native (the prune is a causal-DAG computation) but returned as
 /// plain data so the vault owns the signing + the store owns the drop.
 #[derive(Clone, Debug)]
@@ -126,7 +126,7 @@ pub struct DagCompaction<
     pub frontier: Vec<OId>,
     /// The resolved state to sign into the [`Snapshot`].
     pub state: crate::dag::resolver::GroupState<Id, R, S>,
-    pub ever_shared: bool,
+    pub has_been_shared: bool,
     /// Op ids the caller may drop: strictly below the frontier AND not needed by any retained op.
     pub prune: Vec<OId>,
 }
@@ -166,9 +166,9 @@ mod tests {
         .with_reset_authority(Some([9u8; 32]))
     }
 
-    fn author_sample(ever_shared: bool) -> Snapshot<ContentId, String, TRole, Ed25519> {
+    fn author_sample(has_been_shared: bool) -> Snapshot<ContentId, String, TRole, Ed25519> {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        Snapshot::author(vec![], sample_state(), None, ever_shared, "owner".to_string(), &sk)
+        Snapshot::author(vec![], sample_state(), None, has_been_shared, "owner".to_string(), &sk)
     }
 
     #[test]
@@ -176,10 +176,10 @@ mod tests {
         let s = author_sample(true);
         assert!(verify_snapshot(&s), "a freshly-authored snapshot verifies");
 
-        // Flip the monotonic ever_shared marker → the signature no longer covers it.
+        // Flip the monotonic has_been_shared marker → the signature no longer covers it.
         let mut t = s.clone();
-        t.ever_shared = false;
-        assert!(!verify_snapshot(&t), "tampering ever_shared breaks the signature");
+        t.has_been_shared = false;
+        assert!(!verify_snapshot(&t), "tampering has_been_shared breaks the signature");
 
         // Tamper a state field (the epoch) → rejected.
         let mut t = s.clone();
@@ -200,8 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn ever_shared_is_inside_the_signed_bytes() {
-        // Distinct ever_shared values yield distinct signatures over the same state — the marker is signed, so
+    fn has_been_shared_is_inside_the_signed_bytes() {
+        // Distinct has_been_shared values yield distinct signatures over the same state — the marker is signed, so
         // an attacker can't flip a shared checkpoint to unshared and keep the signature valid.
         assert_ne!(author_sample(true).signature, author_sample(false).signature);
     }

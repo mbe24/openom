@@ -1585,7 +1585,7 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 /// signed and the writer attaches a signature. Unlike `epoch_is_attributed` (a per-epoch, per-revision
 /// property that removal can reset), this never regresses — it survives an un-share back to solo. Read from
 /// the VERIFIED keyring the caller supplies (walked/synced). Chain arm: `first_shared_revision != 0`. Dag arm
-/// (Phase C, OPE-351): the resolved anchor's `ever_shared` — a monotonic scan for any effective `Add`, so an
+/// (Phase C, OPE-351): the resolved anchor's `has_been_shared` — a monotonic scan for any effective `Add`, so an
 /// un-shared-back-to-solo dag still reports true (the effective Add persists).
 #[wasm_bindgen(js_name = keyringHasBeenShared)]
 pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsError> {
@@ -1596,7 +1596,7 @@ pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsE
         }
         EngineKind::Dag => {
             let resolved = dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
-            Ok(resolved.ever_shared)
+            Ok(resolved.has_been_shared)
         }
     }
 }

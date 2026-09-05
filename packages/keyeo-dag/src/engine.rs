@@ -364,7 +364,7 @@ where
     /// pruned; a compaction Snapshot carries the marker so it survives pruning (see `gc::Snapshot`). (Assumes
     /// a solo genesis — openom's `Create` always has one initial member; a co-founder genesis would need the
     /// Create's `initial_members.len() > 1` folded in too.)
-    pub fn ever_shared(&self) -> bool {
+    pub fn has_been_shared(&self) -> bool {
         self.effective_ops()
             .iter()
             .any(|id| matches!(self.ops.get(id).map(|o| o.action()), Some(MembershipAction::Add { .. })))
@@ -666,7 +666,7 @@ fn diff_events<Id: MemberId, R: Role>(
 
 /// Compaction ([`keyeo_core::Compaction`]) for the dag engine: decide a checkpoint + the prunable op set. This
 /// is the DECISION only — pure, no signing (the trait carries no key) and no mutation. The caller authors the
-/// signed [`crate::gc::Snapshot`] from the returned `(frontier, state, ever_shared)` and drops the returned
+/// signed [`crate::gc::Snapshot`] from the returned `(frontier, state, has_been_shared)` and drops the returned
 /// `prune` ops from its store.
 impl<Op, AC, RS, QP> keyeo_core::Compaction for Keyeo<Op, AC, RS, QP>
 where
@@ -734,7 +734,7 @@ where
         Ok(Some(crate::gc::DagCompaction {
             frontier: stable.ops.clone(),
             state: state.state().clone(),
-            ever_shared: state.ever_shared(),
+            has_been_shared: state.has_been_shared(),
             prune,
         }))
     }

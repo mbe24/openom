@@ -197,7 +197,7 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
     },
 
     // Whether the tree HAS BEEN SHARED — the monotonic gate for attributed writes — read from the verified
-    // head keyring (chain: first_shared_revision != 0; dag: the resolved anchor's ever_shared). Survives an
+    // head keyring (chain: first_shared_revision != 0; dag: the resolved anchor's has_been_shared). Survives an
     // un-share back to solo.
     async hasBeenShared(treeKey) {
       const k = await keyringStore.load(treeKey);

@@ -270,7 +270,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
 }
 
 /// Deterministically encode the **signed content** of a compaction [`crate::gc::Snapshot`]: a version tag
-/// followed by `(frontier, prev_snapshot, ever_shared, state)`, the state through the exhaustive
+/// followed by `(frontier, prev_snapshot, has_been_shared, state)`, the state through the exhaustive
 /// [`CanonicalBytes`] seam above. Both the author ([`crate::gc::Snapshot::author`]) and the verifier
 /// ([`crate::gc::verify_snapshot`]) build these from the snapshot's own fields, so the signature binds to
 /// exactly this checkpoint — the membership + RVK a pruned reader will trust — and can't be transplanted to a
@@ -278,7 +278,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
 pub fn canonical_encode_snapshot<OId: OpId, Id: MemberId, R: Role, S: SignatureScheme>(
     frontier: &[OId],
     prev_snapshot: &Option<[u8; 32]>,
-    ever_shared: bool,
+    has_been_shared: bool,
     state: &GroupState<Id, R, S>,
 ) -> Vec<u8> {
     let mut buf = b"keyeo:snapshot:v1".to_vec();
@@ -293,7 +293,7 @@ pub fn canonical_encode_snapshot<OId: OpId, Id: MemberId, R: Role, S: SignatureS
         }
         None => buf.push(0),
     }
-    buf.push(u8::from(ever_shared));
+    buf.push(u8::from(has_been_shared));
     state.write_canonical(&mut buf);
     buf
 }

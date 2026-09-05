@@ -48,12 +48,12 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
     expect(wasmKeyringHasBeenShared('chain', solo)).toBe(true); // un-shared, still requires attribution
   });
 
-  // Phase C (OPE-351): the dag arm reads the resolved anchor's ever_shared — a monotonic effective-Add scan.
+  // Phase C (OPE-351): the dag arm reads the resolved anchor's has_been_shared — a monotonic effective-Add scan.
   it('dag arm: false for a solo dag tree, true once a member is admitted', () => {
     const genesis = keyringOf(wasmProvision('dag', 'owner pass', TREE, OWNER, replica(1)));
     expect(wasmKeyringHasBeenShared('dag', genesis)).toBe(false); // solo → never shared
 
-    // Admit an editor (dag Add op) → ever_shared flips true. Note dag arg order: author key before hpke key.
+    // Admit an editor (dag Add op) → has_been_shared flips true. Note dag arg order: author key before hpke key.
     const m = wasmProvisionMember('member pass');
     const shared = keyringOf(
       wasmDagAddMember(genesis, 'owner pass', TREE, OWNER, replica(2), 'acct-m', 'editor', m.authorPublic, m.hpkePublic),

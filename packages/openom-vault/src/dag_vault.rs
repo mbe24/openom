@@ -435,12 +435,12 @@ impl KeyringLifecycle for DagVault {
         // The anti-rollback watermark is the anchor's frontier (opaque to us). unlock takes no floor — it
         // reports the cursor the caller persists and passes back as the floor on the next mutation.
         let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
-        // Sign entries once the tree HAS BEEN SHARED (`ever_shared` — a monotonic effective-Add scan). A
+        // Sign entries once the tree HAS BEEN SHARED (`has_been_shared` — a monotonic effective-Add scan). A
         // never-shared solo dag stays unattributed (the launch gate skips it); once shared the sealer signs
         // and KEEPS signing after an un-share back to solo (ex-members still hold old-epoch DEKs). The dag
         // stamps its unlock-time frontier as the opaque governing_ref — the analog of the chain's revision
         // (Phase C, OPE-351).
-        if resolved.ever_shared {
+        if resolved.has_been_shared {
             sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
         }
         Ok(Unlocked {
@@ -753,9 +753,9 @@ impl DagVault {
         // owner-specific): the member persists it and passes it back as their floor.
         let watermark = dag_client::watermark(anchor).map_err(map_floor_err)?;
         // Member writer gate: sign iff the tree has been shared. Always true on a member unlock — a member
-        // only exists once shared — but gate on `ever_shared` for symmetry with the owner path, stamping the
+        // only exists once shared — but gate on `has_been_shared` for symmetry with the owner path, stamping the
         // unlock-time frontier as governing_ref (Phase C, OPE-351).
-        if resolved.ever_shared {
+        if resolved.has_been_shared {
             sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
         }
         Ok(Unlocked {
