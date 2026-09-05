@@ -1,5 +1,5 @@
 [package]
-name = "keyeo-linear"
+name = "keyeo-chain"
 description = "A generic linear signed-membership-chain engine over <Id, Role, Sig>: an ordered log of membership states where each revision N→N+1 is signed by a quorum of derived signers under a per-group governance rule, with a recovery authority and an anti-rollback floor. The domain-neutral core of openom's keyring chain (OPE-310). openom-free / dalek-free / standalone-publishable."
 version.workspace = true
 license.workspace = true

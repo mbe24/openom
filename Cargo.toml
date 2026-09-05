@@ -27,7 +27,7 @@ members = [
     "packages/journal",
     "packages/openom-sync",
     "packages/keyeo-core",
-    "packages/keyeo-linear",
+    "packages/keyeo-chain",
     "packages/keyeo-dag",
     "packages/openom-keyring-dag",
     "packages/docsync",
@@ -78,7 +78,7 @@ keyeo-dag = { path = "packages/keyeo-dag" }
 keyeo-core = { path = "packages/keyeo-core" }
 # The generic linear signed-membership-chain engine (OPE-310); the domain-neutral core of the keyring
 # chain, over <Id, Role, Sig>. openom binds concrete types onto it in openom-keyring-chain (OPE-300).
-keyeo-linear = { path = "packages/keyeo-linear" }
+keyeo-chain = { path = "packages/keyeo-chain" }
 
 # Protocol / serialization.
 prost = "0.14"

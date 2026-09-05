@@ -1,6 +1,6 @@
 [package]
 name = "openom-keyring-chain"
-description = "openom's linear signed-chain keyring binding: openom's roles/signing/keys + its own prost keyring wire, on the generic keyeo-linear engine. openom-domain-specific but openom-dependency-free (like openom-keyring-dag)."
+description = "openom's linear signed-chain keyring binding: openom's roles/signing/keys + its own prost keyring wire, on the generic keyeo-chain engine. openom-domain-specific but openom-dependency-free (like openom-keyring-dag)."
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 # The generic linear signed-membership-chain engine this crate binds onto (OPE-300).
-keyeo-linear.workspace = true
+keyeo-chain.workspace = true
 # The engine-family seam types (Ed25519 / SigError / Role / SignatureScheme).
 keyeo-core.workspace = true
 # The storage swap seam — the Blob transport for the keyring document (OPE-265).

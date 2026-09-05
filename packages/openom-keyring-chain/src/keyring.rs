@@ -1,7 +1,7 @@
 //! Signer identities + keyring signing (§4, multi-signer).
 //!
 //! An authorized signer's Ed25519 key signs the whole keyring — via the generic engine's canonical,
-//! domain-separated signed bytes ([`keyeo_linear::signing_bytes`] over the chain's [`ChainDoc`]) — so the
+//! domain-separated signed bytes ([`keyeo_chain::signing_bytes`] over the chain's [`ChainDoc`]) — so the
 //! partly-untrusted server can't substitute a member's wrapped key, role, or public key undetectably. A
 //! keyring carries one or more signatures (any-of / 1-of-N in V1); each signs the *same* bytes (the
 //! `signatures` field is excluded from them), so signatures collect independently.
@@ -30,10 +30,10 @@ pub fn generate_identity() -> Result<SigningKey, SigError> {
 }
 
 /// The canonical bytes an authorized signer signs over `keyring` — the generic engine's message
-/// (`keyeo_linear::signing_bytes`), which the engine also verifies over, so producer and verifier agree by
+/// (`keyeo_chain::signing_bytes`), which the engine also verifies over, so producer and verifier agree by
 /// construction. `pub(crate)` so `blob_sync`'s countersign content-comparison uses the same bytes.
 pub(crate) fn signing_bytes(keyring: &Keyring) -> Vec<u8> {
-    keyeo_linear::signing_bytes(&ChainDoc::new(keyring))
+    keyeo_chain::signing_bytes(&ChainDoc::new(keyring))
 }
 
 /// Append a signature from `signing_key` to the keyring (the any-of model). Set every keyring field first —
@@ -80,7 +80,7 @@ pub fn verify_keyring(keyring: &Keyring, verifying_key: &VerifyingKey) -> Result
 /// `prev_keyring_hash`, chaining the revision history (§4). Delegates to the engine's `doc_hash` so the
 /// chain hash is exactly what the engine chains on.
 pub fn keyring_hash(keyring: &Keyring) -> [u8; 32] {
-    keyeo_linear::doc_hash(&ChainDoc::new(keyring)).0
+    keyeo_chain::doc_hash(&ChainDoc::new(keyring)).0
 }
 
 #[cfg(test)]

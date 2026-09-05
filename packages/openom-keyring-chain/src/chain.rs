@@ -2,13 +2,13 @@
 //! network is a **legitimate successor** of the one the client already trusts.
 //!
 //! Since OPE-300 the transition/walk/reset/bootstrap/governance/quorum LOGIC lives in the generic
-//! `keyeo-linear` engine; this module is the openom binding around it: it maps the chain's `KeyringAnchor`
+//! `keyeo-chain` engine; this module is the openom binding around it: it maps the chain's `KeyringAnchor`
 //! and proto `Keyring` (via [`ChainDoc`](crate::doc::ChainDoc)) to and from the engine's `Anchor`/
 //! `LinearDoc`, and classes the engine's `LinearError` back into the chain's `ChainError` taxonomy so the
 //! accept/reject behavior is unchanged. The engine owns its signed bytes + a payload commitment; this
 //! binding owns the wire, the payload gates, and the governing-ref adapter.
 
-use keyeo_linear::{
+use keyeo_chain::{
     Anchor, DocHash, Governance, GroupId, LinearError, Revision, Signer,
 };
 
@@ -81,7 +81,7 @@ impl KeyringAnchor {
     }
 }
 
-// ---- KeyringAnchor <-> keyeo_linear::Anchor ----
+// ---- KeyringAnchor <-> keyeo_chain::Anchor ----
 
 type LinAnchor = Anchor<String, ChainRole, [u8; 32]>;
 
@@ -248,7 +248,7 @@ pub enum ChainError {
 }
 
 /// Validate `candidate` as the successor of `prior` and return the new anchor. Pure; no I/O. Delegates to
-/// [`keyeo_linear::verify_transition`] over the chain's [`ChainDoc`].
+/// [`keyeo_chain::verify_transition`] over the chain's [`ChainDoc`].
 pub fn verify_transition(
     prior: &KeyringAnchor,
     candidate: &Keyring,
@@ -265,7 +265,7 @@ pub fn verify_transition(
         return Err(ChainError::FirstSharedRegressed);
     }
     let anchor = to_linear_anchor(prior);
-    let out = keyeo_linear::verify_transition(&anchor, &ChainDoc::new(candidate))
+    let out = keyeo_chain::verify_transition(&anchor, &ChainDoc::new(candidate))
         .map_err(map_linear_err)?;
     let mut new_anchor = from_linear_anchor(out);
     new_anchor.first_shared_revision = candidate.first_shared_revision; // carry it forward on the anchor
@@ -283,12 +283,12 @@ pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnc
 }
 
 /// Seed an anchor from a **genesis** keyring (revision 1) as the founder. Delegates to
-/// [`keyeo_linear::bootstrap_genesis`].
+/// [`keyeo_chain::bootstrap_genesis`].
 pub fn bootstrap_from_genesis(
     genesis: &Keyring,
     own_founder_key: &VerifyingKey,
 ) -> Result<KeyringAnchor, ChainError> {
-    let out = keyeo_linear::bootstrap_genesis(&ChainDoc::new(genesis), &own_founder_key.to_bytes())
+    let out = keyeo_chain::bootstrap_genesis(&ChainDoc::new(genesis), &own_founder_key.to_bytes())
         .map_err(map_linear_err)?;
     let mut a = from_linear_anchor(out);
     a.first_shared_revision = genesis.first_shared_revision; // seed the monotonic marker (0 at a true genesis)
@@ -296,14 +296,14 @@ pub fn bootstrap_from_genesis(
 }
 
 /// Seed an anchor from a keyring pinned out-of-band (§4a). Delegates to
-/// [`keyeo_linear::bootstrap_pinned`].
+/// [`keyeo_chain::bootstrap_pinned`].
 pub fn bootstrap_from_oob(
     head: &Keyring,
     pinned_tree_id: &[u8],
     pinned_revision: u32,
     pinned_hash: &[u8; 32],
 ) -> Result<KeyringAnchor, ChainError> {
-    let out = keyeo_linear::bootstrap_pinned(
+    let out = keyeo_chain::bootstrap_pinned(
         &ChainDoc::new(head),
         &GroupId(pinned_tree_id.to_vec()),
         Revision(pinned_revision),
@@ -316,14 +316,14 @@ pub fn bootstrap_from_oob(
 }
 
 /// Validate a keyring that establishes a **new anchor on its own terms** — a genesis, or a recovery /
-/// succession reset. Delegates to [`keyeo_linear::verify_reset`]; when `prior_rvk` is present the reset
+/// succession reset. Delegates to [`keyeo_chain::verify_reset`]; when `prior_rvk` is present the reset
 /// must carry the SAME authority AND be signed by it (continuity + authorization).
 pub fn verify_reset(
     prior_rvk: Option<&[u8]>,
     keyring: &Keyring,
 ) -> Result<KeyringAnchor, ChainError> {
     let rvk = prior_rvk.map(to_pk32);
-    let out = keyeo_linear::verify_reset(rvk.as_ref(), &ChainDoc::new(keyring))
+    let out = keyeo_chain::verify_reset(rvk.as_ref(), &ChainDoc::new(keyring))
         .map_err(map_linear_err)?;
     let mut a = from_linear_anchor(out);
     // Seed the marker from the reset keyring. NOTE: a reset re-anchors on its own terms and verify_reset has

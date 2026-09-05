@@ -1,4 +1,4 @@
-# keyeo-linear
+# keyeo-chain
 
 > A generic **linear signed-membership-chain engine** over `<Id, Role, Sig>`: an ordered log of membership
 > states where each revision N→N+1 is signed by a quorum of derived signers under a per-group governance
@@ -10,7 +10,7 @@
 
 ## What it is — and is not
 
-`keyeo-linear` is the domain-neutral core extracted from openom's keyring chain, mirroring how `keyeo-dag`
+`keyeo-chain` is the domain-neutral core extracted from openom's keyring chain, mirroring how `keyeo-dag`
 is a generic DAG membership engine. It owns the *structure* of a linear membership chain and nothing about
 any particular payload:
 
@@ -59,5 +59,5 @@ Its reference concrete instantiation — `Id = String`-ish member ids, openom's 
 **openom-keyring-chain** (OPE-300), which adds the proto `Keyring` wire, the key-epoch / DEK payload, and
 the `ChainVerifier` seam. Full dependency graph: see `packages/README.md`.
 
-Run: `node scripts/cargo.mjs test -p keyeo-linear` (from the repo root; on Windows cargo runs under
+Run: `node scripts/cargo.mjs test -p keyeo-chain` (from the repo root; on Windows cargo runs under
 WSL2/Docker).

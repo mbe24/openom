@@ -62,4 +62,4 @@ constants.
 
 Layer 1 — the seam. It sits above the two engines and below their consumers: `openom-keyring-dag` and
 `openom-keyring-chain` fold into its `MembershipView`, and the server + `openom-vault` bind to it. It depends
-only on `serde` + `prost`; the generic Layer-0 engines are `keyeo-dag` (DAG) and `keyeo-linear` (chain). Full dependency graph: see `packages/README.md`.
+only on `serde` + `prost`; the generic Layer-0 engines are `keyeo-dag` (DAG) and `keyeo-chain` (chain). Full dependency graph: see `packages/README.md`.

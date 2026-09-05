@@ -1,5 +1,5 @@
 //! The chain keyring's **own** wire — hand-written `prost` messages the chain engine binds onto
-//! `keyeo-linear`. Moved out of `openom-protocol` in OPE-300 so the chain crate owns its keyring shape
+//! `keyeo-chain`. Moved out of `openom-protocol` in OPE-300 so the chain crate owns its keyring shape
 //! and depends on no openom proto crate (the same pattern `openom-keyring-api`'s `MembershipEnvelope`
 //! uses). The field numbers/shapes are byte-identical to the former `openom.v1.Keyring` and sub-messages,
 //! so semantics are unchanged.

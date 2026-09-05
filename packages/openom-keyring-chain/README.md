@@ -1,7 +1,7 @@
 # openom-keyring-chain
 
 > openom's linear signed-chain keyring binding — keyring chain verification and signing on the generic
-> `keyeo-linear` engine. The multi-member membership mechanism an E2EE tree's clients trust.
+> `keyeo-chain` engine. The multi-member membership mechanism an E2EE tree's clients trust.
 
 **Status:** built · access-control/membership mechanism, load-bearing · §B3 launch gate
 **Last updated:** 2026-09-04
@@ -13,14 +13,14 @@ The signed `Keyring` is the authoritative membership + role manifest for a tree,
 successor of the one the client already trusts (anti-rollback, anti-fork, founder-or-unanimity on
 signer-set changes, wrap-completeness), and it does the signing + signature-set verification that rests
 on. Since OPE-300 the transition/walk/reset/bootstrap/governance/quorum LOGIC lives in the generic,
-domain-neutral **`keyeo-linear`** engine (over `<Id, Role, Sig>`); this crate is the thin openom binding
+domain-neutral **`keyeo-chain`** engine (over `<Id, Role, Sig>`); this crate is the thin openom binding
 that picks concrete types (`String` ids, an ordinal `ChainRole`, Ed25519), owns the openom **keyring
 wire** (`wire.rs` — hand-written `prost` messages), and classes the engine's errors into the chain's own
 taxonomy. The throughline: **the server is not the security boundary** — it can serve any bytes, but it
 can't forge an Ed25519 signature — so every guarantee is a client-side check over signed wire data.
 
 It is **openom-domain-specific but openom-dependency-free** (like `openom-keyring-dag`): it depends on the
-generic `keyeo-linear`/`keyeo-core` engines, `openom-keyring-api` (the engine seam), `edsign`, and the
+generic `keyeo-chain`/`keyeo-core` engines, `openom-keyring-api` (the engine seam), `edsign`, and the
 substrate crates (`prost`/`sha2`/`blobstore`), but on **no `openom-*` crate**. The keyring wire, formerly
 in `openom-protocol`, now lives here in `wire.rs` (`Keyring` / `Member` / `KeyEpoch` / `KeyWrap` /
 `RecoveryKey` / `KeyringSignature` + a wire-identical `KdfParams`).
@@ -101,7 +101,7 @@ WSL2/Docker).
 
 ## Position
 
-Sits in the access-control/identity layer, on the generic `keyeo-linear` engine and the `openom-keyring-api`
+Sits in the access-control/identity layer, on the generic `keyeo-chain` engine and the `openom-keyring-api`
 seam, and below whatever holds keyring sync + trust storage (`openom-vault` / `openom-vault-host`, client
 sync) and the server's own authz seam, which must enforce the identical capability mapping. Full dependency
 graph: see `packages/README.md`.

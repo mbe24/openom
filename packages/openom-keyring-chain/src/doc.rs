@@ -1,15 +1,15 @@
-//! The openom binding of `keyeo-linear`: `ChainRole` (openom's ordinal role) + `ChainDoc` (a `Keyring`
-//! viewed as a [`keyeo_linear::LinearDoc`]). The generic engine reasons over the accessors here and signs
+//! The openom binding of `keyeo-chain`: `ChainRole` (openom's ordinal role) + `ChainDoc` (a `Keyring`
+//! viewed as a [`keyeo_chain::LinearDoc`]). The generic engine reasons over the accessors here and signs
 //! the message it builds from them; the openom `Keyring` payload rides through `payload_commitment`.
 //!
 //! The engine owns the generic signed fields (group id, revision, prev-hash, layout, members, governance,
-//! recovery authority — see `keyeo_linear::signing_bytes`). This binding owns [`ChainDoc::payload_commit`]
+//! recovery authority — see `keyeo_chain::signing_bytes`). This binding owns [`ChainDoc::payload_commit`]
 //! (an exhaustive `#[deny(unused_variables)]` hash of the WHOLE keyring payload) and [`ChainDoc::structure`]
 //! (the payload/structural acceptance gate: layout bound, size caps, epochs, epoch ordinals,
 //! signer-key length, wrap-completeness).
 
 use keyeo_core::Ed25519;
-use keyeo_linear::{DocHash, GroupId, Governance, LinearDoc, LinearRole, PayloadCommitment, Revision, Signer};
+use keyeo_chain::{DocHash, GroupId, Governance, LinearDoc, LinearRole, PayloadCommitment, Revision, Signer};
 use sha2::{Digest, Sha256};
 
 use crate::wire::{

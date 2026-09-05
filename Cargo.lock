@@ -2877,6 +2877,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyeo-chain"
+version = "0.1.0"
+dependencies = [
+ "edsign",
+ "keyeo-core",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "keyeo-core"
 version = "0.1.0"
 dependencies = [
@@ -2917,17 +2928,6 @@ dependencies = [
  "petgraph",
  "postcard",
  "proptest",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "keyeo-linear"
-version = "0.1.0"
-dependencies = [
- "edsign",
- "keyeo-core",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.20",
@@ -3689,8 +3689,8 @@ dependencies = [
  "blobstore",
  "edsign",
  "getrandom 0.3.4",
+ "keyeo-chain",
  "keyeo-core",
- "keyeo-linear",
  "openom-keyring-api",
  "proptest",
  "prost",
