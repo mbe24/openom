@@ -25,32 +25,13 @@ impl MemberId for String {}
 impl MemberId for u64 {}
 impl MemberId for u32 {}
 
-/// An opaque group identifier — the group (openom: the tree) an op belongs to. A one-level newtype over
-/// `Vec<u8>` (the OPE-211 house style, no generics): keyeo stays domain-free while the type is
-/// **non-swappable** with the equally-`Vec<u8>`-shaped `sealing` payload it sits beside in constructors.
-/// Bound into every op's signed + content-addressed bytes and enforced by the engine (an op whose group id
-/// differs from the group being resolved is refused). Construct real ids with [`GroupId::new`]; use the
-/// explicit [`GroupId::unscoped`] marker for keyeo's own single-group / test callers so an EMPTY group id is
-/// always a conscious choice, never an accident.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct GroupId(pub Vec<u8>);
-
-impl GroupId {
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self(bytes.into())
-    }
-    /// The explicit "no group scope" marker — a single-group or test context. Distinct in intent from a
-    /// forgotten binding: a caller writes `GroupId::unscoped()` on purpose.
-    pub fn unscoped() -> Self {
-        Self(Vec::new())
-    }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-    pub fn is_unscoped(&self) -> bool {
-        self.0.is_empty()
-    }
-}
+/// An opaque group identifier — the group (openom: the tree) an op belongs to. Bound into every op's signed
+/// + content-addressed bytes and enforced by the engine (an op whose group id differs from the group being
+/// resolved is refused), and bound into the wrap AAD so a wrap can't be transplanted across groups. It is
+/// the keyeo-family foundation type, defined once in keyeo-crypto and re-exported here so the resolver, the
+/// crypto layer, and every consumer name the same `GroupId` (its `unscoped()` marker keeps an EMPTY group
+/// id a conscious choice, never an accident).
+pub use keyeo_crypto::GroupId;
 
 pub trait SignedOp: Debug + Clone + Eq + std::hash::Hash + Ord {
     type S: SignatureScheme;
