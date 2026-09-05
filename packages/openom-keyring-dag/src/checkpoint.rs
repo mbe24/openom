@@ -7,11 +7,6 @@
 //! envelope, and the membership view (`view_of`) reads only `members`. So the checkpoint state is exactly the
 //! member map, plus the two counters a `MemberState` has that a `MemberInit` lacks.
 
-// WIP (compaction step 2a): these format types are built bottom-up and are consumed by the `DagAnchor`
-// checkpoint authoring / resolve-from-checkpoint path in the following steps. Remove this allow once that
-// wiring lands — until then the types exist but have no in-crate caller besides tests.
-#![allow(dead_code)]
-
 use crate::client::{SealingEntry, SealingOrigin};
 use crate::{KeyringRole, KeyringState};
 use keyeo_dag::{CanonicalBytes, Ed25519, GroupId, MemberState, Signed};

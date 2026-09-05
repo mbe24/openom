@@ -379,6 +379,119 @@ fn origin_of(action: &KeyringAction) -> SealingOrigin {
     }
 }
 
+/// Author a CHECKPOINT-ROOTED anchor (OPE-348 step 2a): given a supplied DOMINATING `frontier`, prune the ops
+/// at/below it and replace them with a signed [`Checkpoint`](crate::checkpoint::Checkpoint) carrying the
+/// resolved membership at the cut, the frontier depths, and the preserved sealing. The sealing preservation
+/// rides in as the `author_sealing` callback — the vault supplies it, so keyring-dag never interprets sealing.
+/// Un-compacted base only for now (chained checkpointing is a follow-up).
+pub fn compact_to_checkpoint(
+    anchor_bytes: &[u8],
+    frontier: &[[u8; 32]],
+    prev_snapshot: Option<[u8; 32]>,
+    author: String,
+    signing_key: &edsign::SigningKey,
+    author_sealing: impl FnOnce(&[SealingEntry]) -> Result<(Vec<SealingEntry>, u32), String>,
+) -> Result<Vec<u8>, ClientError> {
+    let anchor: DagAnchor =
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    if anchor.checkpoint.is_some() {
+        return Err(ClientError::Malformed("re-compacting a checkpoint anchor is not yet supported".into()));
+    }
+    let ops: Vec<KeyringOp> = anchor
+        .ops
+        .iter()
+        .map(|b| decode_op(b))
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let by_id: HashMap<[u8; 32], &KeyringOp> = ops.iter().map(|o| (o.id, o)).collect();
+
+    // pre-cut = the frontier tips + all their ancestors (walk parents); everything else is retained above the cut.
+    let mut pre_cut: HashSet<[u8; 32]> = frontier.iter().copied().collect();
+    let mut stack: Vec<[u8; 32]> = frontier.to_vec();
+    while let Some(id) = stack.pop() {
+        if let Some(op) = by_id.get(&id) {
+            for p in &op.parents {
+                if pre_cut.insert(*p) {
+                    stack.push(*p);
+                }
+            }
+        }
+    }
+
+    // Resolve the pre-cut sub-DAG → the cut state (membership), its op depths, and its sealing.
+    let genesis: Vec<KeyringMemberInit> = anchor
+        .genesis
+        .iter()
+        .map(dto_to_minit)
+        .collect::<Result<_, _>>()
+        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+    let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
+        .with_reset_authority(anchor.reset_authority);
+    let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
+    for op in &ops {
+        if pre_cut.contains(&op.id) {
+            engine.apply(op.clone()).map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+        }
+    }
+    engine.flush().map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+
+    // Pre-cut sealing (genesis first, then effective pre-cut ops) — the input to the segment authoring.
+    let mut pre_sealing = Vec::new();
+    if let Some(g) = by_id.get(&anchor.genesis_op_id) {
+        if !g.sealing.is_empty() {
+            pre_sealing.push(SealingEntry {
+                op_id: anchor.genesis_op_id,
+                origin: SealingOrigin::Genesis,
+                bytes: g.sealing.clone(),
+            });
+        }
+    }
+    for op_id in engine.effective_ops() {
+        if op_id == anchor.genesis_op_id {
+            continue;
+        }
+        if let Some(op) = by_id.get(&op_id) {
+            if !op.sealing.is_empty() {
+                pre_sealing.push(SealingEntry {
+                    op_id,
+                    origin: origin_of(&op.action),
+                    bytes: op.sealing.clone(),
+                });
+            }
+        }
+    }
+
+    let (segment, baseline) = author_sealing(&pre_sealing).map_err(ClientError::Malformed)?;
+
+    let depths = engine.op_depths();
+    let frontier_depths: Vec<([u8; 32], u64)> =
+        frontier.iter().map(|t| (*t, *depths.get(t).unwrap_or(&0) as u64)).collect();
+
+    let checkpoint = crate::checkpoint::Checkpoint {
+        frontier: frontier.to_vec(),
+        frontier_depths,
+        state: crate::checkpoint::GroupStateView::of(engine.state()),
+        prev_snapshot,
+        has_been_shared: engine.has_been_shared(),
+        sealing: segment,
+        minting_ops_baseline: baseline,
+        author,
+    };
+    let signed: crate::checkpoint::SignedCheckpoint = keyeo_dag::Signed::sign(checkpoint, signing_key);
+
+    let retained: Vec<Vec<u8>> = ops.iter().filter(|o| !pre_cut.contains(&o.id)).map(encode_op).collect();
+
+    let new_anchor = DagAnchor {
+        group_id: anchor.group_id,
+        genesis: anchor.genesis,
+        reset_authority: anchor.reset_authority,
+        genesis_op_id: anchor.genesis_op_id,
+        ops: retained,
+        checkpoint: Some(signed),
+    };
+    Ok(postcard::to_allocvec(&new_anchor).expect("DagAnchor serialization is infallible"))
+}
+
 /// The DAG frontier: op ids that are no other op's parent (the current tips), sorted for determinism. New
 /// ops parent on this; it is also the anti-rollback watermark (OPE-284).
 fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
