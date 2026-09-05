@@ -494,6 +494,99 @@ pub fn bootstrap_pinned<D: LinearDoc>(
     Ok(anchor_from_doc(head, &msg))
 }
 
+// ---- compaction (retention) — the chain arm of `keyeo_core::Compaction`, symmetric with keyeo-dag ----
+
+/// The chain's Compaction STATE: the revision numbers a client currently retains (each has a stored, verified
+/// doc). A chain "checkpoint" is simply the revision the client keeps as its new base — an ALREADY-SIGNED
+/// revision, so (unlike the dag's net-new signed `Snapshot`) nothing needs authoring: the client re-adopts it
+/// via [`bootstrap_pinned`] and drops the revisions below it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedRevisions {
+    pub revisions: Vec<u32>,
+}
+
+/// The chain's compaction DECISION: keep `checkpoint` as the base, drop every retained revision in `prune` (all
+/// strictly below it). The caller re-anchors on `checkpoint`'s retained doc and deletes the pruned revisions.
+/// Contrast the dag's `DagCompaction`, which must ALSO carry a resolved state to sign into a fresh `Snapshot` —
+/// the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same trait, same shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainCompaction {
+    pub checkpoint: u32,
+    pub prune: Vec<u32>,
+}
+
+impl keyeo_core::Compaction for RetainedRevisions {
+    type State = RetainedRevisions;
+    /// The stable revision every peer has synced past — `compact` never prunes above it (the data-loss guard),
+    /// mirroring the dag's frontier cut.
+    type Cut = u32;
+    type Output = Option<ChainCompaction>;
+
+    fn compact(
+        state: &Self::State,
+        stable: &Self::Cut,
+        plan: keyeo_core::RetentionPlan,
+    ) -> Result<Self::Output, keyeo_core::CompactionError> {
+        // The policy decides WHETHER + how much tail to keep (op/rev count); the stable cut decides HOW FAR we
+        // may prune. Same split as the dag.
+        let keep_last = match plan {
+            keyeo_core::RetentionPlan::KeepAll => return Ok(None),
+            keyeo_core::RetentionPlan::Snapshot { keep_last } => keep_last as u32,
+        };
+        let Some(&head) = state.revisions.iter().max() else {
+            return Ok(None); // nothing retained
+        };
+        // The checkpoint horizon = keep the last `keep_last` revisions, clamped so we never prune above the
+        // stable cut (the more conservative — keeps MORE — of the two).
+        let horizon = head.saturating_sub(keep_last).min(*stable);
+        // The checkpoint must be an actual retained revision — its doc is the re-anchor base.
+        let Some(&checkpoint) = state.revisions.iter().filter(|r| **r <= horizon).max() else {
+            return Ok(None);
+        };
+        let prune: Vec<u32> = state.revisions.iter().copied().filter(|r| *r < checkpoint).collect();
+        if prune.is_empty() {
+            return Ok(None); // horizon is at/below the oldest retained revision — nothing to drop
+        }
+        Ok(Some(ChainCompaction { checkpoint, prune }))
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use keyeo_core::{Compaction, RetentionPlan};
+
+    fn compact(revisions: &[u32], stable: u32, keep_last: usize) -> Option<ChainCompaction> {
+        let state = RetainedRevisions { revisions: revisions.to_vec() };
+        <RetainedRevisions as Compaction>::compact(&state, &stable, RetentionPlan::Snapshot { keep_last })
+            .unwrap()
+    }
+
+    #[test]
+    fn keep_all_is_a_noop() {
+        let state = RetainedRevisions { revisions: vec![1, 2, 3] };
+        assert!(<RetainedRevisions as Compaction>::compact(&state, &3, RetentionPlan::KeepAll)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn keeps_a_checkpoint_and_prunes_below_it_clamped_to_the_stable_revision() {
+        // head 5, keep last 2 → horizon 3; stable well ahead → checkpoint 3, prune {1,2}.
+        let out = compact(&[1, 2, 3, 4, 5], 5, 2).unwrap();
+        assert_eq!(out.checkpoint, 3);
+        assert_eq!(out.prune, vec![1, 2]);
+
+        // A lagging peer pins the stable revision back at 2 → may not prune above 2: checkpoint 2, prune {1}.
+        let out = compact(&[1, 2, 3, 4, 5], 2, 2).unwrap();
+        assert_eq!(out.checkpoint, 2);
+        assert_eq!(out.prune, vec![1]);
+
+        // Stable at the oldest retained revision → horizon 1, nothing strictly below it → no-op.
+        assert!(compact(&[1, 2, 3, 4, 5], 1, 2).is_none());
+    }
+}
+
 /// Kani proof harnesses — bit-precise model checking (CBMC backend). Compiled ONLY under `cargo kani`
 /// (which sets `--cfg kani`); the normal build and `cargo test` never see them, so there is no `kani`
 /// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p keyeo-linear` (Docker image or a
