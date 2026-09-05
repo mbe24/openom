@@ -62,6 +62,15 @@ where
     /// longer accept a fork. Empty = no horizon (accept everything, the default). Set it to the frontier a
     /// compaction anchors to; thereafter an op that does not descend from it is rejected as a `StaleFork`.
     merge_horizon: Vec<Op::OpId>,
+    /// An adopted checkpoint's frontier op-ids (empty for a normal engine). Present-but-not-replayed causal
+    /// roots: `apply`'s parent-presence check treats them as satisfied so retained ops attach instead of
+    /// buffering, but they are absent from `ops`, so the resolver never replays them — their effect is already
+    /// baked into the base state. Seeded by [`Self::adopt`].
+    base_frontier: HashSet<Op::OpId>,
+    /// Absolute lamport depths of the adopted checkpoint's frontier ops — threaded to the resolver's depth
+    /// tiebreak (via [`crate::dag::resolver::Resolver::seed_base`]) and to position-authorization queries, so
+    /// the retained tail resolves as it would on a full-history replica. Empty for a normal engine.
+    base_depths: HashMap<Op::OpId, usize>,
 }
 
 impl<Op, AC, RS> Keyeo<Op, AC, RS, Individual>
@@ -105,6 +114,50 @@ where
             genesis_epoch: 0,
             quorum,
             merge_horizon: Vec::new(),
+            base_frontier: HashSet::new(),
+            base_depths: HashMap::new(),
+        }
+    }
+
+    /// Construct from an ADOPTED CHECKPOINT: `base_state` is the resolved membership at a pruned frontier, and
+    /// `base_frontier_depths` maps each frontier op-id to its absolute lamport depth. The frontier ops are
+    /// seeded as present-but-not-replayed causal roots — `apply` accepts retained ops that parent on them
+    /// (instead of buffering), the resolver never replays them (their effect is already in `base_state`), and
+    /// the depth seed keeps the strong-remove tiebreak matching a full-history replica. The frontier is also
+    /// set as the merge horizon (OPE-270), so a fork branching from below the cut is refused as a `StaleFork`.
+    ///
+    /// SAFETY: the caller must supply a DOMINATING cut — every retained op descends from every frontier tip
+    /// (the same condition [`Compaction::compact`](keyeo_core::Compaction::compact) enforces at author time).
+    pub fn adopt(
+        base_state: GroupState<Op::MemberId, Op::R, Op::S>,
+        base_frontier_depths: HashMap<Op::OpId, usize>,
+        access: AC,
+        resolver: RS,
+        quorum: QP,
+    ) -> Self {
+        let base_frontier: HashSet<Op::OpId> = base_frontier_depths.keys().copied().collect();
+        let mut graph = Graph::new();
+        for id in &base_frontier {
+            graph.add_node(*id); // a causal root — retained ops attach here, its ancestry is pruned
+        }
+        let resolver_state = RS::seed_base(RS::State::default(), base_frontier_depths.clone());
+        Self {
+            genesis: base_state.clone(),
+            state: base_state,
+            graph,
+            ops: HashMap::new(),
+            pending: Vec::new(),
+            access,
+            _resolver: resolver,
+            resolver_state,
+            events: Vec::new(),
+            max_pending: 1024,
+            replica_epochs: Vec::new(),
+            genesis_epoch: 0,
+            quorum,
+            merge_horizon: base_frontier.iter().copied().collect(),
+            base_frontier,
+            base_depths: base_frontier_depths,
         }
     }
 
@@ -180,10 +233,12 @@ where
             return Err(Error::WrongGroup);
         }
 
-        // 1. Parents present? Otherwise buffer (bounded).
+        // 1. Parents present? Otherwise buffer (bounded). A parent that is an adopted checkpoint's frontier op
+        //    counts as PRESENT (present-but-not-replayed): retained ops attach to it even though its pruned
+        //    ancestry is gone, so they must not buffer forever waiting for an op that will never arrive.
         let mut missing = Vec::new();
         for parent in op.parents() {
-            if !self.ops.contains_key(parent) {
+            if !self.ops.contains_key(parent) && !self.base_frontier.contains(parent) {
                 missing.push(*parent);
             }
         }
@@ -634,6 +689,7 @@ where
             &self.ops,
             &self.access,
             op_id,
+            &self.base_depths,
         )
     }
 }

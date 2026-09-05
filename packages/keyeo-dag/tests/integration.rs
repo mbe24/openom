@@ -146,6 +146,124 @@ fn dave_pk() -> [u8; 32] {
     make_keypair(&[4u8; 32]).verifying_key().to_bytes()
 }
 
+/// `Keyeo::adopt` — resolve from a checkpoint base whose pre-frontier history is pruned — must resolve the
+/// retained tail to the SAME membership a full-history replica does. In particular a retained `Remove` must act
+/// on a member whose `Add` op was pruned (the base state carries that member), which also exercises the
+/// baseline-active set coming from the base state rather than a pruned `Create`.
+#[test]
+fn adopt_from_a_checkpoint_resolves_identically_to_full_history() {
+    use keyeo_dag::Individual;
+    use std::collections::HashMap;
+    let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
+    let genesis = [minit(alice, TestRole::Admin, [0xaa; 32])];
+
+    // Full history, all authored by admin alice:
+    //   1 Create{alice}  2 Add bob  3 Add carol  4 Remove bob  5 Reseal(tail)
+    let mk = |id: u64, parents: Vec<u64>, action| make_op(id, parents, &[1u8; 32], action);
+    let ops = vec![
+        mk(1, vec![], MembershipAction::Create { initial_members: genesis.to_vec() }),
+        mk(2, vec![1], MembershipAction::Add { member: bob, role: TestRole::Editor, author_public_key: bob, hpke_public_key: [0xbb; 32], member_proof: None }),
+        mk(3, vec![2], MembershipAction::Add { member: carol, role: TestRole::Editor, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None }),
+        mk(4, vec![3], MembershipAction::Remove { member: bob }),
+        mk(5, vec![4], MembershipAction::Reseal),
+    ];
+
+    let mut full: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
+    for op in &ops {
+        full.apply(op.clone()).unwrap();
+    }
+    full.flush().unwrap();
+
+    // Checkpoint at the dominating cut {3} (linear, single tip). Base = fold(1,2,3) = {alice, bob, carol}.
+    let mut base: TestEngine = Keyeo::new(
+        GroupState::create(GroupId::unscoped(), &genesis),
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+    );
+    for op in ops.iter().take(3) {
+        base.apply(op.clone()).unwrap();
+    }
+    base.flush().unwrap();
+    let base_state = base.state().clone();
+    let base_frontier_depths = HashMap::from([(3u64, 2usize)]); // linear depths 1->0, 2->1, 3->2
+
+    // Adopt the checkpoint and replay ONLY the retained tail {4, 5}.
+    let mut adopted = Keyeo::adopt(
+        base_state,
+        base_frontier_depths,
+        DefaultAccessControl::new(TestRole::Admin),
+        StrongRemove,
+        Individual,
+    );
+    adopted.apply(ops[3].clone()).unwrap(); // Remove bob — parents [3], the pruned frontier tip
+    adopted.apply(ops[4].clone()).unwrap(); // Reseal tail
+    adopted.flush().unwrap();
+
+    let mut full_m = full.state().active_members();
+    let mut adopt_m = adopted.state().active_members();
+    full_m.sort();
+    adopt_m.sort();
+    assert_eq!(adopt_m, full_m, "adopt resolves the same active membership as full history");
+    assert!(!is_member(&adopted, &bob), "the retained Remove acted on bob though bob's Add (op 2) was pruned");
+    assert!(is_member(&adopted, &alice) && is_member(&adopted, &carol));
+}
+
+/// Adopt from a MULTI-TIP checkpoint whose tips sit at DIFFERENT absolute depths — the case that exercises the
+/// depth seed (`seed_base` + `base_depths`): a retained op that attaches to two pruned frontier tips must
+/// resolve identically to full history, with the frontier tips' true depths carried so the tiebreak is
+/// unperturbed by pruning.
+#[test]
+fn adopt_from_a_multi_tip_checkpoint_resolves_identically() {
+    use keyeo_dag::Individual;
+    use std::collections::HashMap;
+    let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
+    let genesis = [minit(alice, TestRole::Admin, [0xaa; 32])];
+    let mk = |id: u64, parents: Vec<u64>, action| make_op(id, parents, &[1u8; 32], action);
+
+    //   1 Create{alice}
+    //   branch A (longer):  2 Add bob (p1)   3 Reseal (p2)        depths 1, 2
+    //   branch B (shorter): 4 Add carol (p1)                       depth 1
+    //   merge:              5 Reseal (p[3,4])  6 Remove bob (p5)   depths 3, 4
+    let ops = vec![
+        mk(1, vec![], MembershipAction::Create { initial_members: genesis.to_vec() }),
+        mk(2, vec![1], MembershipAction::Add { member: bob, role: TestRole::Editor, author_public_key: bob, hpke_public_key: [0xbb; 32], member_proof: None }),
+        mk(3, vec![2], MembershipAction::Reseal),
+        mk(4, vec![1], MembershipAction::Add { member: carol, role: TestRole::Editor, author_public_key: carol, hpke_public_key: [0xcc; 32], member_proof: None }),
+        mk(5, vec![3, 4], MembershipAction::Reseal),
+        mk(6, vec![5], MembershipAction::Remove { member: bob }),
+    ];
+
+    let mut full: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    for op in &ops {
+        full.apply(op.clone()).unwrap();
+    }
+    full.flush().unwrap();
+
+    // Dominating cut {3, 4} — tips at depths 2 and 1. Base = fold(1..4) = {alice, bob, carol}.
+    let mut base: TestEngine = Keyeo::new(GroupState::create(GroupId::unscoped(), &genesis), DefaultAccessControl::new(TestRole::Admin), StrongRemove);
+    for op in ops.iter().take(4) {
+        base.apply(op.clone()).unwrap();
+    }
+    base.flush().unwrap();
+    let base_frontier_depths = HashMap::from([(3u64, 2usize), (4u64, 1usize)]);
+
+    let mut adopted = Keyeo::adopt(base.state().clone(), base_frontier_depths, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    adopted.apply(ops[4].clone()).unwrap(); // Reseal — parents [3, 4], BOTH pruned frontier tips
+    adopted.apply(ops[5].clone()).unwrap(); // Remove bob
+    adopted.flush().unwrap();
+
+    let mut full_m = full.state().active_members();
+    let mut adopt_m = adopted.state().active_members();
+    full_m.sort();
+    adopt_m.sort();
+    assert_eq!(adopt_m, full_m, "multi-tip adopt resolves the same active membership as full history");
+    assert!(!is_member(&adopted, &bob) && is_member(&adopted, &alice) && is_member(&adopted, &carol));
+}
+
 proptest! {
     /// OPE-258 invariant: an op authored by an UNAUTHORIZED member never changes the resolved
     /// membership — it neither applies nor invalidates concurrent authorized ops. Resolve a fixed

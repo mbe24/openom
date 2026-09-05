@@ -68,6 +68,12 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
         self.inner.add_edge(parent, child, ());
     }
 
+    /// Add a standalone node with no edges — used to seed an adopted checkpoint's frontier ops as causal
+    /// roots (their pruned ancestry is gone, but retained ops attach to them and `has_path` must resolve).
+    pub fn add_node(&mut self, n: Op) {
+        self.inner.add_node(n);
+    }
+
     /// Get all nodes.
     pub fn nodes(&self) -> Vec<Op> {
         self.inner.nodes().collect()

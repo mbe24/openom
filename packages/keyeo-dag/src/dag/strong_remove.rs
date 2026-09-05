@@ -59,12 +59,17 @@ use crate::SignatureScheme;
 #[derive(Clone, Debug)]
 pub struct StrongRemoveState<OId: OpId> {
     pub ignore: HashSet<OId>,
+    /// Absolute lamport depths of an adopted checkpoint's pruned frontier ops, seeded via
+    /// [`Resolver::seed_base`]. Empty for a normally-constructed engine. Consulted by `compute_depths` so the
+    /// tiebreak over the retained tail matches a full-history replica.
+    pub base_depths: HashMap<OId, usize>,
 }
 
 impl<OId: OpId> Default for StrongRemoveState<OId> {
     fn default() -> Self {
         Self {
             ignore: HashSet::new(),
+            base_depths: HashMap::new(),
         }
     }
 }
@@ -82,6 +87,11 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         current_frontier.len() > 1
     }
 
+    fn seed_base(mut state: Self::State, base_depths: HashMap<OId, usize>) -> Self::State {
+        state.base_depths = base_depths;
+        state
+    }
+
     fn process(
         mut state: Self::State,
         graph: &Graph<OId>,
@@ -89,7 +99,7 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         ac: &impl AccessControl<Op::MemberId, R, S>,
         genesis_state: &GroupState<Op::MemberId, R, S>,
     ) -> Result<Self::State, Self::Error> {
-        let depth = compute_depths(ops);
+        let depth = compute_depths(ops, &state.base_depths);
         // Baseline-active set = the members ACTIVE in the construction base (`genesis_state`), NOT the result
         // of scanning `ops` for a `Create`. The two agree for a normally-constructed engine (whose base IS the
         // founding members, and which often carries no `Create` op in the DAG at all — the founders are seeded
@@ -383,6 +393,7 @@ pub(crate) fn op_authorized_at_position<OId, R, S, Op>(
     ops: &HashMap<OId, Op>,
     ac: &impl AccessControl<Op::MemberId, R, S>,
     op_id: &OId,
+    base_depths: &HashMap<OId, usize>,
 ) -> Option<bool>
 where
     OId: OpId,
@@ -393,7 +404,7 @@ where
     if !ops.contains_key(op_id) {
         return None;
     }
-    let depth = compute_depths(ops);
+    let depth = compute_depths(ops, base_depths);
     authorized_map(genesis, graph, ops, ac, &depth)
         .get(op_id)
         .copied()
@@ -403,10 +414,12 @@ where
 /// tiebreak, so an unexpected cycle degrading to 0 is harmless.
 fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
     ops: &HashMap<OId, Op>,
+    base_depths: &HashMap<OId, usize>,
 ) -> HashMap<OId, usize> {
     fn go<OId: OpId, Op: SignedOp<OpId = OId>>(
         id: OId,
         ops: &HashMap<OId, Op>,
+        base_depths: &HashMap<OId, usize>,
         memo: &mut HashMap<OId, usize>,
         on_stack: &mut HashSet<OId>,
     ) -> usize {
@@ -417,12 +430,18 @@ fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
             return 0; // cycle guard (shouldn't happen in a DAG)
         }
         let d = match ops.get(&id) {
-            None => 0,
+            // Not a retained op. Either a pruned base-frontier op of an adopted checkpoint — whose ABSOLUTE
+            // pre-prune depth is carried in `base_depths`, so retained-op depths (and the strong-remove
+            // tiebreak) match a full-history replica — or a genuinely unknown parent (depth 0). `base_depths`
+            // is empty for a normally-constructed engine, so this is a no-op there.
+            None => base_depths.get(&id).copied().unwrap_or(0),
             Some(op) => op
                 .parents()
                 .iter()
-                .filter(|p| ops.contains_key(p))
-                .map(|p| 1 + go(*p, ops, memo, on_stack))
+                // A base-frontier parent is absent from `ops` but present in `base_depths`; keep it so its
+                // seeded depth propagates instead of the child re-rooting to 0.
+                .filter(|p| ops.contains_key(p) || base_depths.contains_key(p))
+                .map(|p| 1 + go(*p, ops, base_depths, memo, on_stack))
                 .max()
                 .unwrap_or(0),
         };
@@ -433,7 +452,7 @@ fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
     let mut memo = HashMap::new();
     let mut on_stack = HashSet::new();
     for id in ops.keys() {
-        go(*id, ops, &mut memo, &mut on_stack);
+        go(*id, ops, base_depths, &mut memo, &mut on_stack);
     }
     memo
 }

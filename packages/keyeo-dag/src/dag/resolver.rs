@@ -387,6 +387,14 @@ pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureS
     /// Keyed on the real `OId` — not a `u64` projection — so it stays correct for wide,
     /// content-addressed ids (a 32-byte hash can't round-trip through `to_u64`).
     fn ignored(state: &Self::State) -> HashSet<OId>;
+
+    /// Seed a compaction base into the resolver state before any retained op is applied: the absolute
+    /// lamport depths of an adopted checkpoint's pruned frontier ops. A depth-based resolver uses them so its
+    /// tiebreak over the retained tail matches a full-history replica; the DEFAULT ignores them (a resolver
+    /// that doesn't use depth needs no base). Called once by [`crate::engine::Keyeo::adopt`].
+    fn seed_base(state: Self::State, _base_depths: HashMap<OId, usize>) -> Self::State {
+        state
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
