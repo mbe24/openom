@@ -71,6 +71,11 @@ where
     /// tiebreak (via [`crate::dag::resolver::Resolver::seed_base`]) and to position-authorization queries, so
     /// the retained tail resolves as it would on a full-history replica. Empty for a normal engine.
     base_depths: HashMap<Op::OpId, usize>,
+    /// Whether the group had EVER been shared as of the adopted checkpoint. Carried because the founding/
+    /// sharing `Add` is pruned below the cut, so [`Self::has_been_shared`]'s effective-Add scan over `ops`
+    /// can't see it (it would wrongly regress to `false` on a compacted replica). OR'd into the result.
+    /// `false` for a normal engine.
+    base_has_been_shared: bool,
 }
 
 impl<Op, AC, RS> Keyeo<Op, AC, RS, Individual>
@@ -116,21 +121,31 @@ where
             merge_horizon: Vec::new(),
             base_frontier: HashSet::new(),
             base_depths: HashMap::new(),
+            base_has_been_shared: false,
         }
     }
 
-    /// Construct from an ADOPTED CHECKPOINT: `base_state` is the resolved membership at a pruned frontier, and
-    /// `base_frontier_depths` maps each frontier op-id to its absolute lamport depth. The frontier ops are
-    /// seeded as present-but-not-replayed causal roots — `apply` accepts retained ops that parent on them
-    /// (instead of buffering), the resolver never replays them (their effect is already in `base_state`), and
-    /// the depth seed keeps the strong-remove tiebreak matching a full-history replica. The frontier is also
-    /// set as the merge horizon (OPE-270), so a fork branching from below the cut is refused as a `StaleFork`.
+    /// Construct from an ADOPTED CHECKPOINT: `base_state` is the resolved membership at a pruned frontier,
+    /// `base_frontier_depths` maps each frontier op-id to its absolute lamport depth, and `has_been_shared` is
+    /// the checkpoint's carried shared-marker (the founding/sharing `Add` is pruned, so it must be supplied —
+    /// see [`Self::has_been_shared`]). The frontier ops are seeded as present-but-not-replayed causal roots —
+    /// `apply` accepts retained ops that parent on them (instead of buffering), the resolver never replays them
+    /// (their effect is already in `base_state`), and the depth seed keeps the strong-remove tiebreak matching
+    /// a full-history replica. The frontier is also set as the merge horizon (OPE-270), so a fork branching
+    /// from BELOW the cut is refused as a `StaleFork`.
     ///
     /// SAFETY: the caller must supply a DOMINATING cut — every retained op descends from every frontier tip
     /// (the same condition [`Compaction::compact`](keyeo_core::Compaction::compact) enforces at author time).
+    ///
+    /// NOTE: this preserves MEMBERSHIP + the shared-marker, matching openom's members-only checkpoint. It does
+    /// NOT carry keyeo's own `epoch`/`dek_wraps` (openom carries its DEK material in the opaque `sealing`
+    /// envelope, not `GroupState`) — the first `apply`'s `forge_epoch` resets those to empty, which is inert
+    /// for a consumer that reads only membership. A consumer using keyeo's typed epochs would need them seeded.
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         base_state: GroupState<Op::MemberId, Op::R, Op::S>,
         base_frontier_depths: HashMap<Op::OpId, usize>,
+        has_been_shared: bool,
         access: AC,
         resolver: RS,
         quorum: QP,
@@ -158,6 +173,7 @@ where
             merge_horizon: base_frontier.iter().copied().collect(),
             base_frontier,
             base_depths: base_frontier_depths,
+            base_has_been_shared: has_been_shared,
         }
     }
 
@@ -259,14 +275,16 @@ where
         //    and let the resolver + causal rebuild decide its effect (admit-then-resolve).
         self.authenticate(&op)?;
 
-        // 2b. Bounded fork-merge horizon (OPE-270): once a stable frontier is set, every new op must
-        //     build ON it — its causal past must include every horizon op. An op that branches from
-        //     before the horizon (some horizon op is not an ancestor of any of its parents) is a stale
-        //     fork / equivocation-rollback vector past the compaction frontier, and is rejected here
-        //     rather than merged. Parents are already present (step 1), so ancestry is checkable now;
-        //     a re-applied op already in the DAG is exempt (idempotent).
+        // 2b. Bounded fork-merge horizon (OPE-270): once a stable frontier is set, a new op must build ON the
+        //     frontier — descend from AT LEAST ONE horizon tip. An op that descends from NO tip branches from
+        //     BELOW the frontier (a stale fork / equivocation-rollback past the compaction cut) and is
+        //     rejected. `.any()` (not `.all()`): a MULTI-tip frontier (an adopted checkpoint over concurrent
+        //     tips) must still allow an op that continues just ONE branch — requiring descent from EVERY tip
+        //     would force an immediate merge and wrongly reject legitimate concurrent authorship. A genuinely
+        //     pruned-history fork can't reach here anyway: its parent is absent, so step 1 buffers it. Parents
+        //     are present (step 1), so ancestry is checkable; a re-applied op already in the DAG is exempt.
         if !self.merge_horizon.is_empty() && !self.ops.contains_key(&op.id()) {
-            let descends = self.merge_horizon.iter().all(|h| {
+            let descends = self.merge_horizon.iter().any(|h| {
                 op.parents().iter().any(|p| p == h || self.graph.has_path(*h, *p))
             });
             if !descends {
@@ -420,9 +438,12 @@ where
     /// a solo genesis — openom's `Create` always has one initial member; a co-founder genesis would need the
     /// Create's `initial_members.len() > 1` folded in too.)
     pub fn has_been_shared(&self) -> bool {
-        self.effective_ops()
-            .iter()
-            .any(|id| matches!(self.ops.get(id).map(|o| o.action()), Some(MembershipAction::Add { .. })))
+        // OR in the adopted checkpoint's carried marker: the founding/sharing `Add` may be pruned below the
+        // cut, so the effective-Add scan over `ops` alone would wrongly regress a shared group to `false`.
+        self.base_has_been_shared
+            || self.effective_ops().iter().any(|id| {
+                matches!(self.ops.get(id).map(|o| o.action()), Some(MembershipAction::Add { .. }))
+            })
     }
 
     /// Kahn's topological sort over all admitted ops, with `OpId` as a deterministic tiebreak among
@@ -775,6 +796,15 @@ impl<'a, Op: SignedOp> keyeo_core::Compaction for Retained<'a, Op> {
             keyeo_core::RetentionPlan::Snapshot { keep_last } => keep_last,
         };
 
+        // An empty frontier is not a valid cut: the dominance guard below would vacuously accept it (`all()`
+        // over no tips is true), and a checkpoint authored from it would seed an EMPTY merge horizon on adopt,
+        // silently disabling anti-rollback (OPE-270). Reject explicitly rather than pass the guard by accident.
+        if stable.ops.is_empty() {
+            return Err(keyeo_core::CompactionError(
+                "empty frontier: a checkpoint must anchor at a non-empty cut".into(),
+            ));
+        }
+
         let tips: HashSet<Op::OpId> = stable.ops.iter().copied().collect();
 
         // The cut must be DOMINATING: every op is either AT/BELOW the frontier (a tip, or an ancestor of some
@@ -917,6 +947,20 @@ mod compaction_tests {
         let (k, ..) = dag();
         let out = <Retained<'_, TOp> as Compaction>::compact(&k.retained(), &Frontier { ops: vec![] }, RetentionPlan::KeepAll).unwrap();
         assert!(out.is_none(), "KeepAll prunes nothing and authors no checkpoint");
+    }
+
+    #[test]
+    fn rejects_an_empty_frontier_under_snapshot() {
+        // An empty frontier would vacuously pass the dominance guard and, if authored + adopted, seed an empty
+        // merge horizon that silently disables anti-rollback. It must be an explicit error.
+        let (k, ..) = dag();
+        let err = <Retained<'_, TOp> as Compaction>::compact(
+            &k.retained(),
+            &Frontier { ops: vec![] },
+            RetentionPlan::Snapshot { keep_last: 0 },
+        )
+        .unwrap_err();
+        assert!(err.0.contains("empty frontier"), "an empty frontier is rejected: {}", err.0);
     }
 
     #[test]

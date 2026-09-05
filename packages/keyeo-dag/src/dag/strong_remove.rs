@@ -457,8 +457,6 @@ fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
     memo
 }
 
-/// Members present at genesis (from the `Create` op's initial members).
-
 /// Is `author` an active member in `target`'s causal ancestry? Replay the author's valid
 /// `Add`/`Remove` events that happen-before `target`, in depth order; genesis members start active.
 #[allow(clippy::too_many_arguments)]

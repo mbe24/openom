@@ -195,6 +195,7 @@ fn adopt_from_a_checkpoint_resolves_identically_to_full_history() {
     let mut adopted = Keyeo::adopt(
         base_state,
         base_frontier_depths,
+        base.has_been_shared(),
         DefaultAccessControl::new(TestRole::Admin),
         StrongRemove,
         Individual,
@@ -210,6 +211,10 @@ fn adopt_from_a_checkpoint_resolves_identically_to_full_history() {
     assert_eq!(adopt_m, full_m, "adopt resolves the same active membership as full history");
     assert!(!is_member(&adopted, &bob), "the retained Remove acted on bob though bob's Add (op 2) was pruned");
     assert!(is_member(&adopted, &alice) && is_member(&adopted, &carol));
+    assert!(
+        adopted.has_been_shared() && full.has_been_shared(),
+        "has_been_shared survives adoption even though the sharing Add was pruned"
+    );
 }
 
 /// Adopt from a MULTI-TIP checkpoint whose tips sit at DIFFERENT absolute depths — the case that exercises the
@@ -251,7 +256,7 @@ fn adopt_from_a_multi_tip_checkpoint_resolves_identically() {
     base.flush().unwrap();
     let base_frontier_depths = HashMap::from([(3u64, 2usize), (4u64, 1usize)]);
 
-    let mut adopted = Keyeo::adopt(base.state().clone(), base_frontier_depths, DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let mut adopted = Keyeo::adopt(base.state().clone(), base_frontier_depths, base.has_been_shared(), DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
     adopted.apply(ops[4].clone()).unwrap(); // Reseal — parents [3, 4], BOTH pruned frontier tips
     adopted.apply(ops[5].clone()).unwrap(); // Remove bob
     adopted.flush().unwrap();
@@ -262,6 +267,17 @@ fn adopt_from_a_multi_tip_checkpoint_resolves_identically() {
     adopt_m.sort();
     assert_eq!(adopt_m, full_m, "multi-tip adopt resolves the same active membership as full history");
     assert!(!is_member(&adopted, &bob) && is_member(&adopted, &alice) && is_member(&adopted, &carol));
+
+    // A legitimate op that continues just ONE branch of the multi-tip cut (parents [3] only) must be ADMITTED,
+    // not StaleFork-rejected — requiring descent from every tip would foreclose concurrent authorship (both
+    // Sonnet reviews' confirmed bug). Build it on a fresh adopt so the merge op above hasn't collapsed the tips.
+    let mut adopted2 = Keyeo::adopt(base.state().clone(), HashMap::from([(3u64, 2usize), (4u64, 1usize)]), base.has_been_shared(), DefaultAccessControl::new(TestRole::Admin), StrongRemove, Individual);
+    let single_branch = make_op(7, vec![3], &[1u8; 32], MembershipAction::Reseal);
+    let outcome = adopted2.apply(single_branch);
+    assert!(
+        matches!(outcome, Ok(keyeo_dag::ApplyOutcome::Applied { .. })),
+        "an op continuing one branch of a multi-tip checkpoint is admitted, not StaleFork: {outcome:?}"
+    );
 }
 
 proptest! {
