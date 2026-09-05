@@ -501,26 +501,26 @@ pub fn bootstrap_pinned<D: Doc>(
 /// revision, so (unlike the dag's net-new signed `Snapshot`) nothing needs authoring: the client re-adopts it
 /// via [`bootstrap_pinned`] and drops the revisions below it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetainedRevisions {
+pub struct Retained {
     pub revisions: Vec<u32>,
 }
 
 /// The chain's compaction DECISION: keep `checkpoint` as the base, drop every retained revision in `prune` (all
 /// strictly below it). The caller re-anchors on `checkpoint`'s retained doc and deletes the pruned revisions.
-/// Contrast the dag's `DagCompaction`, which must ALSO carry a resolved state to sign into a fresh `Snapshot` —
+/// Contrast the dag's `keyeo_dag::Compacted`, which must ALSO carry a resolved state to sign into a `Snapshot` —
 /// the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same trait, same shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChainCompaction {
+pub struct Compacted {
     pub checkpoint: u32,
     pub prune: Vec<u32>,
 }
 
-impl keyeo_core::Compaction for RetainedRevisions {
-    type State = RetainedRevisions;
+impl keyeo_core::Compaction for Retained {
+    type State = Retained;
     /// The stable revision every peer has synced past — `compact` never prunes above it (the data-loss guard),
     /// mirroring the dag's frontier cut.
     type Cut = u32;
-    type Output = Option<ChainCompaction>;
+    type Output = Option<Compacted>;
 
     fn compact(
         state: &Self::State,
@@ -547,7 +547,7 @@ impl keyeo_core::Compaction for RetainedRevisions {
         if prune.is_empty() {
             return Ok(None); // horizon is at/below the oldest retained revision — nothing to drop
         }
-        Ok(Some(ChainCompaction { checkpoint, prune }))
+        Ok(Some(Compacted { checkpoint, prune }))
     }
 }
 
@@ -556,16 +556,16 @@ mod compaction_tests {
     use super::*;
     use keyeo_core::{Compaction, RetentionPlan};
 
-    fn compact(revisions: &[u32], stable: u32, keep_last: usize) -> Option<ChainCompaction> {
-        let state = RetainedRevisions { revisions: revisions.to_vec() };
-        <RetainedRevisions as Compaction>::compact(&state, &stable, RetentionPlan::Snapshot { keep_last })
+    fn compact(revisions: &[u32], stable: u32, keep_last: usize) -> Option<Compacted> {
+        let state = Retained { revisions: revisions.to_vec() };
+        <Retained as Compaction>::compact(&state, &stable, RetentionPlan::Snapshot { keep_last })
             .unwrap()
     }
 
     #[test]
     fn keep_all_is_a_noop() {
-        let state = RetainedRevisions { revisions: vec![1, 2, 3] };
-        assert!(<RetainedRevisions as Compaction>::compact(&state, &3, RetentionPlan::KeepAll)
+        let state = Retained { revisions: vec![1, 2, 3] };
+        assert!(<Retained as Compaction>::compact(&state, &3, RetentionPlan::KeepAll)
             .unwrap()
             .is_none());
     }

@@ -26,7 +26,7 @@ pub use epoch::{
     epoch_context, generate_epoch, membership_commitment, reconcile_epochs, recover_epoch_dek,
     wraps_complete, Epoch,
 };
-pub use gc::{verify_snapshot, DagCompaction, Frontier, Snapshot};
+pub use gc::{verify_snapshot, Compacted, Frontier, Snapshot};
 // The retention POLICY vocabulary is engine-neutral — re-export keyeo-core's so dag callers have it here.
 pub use keyeo_core::{Compaction, CompactionError, Retention, RetentionMetrics, RetentionPlan, RetentionPolicy};
 pub use op::Op;

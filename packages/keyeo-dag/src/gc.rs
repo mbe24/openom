@@ -116,7 +116,7 @@ pub fn verify_snapshot<
 /// and applies `prune` to its store. Kept engine-native (the prune is a causal-DAG computation) but returned as
 /// plain data so the vault owns the signing + the store owns the drop.
 #[derive(Clone, Debug)]
-pub struct DagCompaction<
+pub struct Compacted<
     OId: crate::dag::resolver::OpId,
     Id: MemberId,
     R: Role,
@@ -132,10 +132,10 @@ pub struct DagCompaction<
 }
 
 // The dag's compaction MECHANISM (the `keyeo_core::Compaction` impl for `Keyeo`) lives in `engine.rs`, where it
-// can read the engine's causal graph to compute the prune set; it returns a [`DagCompaction`] decision the
+// can read the engine's causal graph to compute the prune set; it returns a [`Compacted`] decision the
 // caller signs (via [`Snapshot::author`]) and applies. The retention POLICY (`keyeo_core::RetentionPolicy` +
 // the `Retention` enum) is engine-neutral in keyeo-core. This module owns the [`Frontier`] cut + the
-// [`Snapshot`] rebuild base + [`DagCompaction`].
+// [`Snapshot`] rebuild base + [`Compacted`].
 
 #[cfg(test)]
 mod tests {

@@ -669,7 +669,7 @@ fn diff_events<Id: MemberId, R: Role>(
 /// access-control / quorum / resolver the engine also carries). [`Keyeo::retained`] produces it and the
 /// [`keyeo_core::Compaction`] impl operates on it, so the `State` type is precisely the mechanism's inputs —
 /// the op-DAG is borrowed, never duplicated, and compaction can't reach engine machinery it has no business in.
-pub struct DagRetained<'a, Op: SignedOp> {
+pub struct Retained<'a, Op: SignedOp> {
     ops: &'a HashMap<Op::OpId, Op>,
     graph: &'a Graph<Op::OpId>,
     state: &'a GroupState<Op::MemberId, Op::R, Op::S>,
@@ -684,9 +684,9 @@ where
     QP: QuorumPolicy<Op::MemberId, Op::R, Op::S>,
 {
     /// A zero-cost borrowing view of the retained state, for the [`keyeo_core::Compaction`] impl on
-    /// [`DagRetained`]. Borrows the engine's own fields — no copy of the op-DAG.
-    pub fn retained(&self) -> DagRetained<'_, Op> {
-        DagRetained {
+    /// [`Retained`]. Borrows the engine's own fields — no copy of the op-DAG.
+    pub fn retained(&self) -> Retained<'_, Op> {
+        Retained {
             ops: &self.ops,
             graph: &self.graph,
             state: &self.state,
@@ -695,14 +695,14 @@ where
     }
 }
 
-/// Compaction ([`keyeo_core::Compaction`]) for the dag engine, over the [`DagRetained`] view: decide a
+/// Compaction ([`keyeo_core::Compaction`]) for the dag engine, over the [`Retained`] view: decide a
 /// checkpoint + the prunable op set. This is the DECISION only — pure, no signing (the trait carries no key)
 /// and no mutation. The caller authors the signed [`crate::gc::Snapshot`] from the returned
 /// `(frontier, state, has_been_shared)` and drops the returned `prune` ops from its store.
-impl<'a, Op: SignedOp> keyeo_core::Compaction for DagRetained<'a, Op> {
-    type State = DagRetained<'a, Op>;
+impl<'a, Op: SignedOp> keyeo_core::Compaction for Retained<'a, Op> {
+    type State = Retained<'a, Op>;
     type Cut = crate::gc::Frontier<Op::OpId>;
-    type Output = Option<crate::gc::DagCompaction<Op::OpId, Op::MemberId, Op::R, Op::S>>;
+    type Output = Option<crate::gc::Compacted<Op::OpId, Op::MemberId, Op::R, Op::S>>;
 
     fn compact(
         state: &Self::State,
@@ -756,7 +756,7 @@ impl<'a, Op: SignedOp> keyeo_core::Compaction for DagRetained<'a, Op> {
             .filter(|x| !keep.contains(x))
             .collect();
 
-        Ok(Some(crate::gc::DagCompaction {
+        Ok(Some(crate::gc::Compacted {
             frontier: stable.ops.clone(),
             state: state.state.clone(),
             has_been_shared: state.has_been_shared,
@@ -841,7 +841,7 @@ mod compaction_tests {
     #[test]
     fn keep_all_is_a_noop() {
         let (k, ..) = dag();
-        let out = <DagRetained<'_, TOp> as Compaction>::compact(&k.retained(), &Frontier { ops: vec![] }, RetentionPlan::KeepAll).unwrap();
+        let out = <Retained<'_, TOp> as Compaction>::compact(&k.retained(), &Frontier { ops: vec![] }, RetentionPlan::KeepAll).unwrap();
         assert!(out.is_none(), "KeepAll prunes nothing and authors no checkpoint");
     }
 
@@ -851,7 +851,7 @@ mod compaction_tests {
 
         // Frontier {c}: below it are a, b. The fork d (concurrent with c) is retained and reaches a WITHOUT
         // crossing c, so a must stay. b is reached only through c (the anchor), so b is prunable.
-        let out = <DagRetained<'_, TOp> as Compaction>::compact(
+        let out = <Retained<'_, TOp> as Compaction>::compact(
             &k.retained(),
             &Frontier { ops: vec![c] },
             RetentionPlan::Snapshot { keep_last: 0 },
@@ -872,7 +872,7 @@ mod compaction_tests {
 
         // Frontier {d}: below it is only a. b/c are concurrent with d (retained) and reach a without crossing d,
         // so a stays. Nothing is prunable — d's only strict ancestor is a, which b/c also need.
-        let out = <DagRetained<'_, TOp> as Compaction>::compact(
+        let out = <Retained<'_, TOp> as Compaction>::compact(
             &k.retained(),
             &Frontier { ops: vec![d] },
             RetentionPlan::Snapshot { keep_last: 0 },
