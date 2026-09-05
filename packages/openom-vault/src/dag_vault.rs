@@ -189,9 +189,6 @@ fn fold_sealing(
 /// op_id (the winner tiebreak), plus one `Other`-origin escrow entry. Returns the segment (fold order
 /// preserved) + the `minting_ops` baseline. PRE-retain, deliberately: the OPE-289 bound is time-varying, so
 /// dropping epochs at author time would permanently lose an epoch a full-history replica later resurrects.
-// Consumed by the DagAnchor checkpoint-authoring path (OPE-374); until that wiring lands it is exercised only by
-// tests. This allow is removed together with the checkpoint.rs one when OPE-374 completes.
-#[allow(dead_code)]
 fn author_checkpoint_sealing(
     pre_cut_sealing: &[dag_client::SealingEntry],
 ) -> Result<(Vec<dag_client::SealingEntry>, u32), VaultError> {
@@ -998,6 +995,56 @@ impl DagVault {
             watermark,
             resealed: true,
         })
+    }
+
+    /// Author a checkpoint-rooted anchor at a SUPPLIED dominating `frontier` (OPE-348 step 2a): the ops at/below
+    /// the frontier are pruned into a signed [`Checkpoint`]. The owner authorizes via their passphrase-derived
+    /// identity (the checkpoint author == owner, anti-substitution as in [`Self::reseal`]), and the sealing
+    /// preservation is folded in via `author_checkpoint_sealing` (keyring-dag never interprets sealing). Returns
+    /// the new anchor bytes. Choosing the frontier automatically over active members is OPE-371; this takes it
+    /// as a parameter.
+    pub fn compact(
+        &self,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        frontier: &[[u8; 32]],
+        prev_snapshot: Option<[u8; 32]>,
+    ) -> Result<Vec<u8>, VaultError> {
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
+
+        // Owner authorizes via their passphrase-derived identity (anti-substitution) — the checkpoint is
+        // Owner-signed.
+        let pass_wrap = escrow
+            .wraps
+            .iter()
+            .find(|w| w.wrap_method == PASSPHRASE)
+            .ok_or(VaultError::MissingWrap)?;
+        let kdf = pass_wrap
+            .kdf
+            .as_ref()
+            .ok_or_else(|| VaultError::BadKeyring("escrow passphrase wrap missing kdf".into()))?;
+        validate_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &KdfParams::from(kdf))?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+        let owner_id = founder.member_id.clone();
+
+        dag_client::compact_to_checkpoint(
+            anchor,
+            frontier,
+            prev_snapshot,
+            owner_id,
+            &root.identity,
+            |pre| author_checkpoint_sealing(pre).map_err(|e| format!("{e:?}")),
+        )
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// Member-authored self-heal of a stale write epoch (OPE-290). Identical repair to [`Self::reseal`], but any
