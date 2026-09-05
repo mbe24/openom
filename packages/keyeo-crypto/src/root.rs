@@ -200,8 +200,8 @@ mod tests {
         let w = hpke_wrap_dek(&a.hpke_public, &Dek::new([9u8; KEY_LEN]), b"info").unwrap();
         let out = hpke_unwrap_dek(
             a.hpke_secret.expose(),
-            &w.encapped_key,
-            &w.ciphertext,
+            w.encapped_key.as_ref(),
+            w.ciphertext.as_ref(),
             b"info",
         )
         .unwrap();

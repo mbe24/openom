@@ -79,7 +79,7 @@ mod tests {
         let salt = generate_salt().unwrap().to_vec();
         let r = derive_root(b"member pass", &cheap(salt)).unwrap();
         let w = hpke_wrap_dek(&r.hpke_public, &Dek::new([9u8; KEY_LEN]), b"info").unwrap();
-        let out = hpke_unwrap_dek(r.hpke_secret.expose(), &w.encapped_key, &w.ciphertext, b"info").unwrap();
+        let out = hpke_unwrap_dek(r.hpke_secret.expose(), w.encapped_key.as_ref(), w.ciphertext.as_ref(), b"info").unwrap();
         assert_eq!(out.expose(), &[9u8; KEY_LEN]);
     }
 }

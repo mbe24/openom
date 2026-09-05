@@ -1318,9 +1318,9 @@ fn do_add_member(
             member_id: new_member_id.to_string(),
             wrap_method: HPKE,
             nonce: Vec::new(),
-            wrapped_dek: w.ciphertext,
+            wrapped_dek: w.ciphertext.as_ref().to_vec(),
             kdf_params: None,
-            ephemeral_public_key: w.encapped_key,
+            ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
             recipient_public_key: member_hpke_public.to_vec(),
         });
     }
@@ -1396,9 +1396,9 @@ fn do_remove_member(
             member_id: m.member_id.clone(),
             wrap_method: HPKE,
             nonce: Vec::new(),
-            wrapped_dek: w.ciphertext,
+            wrapped_dek: w.ciphertext.as_ref().to_vec(),
             kdf_params: None,
-            ephemeral_public_key: w.encapped_key,
+            ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
             recipient_public_key: m.hpke_public_key.clone(),
         });
     }

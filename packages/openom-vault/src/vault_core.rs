@@ -318,9 +318,9 @@ pub(crate) fn rrk_wrap_epoch(
         member_id: founder_id.to_string(),
         wrap_method: RRK_HPKE,
         nonce: Vec::new(),
-        wrapped_dek: w.ciphertext,
+        wrapped_dek: w.ciphertext.as_ref().to_vec(),
         kdf: None,
-        ephemeral_public_key: w.encapped_key,
+        ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
         recipient_public_key: rrk_public.to_vec(),
     })
 }
@@ -340,9 +340,9 @@ pub(crate) fn member_wrap_epoch(
         member_id: member_id.to_string(),
         wrap_method: HPKE,
         nonce: Vec::new(),
-        wrapped_dek: w.ciphertext,
+        wrapped_dek: w.ciphertext.as_ref().to_vec(),
         kdf: None,
-        ephemeral_public_key: w.encapped_key,
+        ephemeral_public_key: w.encapped_key.as_ref().to_vec(),
         recipient_public_key: member_hpke_public.to_vec(),
     })
 }

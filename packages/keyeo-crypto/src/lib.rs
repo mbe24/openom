@@ -23,6 +23,7 @@ pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;
 pub mod aead;
 mod hpke_wrap;
 mod kdf;
+mod material;
 mod recovery;
 mod root;
 mod secret;
@@ -31,6 +32,7 @@ pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
+pub use material::{EncappedKey, WrappedDek};
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
