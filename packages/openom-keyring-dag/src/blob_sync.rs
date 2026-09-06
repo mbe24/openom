@@ -90,6 +90,9 @@ impl<S: BlobStore> KeyringBlobSync<S> {
 
     /// Publish a locally-applied op as an immutable content-addressed blob. Idempotent: a blob already
     /// present (another replica pushed the same op) is fine — the content is identical.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying store write fails.
     pub fn push(&mut self, op: &KeyringOp) -> Result<()> {
         let key = op_key(&op.id);
         match self.store.put(&key, &encode_op(op), Precondition::IfAbsent) {
@@ -104,6 +107,9 @@ impl<S: BlobStore> KeyringBlobSync<S> {
     /// its parents lands once they arrive. Idempotent. Also checks anti-rollback: any op this replica has
     /// already applied that the store no longer serves is reported in [`PullReport::withheld`] — the local
     /// op set is never regressed (pull only adds), so this is a detection signal, not data loss.
+    ///
+    /// # Errors
+    /// Returns an error if the store read fails or a fetched op doesn't decode.
     pub fn pull(&mut self, engine: &mut KeyringEngine) -> Result<PullReport> {
         let keys = self.store.list(OP_PREFIX)?;
         let mut present: HashSet<[u8; 32]> = HashSet::with_capacity(keys.len());
@@ -143,10 +149,11 @@ impl<S: BlobStore> KeyringBlobSync<S> {
 }
 
 fn op_key(id: &[u8; 32]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(OP_PREFIX.len() + 64);
     s.push_str(OP_PREFIX);
     for b in id {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -396,6 +403,9 @@ pub(crate) fn minit_to_dto(m: &KeyringMemberInit) -> MemberInitDto {
     }
 }
 
+// Returns `Result` to compose with the fallible `.map(dto_to_minit).collect::<Result<_>>()` decode
+// pipeline (alongside `decode_op`, which does error); the conversion may gain validation.
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn dto_to_minit(d: &MemberInitDto) -> Result<KeyringMemberInit> {
     Ok(KeyringMemberInit {
         id: d.id.clone(),

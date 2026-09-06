@@ -23,7 +23,7 @@ use crate::{KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringState};
 #[derive(Serialize, Deserialize)]
 struct PinnedConfig {
     /// The group (tree) id the engine's genesis is scoped to. Taken from the signed genesis op at
-    /// bootstrap, so every replayed op — whose signed group_id must match — is gated to this tree; a
+    /// bootstrap, so every replayed op — whose signed `group_id` must match — is gated to this tree; a
     /// tampered value fails closed (the signed ops won't match).
     #[serde(default)]
     group_id: Vec<u8>,
@@ -93,12 +93,14 @@ pub(crate) fn view_of(state: &KeyringState, reset_boundary: bool) -> MembershipV
 }
 
 /// Map a keyeo apply error/outcome to a neutral [`VerifyError`] for the NEW op (stored ops use `replay`).
+// A value->value conversion of the owned apply result; taking `&` would force a borrow dance for no gain.
+#[allow(clippy::needless_pass_by_value)]
 fn classify(outcome: Result<ApplyOutcome<String, [u8; 32]>, KeyeoError<String>>) -> Result<(), VerifyError> {
     match outcome {
         Ok(ApplyOutcome::Applied { .. }) => Ok(()),
         // Missing a parent op — the update references history the verifier hasn't been given (re-fetch).
         Ok(ApplyOutcome::Buffered { .. }) => Err(VerifyError::Stale),
-        Err(KeyeoError::BadSignature) | Err(KeyeoError::UnknownAuthor { .. }) => {
+        Err(KeyeoError::BadSignature | KeyeoError::UnknownAuthor { .. }) => {
             Err(VerifyError::Unauthenticated)
         }
         Err(KeyeoError::StaleFork) => Err(VerifyError::Rollback),
@@ -171,6 +173,9 @@ impl KeyringVerifier for DagVerifier {
 /// Build a `Bootstrap` update from the pinned genesis + the signed genesis op — the first-sight input a
 /// server (or client adoption path) admits. (Helper for callers/tests; the seam itself never constructs
 /// updates.)
+///
+/// # Panics
+/// Never in practice: the built `UpdateDto` always serializes.
 pub fn bootstrap_update(
     genesis: &[KeyringMemberInit],
     reset_authority: Option<[u8; 32]>,
@@ -190,6 +195,10 @@ pub fn bootstrap_update(
 }
 
 /// Build an `Op` update from a signed op — every non-genesis admission.
+///
+/// # Panics
+/// Never in practice: the built `UpdateDto` always serializes.
+#[must_use]
 pub fn op_update(op: &crate::KeyringOp) -> Vec<u8> {
     let dto = UpdateDto::Op {
         op: crate::blob_sync::encode_op(op),

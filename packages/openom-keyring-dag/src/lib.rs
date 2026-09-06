@@ -85,11 +85,11 @@ pub fn sign_op(
 /// openom keyring authority — v1, founder-signed governance (multi-signer quorum is v2).
 ///
 /// Keyring-write authority is **signer-gated**, not role-threshold-based: only a **signer** (Owner or
-/// CoOwner) may author a keyring change. A `MemberRole` below CoOwner (Maintainer / Editor / Viewer)
+/// `CoOwner`) may author a keyring change. A `MemberRole` below `CoOwner` (Maintainer / Editor / Viewer)
 /// carries content/moderation authority elsewhere in openom, but grants **no keyring-write authority**
 /// here. Within that gate:
-/// - touching a **signer** (adding/removing/retargeting an Owner or CoOwner) requires the **Owner**;
-/// - touching an **ordinary member** requires any **signer** (CoOwner or Owner);
+/// - touching a **signer** (adding/removing/retargeting an Owner or `CoOwner`) requires the **Owner**;
+/// - touching an **ordinary member** requires any **signer** (`CoOwner` or Owner);
 /// - the **Owner is unique and immutable** in v1 — no second Owner may be created, and the Owner may not
 ///   be removed or demoted (not even by themselves): "the founder can't leave" (transfer is a v2 op);
 /// - any **non-Owner** member may **remove themselves** (a deliberate BYO-offline widening).
@@ -101,7 +101,7 @@ pub struct KeyringAccess;
 
 impl KeyringAccess {
     /// The weakest role permitted to author a change **touching** a member whose role is `target`:
-    /// touching a signer needs the Owner; touching an ordinary member needs any signer (CoOwner+).
+    /// touching a signer needs the Owner; touching an ordinary member needs any signer (`CoOwner`+).
     fn required_for(target: KeyringRole) -> KeyringRole {
         if target.is_signer() {
             KeyringRole::OWNER
@@ -116,8 +116,7 @@ impl KeyringAccess {
         state
             .members
             .get(member)
-            .map(|m| m.role)
-            .unwrap_or(KeyringRole::VIEWER)
+            .map_or(KeyringRole::VIEWER, |m| m.role)
     }
 }
 
@@ -216,20 +215,20 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
             MembershipAction::ChangeRole { member, new_role } => {
                 new_role.is_signer() || Self::role_of(state, member).is_signer()
             }
-            MembershipAction::Remove { member } => Self::role_of(state, member).is_signer(),
+            // Removing OR retargeting the key of a signer touches the authority structure (privileged);
+            // doing either to an ordinary member (incl. an ordinary member's self-rekey) does not.
+            MembershipAction::Remove { member } | MembershipAction::Retarget { member, .. } => {
+                Self::role_of(state, member).is_signer()
+            }
             // Governance and recovery are always authority-structure changes.
             MembershipAction::Propose { .. }
             | MembershipAction::Approve { .. }
             | MembershipAction::Commit { .. }
             | MembershipAction::ReFound { .. }
             | MembershipAction::RotateRecoveryAuthority { .. } => true,
-            // Retargeting a signer's key touches the authority structure (privileged); an ordinary
-            // member's self-rekey does not.
-            MembershipAction::Retarget { member, .. } => Self::role_of(state, member).is_signer(),
-            // A reseal changes no signer/governance/recovery structure — a routine forward-secrecy repair,
-            // so it auto-merges (never carve-out-voided by a concurrent recovery).
-            MembershipAction::Reseal => false,
-            MembershipAction::Create { .. } => false,
+            // A reseal (a routine forward-secrecy repair) and a Create change no signer/governance/recovery
+            // structure, so they auto-merge (never carve-out-voided by a concurrent recovery).
+            MembershipAction::Reseal | MembershipAction::Create { .. } => false,
         }
     }
 }
@@ -294,22 +293,27 @@ pub struct KeyringQuorum {
 }
 
 impl KeyringQuorum {
+    #[must_use]
     pub fn new(rule: QuorumRule) -> Self {
         Self { rule }
     }
     /// The founder alone governs (single-admin family).
+    #[must_use]
     pub fn founder_only() -> Self {
         Self::new(QuorumRule::FounderOnly)
     }
     /// The founder alone, OR every co-owner (the collective-when-offline default).
+    #[must_use]
     pub fn founder_or_unanimity() -> Self {
         Self::new(QuorumRule::FounderOrUnanimity)
     }
     /// The founder alone, OR at least `m` co-owners.
+    #[must_use]
     pub fn founder_or_threshold(m: usize) -> Self {
         Self::new(QuorumRule::FounderOrThreshold(m))
     }
     /// A flat `m`-of-N over the signers (Owner + co-owners), no special founder path.
+    #[must_use]
     pub fn threshold(m: usize) -> Self {
         Self::new(QuorumRule::Threshold(m))
     }

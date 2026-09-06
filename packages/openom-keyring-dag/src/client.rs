@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Mint an op with `action` + `sealing`, parented on the current frontier and signed by `signing_key`,
-/// and append it to the anchor. The shared core of every `append_*` (Add / ReFound / Retarget).
+/// and append it to the anchor. The shared core of every `append_*` (Add / `ReFound` / Retarget).
 fn append(
     anchor_bytes: &[u8],
     author: &str,
@@ -48,6 +48,9 @@ fn append(
 
 /// Append an **Add** op — an authorized signer (`author`) adds `member_id` at `role`, carrying the
 /// joiner's per-epoch DEK wraps in `sealing`. Signed by the author's current key.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 #[allow(clippy::too_many_arguments)]
 pub fn append_add(
     anchor_bytes: &[u8],
@@ -72,6 +75,9 @@ pub fn append_add(
 /// Append a **Remove** op — an authorized signer (`author`) removes `member_id`, carrying the
 /// forward-secret re-epoch (a fresh DEK wrapped only to the remaining members) in `sealing`. Signed by the
 /// author's current key.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn append_remove(
     anchor_bytes: &[u8],
     author: &str,
@@ -156,7 +162,11 @@ fn mint(
 /// Create a brand-new dag keyring anchor: a content-addressed genesis `Create` op naming `founder_id` as
 /// the sole Owner, carrying the opaque `sealing` payload (the vault's epoch-0 + recovery escrow), with the
 /// recovery authority (RVK) pinned. Returns the serialized anchor bytes.
+///
+/// # Panics
+/// Never in practice: a freshly-built `DagAnchor` always serializes.
 #[allow(clippy::too_many_arguments)]
+#[must_use]
 pub fn provision_anchor(
     tree_id: &[u8],
     founder_id: &str,
@@ -239,6 +249,10 @@ pub enum SealingOrigin {
 /// sealing (it is resolver-inert per OPE-271 but is the pinned root); every other op contributes iff the
 /// engine reports it **effective** ([`Keyeo::effective_ops`]) — not ignored/carve-out-voided, authorized
 /// at its causal position, and for a `Commit` its quorum met — folded in resolved topological order.
+///
+/// # Errors
+/// Returns [`ClientError`] if the anchor is malformed, a stored op is rejected on replay, or history
+/// rolled back below the caller's watermark.
 pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -252,8 +266,12 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             keyeo_dag::GroupId::new(anchor.group_id.clone()),
             anchor.reset_authority,
         );
-        let base_frontier_depths: HashMap<[u8; 32], usize> =
-            cp.frontier_depths.iter().map(|(id, d)| (*id, *d as usize)).collect();
+        let base_frontier_depths: HashMap<[u8; 32], usize> = cp
+            .frontier_depths
+            .iter()
+            // A depth past usize::MAX (only reachable on a 32-bit target) saturates — it stays an upper bound.
+            .map(|(id, d)| (*id, usize::try_from(*d).unwrap_or(usize::MAX)))
+            .collect();
         let engine = Keyeo::adopt(
             base,
             base_frontier_depths,
@@ -336,8 +354,11 @@ pub type KeyringCompacted = Compacted<[u8; 32], String, KeyringRole, Ed25519>;
 /// the signed `Snapshot` from the returned resolved state and applies the prune to its stored anchor.
 ///
 /// `stable` is the frontier every peer has synced past — the data-loss guard `compact` never prunes above.
-/// Until the sync layer supplies a real one, callers pass a conservative frontier. `None` = KeepAll / nothing to
+/// Until the sync layer supplies a real one, callers pass a conservative frontier. `None` = `KeepAll` / nothing to
 /// drop.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed or a stored op is rejected on replay.
 pub fn compact(
     anchor_bytes: &[u8],
     stable: &Frontier<[u8; 32]>,
@@ -384,6 +405,13 @@ fn origin_of(action: &KeyringAction) -> SealingOrigin {
 /// resolved membership at the cut, the frontier depths, and the preserved sealing. The sealing preservation
 /// rides in as the `author_sealing` callback — the vault supplies it, so keyring-dag never interprets sealing.
 /// Un-compacted base only for now (chained checkpointing is a follow-up).
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed, already a checkpoint anchor, a stored op is
+/// rejected on replay, or the `author_sealing` callback fails.
+///
+/// # Panics
+/// Never in practice: the rebuilt `DagAnchor` always serializes.
 pub fn compact_to_checkpoint(
     anchor_bytes: &[u8],
     frontier: &[[u8; 32]],
@@ -519,6 +547,9 @@ fn anchor_ops(anchor_bytes: &[u8]) -> Result<Vec<KeyringOp>, ClientError> {
 /// The anchor's opaque anti-rollback **watermark**: its frontier (sorted tip op-ids) concatenated as raw
 /// 32-byte ids. Deterministic — equal frontiers give equal bytes — so the caller persists it and passes it
 /// back as the `floor` on the next mutating flow. The sealer treats these bytes as opaque (guardrail #1).
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn watermark(anchor_bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
     let ops = anchor_ops(anchor_bytes)?;
     Ok(frontier(&ops).into_iter().flatten().collect())
@@ -530,6 +561,14 @@ pub fn watermark(anchor_bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
 /// An empty floor is "no floor" (Ok); a floor whose length isn't a multiple of 32 is a corrupt watermark
 /// and is refused ([`ClientError::Malformed`]) rather than silently ignored — dropping it would drop
 /// rollback protection.
+///
+/// # Errors
+/// Returns [`ClientError::BadWatermark`] if `floor`'s length isn't a multiple of 32,
+/// [`ClientError::RolledBack`] if a floor op-id is absent from the anchor, or [`ClientError::Malformed`]
+/// if the anchor doesn't decode.
+///
+/// # Panics
+/// Never in practice: each 32-byte chunk always converts to `[u8; 32]`.
 pub fn check_floor(anchor_bytes: &[u8], floor: &[u8]) -> Result<(), ClientError> {
     if floor.is_empty() {
         return Ok(());
@@ -555,12 +594,24 @@ pub fn check_floor(anchor_bytes: &[u8], floor: &[u8]) -> Result<(), ClientError>
 
 /// First 8 bytes of an op-id, hex, for error messages (full id is 32 bytes).
 fn hex32(id: &[u8; 32]) -> String {
-    id[..8].iter().map(|b| format!("{b:02x}")).collect::<String>() + "…"
+    use std::fmt::Write;
+    let mut s = String::with_capacity(17);
+    for b in &id[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s.push('…');
+    s
 }
 
 /// Merge two anchors of the same tree into their causal union — the op closures unioned, deduplicated by
 /// op-id, keeping `a`'s pinned genesis config. Concurrent branches both survive and resolve deterministically
 /// (the op-DAG is a set-union CRDT). A direct convenience over the store-based anti-entropy in `blob_sync`.
+///
+/// # Errors
+/// Returns [`ClientError`] if either anchor is malformed.
+///
+/// # Panics
+/// Never in practice: the merged `DagAnchor` always serializes.
 pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
     let mut a: DagAnchor =
         postcard::from_bytes(anchor_a).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -575,9 +626,12 @@ pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
     Ok(postcard::to_allocvec(&a).expect("DagAnchor serialization is infallible"))
 }
 
-/// Append a recovery **ReFound** op — retarget the Owner to new keys, signed by the recovery authority
+/// Append a recovery **`ReFound`** op — retarget the Owner to new keys, signed by the recovery authority
 /// (RVK), carrying the re-escrow in its opaque `sealing` envelope. Parents = the current frontier. Returns
 /// the new anchor bytes.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn append_refound(
     anchor_bytes: &[u8],
     owner_id: &str,
@@ -599,6 +653,9 @@ pub fn append_refound(
 /// Append a voluntary **Retarget** op — `member` rotates their OWN keys, signed by their CURRENT key
 /// (change-passphrase), carrying the re-escrow in its opaque `sealing`. Parents = the current frontier.
 /// Returns the new anchor bytes.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn append_retarget(
     anchor_bytes: &[u8],
     member_id: &str,
@@ -618,6 +675,9 @@ pub fn append_retarget(
 /// Append a **Reseal** op (OPE-282) — a membership-inert forward-secrecy repair authored by active
 /// `member_id`, carrying a fresh DEK epoch (wrapped to the resolved membership) in its opaque `sealing`.
 /// Parents = the current frontier. Signed by the author's current key. Returns the new anchor bytes.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn append_reseal(
     anchor_bytes: &[u8],
     member_id: &str,
@@ -632,6 +692,9 @@ pub fn append_reseal(
 /// epoch. It reuses the inert `Reseal` keyeo action: keyeo sees only an authored, membership-inert op, and
 /// what the sealing actually does — add wraps vs mint an epoch — is the sealer's concern, invisible to keyeo
 /// (the sealing invariant). Parents = the current frontier. Returns the new anchor bytes.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
 pub fn append_backfill(
     anchor_bytes: &[u8],
     member_id: &str,
