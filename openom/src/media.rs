@@ -49,6 +49,8 @@ fn staging_key(tree: Uuid, blob: Uuid) -> String {
 fn final_key(tree: Uuid, blob: Uuid) -> String {
     keys::blob(tree, blob)
 }
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -56,6 +58,9 @@ fn internal(e: sqlx::Error) -> ApiError {
 /// `POST /trees/{tree_id}/media/intent` — check the owner's entitlements, atomically
 /// reserve quota, and return a presigned staging upload. Owner-pays: quota is the
 /// tree owner's, resolved from `trees.owner_id` (§17).
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn intent(
     State(state): State<AppState>,
     identity: Identity,
@@ -149,7 +154,10 @@ pub async fn intent(
 /// `POST /trees/{tree_id}/media/{blob_id}/confirm` — validate the staged upload and
 /// promote it. HEAD checks the observed size ≤ what was declared/reserved (no
 /// under-declaring past the reserve), reconciles the meter to the observed size,
-/// then CopyObject staging → the canonical key and flips the row to `live`.
+/// then `CopyObject` staging → the canonical key and flips the row to `live`.
+///
+/// # Errors
+/// Returns [`ApiError`] if the upload doesn't match or the store access fails.
 pub async fn confirm(
     State(state): State<AppState>,
     identity: Identity,
@@ -189,7 +197,7 @@ pub async fn confirm(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest("no staged upload to confirm".into()))?;
-    let actual = head.size as i64;
+    let actual = i64::try_from(head.size).unwrap_or(i64::MAX);
 
     if actual > declared {
         // Under-declared to dodge the reserve → reject, release, clean up.
@@ -230,6 +238,9 @@ pub async fn confirm(
 
 /// `GET /trees/{tree_id}/media/{blob_id}` — a short-TTL presigned download URL for a
 /// live blob. `404` for absent/pending/tombstoned (§12 graceful absence).
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn get_media(
     State(state): State<AppState>,
     identity: Identity,
@@ -361,6 +372,9 @@ async fn load_for_ref(
 /// `POST /trees/{id}/media/{blob}/attach` — the client references this blob from its
 /// tree doc: bump refcount, and **revive** it if it was tombstoned (§12). Meter is
 /// unchanged (a tombstoned blob still occupied its bytes).
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn attach(
     State(state): State<AppState>,
     identity: Identity,
@@ -384,6 +398,9 @@ pub async fn attach(
 /// `POST /trees/{id}/media/{blob}/detach` — drop a reference: decrement, and when it
 /// hits zero move to **tombstoned** (revivable) with a timestamp — never a physical
 /// delete (§9.11). Meter unchanged until the sweeper physically deletes.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn detach(
     State(state): State<AppState>,
     identity: Identity,
@@ -433,8 +450,11 @@ const DEFAULT_TOMBSTONE_GRACE_SECS: i64 = 30 * 24 * 3600;
 const DEFAULT_PENDING_EXPIRY_SECS: i64 = 3600;
 
 /// `POST /dev/gc` (local only) — run the physical sweep. In production this logic is
-/// driven by a scheduled trigger (EventBridge → an authenticated internal call), not
+/// driven by a scheduled trigger (`EventBridge` → an authenticated internal call), not
 /// a public route.
+///
+/// # Errors
+/// Returns [`ApiError`] if the store access fails.
 pub async fn sweep_dev(
     State(state): State<AppState>,
     Query(p): Query<SweepParams>,
@@ -519,7 +539,7 @@ async fn run_sweep(
     let _ = sqlx::query("DELETE FROM proposal_day_counts WHERE day < current_date - 1")
         .execute(&state.db)
         .await;
-    let proposals_expired = props.rows_affected() as usize;
+    let proposals_expired = usize::try_from(props.rows_affected()).unwrap_or(usize::MAX);
 
     Ok((deleted, expired, proposals_expired))
 }

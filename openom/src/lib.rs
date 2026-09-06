@@ -44,7 +44,7 @@ pub struct AppState {
     /// The provider-neutral JWT verifier (HS256 secret or RS256/ES256 JWKS) under `AUTH=jwt`; `None`
     /// under `AUTH=dev`. `Arc` so cloning `AppState` shares one JWKS cache.
     jwt_verifier: Option<Arc<jwks::JwtVerifier>>,
-    /// Blob store (MinIO in dev, R2 in prod).
+    /// Blob store (`MinIO` in dev, R2 in prod).
     storage: S3Store,
 }
 
@@ -149,6 +149,13 @@ pub fn app(state: AppState) -> Router {
 /// Wire up the shared state: a lazy Postgres pool, run migrations, seed the local
 /// dev account, and connect the blob store. Idempotent — safe to call at every
 /// startup and at the top of each integration test.
+///
+/// # Errors
+/// Returns [`BuildError`] if the DB, storage, or JWKS setup fails.
+///
+/// # Panics
+/// Never in practice: the JWT-verifier `expect`s require key material that `Config` validates at load,
+/// so a validly-loaded config always satisfies them.
 pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
     // Lazy pool: the process starts even if Postgres is briefly slow; the migration
     // below is the first thing that actually needs a connection.

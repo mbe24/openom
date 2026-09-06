@@ -60,6 +60,8 @@ fn verifier_for(engine: &str) -> Option<Box<dyn KeyringVerifier + Send + Sync>> 
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -67,6 +69,8 @@ fn internal(e: sqlx::Error) -> ApiError {
 /// A rejected keyring update → HTTP. A rollback/fork/stale-head is a *conflict* (the head moved — refetch
 /// and rebuild); a malformed/unauthenticated/unauthorized candidate is a 400. Neutral `VerifyError` (from
 /// the keyless seam), so the mapping is engine-agnostic.
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn verify_err(e: VerifyError) -> ApiError {
     match e {
         VerifyError::Rollback | VerifyError::Stale => ApiError::Conflict,
@@ -84,6 +88,12 @@ fn verify_err(e: VerifyError) -> ApiError {
 /// `PUT /trees/{tree_id}/keyring` — accept a new signed keyring revision: verify it against the stored
 /// head, persist it append-only (the `(tree_id, revision)` PK is the CAS), advance the head, and derive
 /// the `tree_access` ACL from its members. All in one tx under the tree row lock.
+///
+/// # Errors
+/// Returns [`ApiError`] if the update is rejected (auth/rate/CAS) or the store write fails.
+// One cohesive HTTP handler: parse → authorize → admit → persist → derive-ACL, all in one tx; splitting it
+// would thread the transaction + verified facts across boundaries for no clarity gain.
+#[allow(clippy::too_many_lines)]
 pub async fn put_keyring(
     State(state): State<AppState>,
     identity: Identity,
@@ -164,9 +174,10 @@ pub async fn put_keyring(
     }
     // The canonical position, from the VERIFIED body: the chain encodes its revision as the governing-ref.
     // The server keys storage / CAS / head-advance on THIS, never on the unauthenticated update hint.
-    let revision = decode_governing_ref(&admitted.update_ref)
-        .ok_or_else(|| ApiError::BadRequest("keyring update_ref is not a chain revision".into()))?
-        as i32;
+    let revision_u = decode_governing_ref(&admitted.update_ref)
+        .ok_or_else(|| ApiError::BadRequest("keyring update_ref is not a chain revision".into()))?;
+    // Stored as i32 in Postgres; a revision past i32::MAX is unreachable, so saturate rather than wrap.
+    let revision = i32::try_from(revision_u).unwrap_or(i32::MAX);
     let is_reset = admitted.view.reset_boundary;
 
     // A reset bypasses the prior-signer signature gate, so rate-cap it per tree (a stolen Administer token
@@ -184,7 +195,11 @@ pub async fn put_keyring(
         .map_err(internal)?;
         if capped.rows_affected() != 1 {
             tracing::info!(event = "rate_rejected", resource = "keyring_reset", %tree_id);
-            return Err(ApiError::TooManyRequests(RESET_COOLDOWN_SECS as u64));
+            // A whole-second f64 const; as a retry-after it is an exact positive integer, so the
+            // saturating f64->u64 cast is intentional.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let retry_after = RESET_COOLDOWN_SECS as u64;
+            return Err(ApiError::TooManyRequests(retry_after));
         }
         tracing::info!(event = "keyring_reset", %tree_id, revision);
     }
@@ -255,6 +270,9 @@ struct KeyringHistory {
 
 /// `GET /trees/{tree_id}/keyring?from=N` — the keyring chain from revision N to head, so a returning
 /// client walks `prev_keyring_hash` hop-by-hop. Empty list (head 0) when the tree has no keyring yet.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn get_keyring(
     State(state): State<AppState>,
     identity: Identity,

@@ -23,13 +23,7 @@ async fn main() -> Result<(), lambda_http::Error> {
     let state = build_state(&config).await?;
     let router = app(state);
 
-    if !config.is_lambda() {
-        let addr = config.http_addr.clone();
-        tracing::info!(%addr, "serving locally over plain HTTP");
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, router).await?;
-        Ok(())
-    } else {
+    if config.is_lambda() {
         // On Lambda the batch processor's flush timer stops when the sandbox freezes
         // between invocations, so spans would be lost. Flush explicitly after each
         // response instead (invisible to app code — the seam stays in one place).
@@ -47,6 +41,12 @@ async fn main() -> Result<(), lambda_http::Error> {
             None => router,
         };
         lambda_http::run(router).await
+    } else {
+        let addr = config.http_addr.clone();
+        tracing::info!(%addr, "serving locally over plain HTTP");
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        axum::serve(listener, router).await?;
+        Ok(())
     }
 }
 
@@ -67,10 +67,10 @@ fn init_tracing(config: &Config) -> Option<SdkTracerProvider> {
         tracing_opentelemetry::layer().with_tracer(p.tracer("openom"))
     });
 
-    let fmt_layer = if !config.is_lambda() {
-        fmt::layer().boxed()
-    } else {
+    let fmt_layer = if config.is_lambda() {
         fmt::layer().json().boxed()
+    } else {
+        fmt::layer().boxed()
     };
 
     tracing_subscriber::registry()

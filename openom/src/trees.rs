@@ -84,14 +84,17 @@ fn validate_snapshot(
         ));
     }
     Ok(Validated {
-        aead: header.aead as i16,
+        aead: i16::try_from(header.aead).unwrap_or(i16::MAX),
         ciphertext_hash: header.ciphertext_hash.clone(),
-        covers_through_seq: header.covers_through_seq as i64,
+        covers_through_seq: i64::try_from(header.covers_through_seq).unwrap_or(i64::MAX),
     })
 }
 
 /// `PUT /trees/{tree_id}` — upload a new snapshot. `If-Match: "<version>"` names the
 /// snapshot the edit was based on (CAS); its absence means "create, must not exist".
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn put_tree(
     State(state): State<AppState>,
     identity: Identity,
@@ -106,7 +109,7 @@ pub async fn put_tree(
     // New opaque version + fresh key; the object is written before the pointer CAS.
     let version = Uuid::new_v4().to_string();
     let object_key = crate::storage::keys::snapshot(tree_id, &version);
-    let size = body.len() as i64;
+    let size = i64::try_from(body.len()).unwrap_or(i64::MAX);
 
     state
         .storage
@@ -155,6 +158,9 @@ pub async fn put_tree(
 }
 
 /// `GET /trees/{tree_id}` — the current snapshot bytes + its `ETag` version.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn get_tree(
     State(state): State<AppState>,
     identity: Identity,
@@ -221,7 +227,7 @@ async fn cas_create(
     .bind(owner)
     .bind(object_key)
     .bind(version)
-    .bind(ENVELOPE_VERSION as i32)
+    .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
     .bind(valid.aead)
     .bind(size)
     .bind(&valid.ciphertext_hash)
@@ -262,7 +268,7 @@ async fn cas_create(
             .await
             .map_err(internal)?;
             match limits {
-                Some((count, max)) if count >= max as i64 => {
+                Some((count, max)) if count >= i64::from(max) => {
                     tracing::info!(event = "quota_rejected", resource = "trees", %owner);
                     Err(ApiError::QuotaExceeded)
                 }
@@ -309,7 +315,7 @@ async fn cas_update(
     )
     .bind(object_key)
     .bind(version)
-    .bind(ENVELOPE_VERSION as i32)
+    .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
     .bind(valid.aead)
     .bind(size)
     .bind(&valid.ciphertext_hash)
@@ -329,7 +335,7 @@ async fn cas_update(
     Err(ApiError::Conflict)
 }
 
-/// Read `If-Match`, unwrapping the ETag quoting. `None` (or `*`) means "create".
+/// Read `If-Match`, unwrapping the `ETag` quoting. `None` (or `*`) means "create".
 fn if_match(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(IF_MATCH)?.to_str().ok()?.trim();
     let v = raw.trim_matches('"');
@@ -340,11 +346,13 @@ fn if_match(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-/// A quoted (strong) ETag header value from an opaque version token.
+/// A quoted (strong) `ETag` header value from an opaque version token.
 fn etag(version: &str) -> String {
     format!("\"{version}\"")
 }
 
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -356,7 +364,7 @@ pub enum ApiError {
     Conflict,
     QuotaExceeded,
     /// Append rate exceeded (abuse gate). Carries a Retry-After hint in seconds. A
-    /// 429 — distinct from QuotaExceeded's 403 — because it's transient: the client
+    /// 429 — distinct from `QuotaExceeded`'s 403 — because it's transient: the client
     /// should back off and retry, not treat it as a plan limit (§17).
     TooManyRequests(u64),
     /// The requested log tail is no longer retained — the client must bootstrap from a snapshot.

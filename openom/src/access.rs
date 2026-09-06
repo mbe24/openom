@@ -28,6 +28,8 @@ use crate::auth::Identity;
 use crate::trees::ApiError;
 use crate::AppState;
 
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -128,7 +130,7 @@ struct SummaryMember {
     role: i16,
 }
 
-/// The normalized asserted set with the owner pinned at ROLE_OWNER (matching [`apply_membership`]), sorted —
+/// The normalized asserted set with the owner pinned at `ROLE_OWNER` (matching [`apply_membership`]), sorted —
 /// for the unchanged-check against the stored ACL.
 fn normalized(members: &[(Uuid, i16)], owner_id: Uuid) -> Vec<(Uuid, i16)> {
     let mut v: Vec<(Uuid, i16)> = members
@@ -148,6 +150,9 @@ fn normalized(members: &[(Uuid, i16)], owner_id: Uuid) -> Vec<(Uuid, i16)> {
 /// backstop, so this gate IS the authorization (deliberately tighter than `Administer` — a Maintainer can't
 /// author a keyring change, so never needs to assert membership). CAS on the per-tree `generation` makes
 /// concurrent multi-device pushes converge; an identical re-assert is a no-op that does not bump it.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn put_access(
     State(state): State<AppState>,
     identity: Identity,
@@ -264,6 +269,9 @@ struct AccessMember {
 /// its trust state covers the stored basis); a sharing UI reads `members`. Read gate. `generation`/`basis`
 /// are absent (`null`/`[]`) for a tree whose ACL was derived in-tx by the chain keyring PUT and never
 /// summary-pushed.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn get_access(
     State(state): State<AppState>,
     identity: Identity,

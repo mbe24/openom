@@ -6,6 +6,7 @@
 
 /// Start a timing span for the current scope. Bind it to a `_p` so it lives to the scope's end.
 #[inline]
+#[must_use]
 pub fn span(label: &'static str) -> Span {
     Span::new(label)
 }

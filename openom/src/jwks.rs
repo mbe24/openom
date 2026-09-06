@@ -42,6 +42,7 @@ pub enum JwtVerifier {
 
 impl JwtVerifier {
     /// HS256 with a shared secret (Supabase / a local dev secret).
+    #[must_use]
     pub fn hs256(secret: &str, audience: Option<&str>, issuer: Option<&str>) -> Self {
         Self::Hs256 {
             key: DecodingKey::from_secret(secret.as_bytes()),
@@ -49,7 +50,7 @@ impl JwtVerifier {
         }
     }
 
-    /// RS256 / ES256 (and RS384/512, PS*, ES384, EdDSA) with public keys fetched from a JWKS URL.
+    /// RS256 / ES256 (and RS384/512, PS*, ES384, `EdDSA`) with public keys fetched from a JWKS URL.
     pub fn jwks(url: String, audience: Option<&str>, issuer: Option<&str>) -> Self {
         Self::Jwks {
             cache: JwksCache::new(url),
@@ -60,6 +61,9 @@ impl JwtVerifier {
 
     /// Verify a bearer token and return its `sub` as the member id. Async because the JWKS arm may
     /// need to fetch keys.
+    ///
+    /// # Errors
+    /// Returns an error string if the token is malformed, expired, or its signature doesn't verify.
     pub async fn verify(&self, token: &str) -> Result<Uuid, &'static str> {
         match self {
             Self::Hs256 { key, validation } => decode_sub(token, key, validation),
@@ -108,6 +112,7 @@ pub struct JwksCache {
 }
 
 impl JwksCache {
+    #[must_use]
     pub fn new(url: String) -> Self {
         Self {
             url,

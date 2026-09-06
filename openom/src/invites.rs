@@ -3,7 +3,7 @@
 //!
 //! Authentication rides the invite LINK, a second channel the server never sees: the server stores only
 //! an OPEN invite the owner minted and the invitee's MAC'd public-key claim, and the REAL membership
-//! change is the client's signed keyring PUT (admitted by the ChainVerifier). So this layer is advisory
+//! change is the client's signed keyring PUT (admitted by the `ChainVerifier`). So this layer is advisory
 //! transport + spam control, NEVER the security boundary — a malicious server can drop or fabricate a
 //! row but can't forge the MAC (it lacks the link secret `s`) or the owner's keyring signature.
 
@@ -22,7 +22,7 @@ use crate::trees::ApiError;
 use crate::AppState;
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -53,6 +53,9 @@ pub struct CreateInvite {
 
 /// `POST /trees/{tree_id}/invites` — an owner/Maintainer mints a pending invite. The server holds no
 /// secret; the link (carrying `s`) is delivered out of band by the owner.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn create_invite(
     State(state): State<AppState>,
     identity: Identity,
@@ -92,6 +95,9 @@ pub struct ClaimBody {
 /// enforces `member_id == the JWT sub`, the invite is OPEN + unexpired, and ONE live claim. It does NOT
 /// verify the MAC (only the owner, holding the link secret, can) — this is the honest-server gate; the
 /// real defense is the owner's tag check at admit.
+///
+/// # Errors
+/// Returns [`ApiError`] if the invite is missing/expired or the store access fails.
 pub async fn claim_invite(
     State(state): State<AppState>,
     identity: Identity,
@@ -175,6 +181,9 @@ type InviteRow = (
 );
 
 /// `GET /trees/{tree_id}/invites` — the owner lists its pending invites + any claims (to admit).
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn list_invites(
     State(state): State<AppState>,
     identity: Identity,
@@ -210,6 +219,9 @@ pub async fn list_invites(
 }
 
 /// `DELETE /invites/{invite_id}` — the owner consumes/cancels an invite after admitting it. Idempotent.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn delete_invite(
     State(state): State<AppState>,
     identity: Identity,

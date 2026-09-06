@@ -47,9 +47,15 @@ const INLINE_MAX_BYTES: usize = 32 * 1024;
 const TAIL_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const TAIL_MAX_ENTRIES: i64 = 1024;
 
+/// One row of the log-tail query: `(seq, member_id, replica_id, replica_counter, payload, object_key,
+/// size_bytes, created_at)`.
+type TailRow = (i64, Option<Uuid>, Vec<u8>, i64, Option<Vec<u8>>, Option<String>, i64, String);
+
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -104,8 +110,8 @@ fn validate_delta(
     Ok(DeltaValidated {
         ciphertext_hash: header.ciphertext_hash.clone(),
         replica_id: header.replica_id.clone(),
-        replica_counter: header.replica_counter as i64,
-        size: body.len() as i64,
+        replica_counter: i64::try_from(header.replica_counter).unwrap_or(i64::MAX),
+        size: i64::try_from(body.len()).unwrap_or(i64::MAX),
     })
 }
 
@@ -166,6 +172,12 @@ async fn spill_gc(state: &AppState, object_key: Option<&str>) {
 
 /// `POST /trees/{tree_id}/log` — append one sealed delta. Returns its assigned `seq` (or the existing
 /// one on an idempotent re-delivery). The tree must already exist (created by an initial snapshot PUT).
+///
+/// # Errors
+/// Returns [`ApiError`] if the entry is rejected (auth/rate/CAS) or the store write fails.
+// One cohesive HTTP handler: validate → authorize → meter → assign-seq → insert, all in one tx; splitting
+// it would thread the transaction + metering state across boundaries for no clarity gain.
+#[allow(clippy::too_many_lines)]
 pub async fn append_log(
     State(state): State<AppState>,
     identity: Identity,
@@ -244,6 +256,8 @@ pub async fn append_log(
     .await
     .map_err(internal)?;
     if member_ok.rows_affected() != 1 {
+        // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let retry = if m_rate > 0.0 {
             (1.0 / m_rate).ceil() as u64
         } else {
@@ -350,6 +364,9 @@ struct LogTail {
 /// `GET /trees/{tree_id}/log?since=N` — the ordered tail after `since`, byte-budgeted, with the cursor
 /// to continue and the retained-window bounds. A cursor below the retained window is a `410` telling the
 /// client to bootstrap from a snapshot (never a silently truncated tail).
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller is unauthorized, the tail is gone, or the store read fails.
 pub async fn get_log(
     State(state): State<AppState>,
     identity: Identity,
@@ -384,7 +401,7 @@ pub async fn get_log(
         }
     }
 
-    let rows: Vec<(i64, Option<Uuid>, Vec<u8>, i64, Option<Vec<u8>>, Option<String>, i64, String)> =
+    let rows: Vec<TailRow> =
         sqlx::query_as(
             "SELECT seq, member_id, replica_id, replica_counter, payload, object_key, size_bytes, created_at::text
                FROM tree_log
@@ -403,10 +420,10 @@ pub async fn get_log(
     let mut budget = 0usize;
     let mut next_cursor = since;
     for (seq, member, replica, counter, payload, object_key, size, created_at) in rows {
-        if !entries.is_empty() && budget + size as usize > TAIL_BYTE_BUDGET {
+        if !entries.is_empty() && budget + usize::try_from(size).unwrap_or(usize::MAX) > TAIL_BYTE_BUDGET {
             break; // page here; the client pulls again from next_cursor
         }
-        budget += size as usize;
+        budget += usize::try_from(size).unwrap_or(usize::MAX);
         // Resolve the payload transparently: inline bytes if present, else fetch the spilled object from
         // R2 (checked before the budget cap, so we never fetch beyond what we return). A spilled row whose
         // object is missing is a data-integrity fault (the row asserts the payload exists), not a

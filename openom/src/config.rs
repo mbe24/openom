@@ -1,16 +1,16 @@
 //! Runtime configuration.
 //!
 //! Three INDEPENDENT axes, so a deployment can mix them (the point of the split):
-//! - `STORAGE` — `local` (MinIO) vs `cloud` (R2). Also gates the dev-key refusal.
+//! - `STORAGE` — `local` (`MinIO`) vs `cloud` (R2). Also gates the dev-key refusal.
 //! - `AUTH` — `dev` (fake auth: a bearer that parses as a UUID = that member) vs `jwt`
 //!   (a real verified token; the `aud` default keys on this).
 //! - deployment target — local HTTP server (+ pretty logs, dev routes) vs Lambda (+ JSON
 //!   logs, no dev routes). Tracks `RUN_MODE` (Local vs Production).
 //!
-//! `RUN_MODE` is a convenience PRESET: `local` → {storage=local, auth=dev, LocalServer};
+//! `RUN_MODE` is a convenience PRESET: `local` → {storage=local, auth=dev, `LocalServer`};
 //! `production` → {storage=cloud, auth=jwt, Lambda}. `STORAGE` / `AUTH` override their axis
 //! independently — e.g. `RUN_MODE=local` + `AUTH=jwt` + `AUTH_JWT_SECRET=…` is "local Supabase"
-//! (real JWT verification over local MinIO). Everything is read from the environment.
+//! (real JWT verification over local `MinIO`). Everything is read from the environment.
 
 use std::env;
 use uuid::Uuid;
@@ -24,7 +24,7 @@ pub enum RunMode {
     Production,
 }
 
-/// Where encrypted tree bytes live. `Cloud` additionally refuses the reserved dev key_id
+/// Where encrypted tree bytes live. `Cloud` additionally refuses the reserved dev `key_id`
 /// (§16) so a dev key can never seal real user data at rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageMode {
@@ -61,7 +61,7 @@ pub struct Config {
     pub http_addr: String,
     /// Postgres connection string (Neon in prod, a local container in dev).
     pub database_url: String,
-    /// S3-compatible endpoint the *server* uses for proxy ops (R2 in prod, MinIO in dev).
+    /// S3-compatible endpoint the *server* uses for proxy ops (R2 in prod, `MinIO` in dev).
     pub s3_endpoint: String,
     /// Endpoint baked into presigned URLs handed to clients — must be client-reachable.
     pub s3_public_endpoint: String,
@@ -101,6 +101,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Build the config from environment variables, with dev-safe defaults.
+    ///
+    /// # Panics
+    /// Never in practice: the only unwrap is on a hardcoded, valid UUID literal.
+    #[must_use]
     pub fn from_env() -> Self {
         let run_mode = match env::var("RUN_MODE").unwrap_or_default().as_str() {
             "production" | "prod" => RunMode::Production,
@@ -141,7 +146,7 @@ impl Config {
             s3_access_key: env::var("S3_ACCESS_KEY").unwrap_or_else(|_| "openom".into()),
             s3_secret_key: env::var("S3_SECRET_KEY").unwrap_or_else(|_| "openompw123".into()),
             jwt_alg: match env::var("AUTH_JWT_ALG").ok().as_deref() {
-                Some("RS256") | Some("rs256") | Some("ES256") | Some("es256") => JwtAlg::Rs256,
+                Some("RS256" | "rs256" | "ES256" | "es256") => JwtAlg::Rs256,
                 _ => JwtAlg::Hs256,
             },
             jwt_secret: env::var("AUTH_JWT_SECRET")
@@ -163,7 +168,7 @@ impl Config {
                 .unwrap_or_else(|| {
                     Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
                 }),
-            otel_enabled: matches!(env::var("OPENOM_OTEL").as_deref(), Ok("1") | Ok("true")),
+            otel_enabled: matches!(env::var("OPENOM_OTEL").as_deref(), Ok("1" | "true")),
             otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4318".into()),
             otlp_headers: env::var("OTEL_EXPORTER_OTLP_HEADERS").ok(),
@@ -172,29 +177,35 @@ impl Config {
         config
     }
 
-    /// True on the local storage axis (MinIO). Gates bucket bootstrap; its inverse gates
+    /// True on the local storage axis (`MinIO`). Gates bucket bootstrap; its inverse gates
     /// the dev-key refusal.
+    #[must_use]
     pub fn storage_is_local(&self) -> bool {
         self.storage == StorageMode::Local
     }
-    /// True on the cloud storage axis (R2) — refuse the reserved dev key_id at rest (§16).
+    /// True on the cloud storage axis (R2) — refuse the reserved dev `key_id` at rest (§16).
+    #[must_use]
     pub fn storage_is_cloud(&self) -> bool {
         self.storage == StorageMode::Cloud
     }
     /// True on the fake-auth axis (a UUID bearer is that member; no signature).
+    #[must_use]
     pub fn auth_is_dev(&self) -> bool {
         self.auth == AuthMode::Dev
     }
     /// True on the real-JWT axis.
+    #[must_use]
     pub fn auth_is_jwt(&self) -> bool {
         self.auth == AuthMode::Jwt
     }
     /// The deployment runs under Lambda (JSON logs, no dev routes). Local server otherwise.
+    #[must_use]
     pub fn is_lambda(&self) -> bool {
         self.run_mode == RunMode::Production
     }
     /// Dev-only routes (`/dev/gc`, later `/dev/token`) are registered only on the local
     /// server deployment — never under Lambda.
+    #[must_use]
     pub fn dev_routes_enabled(&self) -> bool {
         self.run_mode == RunMode::Local
     }

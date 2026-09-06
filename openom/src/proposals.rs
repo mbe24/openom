@@ -37,9 +37,15 @@ const MAX_PROPOSAL_BYTES: usize = 1024 * 1024;
 const LIST_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 const LIST_MAX: i64 = 512;
 
+/// One row of the proposals list query: `(id, proposer_member_id, size_bytes, created_at, expires_at,
+/// ciphertext_hash, payload)`.
+type ProposalRow = (Uuid, Uuid, i64, String, String, Vec<u8>, Vec<u8>);
+
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn internal(e: sqlx::Error) -> ApiError {
     ApiError::Internal(e.to_string())
 }
@@ -95,6 +101,9 @@ struct CreateResult {
 }
 
 /// `POST /trees/{tree_id}/proposals` — submit a sealed proposal. Metered against the tree owner.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn create_proposal(
     State(state): State<AppState>,
     identity: Identity,
@@ -107,7 +116,7 @@ pub async fn create_proposal(
             "proposal exceeds the per-item size limit".into(),
         ));
     }
-    let size = body.len() as i64;
+    let size = i64::try_from(body.len()).unwrap_or(i64::MAX);
     let ciphertext_hash = validate_proposal(&body, tree_id, state.config.storage_is_cloud())?;
 
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
@@ -157,7 +166,7 @@ pub async fn create_proposal(
     .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
-    if open >= max_open as i64 {
+    if open >= i64::from(max_open) {
         tracing::info!(event = "quota_rejected", resource = "proposals_open", %tree_id, member = %identity.member_id);
         return Err(ApiError::QuotaExceeded);
     }
@@ -194,7 +203,7 @@ pub async fn create_proposal(
     .bind(body.as_ref())
     .bind(&ciphertext_hash)
     .bind(size)
-    .bind(ttl as f64)
+    .bind(f64::from(ttl))
     .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
@@ -235,6 +244,9 @@ struct ProposalList {
 }
 
 /// `GET /trees/{tree_id}/proposals` — list the tree's open proposals (payloads inline) for review.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn list_proposals(
     State(state): State<AppState>,
     identity: Identity,
@@ -250,7 +262,7 @@ pub async fn list_proposals(
     let owner = owner.ok_or(ApiError::NotFound)?;
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
-    let rows: Vec<(Uuid, Uuid, i64, String, String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+    let rows: Vec<ProposalRow> = sqlx::query_as(
         "SELECT id, proposer_member_id, size_bytes, created_at::text, expires_at::text, ciphertext_hash, payload
            FROM proposals
           WHERE tree_id = $1 AND ($2 OR expires_at > now())
@@ -287,6 +299,9 @@ pub async fn list_proposals(
 /// `DELETE /trees/{tree_id}/proposals/{proposal_id}` — resolve (accepted/rejected) or withdraw a
 /// proposal. Idempotent: deleting an already-gone proposal is a success (the client accepts then
 /// deletes, and may retry). Does not decrement the day ledger — the daily cap counts submissions.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
 pub async fn delete_proposal(
     State(state): State<AppState>,
     identity: Identity,

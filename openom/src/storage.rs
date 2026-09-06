@@ -9,14 +9,14 @@
 //!     ([`presign_put`], [`presign_get`]).
 //!
 //! `rusty-s3` only *builds and signs* requests — no async runtime, no OpenSSL — and
-//! reqwest (rustls) sends them. The same code talks to MinIO (dev) and Cloudflare R2
+//! reqwest (rustls) sends them. The same code talks to `MinIO` (dev) and Cloudflare R2
 //! (prod). One concrete store, not a trait: both backends speak the same S3 API, so
 //! a trait would be a speculative abstraction over a single impl.
 //!
 //! **Upload integrity is enforced at the PUT**, not at read: the caller passes the
 //! SHA-256 of the exact bytes being stored, and we sign it into the request as
 //! `x-amz-checksum-sha256`; the backend rejects a mismatched body with a 4xx
-//! (verified against MinIO — see the `checksum_enforced_by_backend` test). This is
+//! (verified against `MinIO` — see the `checksum_enforced_by_backend` test). This is
 //! distinct from `Header.ciphertext_hash`, which covers only the inner ciphertext
 //! and is re-checked reader-side (§12); the S3 checksum covers the whole object body.
 
@@ -64,6 +64,10 @@ pub struct PresignedUpload {
 }
 
 impl S3Store {
+    /// Build the S3 store from config (endpoint, bucket, credentials).
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the S3 configuration is invalid.
     pub fn from_config(config: &Config) -> Result<Self, StorageError> {
         // Path-style (`host/bucket/key`) — MinIO's default and what R2 accepts;
         // virtual-host style needs per-bucket DNS we don't control in dev.
@@ -92,6 +96,9 @@ impl S3Store {
 
     /// Idempotently create the bucket (dev bootstrap; in prod the bucket is
     /// provisioned out of band). A 409 "already owns it" is success.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the bucket can't be created or reached.
     pub async fn ensure_bucket(&self) -> Result<(), StorageError> {
         let url = self.bucket.create_bucket(&self.credentials).sign(PROXY_TTL);
         let resp = self.http.put(url).send().await?;
@@ -105,6 +112,9 @@ impl S3Store {
 
     /// Proxy PUT of `body` at `key` (tree envelopes). The backend enforces the
     /// SHA-256 of the exact bytes, so a corrupted write is rejected here, not later.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the upload fails.
     pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), StorageError> {
         let checksum = sha256_b64(&body);
         let mut action = self.bucket.put_object(Some(&self.credentials), key);
@@ -127,6 +137,9 @@ impl S3Store {
     }
 
     /// Proxy GET. `None` if the object is absent (§12 graceful-404).
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the download fails.
     pub async fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         let url = self
             .bucket
@@ -144,6 +157,9 @@ impl S3Store {
 
     /// Delete `key`. Absent-is-success (delete is idempotent; §12 graceful-absence).
     /// Used by the tree path to GC an object orphaned by a lost snapshot CAS.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the delete fails.
     pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
         let url = self
             .bucket
@@ -172,6 +188,9 @@ impl S3Store {
 impl S3Store {
     /// HEAD for size/etag. `None` if absent (§12 graceful-404). Used by the media
     /// confirm step (size ≤ cap) — integrity was already enforced at the PUT.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the head request fails.
     pub async fn head_object(&self, key: &str) -> Result<Option<ObjectHead>, StorageError> {
         let url = self
             .bucket
@@ -195,6 +214,9 @@ impl S3Store {
 
     /// Server-side copy `from` → `to` (media confirm: staging → final, §12). S3
     /// models a copy as a PUT to the destination carrying `x-amz-copy-source`.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the copy fails.
     pub async fn copy_object(&self, from: &str, to: &str) -> Result<(), StorageError> {
         let source = format!("/{}/{}", self.bucket_name, from);
         let mut action = self.bucket.put_object(Some(&self.credentials), to);
@@ -217,6 +239,7 @@ impl S3Store {
     /// the exact bytes the client will PUT; we sign it as `x-amz-checksum-sha256` so
     /// the backend rejects a mismatched body (§9.10 confirm relies on this). The
     /// client MUST send every `required_headers` entry verbatim.
+    #[must_use]
     pub fn presign_put(
         &self,
         key: &str,
@@ -235,6 +258,7 @@ impl S3Store {
     }
 
     /// Presign a client media download (membership-gated at mint time, §12).
+    #[must_use]
     pub fn presign_get(&self, key: &str, ttl: Duration) -> String {
         self.public_bucket
             .get_object(Some(&self.credentials), key)
@@ -275,6 +299,7 @@ pub mod keys {
     }
 
     /// `trees/{shard}/{tree}/snapshot/{version}` — a versioned, immutable snapshot.
+    #[must_use]
     pub fn snapshot(tree: Uuid, version: &str) -> String {
         format!(
             "trees/{}/{}/snapshot/{}",
@@ -286,11 +311,13 @@ pub mod keys {
 
     /// `trees/{shard}/{tree}/log/{seq}` — a delta spilled out of Postgres to R2 when it
     /// exceeds the inline cap (OPE-81); immutable, append-only.
+    #[must_use]
     pub fn delta(tree: Uuid, seq: i64) -> String {
         format!("trees/{}/{}/log/{}", shard(tree), tree.simple(), seq)
     }
 
     /// `staging/{shard}/{tree}/{blob}` — a media upload not yet confirmed (§9.10).
+    #[must_use]
     pub fn staging(tree: Uuid, blob: Uuid) -> String {
         format!(
             "staging/{}/{}/{}",
@@ -301,6 +328,7 @@ pub mod keys {
     }
 
     /// `blobs/{shard}/{tree}/{blob}` — a confirmed, immutable, per-tree-DEK media blob.
+    #[must_use]
     pub fn blob(tree: Uuid, blob: Uuid) -> String {
         format!("blobs/{}/{}/{}", shard(tree), tree.simple(), blob.simple())
     }

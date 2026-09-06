@@ -22,6 +22,9 @@ pub use openom_roles::Access;
 /// The owner always has full access (fast path, no query). Otherwise the member's role is looked up in
 /// the derived `tree_access` ACL; a member with no row is refused. B3 slice 2 populates that ACL from the
 /// keyring — call sites don't change.
+///
+/// # Errors
+/// Returns [`ApiError::Forbidden`] if the member lacks the required access, or [`ApiError`] on a store error.
 pub async fn authorize(
     db: &sqlx::PgPool,
     tree_id: Uuid,
