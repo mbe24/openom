@@ -15,10 +15,10 @@ use openom_crypto::aad::author_signing_bytes;
 use openom_protocol::v1::{Header, Kind};
 // `epoch_is_attributed` still takes the chain `Keyring` (imported from openom-keyring-chain since the wire
 // moved there in OPE-300); `verify_entry` takes the engine-neutral `MembershipView` instead (OPE-333).
-use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
-use openom_keyring_api::MembershipView;
-use openom_roles::required_role_for_kind;
 use edsign::{Signature, VerifyingKey};
+use openom_keyring_api::MembershipView;
+use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
+use openom_roles::required_role_for_kind;
 use sha2::{Digest, Sha256};
 
 /// Why a landed entry's author attribution was refused. One variant per check, so the client can react
@@ -163,21 +163,25 @@ pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openom_keyring_chain::{encode_governing_ref, generate_identity};
     use edsign::SigningKey;
-    use openom_keyring_chain::wire::Member;
-    use openom_protocol::v1::MemberRole;
     use keyeo_crypto::{
-        codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
+        codec, EncappedKey, Epoch as KeyeoEpoch, KeyId, Wrap as KeyeoWrap, WrapMethod, WrappedDek,
         X25519PublicKey,
     };
+    use openom_keyring_chain::wire::Member;
+    use openom_keyring_chain::{encode_governing_ref, generate_identity};
+    use openom_protocol::v1::MemberRole;
 
     const KID: &[u8] = b"epoch-key-0";
     const VERSION: u32 = 1;
 
     /// One epoch (ordinal 0, given wraps) under `key_id`, as the canonical `codec` bytes the keyring stores.
     fn enc_epoch(key_id: &[u8], wraps: Vec<KeyeoWrap<String>>) -> Vec<u8> {
-        codec::encode_epochs(&[KeyeoEpoch { key_id: KeyId::new(key_id.to_vec()), ordinal: 0, wraps }])
+        codec::encode_epochs(&[KeyeoEpoch {
+            key_id: KeyId::new(key_id.to_vec()),
+            ordinal: 0,
+            wraps,
+        }])
     }
     /// A member HPKE wrap addressed to `id` (placeholder key material — attribution only reads the recipient).
     fn wrap_to(id: &str) -> KeyeoWrap<String> {
@@ -193,7 +197,12 @@ mod tests {
 
     /// Drive `verify_entry` from a chain `Keyring` fixture: fold it to the engine-neutral `MembershipView`
     /// and compute the newest epoch's `key_id` — exactly what the wasm caller does (OPE-333).
-    fn call(version: u32, header: &Header, plaintext: &[u8], kr: &Keyring) -> Result<(), EntryError> {
+    fn call(
+        version: u32,
+        header: &Header,
+        plaintext: &[u8],
+        kr: &Keyring,
+    ) -> Result<(), EntryError> {
         let view = openom_keyring_chain::membership_view(kr);
         let newest = kr
             .key_material()
@@ -287,10 +296,7 @@ mod tests {
         let mallory = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &real)]);
         let h = signed(Kind::Delta, "m1", &mallory, b"x");
-        assert_eq!(
-            call(VERSION, &h, b"x", &kr),
-            Err(EntryError::BadSignature)
-        );
+        assert_eq!(call(VERSION, &h, b"x", &kr), Err(EntryError::BadSignature));
     }
 
     #[test]
@@ -298,10 +304,7 @@ mod tests {
         let k = generate_identity().unwrap();
         let kr = governing(vec![member("m1", MemberRole::Admin, &k)]);
         let h = signed(Kind::Delta, "ghost", &k, b"x");
-        assert_eq!(
-            call(VERSION, &h, b"x", &kr),
-            Err(EntryError::UnknownAuthor)
-        );
+        assert_eq!(call(VERSION, &h, b"x", &kr), Err(EntryError::UnknownAuthor));
     }
 
     #[test]
@@ -318,10 +321,7 @@ mod tests {
             ))
             .to_bytes()
             .to_vec();
-        assert_eq!(
-            call(VERSION, &h, b"x", &kr),
-            Err(EntryError::EpochMismatch)
-        );
+        assert_eq!(call(VERSION, &h, b"x", &kr), Err(EntryError::EpochMismatch));
     }
 
     #[test]
@@ -332,16 +332,15 @@ mod tests {
             key_id: KID.to_vec(),
             ..Default::default()
         };
-        assert_eq!(
-            call(VERSION, &h, b"x", &kr),
-            Err(EntryError::Unattributed)
-        );
+        assert_eq!(call(VERSION, &h, b"x", &kr), Err(EntryError::Unattributed));
     }
 
     #[test]
     fn seal_envelope_round_trips_through_verify_entry() {
         // The cross-crate round-trip: openom-crypto seals + signs the entry, this crate verifies it.
-        use openom_crypto::{generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams};
+        use openom_crypto::{
+            generate_dek, open_envelope, seal_envelope, AuthorIdentity, SealParams,
+        };
         use openom_protocol::v1::{Aead, Compression, Format};
 
         let dek = generate_dek().unwrap();

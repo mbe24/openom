@@ -79,7 +79,7 @@ mod tests {
     fn a_malformed_author_key_is_skipped_not_panicking() {
         let v = view(vec![MemberView {
             member_id: "x".into(),
-            role: 1, // Owner
+            role: 1,                          // Owner
             author_public_key: vec![1, 2, 3], // not 32 bytes
             hpke_public_key: vec![],
         }]);

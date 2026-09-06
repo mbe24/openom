@@ -16,10 +16,8 @@
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 
-use crate::lifecycle::{
-    KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext,
-};
 use crate::lifecycle::ChainVault;
+use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext};
 use crate::{DagVault, VaultError};
 
 /// The two keyring engines behind one dispatch point. Zero-sized selectors, so an `AppVault` is just its

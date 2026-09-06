@@ -3851,6 +3851,7 @@ dependencies = [
  "openom-vault",
  "rusqlite",
  "serde",
+ "serde_json",
  "zeroize",
 ]
 

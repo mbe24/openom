@@ -17,8 +17,8 @@
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,
-    parse_recovery_code, recovery_kdf_params, Dek,
-    HpkePrivate, Kek, RecoveryCode, RootKeys, RrkSecret,
+    parse_recovery_code, recovery_kdf_params, Dek, HpkePrivate, Kek, RecoveryCode, RootKeys,
+    RrkSecret,
 };
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 // The keyring key-material layer the vault crypto is lifted onto (aliased to avoid the proto WrapMethod /
@@ -185,8 +185,14 @@ pub(crate) fn open_rrk_secret(
         method: KeyeoWrapMethod::Kek {
             kind,
             // Unused by unwrap (the KEK is already derived); a placeholder so the record is well-formed.
-            kdf: KeyeoKdfParams { salt: Vec::new(), memory_kib: 0, iterations: 0, parallelism: 0 },
-            nonce: KeyeoNonce::try_from(nonce).map_err(|_| VaultError::BadKeyring("escrow nonce length".into()))?,
+            kdf: KeyeoKdfParams {
+                salt: Vec::new(),
+                memory_kib: 0,
+                iterations: 0,
+                parallelism: 0,
+            },
+            nonce: KeyeoNonce::try_from(nonce)
+                .map_err(|_| VaultError::BadKeyring("escrow nonce length".into()))?,
         },
         ciphertext: KeyeoWrappedDek::try_from(wrapped)
             .map_err(|_| VaultError::BadKeyring("escrow ciphertext length".into()))?,
@@ -215,7 +221,12 @@ pub(crate) fn rrk_wrap_keyeo(
     let kid = KeyeoKeyId::new(key_id.to_vec());
     let rrk_public = X25519PublicKey::try_from(rrk_public)
         .map_err(|_| VaultError::BadKeyring("rrk public key length".into()))?;
-    Ok(keyeo_rrk_wrap(dek, founder_id.to_string(), rrk_public, &epoch_ctx(&group_id, &kid))?)
+    Ok(keyeo_rrk_wrap(
+        dek,
+        founder_id.to_string(),
+        rrk_public,
+        &epoch_ctx(&group_id, &kid),
+    )?)
 }
 
 /// HPKE-wrap an epoch's `dek` to a MEMBER's public key — the per-member wrap giving them access to this
@@ -231,7 +242,12 @@ pub(crate) fn member_wrap_keyeo(
     let kid = KeyeoKeyId::new(key_id.to_vec());
     let recipient_key = X25519PublicKey::try_from(member_hpke_public)
         .map_err(|_| VaultError::BadKeyring("member hpke key length".into()))?;
-    Ok(keyeo_member_wrap(dek, member_id.to_string(), recipient_key, &epoch_ctx(&group_id, &kid))?)
+    Ok(keyeo_member_wrap(
+        dek,
+        member_id.to_string(),
+        recipient_key,
+        &epoch_ctx(&group_id, &kid),
+    )?)
 }
 
 /// Open one epoch's DEK from its RRK wrap using the founder's recovery root secret.
@@ -250,7 +266,11 @@ pub(crate) fn open_epoch_dek(
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
     // Bind the AAD to the founder (the wrap's recipient IS the founder; making it explicit matches wrap time).
     w.recipient = founder_id.to_string();
-    Ok(keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id))?)
+    Ok(keyeo_unwrap_dek(
+        &w,
+        rrk_secret.expose(),
+        &epoch_ctx(&group_id, &epoch.key_id),
+    )?)
 }
 
 /// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
@@ -294,7 +314,13 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
         .iter()
         .map(|ep| {
             let dek = open_epoch_dek(ep, tree_id, founder_id, old_rrk)?;
-            let new_wrap = rrk_wrap_keyeo(new_rrk_public, &dek, tree_id, founder_id, ep.key_id.as_bytes())?;
+            let new_wrap = rrk_wrap_keyeo(
+                new_rrk_public,
+                &dek,
+                tree_id,
+                founder_id,
+                ep.key_id.as_bytes(),
+            )?;
             let mut wraps: Vec<KeyeoWrap<String>> = ep
                 .wraps
                 .iter()
@@ -331,8 +357,12 @@ pub(crate) fn member_epoch_deks(
         let dek = ep
             .wraps
             .iter()
-            .filter(|w| w.recipient == member_id && matches!(w.method, KeyeoWrapMethod::MemberHpke { .. }))
-            .find_map(|w| keyeo_unwrap_dek(w, hpke_secret.expose(), &epoch_ctx(&group_id, &ep.key_id)).ok());
+            .filter(|w| {
+                w.recipient == member_id && matches!(w.method, KeyeoWrapMethod::MemberHpke { .. })
+            })
+            .find_map(|w| {
+                keyeo_unwrap_dek(w, hpke_secret.expose(), &epoch_ctx(&group_id, &ep.key_id)).ok()
+            });
         if let Some(dek) = dek {
             out.push((ep.key_id.as_bytes().to_vec(), ep.ordinal, dek));
         }
