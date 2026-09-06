@@ -432,7 +432,7 @@ impl KeyringLifecycle for DagVault {
             &secrets.root.identity,
         );
 
-        let sealer = sealer_set_from_deks(tree_id, replica_id, vec![(key_id.clone(), 0, dek)], key_id)?;
+        let sealer = sealer_set_from_deks(tree_id, replica_id, vec![(key_id.clone(), 0, dek)], key_id);
         let watermark = dag_client::watermark(&anchor).map_err(map_floor_err)?;
         Ok(Provisioned {
             anchor,
@@ -476,8 +476,8 @@ impl KeyringLifecycle for DagVault {
         }
 
         let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, member_id, KekKind::Passphrase)?;
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
-        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret);
+        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
 
         let owner_key: [u8; 32] = founder
             .author_public_key
@@ -557,8 +557,8 @@ impl KeyringLifecycle for DagVault {
         .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
 
         // The DEK is unchanged, so the sealer opens the same epochs via the RRK.
-        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret)?;
-        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+        let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret);
+        let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
 
         let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
         Ok(Recovered {
@@ -694,7 +694,7 @@ impl DagVault {
         let rrk_secret = open_rrk_secret(&root.kek, rrk_nonce, rrk_ct, tree_id, owner_id, KekKind::Passphrase)?;
 
         // Reach every epoch's DEK and wrap each to the new member's HPKE key.
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret);
         let added_wraps: Vec<AddedWrap> = deks
             .iter()
             .map(|(key_id, _epoch, dek)| {
@@ -759,8 +759,8 @@ impl DagVault {
             return Err(CryptoError::Signature.into());
         }
 
-        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret)?;
-        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id)?;
+        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret);
+        let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
         let my_key: [u8; 32] = me
             .author_public_key
             .as_slice()
@@ -1099,7 +1099,7 @@ impl DagVault {
         // already covered by a wrap addressed to their CURRENT key (OPE-290: key-bound, so a member left on a
         // STALE key after a rekey race is re-wrapped too). (`epoch_deks` skips an un-openable epoch rather
         // than failing, so a corrupt epoch can't brick this.) Empty-key members are skipped — nothing to wrap.
-        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret)?;
+        let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret);
         let mut added_wraps: Vec<AddedWrap> = Vec::new();
         for (key_id, _epoch, dek) in &deks {
             let epoch_wraps = epochs
@@ -1639,7 +1639,7 @@ mod tests {
             ordinal: 0,
             wraps: vec![dead, live],
         };
-        let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret).unwrap();
+        let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret);
         assert_eq!(deks.len(), 1, "the epoch opens via the live wrap despite a dead wrap first");
     }
 
@@ -1670,7 +1670,7 @@ mod tests {
                 ciphertext: keyeo_crypto::WrappedDek::from_bytes([9u8; 48]),
             }],
         };
-        let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret).unwrap();
+        let deks = epoch_deks(&[good, garbage], tree, "owner", &rrk_secret);
         assert_eq!(deks.len(), 1, "the un-openable garbage epoch is skipped, not fatal");
         assert_eq!(deks[0].0, b"good".to_vec(), "the legitimate epoch still opens");
     }

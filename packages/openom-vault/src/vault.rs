@@ -246,7 +246,7 @@ pub fn unlock(
     // sealer (attributed epochs). encode borrows the verifying key, it doesn't consume `identity`.
     let did_key = did::DidKey::from_public_key(&identity.verifying_key().to_bytes());
     let epochs: Vec<(Vec<u8>, openom_crypto::Key32)> =
-        epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?
+        epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)
             .into_iter()
             .map(|(k, _e, d)| (k, d.into_inner()))
             .collect();
@@ -365,7 +365,7 @@ pub fn recover(
     // across a recovery (re-wrap, not rotate), so this RVK matches the prior one — continuity holds.
     sign_keyring(&mut keyring, &openom_crypto::derive_rvk(rrk_secret.expose()));
 
-    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret);
     // A legitimate keyring never repeats an epoch key_id (16 CSPRNG bytes). Reject duplicates: otherwise an
     // attacker could add a same-key_id epoch with an attacker-known DEK that `SealerSet`'s first-match
     // routing would pick over the authenticated one (OPE-286).
@@ -479,7 +479,7 @@ pub fn change_passphrase(
     sign_keyring(&mut keyring, &secrets.root.identity);
     // Carry the (unchanged) write epoch's key MATERIAL forward in the watermark (epochs are untouched by a
     // passphrase change), so a later recover keeps its pin (OPE-286).
-    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)?
+    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &rrk_secret)
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
@@ -526,7 +526,7 @@ pub fn rotate_recovery(
         .ok_or(VaultError::RevisionOverflow)?;
     // Commit the (unchanged) write epoch's key MATERIAL for the watermark, opened via the OLD RRK before the
     // epochs are re-wrapped onto the new one (the DEKs themselves are untouched by a rotation) (OPE-286).
-    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &old_rrk)?
+    let write_dek_hash = epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &old_rrk)
         .iter()
         .find(|(k, _, _)| k.as_slice() == write_key_id.as_slice())
         .map(|(_, _, d)| dek_hash(d.expose()))
@@ -662,7 +662,7 @@ pub fn add_member(
 
     // The owner reaches every epoch's DEK via the RRK; wrap them all for the new member so
     // they see the full history.
-    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret);
     do_add_member(
         keyring,
         tree_id,
@@ -725,7 +725,7 @@ pub fn add_member_as_co_owner(
         .checked_add(1)
         .ok_or(VaultError::RevisionOverflow)?;
     let deks =
-        member_epoch_deks(&keyring_epochs(&acc.keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret)?;
+        member_epoch_deks(&keyring_epochs(&acc.keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret);
     do_add_member(
         acc.keyring,
         tree_id,
@@ -781,7 +781,7 @@ pub fn unlock_as_member(
 
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
-    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &root.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, &root.hpke_secret);
     let write_key_id = write_epoch_by_ordinal(&deks)?;
     let write_dek_hash = deks
         .iter()
@@ -789,7 +789,7 @@ pub fn unlock_as_member(
         .map(|(_, _, d)| dek_hash(d.expose()))
         .ok_or_else(|| VaultError::BadKeyring("write epoch not in the reachable set".into()))?;
     let did_key = did::DidKey::from_public_key(&root.identity.verifying_key().to_bytes());
-    let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
+    let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone());
     // A member is on a shared tree by definition (their admission set `first_shared_revision`), so they sign
     // every entry — stamping their watermarked head as the governing_ref, exactly like the owner path. Gated
     // on `has_been_shared` for symmetry (always true here), so the member and owner writers stay in lockstep.
@@ -879,11 +879,11 @@ pub fn remove_member(
 
     // The owner re-seals with a set spanning every epoch (reached via the RRK); the new epoch
     // is the highest, so the set writes under it.
-    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret)?;
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, owner_member_id, &rrk_secret);
     // Pin the freshly-minted write epoch (key_id + H(DEK)) into the result so the watermark commits to it
     // for the next recover (OPE-286 phase 2), before `deks` is moved into the sealer.
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone());
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
@@ -959,9 +959,9 @@ pub fn remove_member_as_co_owner(
 
     // The co-owner re-seals with a set spanning the epochs their own wraps reach (including
     // the new one they were re-wrapped into); the new epoch is the highest, so it's the write.
-    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret)?;
+    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, co_owner_member_id, &acc.hpke_secret);
     let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
-    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone())?;
+    let sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id.clone());
     Ok(MemberRemoved {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,

@@ -286,8 +286,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             .genesis
             .iter()
             .map(dto_to_minit)
-            .collect::<Result<_, _>>()
-            .map_err(|e| ClientError::Malformed(e.to_string()))?;
+            .collect();
         let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
             .with_reset_authority(anchor.reset_authority);
         (Keyeo::new(base, KeyringAccess, StrongRemove), None, 0)
@@ -370,8 +369,7 @@ pub fn compact(
         .genesis
         .iter()
         .map(dto_to_minit)
-        .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+        .collect();
     let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
         .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
@@ -451,8 +449,7 @@ pub fn compact_to_checkpoint(
         .genesis
         .iter()
         .map(dto_to_minit)
-        .collect::<Result<_, _>>()
-        .map_err(|e| ClientError::Malformed(e.to_string()))?;
+        .collect();
     let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
         .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);

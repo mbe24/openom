@@ -40,7 +40,7 @@ pub fn signing_bytes<D: Doc>(doc: &D) -> Vec<u8> {
     // Owned holders for the accessor values that return by value, so `SignedFields` can borrow them.
     let members = doc.members();
     let recovery = doc.recovery_authority();
-    write_signed_bytes(SignedFields {
+    write_signed_bytes(&SignedFields {
         group_id: doc.group_id(),
         revision: doc.revision(),
         prev_hash: doc.prev_hash(),
@@ -61,13 +61,11 @@ pub fn doc_hash<D: Doc>(doc: &D) -> DocHash {
 
 /// The exhaustive encoder. `#[deny(unused_variables)]` over the destructured `SignedFields` (and each
 /// `Signer` / `Governance`) is the guard: a newly-added signed field cannot silently escape the signed
-/// bytes. Taken by value (it holds only references + `Copy` scalars) so the destructure moves cleanly.
-// `SignedFields` is a lightweight bundle of references + `Copy` scalars, so by-value is cheap; it is taken
-// by value purely so the body owns its destructure without deref noise. (The exhaustiveness guard is the
-// `deny(unused_variables)` destructure itself — it holds by reference too, so this is style, not safety.)
-#[allow(clippy::needless_pass_by_value)]
+/// bytes. `SignedFields` holds only references + `Copy` scalars, so the destructure below copies each
+/// field out of `*fields` — the body reads as if owned, and a new NON-`Copy` field would fail to compile
+/// here, a second guard beside `deny(unused_variables)`.
 #[deny(unused_variables)]
-fn write_signed_bytes<Id, R, Pk>(fields: SignedFields<'_, Id, R, Pk>) -> Vec<u8>
+fn write_signed_bytes<Id, R, Pk>(fields: &SignedFields<'_, Id, R, Pk>) -> Vec<u8>
 where
     Id: Serialize,
     R: Serialize,
@@ -82,7 +80,7 @@ where
         governance,
         recovery_authority,
         payload_commitment,
-    } = fields;
+    } = *fields;
 
     let mut out = Vec::with_capacity(256);
     put_bytes(&mut out, DOMAIN_TAG);

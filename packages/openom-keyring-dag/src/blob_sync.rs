@@ -339,7 +339,7 @@ fn dto_to_action(d: &ActionDto) -> Result<KeyringAction> {
             initial_members: initial_members
                 .iter()
                 .map(dto_to_minit)
-                .collect::<Result<Vec<_>>>()?,
+                .collect(),
         },
         ActionDto::Add {
             member,
@@ -403,16 +403,14 @@ pub(crate) fn minit_to_dto(m: &KeyringMemberInit) -> MemberInitDto {
     }
 }
 
-// Returns `Result` to compose with the fallible `.map(dto_to_minit).collect::<Result<_>>()` decode
-// pipeline (alongside `decode_op`, which does error); the conversion may gain validation.
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn dto_to_minit(d: &MemberInitDto) -> Result<KeyringMemberInit> {
-    Ok(KeyringMemberInit {
+// Infallible: a straight field copy from the DTO (its pipeline sibling `decode_op` is the fallible step).
+pub(crate) fn dto_to_minit(d: &MemberInitDto) -> KeyringMemberInit {
+    KeyringMemberInit {
         id: d.id.clone(),
         role: d.role,
         author_public_key: d.author_public_key,
         hpke_public_key: d.hpke_public_key,
-    })
+    }
 }
 
 #[cfg(test)]

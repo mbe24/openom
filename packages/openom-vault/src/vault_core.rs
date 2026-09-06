@@ -261,23 +261,22 @@ pub(crate) fn open_epoch_dek(
 /// A legitimate epoch always opens under the correct RRK (a wrong passphrase is already caught by the
 /// anti-substitution check before this runs), so the chain — whose epochs are signature-protected — never
 /// skips, and the owner still reaches every real epoch.
-// Result-uniform with `member_epoch_deks` so the caller selects either owner/member path and `?`s it
-// identically; the tolerant-skip design (junk epochs dropped, not fatal) means it never errors today.
-#[allow(clippy::unnecessary_wraps)]
+// Infallible by design: a junk/un-openable epoch is SKIPPED (tolerant, OPE-287), never an error — so the
+// return is a plain `Vec`, not `Result`.
 pub(crate) fn epoch_deks(
     epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
     founder_id: &str,
     rrk_secret: &RrkSecret,
-) -> Result<Vec<(Vec<u8>, u64, Dek)>, VaultError> {
-    Ok(epochs
+) -> Vec<(Vec<u8>, u64, Dek)> {
+    epochs
         .iter()
         .filter_map(|ep| {
             open_epoch_dek(ep, tree_id, founder_id, rrk_secret)
                 .ok()
                 .map(|dek| (ep.key_id.as_bytes().to_vec(), ep.ordinal, dek))
         })
-        .collect())
+        .collect()
 }
 
 /// Re-wrap every epoch's DEK from the OLD recovery root to a NEW one (the RRK-HPKE wrap only; each
@@ -316,14 +315,13 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
 /// their wraps cover — join-epoch-onward). Empty means a removed member. TOLERANT (OPE-287): a wrap that
 /// won't open (a garbage member-authored epoch, or one wrapping the member's stale key) is skipped, not
 /// fatal — one junk epoch must not brick a member's unlock (see [`epoch_deks`]).
-// Result-uniform with `epoch_deks` (see there); the tolerant-skip design means it never errors today.
-#[allow(clippy::unnecessary_wraps)]
+// Infallible by design: an un-openable wrap is SKIPPED (tolerant, see `epoch_deks`), never an error.
 pub(crate) fn member_epoch_deks(
     epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
     member_id: &str,
     hpke_secret: &HpkePrivate,
-) -> Result<Vec<(Vec<u8>, u64, Dek)>, VaultError> {
+) -> Vec<(Vec<u8>, u64, Dek)> {
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
     let mut out = Vec::new();
     for ep in epochs {
@@ -339,30 +337,28 @@ pub(crate) fn member_epoch_deks(
             out.push((ep.key_id.as_bytes().to_vec(), ep.ordinal, dek));
         }
     }
-    Ok(out)
+    out
 }
 
-/// Build a [`SealerSet`] from reachable epoch DEKs, writing under `write_key_id`. The empty-epoch
-/// (removed-member) check is the CALLER's, via [`write_epoch_by_ordinal`] — this constructor never fails.
-// Returns `Result` to stay uniform with the fallible steps around it in the seal pipeline (it never errors).
-#[allow(clippy::unnecessary_wraps)]
+/// Build a [`SealerSet`] from reachable epoch DEKs, writing under `write_key_id`. Infallible — the
+/// empty-epoch (removed-member) check is the CALLER's, via [`write_epoch_by_ordinal`].
 pub(crate) fn sealer_set_from_deks(
     tree_id: &[u8],
     replica_id: &[u8],
     deks: Vec<(Vec<u8>, u64, Dek)>,
     write_key_id: Vec<u8>,
-) -> Result<SealerSet, VaultError> {
+) -> SealerSet {
     // Convert to the sealer's raw DEK bag at the boundary (the sealer has no role to confuse a DEK with).
     let epochs = deks
         .into_iter()
         .map(|(k, _e, d)| (k, d.into_inner()))
         .collect();
-    Ok(SealerSet::new(
+    SealerSet::new(
         TreeId::new(tree_id),
         ReplicaId::new(replica_id),
         epochs,
         KeyId::new(write_key_id),
-    ))
+    )
 }
 
 /// The chain's write epoch: the `key_id` of the highest-ordinal epoch. Chain epochs are a single linear
