@@ -93,6 +93,44 @@ fn is_member(k: &TestEngine, id: &[u8; 32]) -> bool {
     k.state().active_members().iter().any(|(m, _)| m == id)
 }
 
+/// GOLDEN — locks the canonical (signature + content-id) byte layout of a member `Add` action, whose
+/// body is the member's id/role/author-key/hpke-key. The member-identity consolidation renames and
+/// reorders STRUCT DECLARATIONS + serde DTOs, but MUST NOT touch the `write_canonical` encoder bodies;
+/// this fails loudly if the signed member-field order/encoding ever changes.
+/// (Guard for plan/keyring-dag/design.member-identity-consolidation.md.)
+#[test]
+fn golden_add_action_canonical_bytes_are_stable() {
+    let action: MembershipAction<[u8; 32], TestRole, Ed25519> = MembershipAction::Add {
+        member: [0x11; 32],
+        role: TestRole::Editor,
+        author_public_key: [0x22; 32],
+        hpke_public_key: [0x33; 32],
+        member_proof: None,
+    };
+    let bytes = keyeo_dag::canonical_encode::<u64, [u8; 32], _>(
+        &GroupId::unscoped(),
+        &[1u64],
+        &[0x44u8; 32],
+        &action,
+        &[0x55u8; 3],
+    );
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    // Layout: "keyeo:op:v3" | group_id | parents | author | Add{member, role, author_public_key,
+    // hpke_public_key, member_proof} | sealing. The member-field run is the middle — reordering the
+    // encoder would move it and break this.
+    assert_eq!(
+        hex,
+        "6b6579656f3a6f703a76330000000000000000010000000000000001\
+         4444444444444444444444444444444444444444444444444444444444444444\
+         01\
+         1111111111111111111111111111111111111111111111111111111111111111\
+         01\
+         2222222222222222222222222222222222222222222222222222222222222222\
+         3333333333333333333333333333333333333333333333333333333333333333\
+         000300000000000000555555"
+    );
+}
+
 // ── OPE-258: authority-aware resolution (Phase 0) ──
 // RED until the resolver consults `AccessControl` at each op's causal position. Pins the
 // authority-blind hole: a member who is NOT authorized to remove can still fire strong-remove's
