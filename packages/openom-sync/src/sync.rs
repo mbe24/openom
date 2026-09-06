@@ -143,8 +143,7 @@ impl docsync::Sealer for SealerAdapter {
         Envelope::decode(snapshot_envelope)
             .ok()
             .and_then(|e| e.header)
-            .map(|h| h.covers_through_seq)
-            .unwrap_or(0)
+            .map_or(0, |h| h.covers_through_seq)
     }
 }
 
@@ -183,12 +182,18 @@ impl<S: DocStore> SyncClient<S> {
     /// Seal a batch of channel items as one `Kind::Delta` / `Format::OpenomOps` entry, apply it to the
     /// local set, queue it, and flush. Seal + chain-advance happen exactly once; a failed flush leaves
     /// the sealed envelope queued for a byte-identical retry.
+    ///
+    /// # Errors
+    /// Returns an error if sealing or the store append fails.
     pub fn push_claims(&mut self, items: &[ChannelItem]) -> Result<()> {
         self.inner.apply(items.to_vec())
     }
 
     /// Append every queued sealed envelope, oldest first. A failed append leaves it (and the rest)
     /// queued; call again to retry — a re-appended entry dedups on the dot and re-folds idempotently.
+    ///
+    /// # Errors
+    /// Returns an error if the store push fails (the entry stays queued for a later retry).
     pub fn flush(&mut self) -> Result<()> {
         self.inner.flush()
     }
@@ -201,6 +206,9 @@ impl<S: DocStore> SyncClient<S> {
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
     /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate
     /// entry re-inserts by id. From a fresh client this replays the whole log (the journal is authority).
+    ///
+    /// # Errors
+    /// Returns an error if the store read or a decode fails.
     pub fn pull_claims(&mut self) -> Result<usize> {
         self.inner.pull()
     }
@@ -208,12 +216,18 @@ impl<S: DocStore> SyncClient<S> {
     /// Publish a snapshot of the live record set (the byte-preserving fold), CAS'd on the prior snapshot
     /// version and stamped with the log seq it covers. Pull first so the snapshot reflects the whole log.
     /// Returns the covered seq.
+    ///
+    /// # Errors
+    /// Returns an error if snapshotting or the store write fails.
     pub fn compact_claims(&mut self) -> Result<u64> {
         self.inner.compact()
     }
 
     /// Bring a fresh client up to date: load the stored snapshot (if any) into the set, then pull only
     /// the ops after the seq it covers. Falls back to a full log replay when there is no snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the store read or a decode fails.
     pub fn bootstrap_claims(&mut self) -> Result<()> {
         self.inner.bootstrap()
     }
