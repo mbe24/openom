@@ -19,3 +19,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 openom-crypto = { path = "../openom-crypto" }
+
+[lints]
+workspace = true

@@ -42,3 +42,6 @@ proptest.workspace = true
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom_v04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom_v02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+[lints]
+workspace = true

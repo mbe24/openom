@@ -37,6 +37,14 @@ mood, lowercase start, no trailing period.
 
 Run quick type checks, format checks, and unit tests after a series of commits.
 
+**Clippy is a gate.** `clippy::pedantic` + `clippy::cargo` are wired workspace-wide via
+`[workspace.lints.clippy]` (each crate opts in with `[lints] workspace = true`). For every crate you
+touch, run `node scripts/cargo.mjs clippy -p <crate>` and clear any new findings before committing —
+never let them accumulate. When you change a `Cargo.toml` or dependencies, also run one workspace-root
+pass — `node scripts/cargo.mjs clippy --workspace --exclude openom-tauri` — to catch the `clippy::cargo`
+(project-file) lints, which only surface at the workspace level. If a lint is genuinely wrong for a
+call site, `#[allow(clippy::…)]` it with a one-line reason rather than reaching for a blanket allow.
+
 ## Code style
 
 Prefer functions under ~150 lines. A longer one should be split into named phases or helper

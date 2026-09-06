@@ -12,3 +12,6 @@ description = "Generic local-first client sync loop (push/pull/compact/bootstrap
 [dependencies]
 journal = { path = "../journal" }
 thiserror = "2"
+
+[lints]
+workspace = true

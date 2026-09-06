@@ -69,3 +69,6 @@ openom-keyring-chain = { workspace = true, features = ["test-util"] }
 keyeo-crypto.workspace = true
 # Metering tests seed accounts with tiny caps directly, to drive the rate/capacity gates.
 sqlx.workspace = true
+
+[lints]
+workspace = true

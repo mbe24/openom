@@ -23,3 +23,6 @@ proptest.workspace = true
 # lib.rs tests mint an ad-hoc author identity via openom_keyring_chain::generate_identity (test-util gated). A
 # dev-dependency, so it never enters a downstream consumer's build graph.
 openom-keyring-chain = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

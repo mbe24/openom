@@ -15,3 +15,6 @@ thiserror.workspace = true
 # Canonical binary encoding behind the CanonicalBytes seam: compact + deterministic, and byte-identical
 # across native and wasm Rust builds (a content-hash id depends on that).
 postcard = { version = "1", features = ["use-std"] }
+
+[lints]
+workspace = true

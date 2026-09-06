@@ -8,3 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 prost.workspace = true
+
+[lints]
+workspace = true

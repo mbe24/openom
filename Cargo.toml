@@ -51,6 +51,13 @@ rust-version = "1.85"
 # with harnesses opt in via `[lints] workspace = true`. See scripts/kani.mjs and docker/kani.Dockerfile.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
+# Clippy pedantic + cargo, opted into per-crate via `[lints] workspace = true`. Set to `warn` during the
+# cleanup sweep; flip to `deny` once the tree is clean so a new finding can't land (CI runs clippy too).
+# `priority = -1` lets a specific `#[allow(clippy::x)]` / lint override win over the group.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
 [workspace.dependencies]
 # Internal crates (path relative to this root manifest).
 openom-protocol = { path = "packages/openom-protocol" }

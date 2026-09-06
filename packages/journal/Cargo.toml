@@ -22,3 +22,6 @@ rusqlite = { workspace = true, optional = true }
 [features]
 default = []
 sqlite = ["dep:rusqlite"]
+
+[lints]
+workspace = true

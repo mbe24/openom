@@ -27,3 +27,6 @@ openom-roles.workspace = true
 keyeo-crypto.workspace = true
 proptest.workspace = true
 tempfile = "3"
+
+[lints]
+workspace = true

@@ -24,3 +24,6 @@ jsonschema = { workspace = true, optional = true }
 # Validate a serialized model against model.schema.json. Off by default so the wasm bundle stays
 # lean; enabled in tests and any native import path.
 validation = ["dep:jsonschema"]
+
+[lints]
+workspace = true
