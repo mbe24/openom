@@ -99,6 +99,8 @@ impl Part {
     }
 }
 
+// serde's `skip_serializing_if` hands the field by reference, so this must take `&bool` by contract.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -156,6 +158,10 @@ fn find(names: &[Name], id: NameId) -> Option<&Name> {
 /// `borrows_from` — the `family` part(s) borrowed from the nearest ancestor up the composition chain
 /// that has them. Transitive (Bobby → Bob → Robert) and cycle-safe. Never follows `equivalent_to`
 /// (borrowing across a rendering would splice scripts).
+///
+/// # Errors
+/// Returns [`NameError::UnknownName`] if `id` or a borrowed id is absent, or [`NameError::CyclicBorrow`]
+/// on a `borrows_from` cycle.
 pub fn effective_parts(names: &[Name], id: NameId) -> Result<Vec<Part>, NameError> {
     let name = find(names, id).ok_or(NameError::UnknownName(id))?;
     let mut parts = name.parts.clone();
@@ -188,6 +194,9 @@ pub fn effective_parts(names: &[Name], id: NameId) -> Result<Vec<Part>, NameErro
 
 /// Render a name to a display string: its effective parts joined in order, each part rendered with
 /// its particle on the stated side. (Particles are for display only — ignored for sort/match.)
+///
+/// # Errors
+/// Returns a [`NameError`] if the name's effective parts can't be resolved (see [`effective_parts`]).
 pub fn render(names: &[Name], id: NameId) -> Result<String, NameError> {
     let parts = effective_parts(names, id)?;
     Ok(parts
@@ -200,6 +209,9 @@ pub fn render(names: &[Name], id: NameId) -> Result<String, NameError> {
 /// The equivalence class of `id`: every name reachable through `equivalent_to` edges treated as
 /// **undirected**, including `id` itself (a name with no edges is a class of one). Returned in
 /// names-list order. Errors on an edge pointing outside the list.
+///
+/// # Errors
+/// Returns [`NameError::UnknownName`] if `id` or any `equivalent_to` edge points outside `names`.
 pub fn equivalence_class(names: &[Name], id: NameId) -> Result<Vec<NameId>, NameError> {
     if find(names, id).is_none() {
         return Err(NameError::UnknownName(id));
@@ -233,6 +245,9 @@ pub fn equivalence_class(names: &[Name], id: NameId) -> Result<Vec<NameId>, Name
 }
 
 /// The `primary` name, if exactly one is marked. Errors if more than one is; `None` if none is.
+///
+/// # Errors
+/// Returns [`NameError::MultiplePrimary`] if more than one name is marked `primary`.
 pub fn primary(names: &[Name]) -> Result<Option<&Name>, NameError> {
     let mut found: Option<&Name> = None;
     for n in names.iter().filter(|n| n.primary) {
@@ -248,6 +263,10 @@ pub fn primary(names: &[Name]) -> Result<Option<&Name>, NameError> {
 /// `borrows_from` chain resolvable and acyclic; every `equivalent_to` edge resolvable and not a
 /// self-loop; and `provenance` only where an `equivalent_to` edge exists. The two relations are
 /// independent — a name may set both.
+///
+/// # Errors
+/// Returns the first [`NameError`] any invariant violates: multiple primaries, an unresolvable or cyclic
+/// borrow, a self- or dangling `equivalent_to` edge, or `provenance` set without an equivalence edge.
 pub fn validate(names: &[Name]) -> Result<(), NameError> {
     primary(names)?;
     for n in names {

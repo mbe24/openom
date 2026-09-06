@@ -13,7 +13,7 @@ use uuid::Uuid;
 /// Source of fresh entity ids. One impl for real data ([`OsIdSource`]); one for tests
 /// ([`SeededIdSource`]).
 pub trait IdSource {
-    /// Mint a fresh, well-formed UUIDv4.
+    /// Mint a fresh, well-formed `UUIDv4`.
     fn next_uuid(&mut self) -> Uuid;
 }
 
@@ -28,7 +28,7 @@ impl IdSource for OsIdSource {
 }
 
 /// A **deterministic** id source for TESTS ONLY — never for real data (its entropy is not
-/// cryptographic). A xorshift64\* stream stamped into well-formed UUIDv4 layout.
+/// cryptographic). A xorshift64\* stream stamped into well-formed `UUIDv4` layout.
 #[derive(Debug, Clone)]
 pub struct SeededIdSource {
     state: u64,
@@ -36,6 +36,7 @@ pub struct SeededIdSource {
 
 impl SeededIdSource {
     /// Seed the stream. A zero seed is remapped so the generator never gets stuck at 0.
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         Self {
             state: if seed == 0 {

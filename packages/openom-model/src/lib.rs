@@ -171,6 +171,7 @@ pub struct Model {
 
 impl Model {
     /// An empty tree.
+    #[must_use]
     pub fn new(tree: TreeId) -> Self {
         Self {
             tree,
@@ -187,6 +188,9 @@ impl Model {
 
     /// Reserve a cross-tree link (OPE-99 seam). Validates the local node exists; the remote endpoint
     /// is opaque — no federation behaviour is performed.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::DanglingNode`] if `local` is not a node in this model.
     pub fn add_cross_tree_link(
         &mut self,
         local: NodeId,
@@ -226,6 +230,10 @@ impl Model {
     }
 
     /// Add a relationship edge. Rejects self-loops and edges to absent nodes.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::SelfLoop`] if `from == to`, or [`ModelError::DanglingNode`] if either
+    /// endpoint is absent.
     pub fn add_edge(
         &mut self,
         relationship: RelationshipType,
@@ -256,6 +264,9 @@ impl Model {
     }
 
     /// Record an event on a node.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::DanglingNode`] if `primary` is not a node in this model.
     pub fn add_event(
         &mut self,
         event_type: EventType,
@@ -282,6 +293,9 @@ impl Model {
     }
 
     /// Attach a name (the name model) to a node.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::DanglingNode`] if `node` is not a node in this model.
     pub fn add_name(&mut self, node: NodeId, name: Name) -> Result<(), ModelError> {
         let n = self
             .nodes
@@ -294,6 +308,9 @@ impl Model {
     /// Correct an event's timestamp **in place** — the event's id (and any reference to it) is
     /// unchanged. This is the whole point of opaque, non-derived ids: facts are mutable, identity
     /// is not.
+    ///
+    /// # Errors
+    /// Returns [`ModelError::NoSuchEvent`] if `event` is not an event in this model.
     pub fn correct_event_timestamp(
         &mut self,
         event: EventId,
@@ -313,11 +330,17 @@ impl Model {
 /// yields sorted keys, no whitespace, and canonical integers. This equals JCS here because the model
 /// is float-free (JCS's ES6 number rule only bites on floats) and its keys are ASCII (byte order ==
 /// UTF-16 order). If arbitrary/float data ever needs canonicalizing, swap in a full JCS impl here.
+///
+/// # Errors
+/// Returns a [`serde_json::Error`] if `value` fails to serialize.
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&serde_json::to_value(value)?)
 }
 
 /// Canonical bytes of the whole model.
+///
+/// # Errors
+/// Returns a [`serde_json::Error`] if the model fails to serialize.
 pub fn canonicalize(model: &Model) -> Result<Vec<u8>, serde_json::Error> {
     canonical_json(model)
 }
@@ -332,6 +355,9 @@ pub fn canonicalize(model: &Model) -> Result<Vec<u8>, serde_json::Error> {
 ///
 /// Editing a fact changes its hash *by design*: an attestation on the old value then reads as
 /// "attested an earlier value".
+///
+/// # Errors
+/// Returns a [`serde_json::Error`] if `value` fails to serialize.
 pub fn content_hash<T: Serialize>(value: &T) -> Result<[u8; 32], serde_json::Error> {
     Ok(Sha256::digest(canonical_json(value)?).into())
 }
