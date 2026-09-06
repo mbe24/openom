@@ -45,7 +45,7 @@ ok(true, 'owner created the tree row');
 
 // 2. owner mints an invite (dummy signer set — fp isn't server-checked; the real fp matters at join)
 const { link, record, pending } = await mint({
-  uuid, role: 'Editor', signers: [{ memberId: OWNER, authorPublic: new Uint8Array(32).fill(7) }],
+  uuid, role: 'Editor', signers: [{ memberId: OWNER, authorPublicKey: new Uint8Array(32).fill(7) }],
   now: Date.now(), ttlMs: 3600_000,
 });
 
@@ -55,18 +55,18 @@ ok(r.ok, `owner minted the invite on the server (HTTP ${r.status})`);
 
 // 4. member: provisionMember + build the MAC'd claim from the parsed link
 const mi = provisionMember('member-pass');
-const hpke = mi.hpkePublic;
-const author = mi.authorPublic;
+const hpke = mi.hpkePublicKey;
+const author = mi.authorPublicKey;
 const parsed = parseLink(link);
 ok(parsed.uuid === uuid && parsed.role === 'Editor', 'member parsed the invite link');
-const c = await claim({ s: parsed.s, inviteId: parsed.inviteId, uuid: parsed.uuid, role: parsed.role, memberId: MEMBER, hpkePublic: hpke, authorPublic: author });
+const c = await claim({ s: parsed.s, inviteId: parsed.inviteId, uuid: parsed.uuid, role: parsed.role, memberId: MEMBER, hpkePublicKey: hpke, authorPublicKey: author });
 
 // 5. member submits the claim (member_id == the member's JWT sub)
-r = await mf(`${BASE}/invites/${encodeURIComponent(parsed.inviteId)}/claim`, { method: 'PUT', body: JSON.stringify({ member_id: MEMBER, hpke_public: b64(c.hpkePublic), author_public: b64(c.authorPublic), tag: b64(c.tag) }) });
+r = await mf(`${BASE}/invites/${encodeURIComponent(parsed.inviteId)}/claim`, { method: 'PUT', body: JSON.stringify({ member_id: MEMBER, hpke_public: b64(c.hpkePublicKey), author_public: b64(c.authorPublicKey), tag: b64(c.tag) }) });
 ok(r.status === 204, `member submitted the claim (HTTP ${r.status})`);
 
 // the server enforces member_id == JWT sub: the OWNER trying to claim as MEMBER is refused
-r = await of(`${BASE}/invites/${encodeURIComponent(parsed.inviteId)}/claim`, { method: 'PUT', body: JSON.stringify({ member_id: MEMBER, hpke_public: b64(c.hpkePublic), author_public: b64(c.authorPublic), tag: b64(c.tag) }) });
+r = await of(`${BASE}/invites/${encodeURIComponent(parsed.inviteId)}/claim`, { method: 'PUT', body: JSON.stringify({ member_id: MEMBER, hpke_public: b64(c.hpkePublicKey), author_public: b64(c.authorPublicKey), tag: b64(c.tag) }) });
 ok(r.status === 403, `a claim whose member_id != the JWT sub is refused (HTTP ${r.status})`);
 
 // 6. owner lists + verifies the claim MAC against its LOCAL mint record (the anti-MITM check)
@@ -74,10 +74,10 @@ r = await of(`${BASE}/trees/${uuid}/invites`, { method: 'GET' });
 const list = await r.json();
 ok(list.length === 1 && list[0].claim, 'owner sees exactly one claimed invite');
 const cv = list[0].claim;
-const verified = await verifyClaim(record, { memberId: cv.member_id, hpkePublic: unb64(cv.hpke_public), authorPublic: unb64(cv.author_public), tag: unb64(cv.tag) });
+const verified = await verifyClaim(record, { memberId: cv.member_id, hpkePublicKey: unb64(cv.hpke_public), authorPublicKey: unb64(cv.author_public), tag: unb64(cv.tag) });
 ok(verified, 'owner verifies the claim MAC (proves the server did not substitute the member key)');
 // a server that swapped the key is caught:
-const forged = await verifyClaim(record, { memberId: cv.member_id, hpkePublic: new Uint8Array(32).fill(0x99), authorPublic: unb64(cv.author_public), tag: unb64(cv.tag) });
+const forged = await verifyClaim(record, { memberId: cv.member_id, hpkePublicKey: new Uint8Array(32).fill(0x99), authorPublicKey: unb64(cv.author_public), tag: unb64(cv.tag) });
 ok(!forged, 'a substituted member key fails the owner MAC check');
 
 console.log(failed ? `\ninvite transport FAILED (${failed})` : '\ninvite transport + crypto OK against the real server');

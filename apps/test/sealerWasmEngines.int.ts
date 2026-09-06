@@ -182,14 +182,14 @@ describe('the real wasm runs dag membership + concurrent merge end to end (OPE-2
     let anchor = p.keyring;
     p.takeSealer()!.free();
     p.free();
-    const accounts: Record<string, { kdfParams: Uint8Array; authorPublic: Uint8Array; hpkePublic: Uint8Array }> = {};
+    const accounts: Record<string, { kdfParams: Uint8Array; authorPublicKey: Uint8Array; hpkePublicKey: Uint8Array }> = {};
     for (const id of ids) {
       const acct = wasmProvisionMember(`${id} pass`);
-      accounts[id] = { kdfParams: acct.kdfParams, authorPublic: acct.authorPublic, hpkePublic: acct.hpkePublic };
+      accounts[id] = { kdfParams: acct.kdfParams, authorPublicKey: acct.authorPublicKey, hpkePublicKey: acct.hpkePublicKey };
       acct.free();
       const r = wasmDagAddMember(
         anchor, ownerPass, TREE, MEMBER, replica(1), id, 'editor',
-        accounts[id].authorPublic, accounts[id].hpkePublic,
+        accounts[id].authorPublicKey, accounts[id].hpkePublicKey,
       );
       anchor = r.keyring;
       r.free();
@@ -261,8 +261,8 @@ describe('the real wasm runs dag membership + concurrent merge end to end (OPE-2
 
     const bob = wasmProvisionMember('bob pass');
     const bobKdf = bob.kdfParams;
-    const bobAuthor = bob.authorPublic;
-    const bobHpke = bob.hpkePublic;
+    const bobAuthor = bob.authorPublicKey;
+    const bobHpke = bob.hpkePublicKey;
     bob.free();
 
     const added = wasmDagAddMember(anchor0, ownerPass, TREE, MEMBER, replica(1), 'bob', 'editor', bobAuthor, bobHpke);
@@ -301,7 +301,7 @@ describe('keyring membership summary + basis coverage (real wasm, OPE-293/294)',
 
     // Advance the frontier by adding a member.
     const bob = wasmProvisionMember('bob pass');
-    const added = wasmDagAddMember(anchor0, 'owner horse', TREE, MEMBER, replica(1), 'acct-bob', 'editor', bob.authorPublic, bob.hpkePublic);
+    const added = wasmDagAddMember(anchor0, 'owner horse', TREE, MEMBER, replica(1), 'acct-bob', 'editor', bob.authorPublicKey, bob.hpkePublicKey);
     const anchor1 = added.keyring;
     added.free();
     bob.free();

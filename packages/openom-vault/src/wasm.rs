@@ -504,13 +504,13 @@ impl MemberIdentity {
         self.kdf_params.clone()
     }
     /// The Ed25519 author verify-key to share OOB.
-    #[wasm_bindgen(getter, js_name = authorPublic)]
+    #[wasm_bindgen(getter, js_name = authorPublicKey)]
     #[must_use]
     pub fn author_public_key(&self) -> Vec<u8> {
         self.author_public_key.clone()
     }
     /// The X25519 HPKE public key to share OOB.
-    #[wasm_bindgen(getter, js_name = hpkePublic)]
+    #[wasm_bindgen(getter, js_name = hpkePublicKey)]
     #[must_use]
     pub fn hpke_public_key(&self) -> Vec<u8> {
         self.hpke_public_key.clone()
@@ -1466,7 +1466,7 @@ impl WalkResult {
         self.head_keyring.clone()
     }
 
-    /// The head's authorized signers as a JSON string `[{"memberId","authorPublic"(hex)}]`. The JS
+    /// The head's authorized signers as a JSON string `[{"memberId","authorPublicKey"(hex)}]`. The JS
     /// computes the canonical fingerprint over these and cross-checks the invite's human-readable `fp`.
     #[wasm_bindgen(getter, js_name = signersJson)]
     #[must_use]
@@ -1488,7 +1488,7 @@ impl WalkResult {
 struct WalkSignerDto {
     #[serde(rename = "memberId")]
     member_id: String,
-    #[serde(rename = "authorPublic")]
+    #[serde(rename = "authorPublicKey")]
     author_public: String,
 }
 

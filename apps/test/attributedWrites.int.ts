@@ -38,7 +38,7 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
     // Admit an editor → the tree is now shared.
     const m = wasmProvisionMember('member pass');
     const shared = keyringOf(
-      wasmAddMember(genesis, 'owner pass', TREE, OWNER, 1, 'acct-m', 'editor', m.authorPublic, m.hpkePublic),
+      wasmAddMember(genesis, 'owner pass', TREE, OWNER, 1, 'acct-m', 'editor', m.authorPublicKey, m.hpkePublicKey),
     );
     m.free();
     expect(wasmKeyringHasBeenShared('chain', shared)).toBe(true);
@@ -56,7 +56,7 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
     // Admit an editor (dag Add op) → has_been_shared flips true. Note dag arg order: author key before hpke key.
     const m = wasmProvisionMember('member pass');
     const shared = keyringOf(
-      wasmDagAddMember(genesis, 'owner pass', TREE, OWNER, replica(2), 'acct-m', 'editor', m.authorPublic, m.hpkePublic),
+      wasmDagAddMember(genesis, 'owner pass', TREE, OWNER, replica(2), 'acct-m', 'editor', m.authorPublicKey, m.hpkePublicKey),
     );
     m.free();
     expect(wasmKeyringHasBeenShared('dag', shared)).toBe(true);

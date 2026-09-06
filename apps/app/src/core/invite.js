@@ -67,19 +67,19 @@ async function sha256(subtle, data) {
   return new Uint8Array(await subtle.digest('SHA-256', data));
 }
 
-async function macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublic, authorPublic }) {
-  return hmac(subtle, sMac, framed(inviteId, uuid, role, memberId, hpkePublic, authorPublic));
+async function macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey }) {
+  return hmac(subtle, sMac, framed(inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey));
 }
 
 /**
  * Canonical fingerprint of a tree's signer set: SHA-256 over the signers SORTED by member id, each
  * as framed(member_id ‖ author_public), base64url. Both the owner (at mint/admit) and the member
  * (after the genesis-walk) must produce identical bytes, so the encoding is pinned here.
- * @param {{memberId: string, authorPublic: Uint8Array}[]} signers
+ * @param {{memberId: string, authorPublicKey: Uint8Array}[]} signers
  */
 export async function fingerprintSigners(signers, { subtle = crypto.subtle } = {}) {
   const sorted = [...signers].sort((a, b) => (a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0));
-  const parts = sorted.map((s) => framed(s.memberId, s.authorPublic));
+  const parts = sorted.map((s) => framed(s.memberId, s.authorPublicKey));
   const total = parts.reduce((n, p) => n + p.length, 0);
   const cat = new Uint8Array(total);
   let off = 0;
@@ -153,10 +153,10 @@ export function parseLink(url) {
  * Invitee: build the claim to submit to the server, MAC'd with `s_mac` over its own keys. `s` comes
  * from the parsed link; `role`/`inviteId`/`uuid` too. The server stores this against the pending invite.
  */
-export async function claim({ s, inviteId, uuid, role, memberId, hpkePublic, authorPublic }, { subtle = crypto.subtle } = {}) {
+export async function claim({ s, inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey }, { subtle = crypto.subtle } = {}) {
   const sMac = await hkdf(subtle, s, MAC_INFO);
-  const tag = await macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublic, authorPublic });
-  return { inviteId, memberId, hpkePublic, authorPublic, tag };
+  const tag = await macTag(subtle, sMac, { inviteId, uuid, role, memberId, hpkePublicKey, authorPublicKey });
+  return { inviteId, memberId, hpkePublicKey, authorPublicKey, tag };
 }
 
 /**
@@ -170,8 +170,8 @@ export async function verifyClaim(record, claim, { subtle = crypto.subtle } = {}
     uuid: record.uuid,
     role: record.role,
     memberId: claim.memberId,
-    hpkePublic: claim.hpkePublic,
-    authorPublic: claim.authorPublic,
+    hpkePublicKey: claim.hpkePublicKey,
+    authorPublicKey: claim.authorPublicKey,
   });
   return timingSafeEqual(expected, claim.tag);
 }

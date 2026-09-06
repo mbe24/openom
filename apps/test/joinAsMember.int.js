@@ -19,10 +19,10 @@ const treeId = new Uint8Array(16).fill(0xaa);
 
 // The signer set the walk "returns"; the invite fp is computed over the SAME set (the real fingerprint).
 const SIGNERS = [
-  { memberId: 'owner', authorPublic: new Uint8Array(32).fill(0x11) },
-  { memberId: 'co', authorPublic: new Uint8Array(32).fill(0x22) },
+  { memberId: 'owner', authorPublicKey: new Uint8Array(32).fill(0x11) },
+  { memberId: 'co', authorPublicKey: new Uint8Array(32).fill(0x22) },
 ];
-const signersJson = JSON.stringify(SIGNERS.map((s) => ({ memberId: s.memberId, authorPublic: hex(s.authorPublic) })));
+const signersJson = JSON.stringify(SIGNERS.map((s) => ({ memberId: s.memberId, authorPublicKey: hex(s.authorPublicKey) })));
 
 // A 52-byte pinned watermark (revision(4) ‖ pin(48)) as unlockAsMember returns.
 const pinnedWm = (rev) => {

@@ -2,15 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { mint, parseLink, claim, verifyClaim, fingerprintSigners } from '../app/src/core/invite.js';
 
 // Two signers; distinct 32-byte author keys.
-const OWNER = { memberId: '00000000-0000-0000-0000-0000000000aa', authorPublic: new Uint8Array(32).fill(0xa1) };
-const COOWNER = { memberId: '00000000-0000-0000-0000-0000000000bb', authorPublic: new Uint8Array(32).fill(0xb2) };
+const OWNER = { memberId: '00000000-0000-0000-0000-0000000000aa', authorPublicKey: new Uint8Array(32).fill(0xa1) };
+const COOWNER = { memberId: '00000000-0000-0000-0000-0000000000bb', authorPublicKey: new Uint8Array(32).fill(0xb2) };
 const signers = [OWNER, COOWNER];
 
 // A would-be member's provisionMember output (simulated — the crypto is tested elsewhere).
 const M = {
   memberId: '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
-  hpkePublic: new Uint8Array(32).fill(0x11),
-  authorPublic: new Uint8Array(32).fill(0x22),
+  hpkePublicKey: new Uint8Array(32).fill(0x11),
+  authorPublicKey: new Uint8Array(32).fill(0x22),
 };
 
 const UUID = 'bc4e834a-7856-865c-98f7-7a91502b86bf';
@@ -81,7 +81,7 @@ describe('invite crypto (two-channel)', () => {
     const p = parseLink(link);
     const c = await claim({ s: p.s, inviteId: p.inviteId, uuid: p.uuid, role: p.role, ...M });
     // a malicious server swaps the invitee's hpke key for one it controls
-    const tampered = { ...c, hpkePublic: new Uint8Array(32).fill(0x99) };
+    const tampered = { ...c, hpkePublicKey: new Uint8Array(32).fill(0x99) };
     expect(await verifyClaim(record, tampered)).toBe(false);
   });
 

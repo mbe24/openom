@@ -156,7 +156,7 @@ ok(true, 'owner sealed a pre-share entry');
 
 // ── OWNER admits the member (rev 2) ────────────────────────────────────────────────────────────────────
 const m = provisionMember(MEMBER_PASS); // the member's identity (kdf params + public keys), shared OOB via the claim
-const added = addMember(genesisRaw, OWNER_PASS, TREE, OWNER, 1, MEMBER, 'editor', m.authorPublic, m.hpkePublic);
+const added = addMember(genesisRaw, OWNER_PASS, TREE, OWNER, 1, MEMBER, 'editor', m.authorPublicKey, m.hpkePublicKey);
 const rev2Raw = added.keyring;
 added.free();
 await ownerRemote.putKeyring(uuid, wrapChainKeyringUpdate(rev2Raw));
@@ -193,7 +193,7 @@ ok(true, 'a forged UNSIGNED delta was appended to the shared log (seq 2)');
 // governed by rev 2 — the member can only verify it from RETAINED per-revision history, not the head.
 const MEMBER2 = crypto.randomUUID();
 const m2 = provisionMember('member2-pass');
-const added2 = addMember(rev2Raw, OWNER_PASS, TREE, OWNER, 2, MEMBER2, 'editor', m2.authorPublic, m2.hpkePublic);
+const added2 = addMember(rev2Raw, OWNER_PASS, TREE, OWNER, 2, MEMBER2, 'editor', m2.authorPublicKey, m2.hpkePublicKey);
 const rev3Raw = added2.keyring;
 added2.free();
 await ownerRemote.putKeyring(uuid, wrapChainKeyringUpdate(rev3Raw));
@@ -212,7 +212,7 @@ const ownerWalk = (() => {
 ok(ownerWalk.revision === 3, 'the prefix pin (rev 1) verifies against a rev-3 head (the admit-bump)');
 const signers = JSON.parse(ownerWalk.signersJson).map((s) => ({
   memberId: s.memberId,
-  authorPublic: Uint8Array.from(s.authorPublic.match(/../g).map((h) => parseInt(h, 16))),
+  authorPublicKey: Uint8Array.from(s.authorPublicKey.match(/../g).map((h) => parseInt(h, 16))),
 }));
 const { link } = await mint({
   uuid,

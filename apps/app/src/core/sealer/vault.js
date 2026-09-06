@@ -75,13 +75,13 @@ export function unframe(buf) {
 function concatSigners(signers) {
   const out = new Uint8Array(signers.length * 32);
   signers.forEach((s, i) => {
-    if (s.authorPublic.length !== 32) throw new KeyringJoinError('signer author key is not 32 bytes');
-    out.set(s.authorPublic, i * 32);
+    if (s.authorPublicKey.length !== 32) throw new KeyringJoinError('signer author key is not 32 bytes');
+    out.set(s.authorPublicKey, i * 32);
   });
   return out;
 }
 
-// Decode the hex `authorPublic` the wasm emits in `signersJson` back to raw bytes (for the fingerprint
+// Decode the hex `authorPublicKey` the wasm emits in `signersJson` back to raw bytes (for the fingerprint
 // cross-check and the trustedSigners concat).
 function hexToBytes(hex) {
   if (hex.length % 2 !== 0) throw new KeyringJoinError('odd-length signer hex');
@@ -268,7 +268,7 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       // 2. Cross-check the human-readable signer fingerprint against the owner's out-of-band value.
       const signers = JSON.parse(walk.signersJson).map((s) => ({
         memberId: s.memberId,
-        authorPublic: hexToBytes(s.authorPublic),
+        authorPublicKey: hexToBytes(s.authorPublicKey),
       }));
       if ((await fingerprintSigners(signers)) !== invite.fp) {
         throw new KeyringJoinError('signer fingerprint does not match the invite');
