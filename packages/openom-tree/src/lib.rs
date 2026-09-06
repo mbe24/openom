@@ -184,10 +184,11 @@ impl Tree {
         self.moderators = moderators;
     }
 
-    // --- edits: mint an op, apply it optimistically, return the batch bytes to seal --------------
+    // --- edits: mint an op and apply it optimistically; `flush` produces the bytes to seal ----------
 
     /// Assert a new claim about `target`, authored by this replica. `now_millis` is a physical
     /// wall-clock reading (epoch ms); the engine-owned clock turns it into the monotonic `createdAt`.
+    /// The minted op is buffered; call [`flush`](Tree::flush) once per settled edit to get the bytes.
     ///
     /// # Errors
     /// Returns a [`TreeError`] if the claim can't be canonicalized to compute its id.
@@ -197,11 +198,12 @@ impl Tree {
         predicate: &str,
         value: Value,
         now_millis: i64,
-    ) -> Result<Vec<u8>, TreeError> {
+    ) -> Result<(), TreeError> {
         let at = self.clock.next(now_millis);
         let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
         c.compute_id()?;
-        self.emit(vec![ChannelItem::Assert(Record::Claim(c))])
+        self.emit(vec![ChannelItem::Assert(Record::Claim(c))]);
+        Ok(())
     }
 
     /// Assert an identity anchor (Person / Event / Place / Tree) with the given id, authored by this
@@ -224,7 +226,7 @@ impl Tree {
         id: &str,
         type_uri: &str,
         now_millis: i64,
-    ) -> Result<Vec<u8>, TreeError> {
+    ) -> Result<(), TreeError> {
         let at = self.clock.next(now_millis);
         let anchor = Anchor {
             id: id.to_owned(),
@@ -243,7 +245,8 @@ impl Tree {
         self.emit(vec![
             ChannelItem::Assert(Record::Anchor(anchor)),
             ChannelItem::Assert(Record::Claim(existence)),
-        ])
+        ]);
+        Ok(())
     }
 
     /// Remove one of this author's own records by id (same-author observed-remove). Undoable by
@@ -263,7 +266,7 @@ impl Tree {
         )?;
         let item = ChannelItem::Op(op);
         let id = item.id().to_owned();
-        self.emit(vec![item])?;
+        self.emit(vec![item]);
         Ok(id)
     }
 
@@ -279,7 +282,7 @@ impl Tree {
         predicate: &str,
         value: Value,
         now_millis: i64,
-    ) -> Result<Vec<u8>, TreeError> {
+    ) -> Result<(), TreeError> {
         // The replacement claim and the enclosing op are one atomic edit — they share one clock tick.
         let at = self.clock.next(now_millis);
         let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
@@ -292,7 +295,8 @@ impl Tree {
                 replacement: Box::new(Record::Claim(c)),
             },
         )?;
-        self.emit(vec![ChannelItem::Op(op)])
+        self.emit(vec![ChannelItem::Op(op)]);
+        Ok(())
     }
 
     /// Undo a same-author `Remove` by its operation id — restores the original record (before the GC
@@ -300,7 +304,7 @@ impl Tree {
     ///
     /// # Errors
     /// Returns a [`TreeError`] if the Revoke op can't be canonicalized.
-    pub fn revoke(&mut self, removal_op_id: &str, now_millis: i64) -> Result<Vec<u8>, TreeError> {
+    pub fn revoke(&mut self, removal_op_id: &str, now_millis: i64) -> Result<(), TreeError> {
         let op = Op::new(
             self.clock.next(now_millis),
             self.created_by.as_str(),
@@ -308,24 +312,19 @@ impl Tree {
                 removal: removal_op_id.to_owned(),
             },
         )?;
-        self.emit(vec![ChannelItem::Op(op)])
+        self.emit(vec![ChannelItem::Op(op)]);
+        Ok(())
     }
 
     /// Accumulate the minted item(s) into the current intention's batch and apply them to the live set
     /// immediately (so a later read in the same intention sees them). The encoded op-batch is produced
     /// once by [`flush`](Tree::flush), not here — so a whole edit (e.g. `addMarriage` with its event) is
     /// one sealed entry rather than a train of single-op entries a peer could observe half-formed.
-    /// Returns no bytes (an empty vec, so the mint methods keep their signature) — [`flush`](Tree::flush)
-    /// is the sole producer of the encoded batch.
-    // Returns `Result` deliberately so the mint methods can tail-call `self.emit(..)` with a matching
-    // signature (documented above); a future size/policy check here may error, so the wrap is not dead.
-    #[allow(clippy::unnecessary_wraps)]
-    fn emit(&mut self, items: Vec<ChannelItem>) -> Result<Vec<u8>, TreeError> {
+    fn emit(&mut self, items: Vec<ChannelItem>) {
         for item in items {
             self.pending.push(item.clone());
             self.items.insert(item.id().to_owned(), item);
         }
-        Ok(Vec::new())
     }
 
     /// Encode everything minted since the last flush as ONE op-batch and clear the buffer (empty bytes

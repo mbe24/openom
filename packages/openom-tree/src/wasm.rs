@@ -38,24 +38,24 @@ impl WasmTree {
         self.inner.flush().map_err(to_js)
     }
 
-    /// Assert a claim (`value_json` = the claim value as JSON). Returns op-batch bytes to seal.
-    /// `createdAt` is stamped by the engine's own monotonic clock — the caller supplies no timestamp.
+    /// Assert a claim (`value_json` = the claim value as JSON). Buffers the op; call `flush()` for the
+    /// bytes to seal. `createdAt` is stamped by the engine's own monotonic clock — no timestamp arg.
     #[wasm_bindgen(js_name = assertClaim)]
     pub fn assert_claim(
         &mut self,
         target: &str,
         predicate: &str,
         value_json: &str,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<(), JsError> {
         let value = serde_json::from_str(value_json).map_err(to_js)?;
         self.inner
             .assert_claim(target, predicate, value, now_millis())
             .map_err(to_js)
     }
 
-    /// Assert an identity anchor (Person/Event/Place/Tree). Returns op-batch bytes to seal.
+    /// Assert an identity anchor (Person/Event/Place/Tree). Buffers the op; call `flush()` for the bytes.
     #[wasm_bindgen(js_name = assertAnchor)]
-    pub fn assert_anchor(&mut self, id: &str, type_uri: &str) -> Result<Vec<u8>, JsError> {
+    pub fn assert_anchor(&mut self, id: &str, type_uri: &str) -> Result<(), JsError> {
         self.inner
             .assert_anchor(id, type_uri, now_millis())
             .map_err(to_js)
@@ -67,7 +67,7 @@ impl WasmTree {
         self.inner.remove(target, now_millis()).map_err(to_js)
     }
 
-    /// Edit: supersede `prior` with a fresh claim value (`value_json`).
+    /// Edit: supersede `prior` with a fresh claim value (`value_json`). Buffers the op; call `flush()`.
     #[wasm_bindgen(js_name = supersedeClaim)]
     pub fn supersede_claim(
         &mut self,
@@ -75,15 +75,15 @@ impl WasmTree {
         target: &str,
         predicate: &str,
         value_json: &str,
-    ) -> Result<Vec<u8>, JsError> {
+    ) -> Result<(), JsError> {
         let value = serde_json::from_str(value_json).map_err(to_js)?;
         self.inner
             .supersede_claim(prior, target, predicate, value, now_millis())
             .map_err(to_js)
     }
 
-    /// Undo a same-author `Remove` by its operation id.
-    pub fn revoke(&mut self, removal_op_id: &str) -> Result<Vec<u8>, JsError> {
+    /// Undo a same-author `Remove` by its operation id. Buffers the op; call `flush()`.
+    pub fn revoke(&mut self, removal_op_id: &str) -> Result<(), JsError> {
         self.inner.revoke(removal_op_id, now_millis()).map_err(to_js)
     }
 
