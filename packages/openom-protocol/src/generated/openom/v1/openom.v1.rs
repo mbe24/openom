@@ -117,24 +117,6 @@ pub struct KeyringUpdate {
     #[prost(bytes="vec", tag="5")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
 }
-/// Argon2id parameters (explicit so cost can rise later). Kept here (unlike the rest of the keyring wire,
-/// which moved to openom-keyring-chain in OPE-300) because the sealer/crypto path — openom-crypto's
-/// recovery/wrap KDFs — reads and writes it. openom-keyring-chain carries its OWN wire-identical copy.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KdfParams {
-    /// Random per-member salt.
-    #[prost(bytes="vec", tag="1")]
-    pub salt: ::prost::alloc::vec::Vec<u8>,
-    /// Memory cost, KiB.
-    #[prost(uint32, tag="2")]
-    pub memory_kib: u32,
-    /// Time cost (passes).
-    #[prost(uint32, tag="3")]
-    pub iterations: u32,
-    /// Parallelism (lanes).
-    #[prost(uint32, tag="4")]
-    pub parallelism: u32,
-}
 /// What the object is. SNAPSHOT/DELTA are append-log entries of a tree; MEDIA is a
 /// single standalone media blob (referenced by the encrypted tree doc, not part of
 /// the log). PROPOSAL is a staged bundle of edits awaiting approval — it lives in a
@@ -311,49 +293,6 @@ impl MemberRole {
             "MEMBER_ROLE_ADMIN" => Some(Self::Admin),
             "MEMBER_ROLE_EDITOR" => Some(Self::Editor),
             "MEMBER_ROLE_VIEWER" => Some(Self::Viewer),
-            _ => None,
-        }
-    }
-}
-/// How a DEK is wrapped for a member. (Value-compatible with openom-keyring-chain's wrap-method constants;
-/// kept here because openom-crypto reads it on the sealer path.)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum WrapMethod {
-    Unspecified = 0,
-    PassphraseArgon2id = 1,
-    X25519Hpke = 2,
-    /// A second wrap of the same DEK under a high-entropy printable recovery code, so a
-    /// lost passphrase isn't total data loss. A distinct value (not reusing PASSPHRASE)
-    /// makes the two wraps for one member unambiguous — wrap_method is in the wrap's AAD
-    /// tuple (§4), so they can't be swapped. Additive/non-breaking (open enum).
-    RecoveryCodeArgon2id = 3,
-    /// An epoch's DEK sealed (HPKE) to a RecoveryKey's public key, so the founder reaches
-    /// every epoch via one recovery root private key. Uses the per-epoch wrap binding.
-    RrkHpke = 4,
-}
-impl WrapMethod {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "WRAP_METHOD_UNSPECIFIED",
-            Self::PassphraseArgon2id => "WRAP_METHOD_PASSPHRASE_ARGON2ID",
-            Self::X25519Hpke => "WRAP_METHOD_X25519_HPKE",
-            Self::RecoveryCodeArgon2id => "WRAP_METHOD_RECOVERY_CODE_ARGON2ID",
-            Self::RrkHpke => "WRAP_METHOD_RRK_HPKE",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "WRAP_METHOD_UNSPECIFIED" => Some(Self::Unspecified),
-            "WRAP_METHOD_PASSPHRASE_ARGON2ID" => Some(Self::PassphraseArgon2id),
-            "WRAP_METHOD_X25519_HPKE" => Some(Self::X25519Hpke),
-            "WRAP_METHOD_RECOVERY_CODE_ARGON2ID" => Some(Self::RecoveryCodeArgon2id),
-            "WRAP_METHOD_RRK_HPKE" => Some(Self::RrkHpke),
             _ => None,
         }
     }

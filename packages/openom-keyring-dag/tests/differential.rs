@@ -12,7 +12,7 @@ use openom_keyring_chain::{keyring_hash, sign_keyring, verify_reset, verify_tran
 use openom_keyring_dag::{
     recovery, sign_op, KeyringAccess, KeyringEngine, KeyringMemberInit, KeyringRole, KeyringState,
 };
-use openom_protocol::v1::{MemberRole, WrapMethod};
+use openom_protocol::v1::MemberRole;
 use openom_keyring_chain::wire::{Keyring, Member};
 use keyeo_crypto::{
     codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap,
@@ -40,8 +40,8 @@ fn retain_wraps(k: &mut Keyring, keep: impl Fn(&KeyeoWrap<String>) -> bool) {
 }
 
 const TREE: &[u8] = b"tree-uuid-16byte";
-const RRK_HPKE: i32 = WrapMethod::RrkHpke as i32;
-const HPKE: i32 = WrapMethod::X25519Hpke as i32;
+const RRK_HPKE: i32 = KeyeoWrapMethod::TAG_RRK_HPKE;
+const HPKE: i32 = KeyeoWrapMethod::TAG_MEMBER_HPKE;
 const MAINTAINER: i32 = MemberRole::Admin as i32; // UI: "Maintainer"
 const EDITOR: i32 = MemberRole::Editor as i32;
 

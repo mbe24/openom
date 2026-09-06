@@ -12,7 +12,7 @@ use openom_keyring_chain::verifier::ChainVerifier;
 use openom_keyring_dag::verifier::{bootstrap_update, op_update, DagVerifier};
 use openom_keyring_dag::{sign_op, KeyringAction, KeyringMemberInit, KeyringRole};
 use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipEnvelope, MembershipView, VerifyError};
-use openom_protocol::v1::{MemberRole, WrapMethod};
+use openom_protocol::v1::MemberRole;
 use openom_keyring_chain::wire::{Keyring, Member};
 use keyeo_crypto::{
     codec, Epoch as KeyeoEpoch, EncappedKey, KeyId, Wrap as KeyeoWrap,
@@ -40,10 +40,10 @@ fn semantic(v: &MembershipView) -> Vec<(String, i16)> {
 
 // ── chain construction (founder-only genesis + an ordinary "carol" add) ──
 
-fn wrap(id: &str, method: WrapMethod) -> KeyeoWrap<String> {
+fn wrap(id: &str, method: i32) -> KeyeoWrap<String> {
     let encapped = EncappedKey::from_bytes([0u8; 32]);
     let recipient_key = X25519PublicKey::from_bytes([9u8; 32]);
-    let m = if matches!(method, WrapMethod::RrkHpke) {
+    let m = if method == KeyeoWrapMethod::TAG_RRK_HPKE {
         KeyeoWrapMethod::RrkHpke { encapped, recipient_key }
     } else {
         KeyeoWrapMethod::MemberHpke { encapped, recipient_key }
@@ -73,7 +73,7 @@ fn chain_genesis() -> Keyring {
         epochs: codec::encode_epochs(&[KeyeoEpoch {
             key_id: KeyId::new(vec![0]),
             ordinal: 0,
-            wraps: vec![wrap("owner", WrapMethod::RrkHpke)],
+            wraps: vec![wrap("owner", KeyeoWrapMethod::TAG_RRK_HPKE)],
         }]),
         ..Default::default()
     };
@@ -88,7 +88,7 @@ fn with_maintainer_dave(mut g: Keyring) -> Keyring {
         author_public_key: pk(4),
         hpke_public_key: vec![9; 32],
     });
-    push_wrap(&mut g, wrap("dave", WrapMethod::X25519Hpke));
+    push_wrap(&mut g, wrap("dave", KeyeoWrapMethod::TAG_MEMBER_HPKE));
     g.signatures.clear();
     openom_keyring_chain::sign_keyring(&mut g, &sk(1));
     g
@@ -104,7 +104,7 @@ fn chain_add_carol(prior: &Keyring, signer_seed: u8) -> Keyring {
         author_public_key: pk(3),
         hpke_public_key: vec![9; 32],
     });
-    push_wrap(&mut k, wrap("carol", WrapMethod::X25519Hpke));
+    push_wrap(&mut k, wrap("carol", KeyeoWrapMethod::TAG_MEMBER_HPKE));
     k.signatures.clear();
     openom_keyring_chain::sign_keyring(&mut k, &sk(signer_seed));
     k

@@ -19,9 +19,9 @@ pub const DEFAULT_ARGON2_ITERATIONS: u32 = 2;
 /// Argon2id parallelism (lanes).
 pub const DEFAULT_ARGON2_PARALLELISM: u32 = 1;
 
-/// The Argon2id inputs a KEK is derived under: a salt plus the three cost parameters. The
-/// engine-neutral twin of the wire `openom_protocol::v1::KdfParams` (openom-crypto converts
-/// between them with a plain field copy), so the primitives here carry no proto dependency.
+/// The Argon2id inputs a KEK is derived under: a salt plus the three cost parameters. The single,
+/// engine-neutral KDF-params type across the whole stack — serde-serialized (via `codec`) wherever it is
+/// persisted or transmitted, so the primitives here carry no proto dependency.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KdfParams {
     pub salt: Vec<u8>,

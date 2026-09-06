@@ -7,8 +7,8 @@
 
 ## What it is — and is not
 
-The shared client/server contract. `v1` (`Envelope`, `Header`, `KeyringUpdate`, `KdfParams`, and the
-`Kind` / `Format` / `Aead` / `Compression` / `WrapMethod` / `MemberRole` enums) is generated from
+The shared client/server contract. `v1` (`Envelope`, `Header`, `KeyringUpdate`, and the
+`Kind` / `Format` / `Aead` / `Compression` / `MemberRole` enums) is generated from
 `proto/openom/v1/openom.proto` by `buf generate`
 (the `neoeinstein-prost` plugin) and checked into `src/generated/` — there is **no build script and
 no `protoc`**, so nothing executes during `cargo build`, which is what lets the crate build on a host
