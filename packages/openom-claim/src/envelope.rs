@@ -89,6 +89,7 @@ pub enum AttestTarget {
 
 impl AttestTarget {
     /// The `sha256:` string stored as the attestation's `targetId`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
             AttestTarget::Claim(s) | AttestTarget::Fingerprint(s) => s,
@@ -141,6 +142,9 @@ impl Claim {
     /// An attestation (`support`/`reject`) targeting a claim (by id) or a fact (by fingerprint) — the
     /// [`AttestTarget`] forces the caller to say which, so the two `sha256:` string kinds can't be
     /// conflated here.
+    ///
+    /// # Panics
+    /// Never in practice: [`Verdict`] is a small enum that always serializes.
     pub fn attestation(
         target: &AttestTarget,
         verdict: Verdict,
@@ -166,18 +170,28 @@ impl Claim {
     }
 
     /// Serialize to the canonical JSON envelope.
+    ///
+    /// # Panics
+    /// Never in practice: a [`Claim`] always serializes to JSON.
+    #[must_use]
     pub fn to_value(&self) -> Value {
         serde_json::to_value(self).expect("Claim serializes")
     }
 
     /// Compute and set `id = "sha256:" + hex(content_hash)`. Independent of the current `id` and any
     /// `signature` (both excluded from the hash), so it is safe to call before or after signing.
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the claim can't be canonicalized/hashed.
     pub fn compute_id(&mut self) -> Result<(), ClaimError> {
         self.id = crate::claim_id(&self.to_value())?;
         Ok(())
     }
 
     /// The dedup fingerprint of this claim.
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the claim can't be canonicalized/hashed.
     pub fn fingerprint(&self) -> Result<[u8; 32], ClaimError> {
         crate::fingerprint(&self.to_value())
     }
@@ -185,6 +199,9 @@ impl Claim {
     /// Sign with the author's key (must match `createdBy`) and store the hex signature. The signature
     /// is excluded from the id, so calling this after [`compute_id`](Claim::compute_id) leaves the id
     /// unchanged.
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the claim can't be canonicalized or signed.
     pub fn sign_with(&mut self, key: &SigningKey) -> Result<(), ClaimError> {
         let sig = crate::sign(&self.to_value(), key)?;
         self.signature = Some(jcs::hex(&sig));
@@ -197,6 +214,7 @@ impl Claim {
     /// bad signature, a malformed signature string, or an undecodable `createdBy`/content — is
     /// [`Forged`](crate::Authorship::Forged). There is no error or `Option` for a caller to unwrap past
     /// a forgery.
+    #[must_use]
     pub fn verify(&self) -> crate::Authorship {
         use crate::Authorship;
         let Some(sig_hex) = &self.signature else {
@@ -215,6 +233,9 @@ impl Claim {
     /// Does `id` still match a fresh hash of the current fields? Returns `false` if the claim was
     /// mutated after [`compute_id`](Claim::compute_id) — a cheap guard against a stale id. (An empty
     /// `id`, before `compute_id`, is never current.)
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the claim can't be canonicalized/hashed.
     pub fn id_is_current(&self) -> Result<bool, ClaimError> {
         Ok(self.id == crate::claim_id(&self.to_value())?)
     }
@@ -275,6 +296,10 @@ impl Record {
 
     /// Serialize back to the canonical JSON envelope. For an [`Unknown`](Record::Unknown) this is the
     /// original JSON verbatim, so a type this build doesn't understand re-syncs unchanged.
+    ///
+    /// # Panics
+    /// Never in practice: an [`Anchor`] or [`Claim`] always serializes to JSON.
+    #[must_use]
     pub fn to_value(&self) -> Value {
         match self {
             Record::Anchor(a) => serde_json::to_value(a).expect("Anchor serializes"),
@@ -370,7 +395,8 @@ fn hex_decode_64(s: &str) -> Option<[u8; 64]> {
     for (i, byte) in out.iter_mut().enumerate() {
         let hi = (b[2 * i] as char).to_digit(16)?;
         let lo = (b[2 * i + 1] as char).to_digit(16)?;
-        *byte = (hi * 16 + lo) as u8;
+        // Both nibbles are < 16, so the byte is <= 255 and fits u8; the fallback is unreachable.
+        *byte = u8::try_from(hi * 16 + lo).unwrap_or(0);
     }
     Some(out)
 }

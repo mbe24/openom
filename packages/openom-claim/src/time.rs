@@ -1,5 +1,16 @@
 //! The Hybrid Logical Clock timestamp carried by every record and op as `createdAt`.
 
+// This module is a faithful port of Howard Hinnant's proleptic-Gregorian civil-date algorithms. Its
+// single-letter variable names (`y`, `mp`, `doy`, `yoe`, `doe`, `era`, …) match the reference exactly,
+// and every integer cast is bounded by the algorithm's own invariants (month 1..=12, day 1..=31, etc.) —
+// the round-trip is Kani-proven (see `mod verification`). Renaming the vars or wrapping the casts in
+// `try_from` would obscure a proven algorithm without buying any safety, so those lints are off here.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names
+)]
+
 use std::fmt;
 use std::str::FromStr;
 
@@ -37,19 +48,22 @@ impl Hlc {
     /// A timestamp at `millis` epoch-milliseconds with logical counter `logical`. An over-large
     /// `logical` carries into `millis`, so two equal instants always share one representation — a
     /// content-hash-canonicalization requirement (else the same instant could hash two ways).
+    #[must_use]
     pub fn new(millis: i64, logical: u32) -> Self {
         Hlc {
-            millis: millis + (logical / LOGICAL_PER_MILLI) as i64,
+            millis: millis + i64::from(logical / LOGICAL_PER_MILLI),
             logical: logical % LOGICAL_PER_MILLI,
         }
     }
 
     /// The physical component: epoch milliseconds.
+    #[must_use]
     pub fn millis(&self) -> i64 {
         self.millis
     }
 
     /// The logical component: `0`–`999`.
+    #[must_use]
     pub fn logical(&self) -> u32 {
         self.logical
     }
@@ -173,7 +187,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400; // [0, 399]
-    let (m, d) = (m as i64, d as i64);
+    let (m, d) = (i64::from(m), i64::from(d));
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     era * 146_097 + doe - 719_468

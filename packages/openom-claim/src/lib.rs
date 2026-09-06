@@ -59,12 +59,18 @@ pub enum ClaimError {
 }
 
 /// The 32-byte content hash — the basis of both the `id` and the signed message.
+///
+/// # Errors
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
 pub fn content_hash(envelope: &Value) -> Result<[u8; 32], ClaimError> {
     let bytes = jcs::canonical_excluding(envelope, &[F_ID, F_SIGNATURE])?;
     Ok(Sha256::digest(bytes).into())
 }
 
 /// The claim `id`: `"sha256:" + lowercase-hex(content_hash)`.
+///
+/// # Errors
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
 pub fn claim_id(envelope: &Value) -> Result<String, ClaimError> {
     Ok(format!(
         "sha256:{}",
@@ -73,6 +79,9 @@ pub fn claim_id(envelope: &Value) -> Result<String, ClaimError> {
 }
 
 /// The dedup/refutation **fingerprint**: `sha256(JCS(targetId, predicate, value))`.
+///
+/// # Errors
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
 pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
     let bytes = jcs::canonical_subset(envelope, &[F_TARGET_ID, F_PREDICATE, F_VALUE])?;
     Ok(Sha256::digest(bytes).into())
@@ -83,6 +92,9 @@ pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
 /// rather than at a minted id — a reference stable across authors and unaffected by unrelated fields.
 /// The caller supplies the intrinsic (for a name that is its parts+script+culture; otherwise the
 /// whole `value`).
+///
+/// # Errors
+/// Returns a [`ClaimError`] if `intrinsic` can't be canonicalized.
 pub fn content_ref(intrinsic: &Value) -> Result<String, ClaimError> {
     Ok(format!(
         "sha256:{}",
@@ -92,6 +104,9 @@ pub fn content_ref(intrinsic: &Value) -> Result<String, ClaimError> {
 
 /// Sign an envelope with the author's Ed25519 key (must be the key behind `createdBy`). The signature
 /// is over `DOMAIN‖content_hash` and is excluded from the id + fingerprint.
+///
+/// # Errors
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
 pub fn sign(envelope: &Value, key: &SigningKey) -> Result<[u8; 64], ClaimError> {
     let ch = content_hash(envelope)?;
     Ok(key.sign(&signing_message(&ch)).to_bytes())
@@ -125,6 +140,10 @@ pub enum Authorship {
 
 /// Verify `sig` against the envelope's content and the public key behind its `createdBy` `did:key`.
 /// Pure cryptography — no keyring/role authority check (that is a higher layer).
+///
+/// # Errors
+/// Returns a [`ClaimError`] if `createdBy` is missing or not a decodable `did:key`, or the content
+/// can't be canonicalized. (A signature that simply fails to verify is `Ok(`[`SigCheck::Bad`]`)`.)
 pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> {
     let did = envelope
         .get(F_CREATED_BY)
@@ -161,11 +180,17 @@ fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
 pub trait ContentAddressed: serde::Serialize {
     /// The JSON to hash, normalized so anything excluded from the hash below the top level is already
     /// removed. Default = the plain serialization (correct for a flat envelope like [`envelope::Claim`]).
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if `self` can't be serialized to JSON.
     fn hash_envelope(&self) -> Result<Value, ClaimError> {
         Ok(serde_json::to_value(self)?)
     }
 
     /// The content-hash id: `"sha256:" + hex(sha256(JCS(hash_envelope − id − signature)))`.
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the envelope can't be serialized or canonicalized.
     fn content_id(&self) -> Result<String, ClaimError> {
         claim_id(&self.hash_envelope()?)
     }
