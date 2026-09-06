@@ -32,10 +32,12 @@ impl TreeId {
         Self(bytes.into())
     }
     /// The raw bytes — for a mechanism layer that speaks `&[u8]`.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
     /// Consume into the owned bytes.
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
@@ -47,10 +49,12 @@ impl ReplicaId {
         Self(bytes.into())
     }
     /// The raw bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
     /// Consume into the owned bytes.
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
@@ -62,10 +66,12 @@ impl KeyId {
         Self(bytes.into())
     }
     /// The raw bytes.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
     /// Consume into the owned bytes.
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.0
     }
@@ -77,10 +83,12 @@ impl MemberId {
         Self(s.into())
     }
     /// The member id as `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
     /// Consume into the owned string.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }

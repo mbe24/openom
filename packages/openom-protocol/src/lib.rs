@@ -4,12 +4,11 @@
 /// `Kind` / `Format` / `Aead` / `Compression` / `MemberRole` enums. (The keyring wire moved to
 /// `openom-keyring-chain` in OPE-300; the keyring KEY MATERIAL — `KdfParams` / `WrapMethod` / epochs /
 /// wraps — moved to `keyeo-crypto` + `keyeo_crypto::codec`, OPE-377.)
+// prost-generated code — not ours to hand-lint, so pedantic is off for the generated module only.
+#[allow(clippy::pedantic)]
 pub mod v1 {
     include!("generated/openom/v1/openom.v1.rs");
 }
-
-/// Canonical, length-prefixed AAD encoding of a `Header` (data-format spec §5) — the
-/// byte string a Rust and a WASM/JS build must produce identically.
 
 /// Identity newtypes (`TreeId` / `ReplicaId` / `MemberId`) so the vault surface can't confuse one
 /// opaque id byte-string for another at a call site. Wrap the proto's own fields; no wire change.
