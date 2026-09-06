@@ -14,6 +14,7 @@ impl EngineKind {
     /// The canonical config/wire tag for this engine — the single source of truth every host boundary maps
     /// through (the wasm veneer's `engine` argument, the Tauri `OPENOM_KEYRING_ENGINE` override, the web
     /// `KEYRING_ENGINE` constant), so the tag strings can't drift apart. Paired with [`std::str::FromStr`].
+    #[must_use]
     pub fn as_tag(self) -> &'static str {
         match self {
             EngineKind::Chain => "chain",
@@ -69,6 +70,7 @@ pub struct MembershipEnvelope {
 
 impl MembershipEnvelope {
     /// Frame an engine's opaque update bytes at the current version.
+    #[must_use]
     pub fn wrap(engine: EngineKind, body: Vec<u8>) -> Self {
         Self {
             version: MEMBERSHIP_ENVELOPE_VERSION,
@@ -78,11 +80,15 @@ impl MembershipEnvelope {
     }
 
     /// Encode to protobuf bytes (the blob/transport form).
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         ::prost::Message::encode_to_vec(self)
     }
 
     /// Decode from protobuf bytes, refusing a future/unknown `version` (fail closed, never misparse).
+    ///
+    /// # Errors
+    /// Returns [`EnvelopeError`] if the bytes don't decode or carry an unknown/future version.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeError> {
         let env = <Self as ::prost::Message>::decode(bytes).map_err(|_| EnvelopeError::Malformed)?;
         if env.version != MEMBERSHIP_ENVELOPE_VERSION {
@@ -92,6 +98,9 @@ impl MembershipEnvelope {
     }
 
     /// The producing engine, parsed from the tag — [`EngineKind`], or an `UnknownEngine`.
+    ///
+    /// # Errors
+    /// Returns [`UnknownEngine`] if the tag names an engine this build doesn't recognize.
     pub fn engine_kind(&self) -> Result<EngineKind, UnknownEngine> {
         self.engine.parse()
     }
@@ -142,12 +151,14 @@ pub struct MemberView {
 }
 
 impl MemberView {
-    /// A **signer** (keyring-write authority) is a CoOwner or stronger — the single-axis mapping both
+    /// A **signer** (keyring-write authority) is a `CoOwner` or stronger — the single-axis mapping both
     /// engines use.
+    #[must_use]
     pub fn is_signer(&self) -> bool {
         self.role <= ROLE_CO_OWNER
     }
     /// The unique Owner / founder.
+    #[must_use]
     pub fn is_owner(&self) -> bool {
         self.role == ROLE_OWNER
     }
@@ -167,6 +178,7 @@ pub struct MembershipView {
 impl MembershipView {
     /// Build a view from members, sorting for determinism (so two engines that resolve the same
     /// membership produce byte-identical views).
+    #[must_use]
     pub fn new(mut members: Vec<MemberView>, reset_boundary: bool) -> Self {
         members.sort_by(|a, b| a.member_id.cmp(&b.member_id));
         Self {
@@ -175,13 +187,14 @@ impl MembershipView {
         }
     }
 
-    /// The signer subset (CoOwner or stronger) — what keyring-write authority checks and the server's
+    /// The signer subset (`CoOwner` or stronger) — what keyring-write authority checks and the server's
     /// ACL derivation care about.
     pub fn signers(&self) -> impl Iterator<Item = &MemberView> {
         self.members.iter().filter(|m| m.is_signer())
     }
 
     /// The unique Owner, if present.
+    #[must_use]
     pub fn owner(&self) -> Option<&MemberView> {
         self.members.iter().find(|m| m.is_owner())
     }
@@ -240,6 +253,9 @@ pub enum VerifyError {
 pub trait KeyringVerifier {
     /// Admit `update` against `prior_state` (`None` = first sight / bootstrap). Returns the new opaque
     /// trust state + resolved view + a `changed` flag, or a neutral refusal.
+    ///
+    /// # Errors
+    /// Returns [`VerifyError`] if `update` is malformed or not a valid successor of `prior_state`.
     fn admit(&self, prior_state: Option<&[u8]>, update: &[u8]) -> Result<Admitted, VerifyError>;
 }
 
