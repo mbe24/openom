@@ -57,7 +57,9 @@ impl SqliteVaultStore {
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -90,7 +92,12 @@ impl VaultStore for SqliteVaultStore {
             })
     }
 
-    fn commit_keyring(&self, tree_key: &str, anchor: &[u8], watermark: &[u8]) -> Result<(), String> {
+    fn commit_keyring(
+        &self,
+        tree_key: &str,
+        anchor: &[u8],
+        watermark: &[u8],
+    ) -> Result<(), String> {
         // One transaction: the keyring write and the watermark advance land together or not at all,
         // so a crash can never leave a saved keyring with a stale cursor (or vice versa). The cursor
         // is write-through opaque bytes (the engine owns the order), so no MAX here.
@@ -127,8 +134,10 @@ mod tests {
             let s = SqliteVaultStore::open(&path).unwrap();
             // The watermark is engine-opaque write-through bytes — last write wins (the engine, not the
             // store, owns anti-rollback), and the keyring + its cursor land in one transaction.
-            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 1]).unwrap();
-            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 3]).unwrap();
+            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 1])
+                .unwrap();
+            s.commit_keyring("my-tree", b"kr-bytes", &[0, 0, 0, 3])
+                .unwrap();
         }
         {
             let s = SqliteVaultStore::open(&path).unwrap();

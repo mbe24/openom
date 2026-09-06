@@ -262,7 +262,12 @@ pub struct Sealed {
 #[serde(rename_all = "camelCase")]
 pub struct MemberProvisioned {
     pub kdf_params: Vec<u8>,
+    // JS-facing key stays `authorPublic`/`hpkePublic` (the JS convention the invite/signer domain also
+    // uses, and the wasm `MemberIdentity` getter's name), even though the Rust field carries the `_key`
+    // suffix. Renaming the JS key would break the sharing invite/join callers for no gain.
+    #[serde(rename = "authorPublic")]
     pub author_public_key: Vec<u8>,
+    #[serde(rename = "hpkePublic")]
     pub hpke_public_key: Vec<u8>,
 }
 

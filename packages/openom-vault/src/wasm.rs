@@ -547,8 +547,8 @@ pub fn add_member(
     min_revision: u32,
     new_member_id: &str,
     role: &str,
-    member_hpke_public: &[u8],
     member_author_public: &[u8],
+    member_hpke_public: &[u8],
 ) -> Result<VaultResult, JsError> {
     let added = vault::add_member(
         keyring,
@@ -1192,8 +1192,8 @@ pub fn add_member_as_co_owner(
     min_revision: u32,
     new_member_id: &str,
     role: &str,
-    member_hpke_public: &[u8],
     member_author_public: &[u8],
+    member_hpke_public: &[u8],
 ) -> Result<VaultResult, JsError> {
     let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
         .map_err(|_| JsError::new("bad kdf params"))?;

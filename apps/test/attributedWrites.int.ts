@@ -38,7 +38,7 @@ describe('keyringHasBeenShared — the monotonic shared signal (A2)', () => {
     // Admit an editor → the tree is now shared.
     const m = wasmProvisionMember('member pass');
     const shared = keyringOf(
-      wasmAddMember(genesis, 'owner pass', TREE, OWNER, 1, 'acct-m', 'editor', m.hpkePublic, m.authorPublic),
+      wasmAddMember(genesis, 'owner pass', TREE, OWNER, 1, 'acct-m', 'editor', m.authorPublic, m.hpkePublic),
     );
     m.free();
     expect(wasmKeyringHasBeenShared('chain', shared)).toBe(true);
