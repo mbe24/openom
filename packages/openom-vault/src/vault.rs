@@ -33,6 +33,7 @@ use openom_protocol::v1::MemberRole;
 // keyeo key material the chain stores as `codec` bytes (OPE-377).
 use keyeo_crypto::{
     codec, Epoch as KeyeoEpoch, KdfParams as KeyeoKdfParams, KekKind, KeyId as KeyeoKeyId,
+    X25519PublicKey,
 };
 use openom_keyring_chain::wire::{Keyring, Member, RecoveryKey};
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
@@ -621,8 +622,8 @@ pub fn rotate_recovery(
 /// hand a tree owner out-of-band (§4a) — the Ed25519 author key and the X25519 HPKE key.
 pub struct MemberProvision {
     pub kdf_params: KeyeoKdfParams,
-    pub author_public: Vec<u8>,
-    pub hpke_public: Vec<u8>,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
 }
 
 /// Provision a member identity from a passphrase: derive the account's signing + HPKE
@@ -639,8 +640,8 @@ pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, Vaul
         // The member's account KDF record — keyeo's `KdfParams`, persisted client-side (the wasm / Tauri
         // boundary serializes it via `keyeo_crypto::codec`) and replayed on a later unlock.
         kdf_params: kdf,
-        author_public: root.identity.verifying_key().to_bytes().to_vec(),
-        hpke_public: root.hpke_public.to_vec(),
+        author_public_key: root.identity.verifying_key().to_bytes().to_vec(),
+        hpke_public_key: root.hpke_public.to_vec(),
     })
 }
 
@@ -654,13 +655,48 @@ pub struct MemberAdded {
     pub write_dek_hash: Vec<u8>,
 }
 
-/// The member being added: their id, role, and OOB-verified public keys (HPKE + signing). Shared by the
-/// founder and co-owner add paths and the `do_add_member` core so the three can't drift.
-pub struct NewMemberSpec<'a> {
-    pub member_id: &'a MemberId,
-    pub role: MemberRole,
-    pub hpke_public: &'a [u8],
-    pub author_public: &'a [u8],
+/// The member being admitted to a tree ("the joiner"): their assigned id + role and the OOB-verified
+/// public keys they provided (§4a). The openom analog of keyeo's `MemberInit`, generic over the engine's
+/// role type so the chain (`MemberRole`) and dag (`KeyringRole`) add paths — and the shared `do_add_member`
+/// core — all speak one type. The two keys are DISTINCT types (`VerifyingKey` vs `X25519PublicKey`), so a
+/// transposition is a *compile error*, not a convention; construct via [`Joiner::from_bytes`], which is the
+/// single point that validates the raw boundary bytes into those types.
+pub struct Joiner<R> {
+    pub member_id: String,
+    pub role: R,
+    pub author_public_key: VerifyingKey,
+    pub hpke_public_key: X25519PublicKey,
+}
+
+impl<R> Joiner<R> {
+    /// Build a joiner from an id + role + the raw OOB-received key bytes, validating each once: the author
+    /// key must be a well-formed Ed25519 point (32 bytes), the HPKE key must be 32 bytes. This is the ONLY
+    /// place raw key bytes are narrowed/typed — thereafter the two keys cannot be confused.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::BadKeyring`] if either key is the wrong length or the author key is not a valid
+    /// Ed25519 verifying key.
+    pub fn from_bytes(
+        member_id: &MemberId,
+        role: R,
+        author_public_key: &[u8],
+        hpke_public_key: &[u8],
+    ) -> Result<Self, VaultError> {
+        let author: [u8; 32] = author_public_key
+            .try_into()
+            .map_err(|_| VaultError::BadKeyring("author public key must be 32 bytes".into()))?;
+        let hpke: [u8; 32] = hpke_public_key
+            .try_into()
+            .map_err(|_| VaultError::BadKeyring("hpke public key must be 32 bytes".into()))?;
+        Ok(Self {
+            member_id: member_id.as_str().to_string(),
+            role,
+            author_public_key: VerifyingKey::from_bytes(&author).map_err(|_| {
+                VaultError::BadKeyring("author public key is not a valid key".into())
+            })?,
+            hpke_public_key: X25519PublicKey::from_bytes(hpke),
+        })
+    }
 }
 
 /// A non-owner caller's credentials for a shared tree: their `passphrase` + account `kdf` (to re-derive
@@ -697,13 +733,13 @@ pub fn add_member(
     tree_id: &TreeId,
     owner_member_id: &MemberId,
     min_revision: u32,
-    new_member: &NewMemberSpec<'_>,
+    joiner: &Joiner<MemberRole>,
 ) -> Result<MemberAdded, VaultError> {
     let owner_passphrase = owner_passphrase.expose();
     let tree_id = tree_id.as_bytes();
     let owner_member_id = owner_member_id.as_str();
-    let new_member_id = new_member.member_id.as_str();
-    guard_ordinary_role(new_member.role)?;
+    let new_member_id = joiner.member_id.as_str();
+    guard_ordinary_role(joiner.role)?;
     let Opened {
         rrk_secret,
         revision,
@@ -738,7 +774,7 @@ pub fn add_member(
         &identity,
         prev_hash,
         new_revision,
-        new_member,
+        joiner,
     )
 }
 
@@ -754,12 +790,12 @@ pub fn add_member_as_co_owner(
     co_owner: &MemberAuth<'_>,
     tree_id: &TreeId,
     min_revision: u32,
-    new_member: &NewMemberSpec<'_>,
+    joiner: &Joiner<MemberRole>,
 ) -> Result<MemberAdded, VaultError> {
     let tree_id = tree_id.as_bytes();
     let co_owner_member_id = co_owner.member_id.as_str();
-    let new_member_id = new_member.member_id.as_str();
-    guard_ordinary_role(new_member.role)?;
+    let new_member_id = joiner.member_id.as_str();
+    guard_ordinary_role(joiner.role)?;
     let acc = open_as_co_owner(
         keyring_bytes,
         co_owner.passphrase.expose(),
@@ -794,7 +830,7 @@ pub fn add_member_as_co_owner(
         &acc.identity,
         acc.prev_hash,
         new_revision,
-        new_member,
+        joiner,
     )
 }
 
@@ -1405,12 +1441,15 @@ fn do_add_member(
     identity: &SigningKey,
     prev_hash: Vec<u8>,
     new_revision: u32,
-    spec: &NewMemberSpec<'_>,
+    joiner: &Joiner<MemberRole>,
 ) -> Result<MemberAdded, VaultError> {
-    let new_member_id = spec.member_id.as_str();
+    let new_member_id = joiner.member_id.as_str();
+    // The joiner's HPKE key, narrowed once (in `Joiner::from_bytes`); the SAME value addresses every wrap
+    // and is registered in the member list, so the wrapped key and the stored key are provably identical.
+    let hpke_public_key = joiner.hpke_public_key.to_bytes();
     let mut epochs = keyring_epochs(&keyring)?;
     for (key_id, epoch, dek) in deks {
-        let wrap = member_wrap_keyeo(spec.hpke_public, dek, tree_id, new_member_id, key_id)?;
+        let wrap = member_wrap_keyeo(&hpke_public_key, dek, tree_id, new_member_id, key_id)?;
         let ep = epochs
             .iter_mut()
             .find(|e| e.ordinal == *epoch)
@@ -1420,9 +1459,9 @@ fn do_add_member(
     keyring.epochs = codec::encode_epochs(&epochs);
     keyring.members.push(Member {
         member_id: new_member_id.to_string(),
-        role: spec.role as i32,
-        author_public_key: spec.author_public.to_vec(),
-        hpke_public_key: spec.hpke_public.to_vec(),
+        role: joiner.role as i32,
+        author_public_key: joiner.author_public_key.to_bytes().to_vec(),
+        hpke_public_key: joiner.hpke_public_key.to_bytes().to_vec(),
     });
     // First share: a founding-solo tree becomes multi-author the instant a non-founder member is admitted.
     // Set the monotonic marker once, on that first add (later adds leave it — already non-zero). It is NEVER
@@ -1554,7 +1593,7 @@ mod tests {
     use super::{
         add_co_owner, add_member, add_member_as_co_owner, change_passphrase, provision,
         provision_member, recover, remove_co_owner, remove_member, remove_member_as_co_owner,
-        rotate_recovery, unlock, unlock_as_member, MemberAuth, NewMemberSpec, RecoverWatermark,
+        rotate_recovery, unlock, unlock_as_member, Joiner, MemberAuth, RecoverWatermark,
     };
     use crate::VaultError;
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
@@ -1620,12 +1659,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             1,
-            &NewMemberSpec {
-                member_id: &MemberId::new("acct-2"),
-                role: MemberRole::Editor,
-                hpke_public: &m2.hpke_public,
-                author_public: &m2.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new("acct-2"),
+                MemberRole::Editor,
+                &m2.author_public_key,
+                &m2.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(add1.revision, 2);
@@ -1639,12 +1679,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             2,
-            &NewMemberSpec {
-                member_id: &MemberId::new("acct-3"),
-                role: MemberRole::Editor,
-                hpke_public: &m3.hpke_public,
-                author_public: &m3.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new("acct-3"),
+                MemberRole::Editor,
+                &m3.author_public_key,
+                &m3.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1723,12 +1764,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             1,
-            &NewMemberSpec {
-                member_id: &MemberId::new("acct-m"),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new("acct-m"),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -2542,12 +2584,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(added.revision, 2);
@@ -2600,12 +2643,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Viewer,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Viewer,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -2665,12 +2709,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert!(matches!(
@@ -2680,12 +2725,13 @@ mod tests {
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
-                &NewMemberSpec {
-                    member_id: &MemberId::new(MEMBER2),
-                    role: MemberRole::Editor,
-                    hpke_public: &m.hpke_public,
-                    author_public: &m.author_public
-                }
+                &Joiner::from_bytes(
+                    &MemberId::new(MEMBER2),
+                    MemberRole::Editor,
+                    &m.author_public_key,
+                    &m.hpke_public_key
+                )
+                .unwrap()
             ),
             Err(VaultError::MemberExists)
         ));
@@ -2697,12 +2743,13 @@ mod tests {
                 &TreeId::new(TREE),
                 &MemberId::new(MEMBER),
                 0,
-                &NewMemberSpec {
-                    member_id: &MemberId::new(MEMBER),
-                    role: MemberRole::Editor,
-                    hpke_public: &m.hpke_public,
-                    author_public: &m.author_public
-                }
+                &Joiner::from_bytes(
+                    &MemberId::new(MEMBER),
+                    MemberRole::Editor,
+                    &m.author_public_key,
+                    &m.hpke_public_key
+                )
+                .unwrap()
             ),
             Err(VaultError::MemberExists)
         ));
@@ -2724,12 +2771,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public
-            }
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key
+            )
+            .unwrap()
         )
         .is_err());
     }
@@ -2754,12 +2802,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &a.hpke_public,
-                author_public: &a.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &a.author_public_key,
+                &a.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let k2 = add_member(
@@ -2768,12 +2817,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER3),
-                role: MemberRole::Viewer,
-                hpke_public: &b.hpke_public,
-                author_public: &b.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER3),
+                MemberRole::Viewer,
+                &b.author_public_key,
+                &b.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(k2.revision, 3);
@@ -2861,12 +2911,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let sealed = {
@@ -2967,12 +3018,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Viewer,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Viewer,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let old_founder = founder_key(&shared.keyring);
@@ -3050,12 +3102,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let removed = remove_member(
@@ -3130,12 +3183,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let removed = remove_member(
@@ -3188,12 +3242,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Viewer,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Viewer,
+                &m.author_public_key,
+                &m.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let pinned = founder_key(&owner.keyring);
@@ -3232,12 +3287,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
 
@@ -3256,7 +3312,7 @@ mod tests {
         // members) — keeping their author key.
         assert!(k.members.iter().any(|m| m.member_id == MEMBER2
             && m.role == MemberRole::CoOwner as i32
-            && m.author_public_key == co.author_public));
+            && m.author_public_key == co.author_public_key));
         let founder = founder_key(&owner.keyring);
         verify_keyring(&k, &founder).unwrap(); // the signer-set change is founder-authorized
 
@@ -3335,12 +3391,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let promoted = add_co_owner(
@@ -3367,18 +3424,19 @@ mod tests {
             },
             &TreeId::new(TREE),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER3),
-                role: MemberRole::Viewer,
-                hpke_public: &m3.hpke_public,
-                author_public: &m3.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER3),
+                MemberRole::Viewer,
+                &m3.author_public_key,
+                &m3.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
 
         // The added member unlocks (trusting the founder AND the co-owner who added them — a
         // co-owner signed this revision) and reads content sealed before they joined.
-        let co_vk = vk(&co.author_public);
+        let co_vk = vk(&co.author_public_key);
         let u = unlock_as_member(
             &added.keyring,
             &MemberAuth {
@@ -3415,12 +3473,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let k2 = add_member(
@@ -3429,12 +3488,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER3),
-                role: MemberRole::Editor,
-                hpke_public: &victim.hpke_public,
-                author_public: &victim.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER3),
+                MemberRole::Editor,
+                &victim.author_public_key,
+                &victim.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let promoted = add_co_owner(
@@ -3466,7 +3526,7 @@ mod tests {
         let new = seal_open(&removed.sealer, b"post-removal");
         // Even trusting the co-owner, the removed member has no wrap → locked out (forward
         // secrecy). The founder still reaches the co-owner's new content via the RRK.
-        let co_vk = vk(&co.author_public);
+        let co_vk = vk(&co.author_public_key);
         assert!(matches!(
             unlock_as_member(
                 &removed.keyring,
@@ -3512,12 +3572,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &ed.hpke_public,
-                author_public: &ed.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &ed.author_public_key,
+                &ed.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let pinned = founder_key(&owner.keyring);
@@ -3534,12 +3595,13 @@ mod tests {
                 },
                 &TreeId::new(TREE),
                 0,
-                &NewMemberSpec {
-                    member_id: &MemberId::new(MEMBER3),
-                    role: MemberRole::Viewer,
-                    hpke_public: &m3.hpke_public,
-                    author_public: &m3.author_public
-                }
+                &Joiner::from_bytes(
+                    &MemberId::new(MEMBER3),
+                    MemberRole::Viewer,
+                    &m3.author_public_key,
+                    &m3.hpke_public_key
+                )
+                .unwrap()
             ),
             Err(VaultError::NotAuthorized)
         ));
@@ -3578,12 +3640,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co1.hpke_public,
-                author_public: &co1.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co1.author_public_key,
+                &co1.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let k2 = add_member(
@@ -3592,12 +3655,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER3),
-                role: MemberRole::Editor,
-                hpke_public: &co2.hpke_public,
-                author_public: &co2.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER3),
+                MemberRole::Editor,
+                &co2.author_public_key,
+                &co2.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let p1 = add_co_owner(
@@ -3670,12 +3734,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::CoOwner,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public
-            }
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::CoOwner,
+                &m.author_public_key,
+                &m.hpke_public_key
+            )
+            .unwrap()
         )
         .is_err());
         assert!(add_member(
@@ -3684,12 +3749,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Owner,
-                hpke_public: &m.hpke_public,
-                author_public: &m.author_public
-            }
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Owner,
+                &m.author_public_key,
+                &m.hpke_public_key
+            )
+            .unwrap()
         )
         .is_err());
     }
@@ -3710,12 +3776,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let promoted = add_co_owner(
@@ -3805,12 +3872,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let promoted = add_co_owner(
@@ -3844,7 +3912,7 @@ mod tests {
         assert!(
             k.members.iter().any(|m| m.member_id == MEMBER2
                 && m.role == MemberRole::CoOwner as i32
-                && m.author_public_key == co.author_public),
+                && m.author_public_key == co.author_public_key),
             "recover must not drop a co-owner from the signer set"
         );
         // …and they still read the tree — re-pinning the new founder, per the succession boundary
@@ -3885,12 +3953,13 @@ mod tests {
             &TreeId::new(TREE),
             &MemberId::new(MEMBER),
             0,
-            &NewMemberSpec {
-                member_id: &MemberId::new(MEMBER2),
-                role: MemberRole::Editor,
-                hpke_public: &co.hpke_public,
-                author_public: &co.author_public,
-            },
+            &Joiner::from_bytes(
+                &MemberId::new(MEMBER2),
+                MemberRole::Editor,
+                &co.author_public_key,
+                &co.hpke_public_key,
+            )
+            .unwrap(),
         )
         .unwrap();
         let promoted = add_co_owner(
@@ -3918,7 +3987,7 @@ mod tests {
         assert!(
             k.members.iter().any(|m| m.member_id == MEMBER2
                 && m.role == MemberRole::CoOwner as i32
-                && m.author_public_key == co.author_public),
+                && m.author_public_key == co.author_public_key),
             "change_passphrase must leave co-owners untouched"
         );
         // The old founder co-signed, so the co-owner still verifies against its pre-change pin.

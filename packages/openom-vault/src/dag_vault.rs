@@ -23,7 +23,7 @@ use openom_crypto::{
     derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
     parse_recovery_code, CryptoError, HpkeKeypair, Passphrase, RecoveryCode, RrkSecret,
 };
-use openom_keyring_dag::client as dag_client;
+use openom_keyring_dag::{client as dag_client, KeyringRole};
 use serde::{Deserialize, Serialize};
 
 use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext};
@@ -757,11 +757,11 @@ impl DagVault {
         ctx: &VaultContext,
         anchor: &[u8],
         owner_passphrase: &Passphrase,
-        member: &openom_keyring_dag::KeyringMemberInit,
+        joiner: &crate::vault::Joiner<KeyringRole>,
     ) -> Result<Vec<u8>, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let owner_id = ctx.member_id.as_str();
-        let new_member_id = member.id.as_str();
+        let new_member_id = joiner.member_id.as_str();
 
         let resolved =
             dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
@@ -788,18 +788,22 @@ impl DagVault {
             KekKind::Passphrase,
         )?;
 
-        // Reach every epoch's DEK and wrap each to the new member's HPKE key.
+        // Reach every epoch's DEK and wrap each to the new member's HPKE key. The joiner's keys were
+        // narrowed once (in `Joiner::from_bytes`); the SAME values wrap every DEK and register the member,
+        // so the wrapped key and the stored key are provably identical.
+        let hpke_public_key = joiner.hpke_public_key.to_bytes();
         let deks = epoch_deks(&epochs, tree_id, owner_id, &rrk_secret);
-        let added_wraps: Vec<AddedWrap> =
-            deks.iter()
-                .map(|(key_id, _epoch, dek)| {
-                    member_wrap_keyeo(&member.hpke_public_key, dek, tree_id, new_member_id, key_id)
-                        .map(|wrap| AddedWrap {
-                            key_id: key_id.clone(),
-                            wrap,
-                        })
-                })
-                .collect::<Result<_, _>>()?;
+        let added_wraps: Vec<AddedWrap> = deks
+            .iter()
+            .map(|(key_id, _epoch, dek)| {
+                member_wrap_keyeo(&hpke_public_key, dek, tree_id, new_member_id, key_id).map(
+                    |wrap| AddedWrap {
+                        key_id: key_id.clone(),
+                        wrap,
+                    },
+                )
+            })
+            .collect::<Result<_, _>>()?;
 
         let sealing = SealingPayload {
             new_epochs: vec![],
@@ -807,7 +811,15 @@ impl DagVault {
             escrow: None,
         }
         .to_bytes();
-        dag_client::append_add(anchor, owner_id, member, sealing, &root.identity)
+        // Infallible narrowing to keyeo's owned genesis-shaped init at the engine boundary (the typed keys
+        // are already validated); `append_add` keeps taking `KeyringMemberInit`.
+        let member = openom_keyring_dag::KeyringMemberInit {
+            id: joiner.member_id.clone(),
+            role: joiner.role,
+            author_public_key: joiner.author_public_key.to_bytes(),
+            hpke_public_key,
+        };
+        dag_client::append_add(anchor, owner_id, &member, sealing, &root.identity)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
@@ -2204,23 +2216,28 @@ mod tests {
             .unwrap()
             .envelope;
 
-        // bob's OOB-verified keys (a real HPKE public key so the wrap succeeds).
+        // bob's OOB-verified keys: a real HPKE public key so the wrap succeeds, and a real Ed25519 author
+        // key so `Joiner::from_bytes` accepts it (it validates the author key is a well-formed point).
         let bob_id = "acct-bob";
         let HpkeKeypair {
             public: bob_hpke, ..
         } = generate_hpke_keypair().unwrap();
+        let bob_author = edsign::SigningKey::from_seed(&[9u8; 32])
+            .verifying_key()
+            .to_bytes();
 
         let new_anchor = DagVault
             .add_member(
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: (bob_id).to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: [9u8; 32],
-                    hpke_public_key: bob_hpke,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new(bob_id),
+                    KeyringRole::EDITOR,
+                    &bob_author,
+                    &bob_hpke,
+                )
+                .unwrap(),
             )
             .unwrap();
 
@@ -2293,12 +2310,13 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &owner_pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: ("acct-bob").to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: bob_author,
-                    hpke_public_key: bob.root.hpke_public,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-bob"),
+                    KeyringRole::EDITOR,
+                    &bob_author,
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
 
@@ -2362,12 +2380,13 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &owner_pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: ("acct-bob").to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: bob_author,
-                    hpke_public_key: bob.root.hpke_public,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-bob"),
+                    KeyringRole::EDITOR,
+                    &bob_author,
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
 
@@ -2422,12 +2441,13 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &owner_pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: ("acct-bob").to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: bob_author,
-                    hpke_public_key: bob.root.hpke_public,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-bob"),
+                    KeyringRole::EDITOR,
+                    &bob_author,
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
         assert!(
@@ -2502,12 +2522,13 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &p.anchor,
                 &owner_pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: ("acct-bob").to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: bob.root.identity.verifying_key().to_bytes(),
-                    hpke_public_key: bob.root.hpke_public,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-bob"),
+                    KeyringRole::EDITOR,
+                    &bob.root.identity.verifying_key().to_bytes(),
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
         let a2 = DagVault
@@ -2515,12 +2536,13 @@ mod tests {
                 &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
                 &a1,
                 &owner_pass,
-                &openom_keyring_dag::KeyringMemberInit {
-                    id: ("acct-carol").to_string(),
-                    role: KeyringRole::EDITOR,
-                    author_public_key: carol.root.identity.verifying_key().to_bytes(),
-                    hpke_public_key: carol.root.hpke_public,
-                },
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-carol"),
+                    KeyringRole::EDITOR,
+                    &carol.root.identity.verifying_key().to_bytes(),
+                    &carol.root.hpke_public,
+                )
+                .unwrap(),
             )
             .unwrap();
 

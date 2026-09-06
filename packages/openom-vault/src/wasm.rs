@@ -491,8 +491,8 @@ pub fn change_passphrase(
 #[wasm_bindgen]
 pub struct MemberIdentity {
     kdf_params: Vec<u8>,
-    author_public: Vec<u8>,
-    hpke_public: Vec<u8>,
+    author_public_key: Vec<u8>,
+    hpke_public_key: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -506,14 +506,14 @@ impl MemberIdentity {
     /// The Ed25519 author verify-key to share OOB.
     #[wasm_bindgen(getter, js_name = authorPublic)]
     #[must_use]
-    pub fn author_public(&self) -> Vec<u8> {
-        self.author_public.clone()
+    pub fn author_public_key(&self) -> Vec<u8> {
+        self.author_public_key.clone()
     }
     /// The X25519 HPKE public key to share OOB.
     #[wasm_bindgen(getter, js_name = hpkePublic)]
     #[must_use]
-    pub fn hpke_public(&self) -> Vec<u8> {
-        self.hpke_public.clone()
+    pub fn hpke_public_key(&self) -> Vec<u8> {
+        self.hpke_public_key.clone()
     }
 }
 
@@ -526,8 +526,8 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
     let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(to_js)?;
     Ok(MemberIdentity {
         kdf_params: keyeo_crypto::codec::encode_kdf_params(&m.kdf_params),
-        author_public: m.author_public,
-        hpke_public: m.hpke_public,
+        author_public_key: m.author_public_key,
+        hpke_public_key: m.hpke_public_key,
     })
 }
 
@@ -556,12 +556,13 @@ pub fn add_member(
         &TreeId::new(tree_id),
         &MemberId::new(owner_member_id),
         min_revision,
-        &vault::NewMemberSpec {
-            member_id: &MemberId::new(new_member_id),
-            role: parse_member_role(role)?,
-            hpke_public: member_hpke_public,
-            author_public: member_author_public,
-        },
+        &vault::Joiner::from_bytes(
+            &MemberId::new(new_member_id),
+            parse_member_role(role)?,
+            member_author_public,
+            member_hpke_public,
+        )
+        .map_err(to_js)?,
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -676,12 +677,6 @@ fn parse_keyring_role(s: &str) -> Result<KeyringRole, JsError> {
     }
 }
 
-/// A 32-byte public key from wire bytes, or an error naming the field.
-fn key32(b: &[u8], what: &str) -> Result<[u8; 32], JsError> {
-    b.try_into()
-        .map_err(|_| JsError::new(&format!("{what} must be 32 bytes, got {}", b.len())))
-}
-
 /// The result of [`dag_reseal`]: the (possibly unchanged) anchor + its watermark, and whether a repair was
 /// actually appended (`false` = nothing was stale, an idempotent no-op).
 #[wasm_bindgen]
@@ -746,12 +741,13 @@ pub fn dag_add_member(
             &ctx,
             keyring,
             &Passphrase::new(owner_passphrase.into_bytes()),
-            &openom_keyring_dag::KeyringMemberInit {
-                id: new_member_id.to_string(),
-                role: parse_keyring_role(role)?,
-                author_public_key: key32(member_author_public, "member author key")?,
-                hpke_public_key: key32(member_hpke_public, "member hpke key")?,
-            },
+            &vault::Joiner::from_bytes(
+                &MemberId::new(new_member_id),
+                parse_keyring_role(role)?,
+                member_author_public,
+                member_hpke_public,
+            )
+            .map_err(to_js)?,
         )
         .map_err(to_js)?;
     let watermark = DagVault.watermark(&new_anchor).map_err(to_js)?;
@@ -1212,12 +1208,13 @@ pub fn add_member_as_co_owner(
         },
         &TreeId::new(tree_id),
         min_revision,
-        &vault::NewMemberSpec {
-            member_id: &MemberId::new(new_member_id),
-            role: parse_member_role(role)?,
-            hpke_public: member_hpke_public,
-            author_public: member_author_public,
-        },
+        &vault::Joiner::from_bytes(
+            &MemberId::new(new_member_id),
+            parse_member_role(role)?,
+            member_author_public,
+            member_hpke_public,
+        )
+        .map_err(to_js)?,
     )
     .map_err(to_js)?;
     Ok(VaultResult {
