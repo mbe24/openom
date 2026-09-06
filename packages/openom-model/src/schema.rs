@@ -13,6 +13,10 @@ pub struct ModelSchema {
 
 impl ModelSchema {
     /// Compile the checked-in canonical-model schema.
+    ///
+    /// # Panics
+    /// Never in practice: the checked-in schema JSON is valid and compiles.
+    #[must_use]
     pub fn new() -> Self {
         let model: Value = serde_json::from_str(include_str!("../schema/model.schema.json"))
             .expect("model.schema.json is valid JSON");
@@ -31,6 +35,7 @@ impl ModelSchema {
     }
 
     /// Does `instance` satisfy the schema?
+    #[must_use]
     pub fn is_valid(&self, instance: &Value) -> bool {
         self.validator.is_valid(instance)
     }

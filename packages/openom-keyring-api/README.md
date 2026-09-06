@@ -11,7 +11,7 @@
 openom runs **two** permanent keyring engines — the linear signed **chain** (`openom-keyring-chain`) and the
 **DAG** (`openom-keyring-dag`) — and this crate is the small shared vocabulary both fold into so the rest of the
 system binds to neither. It holds three engine-agnostic pieces: [`MembershipView`] (the resolved members
-+ roles, the value the app's role display and the server's ACL derivation both consume), the keyless
+and roles, the value the app's role display and the server's ACL derivation both consume), the keyless
 [`KeyringVerifier`] seam (admit an update against prior opaque trust state, report the new state + view +
 whether it changed — all the server binds to), and [`EngineKind`] (the immutable per-tree engine tag every
 host boundary parses through, so the `"chain"`/`"dag"` strings can't drift).

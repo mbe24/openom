@@ -22,6 +22,9 @@ pub use edsign::{Signature, SigningKey, VerifyingKey};
 /// Generate a random signer identity (Ed25519) — a **test helper**, not a production path: real identities
 /// are passphrase-derived so they can be recovered. Gated behind `test-util` (and the crate's own tests).
 /// `SigningKey` zeroizes on drop.
+///
+/// # Errors
+/// Returns [`SigError`] if the system RNG fails.
 #[cfg(any(test, feature = "test-util"))]
 pub fn generate_identity() -> Result<SigningKey, SigError> {
     let mut seed = [0u8; 32];

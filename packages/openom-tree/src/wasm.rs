@@ -141,5 +141,8 @@ fn to_js<E: std::fmt::Display>(e: E) -> JsError {
 /// The physical wall-clock reading (epoch ms) fed to the engine's monotonic clock. The engine
 /// sanitizes it — a backwards or stalled `Date::now()` still yields a strictly increasing `createdAt`.
 fn now_millis() -> i64 {
-    js_sys::Date::now() as i64
+    // JS epoch ms is a positive f64 that fits i64 for millennia; the truncation is intentional.
+    #[allow(clippy::cast_possible_truncation)]
+    let ms = js_sys::Date::now() as i64;
+    ms
 }

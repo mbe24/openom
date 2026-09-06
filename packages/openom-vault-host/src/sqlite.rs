@@ -1,4 +1,4 @@
-//! A durable [`VaultStore`] on SQLite, for the Tauri host. Holds the keyring (a wrapped DEK —
+//! A durable [`VaultStore`] on `SQLite`, for the Tauri host. Holds the keyring (a wrapped DEK —
 //! not secret, needs only durability) and the keyring-revision watermark (anti-rollback state)
 //! in the app data dir. Fable's guidance: keep this in its OWN file (`vault.sqlite`), separate
 //! from the doc store's `tree.sqlite`, so copying/restoring the tree database can't drag the
@@ -30,6 +30,9 @@ pub struct SqliteVaultStore {
 
 impl SqliteVaultStore {
     /// Durable, file-backed (WAL). Use the app data dir on Tauri.
+    ///
+    /// # Errors
+    /// Returns an error string if the database can't be opened or the schema can't be applied.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let conn = Connection::open(path).map_err(|e| e.to_string())?;
         conn.execute_batch(&format!(
@@ -42,6 +45,9 @@ impl SqliteVaultStore {
     }
 
     /// Flüchtig — für Tests.
+    ///
+    /// # Errors
+    /// Returns an error string if the in-memory database can't be opened or the schema can't be applied.
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
@@ -51,7 +57,7 @@ impl SqliteVaultStore {
     }
 
     fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

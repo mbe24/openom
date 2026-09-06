@@ -14,6 +14,10 @@ pub struct RecordSchema {
 
 impl RecordSchema {
     /// Compile the checked-in record schema.
+    ///
+    /// # Panics
+    /// Never in practice: the checked-in schema JSON is valid and compiles.
+    #[must_use]
     pub fn new() -> Self {
         let schema: Value = serde_json::from_str(include_str!("../schema/record.schema.json"))
             .expect("record.schema.json is valid JSON");
@@ -24,6 +28,7 @@ impl RecordSchema {
     }
 
     /// Does `instance` satisfy the schema (is it a valid Anchor or Claim)?
+    #[must_use]
     pub fn is_valid(&self, instance: &Value) -> bool {
         self.validator.is_valid(instance)
     }

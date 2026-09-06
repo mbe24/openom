@@ -31,7 +31,8 @@ impl Span {
 #[cfg(feature = "profiling")]
 impl Drop for Span {
     fn drop(&mut self) {
-        let micros = self.start.elapsed().as_micros() as u64;
+        // A span over ~584k years is impossible; saturate rather than truncate the u128 micros.
+        let micros = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
         tracing::debug!(target: "openom::profile", label = self.label, micros, "prof");
     }
 }
