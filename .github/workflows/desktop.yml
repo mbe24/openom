@@ -11,7 +11,39 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Clippy-Gate: laeuft ZUERST und einmalig (Linux). Faellt es durch, startet die
+  # Matrix (Windows/macOS/Linux) gar nicht erst — kein OS-Build ohne saubere Lints.
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # Tauri (openom-tauri) wird unter --all-features mitkompiliert und braucht WebKitGTK.
+      - name: System libraries (Linux)
+        run: |
+          sudo apt-get update
+          # libappindicator3-dev und libayatana-appindicator3-dev schliessen
+          # einander aus — Tauri 2 will die Ayatana-Fassung.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file \
+            libssl-dev libgtk-3-dev
+
+      # clippy::pedantic + clippy::cargo sind in [workspace.lints.clippy] als `deny`
+      # verdrahtet, ein Fund bricht hier ab. --all-features deckt den Feature-Code
+      # (wasm/sqlite/profiling) ab.
+      - name: Clippy (pedantic + cargo gate)
+        run: cargo clippy --workspace --all-features
+
   build:
+    needs: clippy
     strategy:
       fail-fast: false
       matrix:
@@ -51,13 +83,6 @@ jobs:
       # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
-
-      # Clippy pedantic + cargo are wired as `deny` in [workspace.lints.clippy], so a new finding fails
-      # here. --all-features covers the feature-gated code (wasm/sqlite/profiling). Linux only (one run
-      # is enough; GTK is installed above so the tauri crate compiles).
-      - name: Clippy (pedantic + cargo gate)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy --workspace --all-features
 
       - name: Store conformance suite
         run: cargo test --workspace --all-features
