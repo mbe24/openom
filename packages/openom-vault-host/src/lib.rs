@@ -677,10 +677,12 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &TreeId::new(tree_id),
             &MemberId::new(owner_member_id),
             floor,
-            &MemberId::new(new_member_id),
-            parse_member_role(role)?,
-            member_hpke_public,
-            member_author_public,
+            &vault::NewMemberSpec {
+                member_id: &MemberId::new(new_member_id),
+                role: parse_member_role(role)?,
+                hpke_public: member_hpke_public,
+                author_public: member_author_public,
+            },
         )?;
         let watermark = self.commit_transition(
             tree_key,
@@ -724,11 +726,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let replica = self.fresh_replica()?;
         let u = vault::unlock_as_member(
             &keyring,
-            &Passphrase::new(passphrase.into_bytes()),
-            &kdf,
+            &vault::MemberAuth {
+                passphrase: &Passphrase::new(passphrase.into_bytes()),
+                kdf: &kdf,
+                member_id: &MemberId::new(member_id),
+                trusted_signers: &trusted,
+            },
             &TreeId::new(tree_id),
-            &MemberId::new(member_id),
-            &trusted,
             &ReplicaId::new(replica),
             floor,
         )?;
@@ -821,16 +825,20 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let trusted = parse_trusted_signers(&trusted_signers)?;
         let added = vault::add_member_as_co_owner(
             &keyring,
-            &Passphrase::new(passphrase.into_bytes()),
-            &kdf,
+            &vault::MemberAuth {
+                passphrase: &Passphrase::new(passphrase.into_bytes()),
+                kdf: &kdf,
+                member_id: &MemberId::new(co_owner_member_id),
+                trusted_signers: &trusted,
+            },
             &TreeId::new(tree_id),
-            &MemberId::new(co_owner_member_id),
-            &trusted,
             floor,
-            &MemberId::new(new_member_id),
-            parse_member_role(role)?,
-            member_hpke_public,
-            member_author_public,
+            &vault::NewMemberSpec {
+                member_id: &MemberId::new(new_member_id),
+                role: parse_member_role(role)?,
+                hpke_public: member_hpke_public,
+                author_public: member_author_public,
+            },
         )?;
         let watermark = self.commit_transition(
             tree_key,
@@ -872,11 +880,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let replica = self.fresh_replica()?;
         let r = vault::remove_member_as_co_owner(
             &keyring,
-            &Passphrase::new(passphrase.into_bytes()),
-            &kdf,
+            &vault::MemberAuth {
+                passphrase: &Passphrase::new(passphrase.into_bytes()),
+                kdf: &kdf,
+                member_id: &MemberId::new(co_owner_member_id),
+                trusted_signers: &trusted,
+            },
             &TreeId::new(tree_id),
-            &MemberId::new(co_owner_member_id),
-            &trusted,
             floor,
             &MemberId::new(remove_member_id),
             &ReplicaId::new(replica),
@@ -1146,10 +1156,12 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &ctx,
             &anchor,
             &Passphrase::new(owner_passphrase.into_bytes()),
-            new_member_id,
-            parse_keyring_role(role)?,
-            key32(member_author_public, "member author key")?,
-            key32(member_hpke_public, "member hpke key")?,
+            &openom_vault::KeyringMemberInit {
+                id: new_member_id.to_string(),
+                role: parse_keyring_role(role)?,
+                author_public_key: key32(member_author_public, "member author key")?,
+                hpke_public_key: key32(member_hpke_public, "member hpke key")?,
+            },
         )?;
         let watermark = dag.watermark(&new_anchor)?;
         self.store
