@@ -54,7 +54,7 @@ pub enum VaultErrorCode {
     KeyringUnendorsed,
     /// A network-served keyring is validly signed by a signer but regresses the has-been-shared marker —
     /// an attempt to DOWNGRADE a shared tree back to unattributed writes. A signed monotonicity violation
-    /// (distinct from `KeyringUnendorsed`, which is an UNsigned change); an attack, not availability.
+    /// (distinct from `KeyringUnendorsed`, which is an `UNsigned` change); an attack, not availability.
     KeyringSharedRegressed,
     /// A network-served keyring is malformed as a successor — bad structure, an incomplete wrap
     /// set (silent lock-out), a too-new layout, or a failed bootstrap.
@@ -75,7 +75,7 @@ pub enum VaultErrorCode {
     NoKeyring,
     /// An envelope wouldn't decode / had no header.
     BadEnvelope,
-    /// An envelope is out of this sealer's (tree_id, key_id) scope.
+    /// An envelope is out of this sealer's (`tree_id`, `key_id`) scope.
     WrongScope,
     /// The envelope's epoch isn't one the caller holds a key for (e.g. content from before
     /// a member joined) — an access boundary, not a tampered/misrouted blob.
@@ -172,18 +172,27 @@ type Result<T> = std::result::Result<T, VaultError>;
 
 /// Persistence for the keyring (a wrapped DEK — not secret, needs durability) and the
 /// keyring-revision watermark (anti-rollback state). Injected so the host is testable with an
-/// in-memory fake and, on Tauri, backs onto durable SQLite. The snapshot-hash replay window
+/// in-memory fake and, on Tauri, backs onto durable `SQLite`. The snapshot-hash replay window
 /// (a separate, sync-layer concern) is intentionally NOT here — the vault flows only need the
 /// keyring-revision floor.
 pub trait VaultStore: Send + Sync {
     /// The current keyring anchor to unlock from (the head record — one blob per tree; `None` if none).
+    ///
+    /// # Errors
+    /// Returns an error string if the host store read fails.
     fn load_keyring(&self, tree_key: &str) -> std::result::Result<Option<Vec<u8>>, String>;
     /// The engine-OPAQUE anti-rollback watermark for this tree (empty = none). Replaces the old scalar
     /// revision (OPE-278): the order check lives INSIDE the engine, so the store just persists these bytes
     /// and hands them back as the floor.
+    ///
+    /// # Errors
+    /// Returns an error string if the host store read fails.
     fn watermark(&self, tree_key: &str) -> std::result::Result<Vec<u8>, String>;
     /// **Atomically** persist a newly-accepted keyring `anchor` and its `watermark` cursor, in ONE durable
     /// transaction — so a crash can never leave the stored anchor and its cursor disagreeing.
+    ///
+    /// # Errors
+    /// Returns an error string if the host store write fails (e.g. a CAS conflict).
     fn commit_keyring(
         &self,
         tree_key: &str,
@@ -315,7 +324,7 @@ struct Registry {
 
 impl Registry {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SealerSet>>> {
-        self.map.lock().unwrap_or_else(|e| e.into_inner())
+        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     fn insert(&self, id: String, sealer: SealerSet) {
         self.lock().insert(id, Arc::new(sealer));
@@ -340,6 +349,9 @@ impl Registry {
 /// interior mutability), so the host's methods stay `&self`.
 pub trait HostEntropy: Send + Sync {
     /// 128 fresh random bits. Errs only if the OS/browser entropy source fails.
+    ///
+    /// # Errors
+    /// Returns an error if the host RNG fails.
     fn random_id(&self) -> Result<[u8; SALT_LEN]>;
 }
 
@@ -428,6 +440,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Set the deployment's keyring engine (default [`EngineKind::Chain`]). A backend preset — the managed
     /// backend is fixed to one engine, a BYO backend to one — never a per-tree choice.
+    #[must_use]
     pub fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine = engine;
         self
@@ -439,6 +452,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     }
 
     /// Is a keyring stored for this tree? (The gate uses this to choose unlock vs welcome.)
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the host store read fails.
     pub fn has_keyring(&self, tree_key: &str) -> Result<bool> {
         Ok(self
             .store
@@ -449,6 +465,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Create a brand-new encrypted tree: fresh DEK, wrapped under the passphrase + a fresh
     /// recovery code. Persists the keyring, watermarks revision 1, and returns a live sealer.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn provision(
         &self,
         tree_key: &str,
@@ -487,6 +506,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Open the stored keyring with a passphrase. Unlock is a PURE READ of the local (trusted) anchor: it
     /// takes no floor (the anti-rollback floor is enforced engine-side on recover + keyring sync) and does
     /// not touch the stored watermark.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn unlock(
         &self,
         tree_key: &str,
@@ -521,6 +543,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Recover with the recovery code, re-provisioning under a new passphrase. The stored watermark is the
     /// rollback floor (enforced inside the engine); a fresh recovery code is issued.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn recover(
         &self,
         tree_key: &str,
@@ -565,6 +590,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Change the passphrase: re-wrap the same DEK under a new passphrase, rotate the recovery code, advance
     /// the watermark. No new sealer — the running session keeps working.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn change_passphrase(
         &self,
         tree_key: &str,
@@ -605,6 +633,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Provision a member identity from a passphrase (stateless — no tree touched): returns
     /// the public keys to share OOB with a tree owner and the opaque KDF params the member
     /// persists and passes back at unlock.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn provision_member(&self, passphrase: String) -> Result<MemberProvisioned> {
         let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes()))?;
         Ok(MemberProvisioned {
@@ -618,6 +649,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// record them in the signed member list, persist + watermark the new keyring. The
     /// owner's live sealer is unaffected (no re-key). The member's public keys MUST have
     /// been verified out-of-band before calling.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     #[allow(clippy::too_many_arguments)]
     pub fn add_member(
         &self,
@@ -661,6 +695,12 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// (from out-of-band verification, not the document's hints), HPKE-unwrap with the
     /// member's passphrase, and register a sealer. `member_kdf_params` is the opaque blob
     /// [`provision_member`] returned.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
+    // `trusted_signers` arrives owned from the IPC/host boundary (the Tauri command layer this crate
+    // doesn't rebuild passes it by value); it is only borrowed here, so the by-value is a boundary shape.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn unlock_as_member(
         &self,
         tree_key: &str,
@@ -707,6 +747,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// epoch wrapped only for those remaining, a rotated recovery code, the removed member
     /// dropped from the member list and signer set. Registers a NEW sealer scoped to the new
     /// epoch — the caller re-seals the tree with it and drops its old sealer handle.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn remove_member(
         &self,
         tree_key: &str,
@@ -747,7 +790,11 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
     /// verifies against their pinned signer set, signs with their identity.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
+    // `trusted_signers` arrives owned from the IPC/host boundary; only borrowed here (see unlock_as_member).
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     pub fn add_member_as_co_owner(
         &self,
         tree_key: &str,
@@ -796,7 +843,11 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Remove an ordinary member **as a co-owner** (any-of): re-keys under the new epoch,
     /// signs with the co-owner's identity, and registers a new-epoch sealer.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
+    // `trusted_signers` arrives owned from the IPC/host boundary; only borrowed here (see unlock_as_member).
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     pub fn remove_member_as_co_owner(
         &self,
         tree_key: &str,
@@ -845,6 +896,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// Promote an existing member to co-owner (founder action). Persists + watermarks the
     /// new keyring; no sealer changes (signing authority, not keys).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn add_co_owner(
         &self,
         tree_key: &str,
@@ -874,7 +928,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     }
 
     /// Demote a co-owner to an ordinary role (founder action). Revokes signing authority,
-    /// not read access — use remove_member to fully revoke. `new_role` = admin/editor/viewer.
+    /// not read access — use `remove_member` to fully revoke. `new_role` = admin/editor/viewer.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn remove_co_owner(
         &self,
         tree_key: &str,
@@ -916,6 +973,14 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// This updates keyring state only; it does not touch live sealers. A caller that needs to
     /// read content under a newly-rotated epoch re-unlocks. A first-sight member (no local
     /// anchor) bootstraps out-of-band first (a separate path); here an anchor must already exist.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the served keyring is malformed, does not verify, or the host store access fails.
+    ///
+    /// # Panics
+    /// Never in practice: `hops` is validated non-empty before its last element is taken.
+    // `hops` arrives owned from the IPC/host boundary; only borrowed here (see unlock_as_member).
+    #[allow(clippy::needless_pass_by_value)]
     pub fn accept_remote_keyring(
         &self,
         tree_key: &str,
@@ -967,6 +1032,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
 
     /// A local-development sealer under the reserved dev key (the demo path). Real ciphertext,
     /// well-known key — no keyring, no unlock.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the dev unlock fails.
     pub fn dev(&self, tree_id: &[u8]) -> Result<Unlocked> {
         let replica = self.fresh_replica()?;
         let id = self.register(SealerSet::single(Sealer::dev(
@@ -983,6 +1051,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     }
 
     /// Seal one entry with the caller-supplied chain state, on the sealer behind `sealer_id`.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the sealer is unknown or sealing fails.
     #[allow(clippy::too_many_arguments)]
     pub fn seal_entry(
         &self,
@@ -1014,6 +1085,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     }
 
     /// Open one envelope on the sealer behind `sealer_id`, verifying scope + kind.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the sealer is unknown or opening fails.
     pub fn open_entry(&self, sealer_id: &str, kind: &str, envelope: &[u8]) -> Result<Vec<u8>> {
         let sealer = self.sealer(sealer_id)?;
         Ok(sealer.open_entry(parse_kind(kind)?, envelope)?)
@@ -1040,6 +1114,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Add a member to a dag tree (owner action): the owner reaches every epoch's DEK and wraps it to the
     /// joiner's HPKE key, appending a signed Add op. Persists the new anchor + watermark; the owner's live
     /// sealer is unaffected (Add mints no new epoch). The joiner's keys MUST be verified out-of-band first.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     #[allow(clippy::too_many_arguments)]
     pub fn dag_add_member(
         &self,
@@ -1084,6 +1161,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Remove a member from a dag tree (owner action) with forward secrecy: appends a Remove op minting a
     /// fresh epoch the removed member can't reach, then re-unlocks under that epoch so the caller gets a
     /// sealer scoped to it (matching the chain's remove). Persists the new anchor + watermark.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_remove_member(
         &self,
         tree_key: &str,
@@ -1123,6 +1203,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Unlock a dag tree AS AN ORDINARY member: reach the DEKs via the member's own per-epoch HPKE wraps (not
     /// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key (dag membership
     /// is resolved from the op-DAG, so no caller-supplied trusted-signer set is needed, unlike the chain).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_unlock_as_member(
         &self,
         tree_key: &str,
@@ -1162,6 +1245,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// closures) and persist the merged anchor + advanced watermark. Merge only ADDS ops, so it can't roll the
     /// local anchor back — no floor needed. A following `unlock`/`dag_unlock_as_member` reports `needs_reseal`
     /// if the merged write epoch is stale (a concurrent-removal race); call [`dag_reseal`] to repair.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_merge_remote(&self, tree_key: &str, remote_anchor: &[u8]) -> Result<AcceptedKeyring> {
         let dag = self.dag()?;
         let local = self.require_keyring(tree_key)?;
@@ -1176,6 +1262,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Repair a stale write epoch (OPE-282) after a concurrent membership merge: if the resolved keyring needs
     /// it, append a covering Reseal op (a fresh DEK wrapped to exactly the resolved membership). Idempotent —
     /// a no-op (`resealed=false`, nothing persisted) when nothing is stale. The stored watermark is the floor.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_reseal(
         &self,
         tree_key: &str,
@@ -1218,6 +1307,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// ACTIVE member — authorizing with their own `passphrase` + account `member_kdf_params` — can drive it,
     /// so a member locked out by a concurrent merge doesn't have to wait for the owner's device. Idempotent;
     /// the stored watermark is the floor.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_reseal_as_member(
         &self,
         tree_key: &str,
@@ -1265,6 +1357,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// is missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
     /// Idempotent — a no-op (`backfilled=false`, nothing persisted) when nothing is missing. Owner-authored
     /// (only the RRK opens the old DEKs). The stored watermark is the floor.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
     pub fn dag_backfill(
         &self,
         tree_key: &str,
@@ -1348,12 +1443,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let produced = decode_keyring(produced_bytes)?;
         let new_anchor = verify_transition(&KeyringAnchor::from_keyring(&prior), &produced)
             .map_err(self_check_failed)?;
-        let watermark = match pin {
-            Some((key_id, dek_hash)) => chain_watermark_pinned(new_anchor.revision, key_id, dek_hash),
-            None => {
-                let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
-                chain_watermark_carry(new_anchor.revision, &stored)
-            }
+        let watermark = if let Some((key_id, dek_hash)) = pin { chain_watermark_pinned(new_anchor.revision, key_id, dek_hash) } else {
+            let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+            chain_watermark_carry(new_anchor.revision, &stored)
         };
         self.store
             .commit_keyring(tree_key, produced_bytes, &watermark)
@@ -1423,15 +1515,14 @@ fn chain_watermark_carry(revision: u32, stored: &[u8]) -> Vec<u8> {
 }
 
 /// Decode a chain watermark's scalar revision — its first 4 big-endian bytes. The chain watermark is
-/// `revision(4) [‖ write_key_id(16) ‖ H(DEK)(32)]` since OPE-286 (the epoch pin the ChainVault threads
+/// `revision(4) [‖ write_key_id(16) ‖ H(DEK)(32)]` since OPE-286 (the epoch pin the `ChainVault` threads
 /// through recover); this reads only the revision (empty / too-short = 0). Only the chain-only
 /// membership/accept paths use it, to pass a scalar floor to `vault::*`.
 fn chain_floor(watermark: &[u8]) -> u32 {
     watermark
         .get(..4)
         .and_then(|b| b.try_into().ok())
-        .map(u32::from_be_bytes)
-        .unwrap_or(0)
+        .map_or(0, u32::from_be_bytes)
 }
 
 /// Decode a keyring we ourselves produced or previously stored. A failure is an internal
@@ -1446,8 +1537,10 @@ fn decode_keyring(bytes: &[u8]) -> Result<Keyring> {
 }
 
 /// A flow produced a keyring its own chain-walk rejects — a construction bug in this crate,
-/// caught before persistence. Deliberately Internal (with the KeyringError for the log), never a
+/// caught before persistence. Deliberately Internal (with the `KeyringError` for the log), never a
 /// matchable user-facing code: the fix is our code, not the caller's input.
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn self_check_failed(e: KeyringError) -> VaultError {
     VaultError::new(
         VaultErrorCode::Internal,
@@ -1459,6 +1552,8 @@ fn self_check_failed(e: KeyringError) -> VaultError {
 /// [`self_check_failed`], this is the *counterparty's* fault, not ours — mapped to a granular,
 /// user-facing code so the JS side can react (fork = attack, gap = availability, unendorsed =
 /// tampering) rather than a blanket internal error.
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn remote_chain_err(e: KeyringError) -> VaultError {
     use KeyringError as E;
     use VaultErrorCode as C;
@@ -1477,9 +1572,10 @@ fn remote_chain_err(e: KeyringError) -> VaultError {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
