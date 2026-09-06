@@ -32,6 +32,3 @@ pub use quorum::{Individual, QuorumPolicy};
 // Ed25519 / CanonicalBytes / Requirement).
 pub use keyeo_core::{CanonicalBytes, Ed25519, Requirement, Role, SigError, SignatureScheme, Signed};
 
-// The generic crypto primitives now live in keyeo-crypto (OPE-305). Re-exported here so `keyeo_dag::X`
-// keeps resolving for the group-membership engine's own consumers.
-pub use keyeo_crypto::{CryptoError, Key32, KEY_LEN, SALT_LEN};

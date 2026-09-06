@@ -14,9 +14,7 @@ path = "src/lib.rs"
 # re-exported so `keyeo_dag::X` keeps resolving for the openom-keyring-dag binding and other consumers (OPE-306).
 keyeo-core = { path = "../keyeo-core" }
 # The generic crypto primitives (DEK generation, HPKE DEK wraps, Key32/CryptoError) — openom-free,
-# so keyeo-dag stays standalone-publishable (OPE-305). The Argon2id/AEAD/recovery surface rides along.
-keyeo-crypto = { path = "../keyeo-crypto" }
-# Still used directly by the signing helpers (Op::sign / epoch + content signing take a dalek SigningKey);
+# so keyeo-dag stays standalone-publishable (OPE-305). The Argon2id/AEAD/recovery surface rides along.# Still used directly by the signing helpers (Op::sign / epoch + content signing take a dalek SigningKey);
 # the verify seam moved to keyeo-core (Ed25519 via edsign), but the sign side keeps this edge.
 ed25519-dalek = { version = "2", features = ["zeroize"] }
 sha2 = "0.10"

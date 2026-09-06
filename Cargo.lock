@@ -2911,7 +2911,8 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf 0.12.4",
  "hpke",
- "keyeo-material",
+ "keyeo-core",
+ "keyeo-wrap",
  "postcard",
  "proptest",
  "rand_core 0.6.4",
@@ -2928,7 +2929,6 @@ dependencies = [
  "ed25519-dalek",
  "edsign",
  "keyeo-core",
- "keyeo-crypto",
  "petgraph",
  "postcard",
  "proptest",
@@ -2938,7 +2938,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyeo-material"
+name = "keyeo-wrap"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -3720,7 +3720,7 @@ dependencies = [
  "edsign",
  "keyeo-crypto",
  "keyeo-dag",
- "keyeo-material",
+ "keyeo-wrap",
  "openom-keyring-api",
  "openom-keyring-chain",
  "openom-protocol",

@@ -66,7 +66,7 @@ impl rand_core::RngCore for OsCsprng {
 impl rand_core::CryptoRng for OsCsprng {}
 
 /// An HPKE-wrapped DEK: the encapsulated key (the ephemeral X25519 public) and the sealed DEK, each a
-/// fixed-size [material newtype](keyeo_material) so a wrong-length half is unconstructable. HPKE carries
+/// fixed-size [material newtype](keyeo_wrap) so a wrong-length half is unconstructable. HPKE carries
 /// its own nonce internally, so there is no separate nonce for this method.
 pub struct HpkeWrap {
     pub encapped_key: EncappedKey,

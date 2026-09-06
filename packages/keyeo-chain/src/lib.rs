@@ -21,9 +21,10 @@ type Sig<D> = <<D as Doc>::S as SignatureScheme>::Signature;
 
 // ---- newtypes (zero-cost; a caller can't cross a group-id for a hash, a revision for a version, …) ----
 
-/// The identifier of the membership group this chain governs (the chain's `tree_id`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct GroupId(pub Vec<u8>);
+/// The identifier of the membership group this chain governs (the chain's `tree_id`) — the shared
+/// `keyeo-core` type, re-exported so chain consumers keep naming it `keyeo_chain::GroupId`. (It used to be
+/// a separate, near-identical local newtype; unified into keyeo-core so the whole family names one type.)
+pub use keyeo_core::GroupId;
 
 /// The monotonic revision number. Each transition advances it by exactly one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -4,7 +4,7 @@
 # are part of its public wrap/HPKE API); lean consumers (e.g. openom-keyring-dag) depend on this crate
 # directly. Pure newtypes: serde-only, no crypto deps.
 [package]
-name = "keyeo-material"
+name = "keyeo-wrap"
 description = "Fixed-size keyeo crypto-material newtypes (X25519 public key, HPKE encapped key, nonce, wrapped DEK) — length-in-the-type, so wrong-length or swapped key material is unconstructable. Dependency-light: the types without the machinery."
 version.workspace = true
 license.workspace = true

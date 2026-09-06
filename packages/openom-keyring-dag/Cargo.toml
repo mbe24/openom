@@ -10,7 +10,7 @@ rust-version.workspace = true
 keyeo-dag.workspace = true
 # The lean X25519 public-key type (WITHOUT keyeo-crypto's AEAD/HPKE/Argon2 machinery), so the HPKE key a
 # member carries is a distinct type from the Ed25519 author key — transposition is a compile error.
-keyeo-material.workspace = true
+keyeo-wrap.workspace = true
 blobstore.workspace = true
 openom-keyring-api.workspace = true
 edsign.workspace = true

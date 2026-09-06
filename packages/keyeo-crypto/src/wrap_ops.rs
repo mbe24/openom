@@ -102,7 +102,7 @@ pub fn unwrap_dek<Id: RecipientId>(
 mod tests {
     use super::*;
     use crate::hpke_wrap::derive_hpke_keypair;
-    use crate::ids::{GroupId, KeyId};
+    use crate::{GroupId, KeyId};
 
     fn ctx_ids() -> (GroupId, KeyId) {
         (

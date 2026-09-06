@@ -9,7 +9,7 @@ use std::hash::Hash;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::ids::{GroupId, KeyId};
+use crate::{GroupId, KeyId};
 use crate::KdfParams;
 use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 

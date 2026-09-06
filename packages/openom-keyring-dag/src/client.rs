@@ -189,7 +189,7 @@ pub fn provision_anchor(
     tree_id: &[u8],
     founder_id: &str,
     author_public_key: edsign::VerifyingKey,
-    hpke_public_key: keyeo_material::X25519PublicKey,
+    hpke_public_key: keyeo_wrap::X25519PublicKey,
     reset_authority: [u8; 32],
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
@@ -669,7 +669,7 @@ pub fn append_refound(
     anchor_bytes: &[u8],
     owner_id: &str,
     new_author_public_key: edsign::VerifyingKey,
-    new_hpke_public_key: keyeo_material::X25519PublicKey,
+    new_hpke_public_key: keyeo_wrap::X25519PublicKey,
     era: u64,
     sealing: Vec<u8>,
     rvk_signing_key: &edsign::SigningKey,
@@ -693,7 +693,7 @@ pub fn append_retarget(
     anchor_bytes: &[u8],
     member_id: &str,
     new_author_public_key: edsign::VerifyingKey,
-    new_hpke_public_key: keyeo_material::X25519PublicKey,
+    new_hpke_public_key: keyeo_wrap::X25519PublicKey,
     sealing: Vec<u8>,
     current_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
@@ -769,8 +769,8 @@ mod tests {
     fn vpk(seed: u8) -> edsign::VerifyingKey {
         sk(seed).verifying_key()
     }
-    fn xpk(seed: u8) -> keyeo_material::X25519PublicKey {
-        keyeo_material::X25519PublicKey::from_bytes([seed; 32])
+    fn xpk(seed: u8) -> keyeo_wrap::X25519PublicKey {
+        keyeo_wrap::X25519PublicKey::from_bytes([seed; 32])
     }
     fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {

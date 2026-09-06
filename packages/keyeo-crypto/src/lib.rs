@@ -41,16 +41,19 @@ pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
-pub use ids::{GroupId, KeyId};
+pub use ids::KeyId;
+// GroupId is the shared keyeo-core type; re-exported because it's a public wrap parameter (kek_wrap /
+// unwrap_kek take &GroupId) so this crate's callers can name it.
+pub use keyeo_core::GroupId;
 pub use keyring::{Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
 pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
-// The fixed-size material newtypes now live in the lean `keyeo-material` crate; re-exported here because
+// The fixed-size material newtypes now live in the lean `keyeo-wrap` crate; re-exported here because
 // they are part of this crate's public wrap/HPKE API (RecipientDescriptor, HpkeWrap records, epoch wraps).
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfBounds, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
-pub use keyeo_material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
+pub use keyeo_wrap::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, RECOVERY_ARGON2_ITERATIONS,
     RECOVERY_ARGON2_MEMORY_KIB, RECOVERY_ARGON2_PARALLELISM, RECOVERY_ENTROPY_LEN,

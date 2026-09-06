@@ -94,7 +94,7 @@ mod tests {
     use super::*;
     use crate::ids::KeyId;
     use crate::keyring::{KekKind, WrapMethod};
-    use crate::material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
+    use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 
     /// A fully-populated sample exercising ALL wrap forms with every field a distinct non-default value — the
     /// oracle for the round-trip + per-field mutation guards (a `#[serde(skip)]` on any field would make

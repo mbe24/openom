@@ -28,10 +28,10 @@ impl MemberId for u32 {}
 /// An opaque group identifier — the group (openom: the tree) an op belongs to. Bound into every op's signed
 /// and content-addressed bytes and enforced by the engine (an op whose group id differs from the group being
 /// resolved is refused), and bound into the wrap AAD so a wrap can't be transplanted across groups. It is
-/// the keyeo-family foundation type, defined once in keyeo-crypto and re-exported here so the resolver, the
+/// the keyeo-family foundation type, defined once in keyeo-core and re-exported here so the resolver, the
 /// crypto layer, and every consumer name the same `GroupId` (its `unscoped()` marker keeps an EMPTY group
 /// id a conscious choice, never an accident).
-pub use keyeo_crypto::GroupId;
+pub use keyeo_core::GroupId;
 
 pub trait SignedOp: Debug + Clone + Eq + std::hash::Hash + Ord {
     type S: SignatureScheme;
