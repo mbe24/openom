@@ -7,6 +7,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The fixed-size material newtypes (X25519PublicKey / EncappedKey / Nonce / WrappedDek), extracted so lean
+# consumers can name them without this crate's machinery. Re-exported below — they're part of our wrap API.
+keyeo-material.workspace = true
 aes-gcm.workspace = true
 chacha20poly1305.workspace = true
 argon2.workspace = true

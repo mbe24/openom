@@ -4,16 +4,15 @@
 //! XChaCha20-Poly1305 for the symmetric KEK wrap. So an X25519 point is 32 bytes and a sealed 32-byte
 //! secret is 48 (32 + a 16-byte AEAD tag). Encoding those lengths in the *type* makes a wrong-length key
 //! or ciphertext unconstructable (illegal states unrepresentable) and removes a heap allocation per field
-//! (a `[u8; N]` is inline; a `Vec<u8>` for a 32-byte key is an alloc + a pointer chase). This is the same
-//! discipline [`HpkeKeypair`](crate::HpkeKeypair) already uses for its key halves, extended to the wrap
-//! outputs — which had regressed to raw `Vec<u8>`.
+//! (a `[u8; N]` is inline; a `Vec<u8>` for a 32-byte key is an alloc + a pointer chase).
 //!
-//! serde is deliberately NOT derived here yet: the current consumer ([`HpkeWrap`](crate::HpkeWrap)) is a
-//! transient value converted immediately into the consumer's own record, so nothing serializes these in
-//! isolation. The `serde(transparent)` impls (and the hand impl the 48-byte array needs, since serde's
-//! blanket array impls stop at 32) land when the shared wrap/epoch types that ARE serialized arrive.
+//! These live in their OWN crate (not `keyeo-crypto`) so a consumer can name a typed public key without
+//! pulling in the AEAD / Argon2 / HPKE machinery — the same isolation `edsign` gives the Ed25519 key
+//! types. `keyeo-crypto` re-exports them (they are part of its public wrap/HPKE API). The length-checked
+//! `TryFrom<&[u8]>` yields the std [`core::array::TryFromSliceError`], so this crate stays error-domain-free.
 
-use crate::CryptoError;
+use core::array::TryFromSliceError;
+
 use serde::{Deserialize, Serialize};
 
 /// The HPKE encapsulated key (`enc`) — the ephemeral X25519 public produced by a seal, replayed to the
@@ -47,10 +46,10 @@ impl AsRef<[u8]> for EncappedKey {
 }
 
 impl TryFrom<&[u8]> for EncappedKey {
-    type Error = CryptoError;
+    type Error = TryFromSliceError;
     /// Length-checked at the wire boundary: a slice that isn't exactly 32 bytes is rejected.
-    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
-        bytes.try_into().map(Self).map_err(|_| CryptoError::Hpke)
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(Self(bytes.try_into()?))
     }
 }
 
@@ -84,10 +83,10 @@ impl AsRef<[u8]> for X25519PublicKey {
 }
 
 impl TryFrom<&[u8]> for X25519PublicKey {
-    type Error = CryptoError;
+    type Error = TryFromSliceError;
     /// Length-checked at the wire boundary: a slice that isn't exactly 32 bytes is rejected.
-    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
-        bytes.try_into().map(Self).map_err(|_| CryptoError::Hpke)
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(Self(bytes.try_into()?))
     }
 }
 
@@ -120,10 +119,10 @@ impl AsRef<[u8]> for Nonce {
 }
 
 impl TryFrom<&[u8]> for Nonce {
-    type Error = CryptoError;
+    type Error = TryFromSliceError;
     /// Length-checked at the wire boundary: a slice that isn't exactly 24 bytes is rejected.
-    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
-        bytes.try_into().map(Self).map_err(|_| CryptoError::NonceLength)
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(Self(bytes.try_into()?))
     }
 }
 
@@ -155,10 +154,10 @@ impl AsRef<[u8]> for WrappedDek {
 }
 
 impl TryFrom<&[u8]> for WrappedDek {
-    type Error = CryptoError;
+    type Error = TryFromSliceError;
     /// Length-checked at the wire boundary: a slice that isn't exactly 48 bytes is rejected.
-    fn try_from(bytes: &[u8]) -> Result<Self, CryptoError> {
-        bytes.try_into().map(Self).map_err(|_| CryptoError::Hpke)
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Ok(Self(bytes.try_into()?))
     }
 }
 
@@ -181,7 +180,10 @@ impl<'de> Deserialize<'de> for WrappedDek {
             fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<WrappedDek, E> {
                 WrappedDek::try_from(v).map_err(|_| E::invalid_length(v.len(), &self))
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<WrappedDek, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<WrappedDek, A::Error> {
                 let mut buf = [0u8; 48];
                 for (i, slot) in buf.iter_mut().enumerate() {
                     *slot = seq

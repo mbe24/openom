@@ -9,6 +9,7 @@ members = [
     "packages/openom-protocol",
     "packages/openom-crypto",
     "packages/keyeo-crypto",
+    "packages/keyeo-material",
     "packages/openom-roles",
     "packages/openom-keyring-chain",
     "packages/openom-keyring-api",
@@ -70,6 +71,7 @@ multiple_crate_versions = "allow"
 openom-protocol = { path = "packages/openom-protocol" }
 openom-crypto = { path = "packages/openom-crypto" }
 keyeo-crypto = { path = "packages/keyeo-crypto" }
+keyeo-material = { path = "packages/keyeo-material" }
 openom-roles = { path = "packages/openom-roles" }
 openom-keyring-chain = { path = "packages/openom-keyring-chain" }
 openom-keyring-dag = { path = "packages/openom-keyring-dag" }

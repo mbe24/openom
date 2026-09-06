@@ -1,0 +1,18 @@
+# The fixed-size crypto-material newtypes (X25519PublicKey / EncappedKey / Nonce / WrappedDek), extracted
+# out of keyeo-crypto so a crate can name a typed public key WITHOUT pulling in the AEAD/Argon2/HPKE
+# machinery — mirroring how `edsign` isolates the Ed25519 key types. keyeo-crypto re-exports these (they
+# are part of its public wrap/HPKE API); lean consumers (e.g. openom-keyring-dag) depend on this crate
+# directly. Pure newtypes: serde-only, no crypto deps.
+[package]
+name = "keyeo-material"
+description = "Fixed-size keyeo crypto-material newtypes (X25519 public key, HPKE encapped key, nonce, wrapped DEK) — length-in-the-type, so wrong-length or swapped key material is unconstructable. Dependency-light: the types without the machinery."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

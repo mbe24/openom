@@ -189,7 +189,7 @@ pub fn provision_anchor(
     tree_id: &[u8],
     founder_id: &str,
     author_public_key: edsign::VerifyingKey,
-    hpke_public_key: [u8; 32],
+    hpke_public_key: keyeo_material::X25519PublicKey,
     reset_authority: [u8; 32],
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
@@ -198,10 +198,10 @@ pub fn provision_anchor(
     let founder = KeyringMemberInit {
         id: founder_id.to_string(),
         role: KeyringRole::OWNER,
-        // The author key is a typed `VerifyingKey`; HPKE stays raw `[u8; 32]`. Distinct types → the two
-        // can't be transposed (a compile error), without pulling an X25519 crate into this lean crate.
+        // Both keys are typed and DISTINCT (`VerifyingKey` / `X25519PublicKey`), so a transposition is a
+        // compile error; each is narrowed to keyeo's raw `[u8; 32]` here at the engine boundary.
         author_public_key: author_public_key.to_bytes(),
-        hpke_public_key,
+        hpke_public_key: hpke_public_key.to_bytes(),
     };
     let action = MembershipAction::Create {
         initial_members: vec![founder.clone()],
@@ -669,7 +669,7 @@ pub fn append_refound(
     anchor_bytes: &[u8],
     owner_id: &str,
     new_author_public_key: edsign::VerifyingKey,
-    new_hpke_public_key: [u8; 32],
+    new_hpke_public_key: keyeo_material::X25519PublicKey,
     era: u64,
     sealing: Vec<u8>,
     rvk_signing_key: &edsign::SigningKey,
@@ -677,7 +677,7 @@ pub fn append_refound(
     let action = MembershipAction::ReFound {
         member: owner_id.to_string(),
         new_author_public_key: new_author_public_key.to_bytes(),
-        new_hpke_public_key,
+        new_hpke_public_key: new_hpke_public_key.to_bytes(),
         era,
     };
     append(anchor_bytes, owner_id, action, sealing, rvk_signing_key)
@@ -693,14 +693,14 @@ pub fn append_retarget(
     anchor_bytes: &[u8],
     member_id: &str,
     new_author_public_key: edsign::VerifyingKey,
-    new_hpke_public_key: [u8; 32],
+    new_hpke_public_key: keyeo_material::X25519PublicKey,
     sealing: Vec<u8>,
     current_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Retarget {
         member: member_id.to_string(),
         new_author_public_key: new_author_public_key.to_bytes(),
-        new_hpke_public_key,
+        new_hpke_public_key: new_hpke_public_key.to_bytes(),
     };
     append(
         anchor_bytes,
@@ -768,6 +768,9 @@ mod tests {
     }
     fn vpk(seed: u8) -> edsign::VerifyingKey {
         sk(seed).verifying_key()
+    }
+    fn xpk(seed: u8) -> keyeo_material::X25519PublicKey {
+        keyeo_material::X25519PublicKey::from_bytes([seed; 32])
     }
     fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {
@@ -882,7 +885,7 @@ mod tests {
             b"tree-1",
             "founder",
             vpk(1),
-            [1; 32],
+            xpk(1),
             vk(3),
             b"seal".to_vec(),
             &sk(1),
@@ -934,7 +937,7 @@ mod tests {
             b"tree-es",
             "founder",
             vpk(1),
-            [1; 32],
+            xpk(1),
             vk(3),
             b"seal".to_vec(),
             &sk(1),
@@ -972,7 +975,7 @@ mod tests {
             b"tree-cp",
             "founder",
             vpk(1),
-            [1; 32],
+            xpk(1),
             vk(3),
             b"g".to_vec(),
             &sk(1),

@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 
 use crate::keyring::{Epoch, RecipientId, Wrap, WrapMethod};
-use crate::material::X25519PublicKey;
+use crate::X25519PublicKey;
 
 /// A recipient the caller requires an epoch to cover. `expected_key = Some(k)` demands the wrap be
 /// addressed to that current X25519 key (the rekey-race guard); `None` matches any wrap to the id.
@@ -99,7 +99,7 @@ pub fn covers_exact<Id: RecipientId>(
 mod tests {
     use super::*;
     use crate::ids::KeyId;
-    use crate::material::{EncappedKey, WrappedDek};
+    use crate::{EncappedKey, WrappedDek};
 
     fn member_wrap(recipient: &str, key: u8) -> Wrap<String> {
         Wrap {
@@ -124,16 +124,27 @@ mod tests {
     }
 
     fn epoch(wraps: Vec<Wrap<String>>) -> Epoch<String> {
-        Epoch { key_id: KeyId::new(vec![1]), ordinal: 1, wraps }
+        Epoch {
+            key_id: KeyId::new(vec![1]),
+            ordinal: 1,
+            wraps,
+        }
     }
 
     fn desc(id: &str, key: Option<u8>) -> RecipientDescriptor<String> {
-        RecipientDescriptor { id: id.to_string(), expected_key: key.map(|k| X25519PublicKey::from_bytes([k; 32])) }
+        RecipientDescriptor {
+            id: id.to_string(),
+            expected_key: key.map(|k| X25519PublicKey::from_bytes([k; 32])),
+        }
     }
 
     #[test]
     fn a_complete_epoch_covers_and_has_nothing_missing() {
-        let ep = epoch(vec![rrk_wrap("owner", 9), member_wrap("alice", 1), member_wrap("bob", 2)]);
+        let ep = epoch(vec![
+            rrk_wrap("owner", 9),
+            member_wrap("alice", 1),
+            member_wrap("bob", 2),
+        ]);
         let required = vec![desc("alice", Some(1)), desc("bob", Some(2))];
         let rrk = desc("owner", None);
         assert!(missing(&ep, &required, &rrk).is_empty());
@@ -152,11 +163,21 @@ mod tests {
     #[test]
     fn a_leaked_removed_member_breaks_covers_but_is_not_missing() {
         // bob was removed (not in required) yet still has a wrap — a forward-secrecy leak.
-        let ep = epoch(vec![rrk_wrap("owner", 9), member_wrap("alice", 1), member_wrap("bob", 2)]);
+        let ep = epoch(vec![
+            rrk_wrap("owner", 9),
+            member_wrap("alice", 1),
+            member_wrap("bob", 2),
+        ]);
         let required = vec![desc("alice", Some(1))];
         let rrk = desc("owner", None);
-        assert!(missing(&ep, &required, &rrk).is_empty(), "missing is subset-only, so it doesn't see the leak");
-        assert!(!covers_exact(&ep, &required, &rrk), "covers_exact does — a removed member must force a reseal");
+        assert!(
+            missing(&ep, &required, &rrk).is_empty(),
+            "missing is subset-only, so it doesn't see the leak"
+        );
+        assert!(
+            !covers_exact(&ep, &required, &rrk),
+            "covers_exact does — a removed member must force a reseal"
+        );
     }
 
     #[test]
@@ -176,7 +197,11 @@ mod tests {
         let stale = epoch(vec![rrk_wrap("owner", 9), member_wrap("alice", 8)]);
         assert_eq!(missing(&stale, &required, &rrk), vec!["alice".to_string()]);
         // A current-key wrap coexisting with the stale one → covered, and the leftover is not a leak.
-        let both = epoch(vec![rrk_wrap("owner", 9), member_wrap("alice", 8), member_wrap("alice", 1)]);
+        let both = epoch(vec![
+            rrk_wrap("owner", 9),
+            member_wrap("alice", 8),
+            member_wrap("alice", 1),
+        ]);
         assert!(missing(&both, &required, &rrk).is_empty());
         assert!(covers_exact(&both, &required, &rrk));
     }

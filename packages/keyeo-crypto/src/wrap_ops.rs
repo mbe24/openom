@@ -7,8 +7,8 @@
 
 use crate::hpke_wrap::{hpke_unwrap_dek, hpke_wrap_dek};
 use crate::keyring::{GroupContext, RecipientId, Wrap, WrapMethod};
-use crate::material::X25519PublicKey;
 use crate::wrap_aad::wrap_aad;
+use crate::X25519PublicKey;
 use crate::{CryptoError, Dek};
 
 /// HPKE-wrap `dek` to a member's X25519 public key — the per-member wrap that gives them access to this
@@ -31,7 +31,10 @@ pub fn member_wrap<Id: RecipientId>(
     let w = hpke_wrap_dek(recipient_key.as_ref(), dek, &aad)?;
     Ok(Wrap {
         recipient,
-        method: WrapMethod::MemberHpke { encapped: w.encapped_key, recipient_key },
+        method: WrapMethod::MemberHpke {
+            encapped: w.encapped_key,
+            recipient_key,
+        },
         ciphertext: w.ciphertext,
     })
 }
@@ -56,7 +59,10 @@ pub fn rrk_wrap<Id: RecipientId>(
     let w = hpke_wrap_dek(rrk_public.as_ref(), dek, &aad)?;
     Ok(Wrap {
         recipient,
-        method: WrapMethod::RrkHpke { encapped: w.encapped_key, recipient_key: rrk_public },
+        method: WrapMethod::RrkHpke {
+            encapped: w.encapped_key,
+            recipient_key: rrk_public,
+        },
         ciphertext: w.ciphertext,
     })
 }
@@ -84,7 +90,12 @@ pub fn unwrap_dek<Id: RecipientId>(
         &wrap.recipient.aad_bytes(),
         tag,
     );
-    hpke_unwrap_dek(hpke_secret, encapped.as_ref(), wrap.ciphertext.as_ref(), &aad)
+    hpke_unwrap_dek(
+        hpke_secret,
+        encapped.as_ref(),
+        wrap.ciphertext.as_ref(),
+        &aad,
+    )
 }
 
 #[cfg(test)]
@@ -94,7 +105,10 @@ mod tests {
     use crate::ids::{GroupId, KeyId};
 
     fn ctx_ids() -> (GroupId, KeyId) {
-        (GroupId::new(b"tree".to_vec()), KeyId::new(b"epoch-0".to_vec()))
+        (
+            GroupId::new(b"tree".to_vec()),
+            KeyId::new(b"epoch-0".to_vec()),
+        )
     }
 
     #[test]
@@ -102,8 +116,17 @@ mod tests {
         let kp = derive_hpke_keypair(&[7u8; 32]);
         let dek = Dek::new([9u8; 32]);
         let (group, key_id) = ctx_ids();
-        let ctx = GroupContext { group_id: &group, key_id: &key_id };
-        let wrap = member_wrap(&dek, "alice".to_string(), X25519PublicKey::from_bytes(kp.public), &ctx).unwrap();
+        let ctx = GroupContext {
+            group_id: &group,
+            key_id: &key_id,
+        };
+        let wrap = member_wrap(
+            &dek,
+            "alice".to_string(),
+            X25519PublicKey::from_bytes(kp.public),
+            &ctx,
+        )
+        .unwrap();
 
         // Round-trips under the right secret + context.
         let opened = unwrap_dek(&wrap, &*kp.secret, &ctx).unwrap();
@@ -111,13 +134,25 @@ mod tests {
 
         // A different epoch (key_id) rebuilds a different AAD → the tag fails.
         let other_key = KeyId::new(b"epoch-1".to_vec());
-        let other_ctx = GroupContext { group_id: &group, key_id: &other_key };
-        assert!(matches!(unwrap_dek(&wrap, &*kp.secret, &other_ctx), Err(CryptoError::Hpke)));
+        let other_ctx = GroupContext {
+            group_id: &group,
+            key_id: &other_key,
+        };
+        assert!(matches!(
+            unwrap_dek(&wrap, &*kp.secret, &other_ctx),
+            Err(CryptoError::Hpke)
+        ));
 
         // A different group fails too.
         let other_group = GroupId::new(b"tree-B".to_vec());
-        let other_group_ctx = GroupContext { group_id: &other_group, key_id: &key_id };
-        assert!(matches!(unwrap_dek(&wrap, &*kp.secret, &other_group_ctx), Err(CryptoError::Hpke)));
+        let other_group_ctx = GroupContext {
+            group_id: &other_group,
+            key_id: &key_id,
+        };
+        assert!(matches!(
+            unwrap_dek(&wrap, &*kp.secret, &other_group_ctx),
+            Err(CryptoError::Hpke)
+        ));
     }
 
     #[test]
@@ -126,9 +161,21 @@ mod tests {
         let other = derive_hpke_keypair(&[8u8; 32]);
         let dek = Dek::new([1u8; 32]);
         let (group, key_id) = ctx_ids();
-        let ctx = GroupContext { group_id: &group, key_id: &key_id };
-        let wrap = member_wrap(&dek, "alice".to_string(), X25519PublicKey::from_bytes(kp.public), &ctx).unwrap();
-        assert!(matches!(unwrap_dek(&wrap, &*other.secret, &ctx), Err(CryptoError::Hpke)));
+        let ctx = GroupContext {
+            group_id: &group,
+            key_id: &key_id,
+        };
+        let wrap = member_wrap(
+            &dek,
+            "alice".to_string(),
+            X25519PublicKey::from_bytes(kp.public),
+            &ctx,
+        )
+        .unwrap();
+        assert!(matches!(
+            unwrap_dek(&wrap, &*other.secret, &ctx),
+            Err(CryptoError::Hpke)
+        ));
     }
 
     #[test]
@@ -136,8 +183,17 @@ mod tests {
         let kp = derive_hpke_keypair(&[3u8; 32]);
         let dek = Dek::new([5u8; 32]);
         let (group, key_id) = ctx_ids();
-        let ctx = GroupContext { group_id: &group, key_id: &key_id };
-        let wrap = rrk_wrap(&dek, "owner".to_string(), X25519PublicKey::from_bytes(kp.public), &ctx).unwrap();
+        let ctx = GroupContext {
+            group_id: &group,
+            key_id: &key_id,
+        };
+        let wrap = rrk_wrap(
+            &dek,
+            "owner".to_string(),
+            X25519PublicKey::from_bytes(kp.public),
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(wrap.method.tag(), WrapMethod::TAG_RRK_HPKE);
         let opened = unwrap_dek(&wrap, &*kp.secret, &ctx).unwrap();
         assert_eq!(opened.expose(), dek.expose());

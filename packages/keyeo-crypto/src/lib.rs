@@ -28,35 +28,36 @@ mod hpke_wrap;
 mod ids;
 mod kdf;
 mod keyring;
-mod material;
 mod recovery;
 mod root;
 mod secret;
 mod wrap_aad;
 mod wrap_ops;
 
+pub use codec::CodecError;
+pub use covers::{covers_exact, missing, RecipientDescriptor};
+pub use escrow::{kek_wrap, kek_wrap_with_nonce, unwrap_kek};
 pub use hpke_wrap::{
     derive_hpke_keypair, generate_hpke_keypair, hpke_unwrap_dek, hpke_wrap_dek,
     hpke_wrap_dek_with_rng, HpkeKeypair, HpkeWrap, HPKE_PUBLIC_LEN, HPKE_SECRET_LEN,
 };
-pub use codec::CodecError;
-pub use covers::{covers_exact, missing, RecipientDescriptor};
-pub use escrow::{kek_wrap, kek_wrap_with_nonce, unwrap_kek};
 pub use ids::{GroupId, KeyId};
 pub use keyring::{Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
 pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
-pub use material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
-pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
+// The fixed-size material newtypes now live in the lean `keyeo-material` crate; re-exported here because
+// they are part of this crate's public wrap/HPKE API (RecipientDescriptor, HpkeWrap records, epoch wraps).
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfBounds, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
+pub use keyeo_material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, RECOVERY_ARGON2_ITERATIONS,
     RECOVERY_ARGON2_MEMORY_KIB, RECOVERY_ARGON2_PARALLELISM, RECOVERY_ENTROPY_LEN,
 };
 pub use root::{derive_root, derive_rvk, RootKeys, RootLabels};
 pub use secret::{Dek, HpkePrivate, Kek, Passphrase, RecoveryCode, RrkSecret};
+pub use wrap_aad::{rrk_wrap_aad, wrap_aad};
 
 /// A crypto operation failed. `Open` deliberately does not distinguish a bad key from
 /// a bad tag from a tampered header — all are "this ciphertext didn't authenticate".

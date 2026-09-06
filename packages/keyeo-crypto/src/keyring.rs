@@ -10,8 +10,8 @@ use std::hash::Hash;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::ids::{GroupId, KeyId};
-use crate::material::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 use crate::KdfParams;
+use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 
 /// The group-at-an-epoch binding context (the MLS `GroupContext` role): the two coordinates a DEK wrap is
 /// bound to, so a wrap can't be transplanted across groups or epochs. The other two AAD fields come from
@@ -58,11 +58,21 @@ pub enum KekKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WrapMethod {
     /// HPKE to an active member's X25519 key.
-    MemberHpke { encapped: EncappedKey, recipient_key: X25519PublicKey },
+    MemberHpke {
+        encapped: EncappedKey,
+        recipient_key: X25519PublicKey,
+    },
     /// HPKE to the recovery root key — the founder's cross-epoch access.
-    RrkHpke { encapped: EncappedKey, recipient_key: X25519PublicKey },
+    RrkHpke {
+        encapped: EncappedKey,
+        recipient_key: X25519PublicKey,
+    },
     /// A symmetric wrap under an Argon2id-derived KEK (passphrase or recovery-code).
-    Kek { kind: KekKind, kdf: KdfParams, nonce: Nonce },
+    Kek {
+        kind: KekKind,
+        kdf: KdfParams,
+        nonce: Nonce,
+    },
 }
 
 impl WrapMethod {
@@ -79,9 +89,15 @@ impl WrapMethod {
     #[must_use]
     pub fn tag(&self) -> i32 {
         match self {
-            WrapMethod::Kek { kind: KekKind::Passphrase, .. } => Self::TAG_PASSPHRASE_KEK,
+            WrapMethod::Kek {
+                kind: KekKind::Passphrase,
+                ..
+            } => Self::TAG_PASSPHRASE_KEK,
             WrapMethod::MemberHpke { .. } => Self::TAG_MEMBER_HPKE,
-            WrapMethod::Kek { kind: KekKind::RecoveryCode, .. } => Self::TAG_RECOVERY_KEK,
+            WrapMethod::Kek {
+                kind: KekKind::RecoveryCode,
+                ..
+            } => Self::TAG_RECOVERY_KEK,
             WrapMethod::RrkHpke { .. } => Self::TAG_RRK_HPKE,
         }
     }
@@ -131,7 +147,12 @@ mod tests {
                     recipient: "owner".to_string(),
                     method: WrapMethod::Kek {
                         kind: KekKind::Passphrase,
-                        kdf: KdfParams { salt: vec![5, 6], memory_kib: 19_456, iterations: 2, parallelism: 1 },
+                        kdf: KdfParams {
+                            salt: vec![5, 6],
+                            memory_kib: 19_456,
+                            iterations: 2,
+                            parallelism: 1,
+                        },
                         nonce: Nonce::from_bytes([4u8; 24]),
                     },
                     ciphertext: WrappedDek::from_bytes([7u8; 48]),
@@ -160,9 +181,22 @@ mod tests {
             encapped: EncappedKey::from_bytes([0u8; 32]),
             recipient_key: X25519PublicKey::from_bytes([0u8; 32]),
         };
-        let kdf = KdfParams { salt: vec![], memory_kib: 1, iterations: 1, parallelism: 1 };
-        let pass = WrapMethod::Kek { kind: KekKind::Passphrase, kdf: kdf.clone(), nonce: Nonce::from_bytes([0u8; 24]) };
-        let rec = WrapMethod::Kek { kind: KekKind::RecoveryCode, kdf, nonce: Nonce::from_bytes([0u8; 24]) };
+        let kdf = KdfParams {
+            salt: vec![],
+            memory_kib: 1,
+            iterations: 1,
+            parallelism: 1,
+        };
+        let pass = WrapMethod::Kek {
+            kind: KekKind::Passphrase,
+            kdf: kdf.clone(),
+            nonce: Nonce::from_bytes([0u8; 24]),
+        };
+        let rec = WrapMethod::Kek {
+            kind: KekKind::RecoveryCode,
+            kdf,
+            nonce: Nonce::from_bytes([0u8; 24]),
+        };
         // The four discriminants are exactly {1,2,3,4} — passphrase and recovery-code never collapse.
         assert_eq!(pass.tag(), 1);
         assert_eq!(hpke.tag(), 2);

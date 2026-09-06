@@ -11,9 +11,9 @@ use zeroize::Zeroizing;
 use crate::aead::{xchacha_open, xchacha_seal};
 use crate::ids::GroupId;
 use crate::keyring::{KekKind, RecipientId, Wrap, WrapMethod};
-use crate::material::{Nonce, WrappedDek};
 use crate::wrap_aad::rrk_wrap_aad;
-use crate::{CryptoError, Kek, KdfParams, Key32, KEY_LEN};
+use crate::{CryptoError, KdfParams, Kek, Key32, KEY_LEN};
+use crate::{Nonce, WrappedDek};
 
 /// XChaCha20-Poly1305 nonce length for a KEK wrap.
 const KEK_NONCE_LEN: usize = 24;
@@ -40,7 +40,15 @@ pub fn kek_wrap<Id: RecipientId>(
 ) -> Result<Wrap<Id>, CryptoError> {
     let mut nonce = [0u8; KEK_NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| CryptoError::Rng(e.to_string()))?;
-    kek_wrap_with_nonce(Nonce::from_bytes(nonce), secret, recipient, kind, kek, kdf, group_id)
+    kek_wrap_with_nonce(
+        Nonce::from_bytes(nonce),
+        secret,
+        recipient,
+        kind,
+        kek,
+        kdf,
+        group_id,
+    )
 }
 
 /// The deterministic core of [`kek_wrap`], with the `nonce` supplied by the caller — same inputs yield the
@@ -58,12 +66,16 @@ pub fn kek_wrap_with_nonce<Id: RecipientId>(
     kdf: KdfParams,
     group_id: &GroupId,
 ) -> Result<Wrap<Id>, CryptoError> {
-    let aad = rrk_wrap_aad(group_id.as_bytes(), &recipient.aad_bytes(), kek_method_tag(kind));
+    let aad = rrk_wrap_aad(
+        group_id.as_bytes(),
+        &recipient.aad_bytes(),
+        kek_method_tag(kind),
+    );
     let ciphertext = xchacha_seal(kek.expose(), nonce.as_ref(), &aad, secret)?;
     Ok(Wrap {
         recipient,
         method: WrapMethod::Kek { kind, kdf, nonce },
-        ciphertext: WrappedDek::try_from(ciphertext.as_slice())?,
+        ciphertext: WrappedDek::try_from(ciphertext.as_slice()).map_err(|_| CryptoError::Hpke)?,
     })
 }
 
@@ -83,8 +95,17 @@ pub fn unwrap_kek<Id: RecipientId>(
         WrapMethod::Kek { kind, nonce, .. } => (*kind, nonce),
         _ => return Err(CryptoError::Open),
     };
-    let aad = rrk_wrap_aad(group_id.as_bytes(), &wrap.recipient.aad_bytes(), kek_method_tag(kind));
-    let plaintext = Zeroizing::new(xchacha_open(kek.expose(), nonce.as_ref(), &aad, wrap.ciphertext.as_ref())?);
+    let aad = rrk_wrap_aad(
+        group_id.as_bytes(),
+        &wrap.recipient.aad_bytes(),
+        kek_method_tag(kind),
+    );
+    let plaintext = Zeroizing::new(xchacha_open(
+        kek.expose(),
+        nonce.as_ref(),
+        &aad,
+        wrap.ciphertext.as_ref(),
+    )?);
     let secret: [u8; KEY_LEN] = plaintext
         .as_slice()
         .try_into()
@@ -97,7 +118,12 @@ mod tests {
     use super::*;
 
     fn kdf() -> KdfParams {
-        KdfParams { salt: vec![1, 2, 3, 4, 5, 6, 7, 8], memory_kib: 19_456, iterations: 2, parallelism: 1 }
+        KdfParams {
+            salt: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            memory_kib: 19_456,
+            iterations: 2,
+            parallelism: 1,
+        }
     }
 
     #[test]
@@ -105,7 +131,15 @@ mod tests {
         let group = GroupId::new(b"tree".to_vec());
         let kek = Kek::new([42u8; 32]);
         let secret = [9u8; 32];
-        let wrap = kek_wrap(&secret, "owner".to_string(), KekKind::Passphrase, &kek, kdf(), &group).unwrap();
+        let wrap = kek_wrap(
+            &secret,
+            "owner".to_string(),
+            KekKind::Passphrase,
+            &kek,
+            kdf(),
+            &group,
+        )
+        .unwrap();
         assert_eq!(wrap.method.tag(), WrapMethod::TAG_PASSPHRASE_KEK);
         let opened = unwrap_kek(&wrap, &kek, &group).unwrap();
         assert_eq!(&*opened, &secret);
@@ -115,12 +149,26 @@ mod tests {
     fn a_wrong_kek_or_group_fails() {
         let group = GroupId::new(b"tree".to_vec());
         let kek = Kek::new([42u8; 32]);
-        let wrap = kek_wrap(&[9u8; 32], "owner".to_string(), KekKind::RecoveryCode, &kek, kdf(), &group).unwrap();
+        let wrap = kek_wrap(
+            &[9u8; 32],
+            "owner".to_string(),
+            KekKind::RecoveryCode,
+            &kek,
+            kdf(),
+            &group,
+        )
+        .unwrap();
         // wrong KEK
-        assert!(matches!(unwrap_kek(&wrap, &Kek::new([7u8; 32]), &group), Err(CryptoError::Open)));
+        assert!(matches!(
+            unwrap_kek(&wrap, &Kek::new([7u8; 32]), &group),
+            Err(CryptoError::Open)
+        ));
         // wrong group rebuilds a different AAD → the tag fails
         let other = GroupId::new(b"tree-B".to_vec());
-        assert!(matches!(unwrap_kek(&wrap, &kek, &other), Err(CryptoError::Open)));
+        assert!(matches!(
+            unwrap_kek(&wrap, &kek, &other),
+            Err(CryptoError::Open)
+        ));
     }
 
     #[test]
@@ -130,12 +178,26 @@ mod tests {
         let group = GroupId::new(b"tree".to_vec());
         let kek = Kek::new([42u8; 32]);
         let nonce = Nonce::from_bytes([5u8; 24]);
-        let pass =
-            kek_wrap_with_nonce(nonce, &[9u8; 32], "owner".to_string(), KekKind::Passphrase, &kek, kdf(), &group)
-                .unwrap();
-        let rec =
-            kek_wrap_with_nonce(nonce, &[9u8; 32], "owner".to_string(), KekKind::RecoveryCode, &kek, kdf(), &group)
-                .unwrap();
+        let pass = kek_wrap_with_nonce(
+            nonce,
+            &[9u8; 32],
+            "owner".to_string(),
+            KekKind::Passphrase,
+            &kek,
+            kdf(),
+            &group,
+        )
+        .unwrap();
+        let rec = kek_wrap_with_nonce(
+            nonce,
+            &[9u8; 32],
+            "owner".to_string(),
+            KekKind::RecoveryCode,
+            &kek,
+            kdf(),
+            &group,
+        )
+        .unwrap();
         // Same secret, KEK, nonce, recipient — only the method differs, and that moves the ciphertext.
         assert_ne!(pass.ciphertext, rec.ciphertext);
     }

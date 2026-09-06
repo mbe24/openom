@@ -22,8 +22,8 @@ use hpke::{
 
 use zeroize::Zeroizing;
 
-use crate::material::{EncappedKey, WrappedDek};
 use crate::{CryptoError, Dek, KEY_LEN};
+use crate::{EncappedKey, WrappedDek};
 
 /// The pinned HPKE KEM / KDF / AEAD for `WRAP_METHOD_X25519_HPKE`.
 type KemImpl = X25519HkdfSha256;
@@ -66,7 +66,7 @@ impl rand_core::RngCore for OsCsprng {
 impl rand_core::CryptoRng for OsCsprng {}
 
 /// An HPKE-wrapped DEK: the encapsulated key (the ephemeral X25519 public) and the sealed DEK, each a
-/// fixed-size [material newtype](crate::material) so a wrong-length half is unconstructable. HPKE carries
+/// fixed-size [material newtype](keyeo_material) so a wrong-length half is unconstructable. HPKE carries
 /// its own nonce internally, so there is no separate nonce for this method.
 pub struct HpkeWrap {
     pub encapped_key: EncappedKey,
@@ -148,8 +148,9 @@ pub fn hpke_wrap_dek_with_rng<R: rand_core::RngCore + rand_core::CryptoRng>(
     Ok(HpkeWrap {
         // The suite fixes both lengths (encapped = 32, sealed 32-byte DEK = 48); `TryFrom` is the
         // safety net that would flag a suite change, never expected to fire here.
-        encapped_key: EncappedKey::try_from(encapped.to_bytes().as_slice())?,
-        ciphertext: WrappedDek::try_from(ciphertext.as_slice())?,
+        encapped_key: EncappedKey::try_from(encapped.to_bytes().as_slice())
+            .map_err(|_| CryptoError::Hpke)?,
+        ciphertext: WrappedDek::try_from(ciphertext.as_slice()).map_err(|_| CryptoError::Hpke)?,
     })
 }
 
@@ -223,7 +224,13 @@ mod tests {
     fn wrap_then_unwrap_round_trips() {
         let HpkeKeypair { secret, public } = derive_hpke_keypair(&[7u8; 32]);
         let w = hpke_wrap_dek(&public, &dek(), INFO).unwrap();
-        let out = hpke_unwrap_dek(&*secret, w.encapped_key.as_ref(), w.ciphertext.as_ref(), INFO).unwrap();
+        let out = hpke_unwrap_dek(
+            &*secret,
+            w.encapped_key.as_ref(),
+            w.ciphertext.as_ref(),
+            INFO,
+        )
+        .unwrap();
         assert_eq!(out.expose(), dek().expose());
     }
 
@@ -251,7 +258,12 @@ mod tests {
         } = derive_hpke_keypair(&[8u8; 32]);
         let w = hpke_wrap_dek(&public, &dek(), INFO).unwrap();
         assert!(matches!(
-            hpke_unwrap_dek(&*other_secret, w.encapped_key.as_ref(), w.ciphertext.as_ref(), INFO),
+            hpke_unwrap_dek(
+                &*other_secret,
+                w.encapped_key.as_ref(),
+                w.ciphertext.as_ref(),
+                INFO
+            ),
             Err(CryptoError::Hpke)
         ));
     }
@@ -279,7 +291,12 @@ mod tests {
         bytes[0] ^= 0xFF;
         w.ciphertext = WrappedDek::from_bytes(bytes);
         assert!(matches!(
-            hpke_unwrap_dek(&*secret, w.encapped_key.as_ref(), w.ciphertext.as_ref(), INFO),
+            hpke_unwrap_dek(
+                &*secret,
+                w.encapped_key.as_ref(),
+                w.ciphertext.as_ref(),
+                INFO
+            ),
             Err(CryptoError::Hpke)
         ));
     }
