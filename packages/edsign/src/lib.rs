@@ -24,16 +24,19 @@ pub struct SigningKey(ed25519_dalek::SigningKey);
 impl SigningKey {
     /// Build a signing key from a 32-byte seed (e.g. `openom-crypto`'s HKDF-derived owner identity, or
     /// a test helper's random seed). Deterministic: the same seed always yields the same key.
+    #[must_use]
     pub fn from_seed(seed: &[u8; 32]) -> Self {
         Self(ed25519_dalek::SigningKey::from_bytes(seed))
     }
 
     /// The matching public key.
+    #[must_use]
     pub fn verifying_key(&self) -> VerifyingKey {
         VerifyingKey(self.0.verifying_key())
     }
 
     /// Sign `msg` (the caller is responsible for domain-separating it).
+    #[must_use]
     pub fn sign(&self, msg: &[u8]) -> Signature {
         Signature(self.0.sign(msg).to_bytes())
     }
@@ -45,6 +48,11 @@ impl SigningKey {
 /// capability derived here can never be confused with an encryption/identity key from the same secret —
 /// never reuse a scalar across roles. Generic: the `info` is the caller's, so this crate stays domain-free
 /// (both keyring engines derive their recovery-verification key through this one function).
+///
+/// # Panics
+/// Never in practice: the only fallible step is the HKDF expand, which fails solely on an invalid output
+/// length, and 32 bytes is always valid for HKDF-SHA256.
+#[must_use]
 pub fn derive_signing_key(ikm: &[u8; 32], info: &[u8]) -> SigningKey {
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, ikm);
     let mut seed = zeroize::Zeroizing::new([0u8; 32]);
@@ -81,6 +89,9 @@ impl VerifyingKey {
     /// Parse a 32-byte compressed public key. This is decompression-only (it does **not** reject
     /// small-order / torsion points — that is [`Self::verify`]'s job, so a construction failure stays
     /// distinct from a verification failure, exactly as the raw library draws the line).
+    ///
+    /// # Errors
+    /// Returns [`SignError::MalformedKey`] if the bytes do not decompress to a curve point.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, SignError> {
         ed25519_dalek::VerifyingKey::from_bytes(bytes)
             .map(Self)
@@ -88,12 +99,17 @@ impl VerifyingKey {
     }
 
     /// The 32-byte compressed encoding.
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
     }
 
     /// Verify `sig` over `msg` with `verify_strict` — additionally rejecting small-order / torsion
     /// public keys and non-canonical signatures. This is the single verify in the workspace.
+    ///
+    /// # Errors
+    /// Returns [`SignError::BadSignature`] if the signature does not verify under `verify_strict` (wrong
+    /// key, tampered message, small-order/torsion key, or a non-canonical signature).
     pub fn verify(&self, msg: &[u8], sig: &Signature) -> Result<(), SignError> {
         self.0
             .verify_strict(msg, &ed25519_dalek::Signature::from_bytes(&sig.0))
@@ -108,11 +124,13 @@ pub struct Signature([u8; 64]);
 
 impl Signature {
     /// Wrap 64 signature bytes (infallible — validity is checked at verify time).
+    #[must_use]
     pub fn from_bytes(bytes: &[u8; 64]) -> Self {
         Self(*bytes)
     }
 
     /// The 64 signature bytes.
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; 64] {
         self.0
     }
