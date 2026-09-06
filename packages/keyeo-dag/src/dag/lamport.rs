@@ -44,9 +44,6 @@ type ApplyResult<Id, R, S> = Result<(GroupState<Id, R, S>, Vec<MembershipEvent<I
 /// # Errors
 /// Returns `Err(String)` if the action is invalid for the current state (e.g. an operation on an absent
 /// member or an otherwise illegal membership transition).
-// One cohesive dispatch: each arm folds one action variant into the shared `state` + `events`. Splitting
-// arms out would thread both across a call boundary for no clarity gain (the AGENTS.md coupled-state case).
-#[allow(clippy::too_many_lines)]
 pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
     mut state: GroupState<Id, R, S>,
     action: &MembershipAction<Id, R, S>,
@@ -61,7 +58,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             // what the seam exports as the verified `Admitted.tree_id`, so it must survive the fold.
             let mut created = GroupState::create(state.group_id.clone(), initial_members);
             created.reset_authority.clone_from(&state.reset_authority);
-            Ok((created, events))
+            return Ok((created, events));
         }
         MembershipAction::Add {
             member,
@@ -69,105 +66,31 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             author_public_key,
             hpke_public_key,
             ..
-        } => {
-            match state.members.get_mut(member) {
-                // Re-add of a previously removed member = legitimate re-onboarding: reactivate the
-                // record (bump the counter back to an active parity) and refresh their role/keys from
-                // this Add. Adding a member who is already *active* is still an error.
-                Some(s) if !s.is_active() => {
-                    s.member_counter += 1;
-                    s.role = role.clone();
-                    s.author_public_key = author_public_key.clone();
-                    s.hpke_public_key = *hpke_public_key;
-                }
-                Some(_) => return Err(format!("{member:?} is already an active member")),
-                None => {
-                    state.members.insert(
-                        member.clone(),
-                        MemberState::new(role.clone(), author_public_key.clone(), *hpke_public_key),
-                    );
-                }
-            }
-            events.push(MembershipEvent::MemberAdded {
-                member: member.clone(),
-            });
-            Ok((state, events))
-        }
-        MembershipAction::Remove { member } => {
-            if let Some(s) = state.members.get_mut(member) {
-                if !s.is_active() {
-                    return Err(format!("{member:?} is already removed"));
-                }
-                s.member_counter += 1;
-                events.push(MembershipEvent::MemberRemoved {
-                    member: member.clone(),
-                });
-            } else {
-                return Err(format!("{member:?} is not a member"));
-            }
-            Ok((state, events))
-        }
+        } => apply_add(&mut state, member, role, author_public_key, hpke_public_key, &mut events)?,
+        MembershipAction::Remove { member } => apply_remove(&mut state, member, &mut events)?,
         MembershipAction::ChangeRole { member, new_role } => {
-            if let Some(s) = state.members.get_mut(member) {
-                if !s.is_active() {
-                    return Err(format!("{member:?} is not an active member"));
-                }
-                s.role = new_role.clone();
-                s.access_counter += 1;
-                events.push(MembershipEvent::RoleChanged {
-                    member: member.clone(),
-                });
-            } else {
-                return Err(format!("{member:?} is not a member"));
-            }
-            Ok((state, events))
+            apply_change_role(&mut state, member, new_role, &mut events)?;
         }
-        // Recovery re-founding: retarget the member's (the Owner's) signing + HPKE keys in place. The
-        // member stays active and no one else is touched — a minimal forward delta. keeps the opaque
-        // `recovery_rewrap` out of the resolved state (it is carried by the op for openom's sealer). Only
-        // an active member can be re-founded; authority (RVK-signature + Owner-target) is decided by the
-        // caller before this runs (see `key_matches_registration` + `AccessControl`).
+        // Recovery re-founding: retarget the Owner's signing + HPKE keys in place (identical mechanics to a
+        // voluntary Retarget below); authority (RVK-signature + Owner-target) is decided by the caller
+        // before this runs (see `key_matches_registration` + `AccessControl`).
         MembershipAction::ReFound {
             member,
             new_author_public_key,
             new_hpke_public_key,
             ..
-        } => {
-            match state.members.get_mut(member) {
-                Some(s) if s.is_active() => {
-                    s.author_public_key = new_author_public_key.clone();
-                    s.hpke_public_key = *new_hpke_public_key;
-                    s.access_counter += 1;
-                }
-                _ => return Err(format!("{member:?} is not an active member to re-found")),
-            }
-            Ok((state, events))
-        }
-        // Rotate the recovery authority: replace the pinned key. Membership is untouched — this only
-        // changes who may authorize a future recovery. Authority (signed by the CURRENT authority) is
-        // decided by the caller before this runs (see `key_matches_registration`).
-        // Voluntary self-rekey: retarget the member's OWN signing + HPKE keys in place — identical
-        // mechanics to a re-founding, but authorized by the member's current key, not the recovery
-        // authority (decided by the caller; see `key_matches_registration` + `AccessControl`). Not a
-        // recovery, so it does not participate in the reset-merge carve-out.
+        } => retarget_keys(&mut state, member, new_author_public_key, new_hpke_public_key, "re-found")?,
+        // Voluntary self-rekey: same mechanics as a re-founding, but authorized by the member's current
+        // key, not the recovery authority. Not a recovery, so it does not join the reset-merge carve-out.
         MembershipAction::Retarget {
             member,
             new_author_public_key,
             new_hpke_public_key,
-        } => {
-            match state.members.get_mut(member) {
-                Some(s) if s.is_active() => {
-                    s.author_public_key = new_author_public_key.clone();
-                    s.hpke_public_key = *new_hpke_public_key;
-                    s.access_counter += 1;
-                }
-                _ => return Err(format!("{member:?} is not an active member to retarget")),
-            }
-            Ok((state, events))
-        }
+        } => retarget_keys(&mut state, member, new_author_public_key, new_hpke_public_key, "retarget")?,
+        // Replace the pinned recovery authority. Membership is untouched — this only changes who may
+        // authorize a future recovery (signed by the CURRENT authority, checked by the caller).
         MembershipAction::RotateRecoveryAuthority { new_reset_authority, .. } => {
             state.reset_authority = Some(new_reset_authority.clone());
-            Ok((state, events))
         }
         // All membership-inert no-ops, for different reasons:
         //  - Reseal (OPE-282): a forward-secrecy reseal rides the op's `sealing` and the sealer validates its
@@ -177,8 +100,102 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
         MembershipAction::Reseal
         | MembershipAction::Propose { .. }
         | MembershipAction::Approve { .. }
-        | MembershipAction::Commit { .. } => Ok((state, events)),
+        | MembershipAction::Commit { .. } => {}
     }
+    Ok((state, events))
+}
+
+/// Add a member, or reactivate a previously-removed one (legitimate re-onboarding: bump the counter back
+/// to an active parity and refresh their role/keys). Adding an already-active member is an error.
+fn apply_add<Id: MemberId, R: Role, S: SignatureScheme>(
+    state: &mut GroupState<Id, R, S>,
+    member: &Id,
+    role: &R,
+    author_public_key: &<S as SignatureScheme>::PublicKey,
+    hpke_public_key: &[u8; 32],
+    events: &mut Vec<MembershipEvent<Id>>,
+) -> Result<(), String> {
+    match state.members.get_mut(member) {
+        Some(s) if !s.is_active() => {
+            s.member_counter += 1;
+            s.role = role.clone();
+            s.author_public_key = author_public_key.clone();
+            s.hpke_public_key = *hpke_public_key;
+        }
+        Some(_) => return Err(format!("{member:?} is already an active member")),
+        None => {
+            state.members.insert(
+                member.clone(),
+                MemberState::new(role.clone(), author_public_key.clone(), *hpke_public_key),
+            );
+        }
+    }
+    events.push(MembershipEvent::MemberAdded {
+        member: member.clone(),
+    });
+    Ok(())
+}
+
+/// Remove an active member (bump their counter to an inactive parity). An absent or already-removed
+/// member is an error.
+fn apply_remove<Id: MemberId, R: Role, S: SignatureScheme>(
+    state: &mut GroupState<Id, R, S>,
+    member: &Id,
+    events: &mut Vec<MembershipEvent<Id>>,
+) -> Result<(), String> {
+    let Some(s) = state.members.get_mut(member) else {
+        return Err(format!("{member:?} is not a member"));
+    };
+    if !s.is_active() {
+        return Err(format!("{member:?} is already removed"));
+    }
+    s.member_counter += 1;
+    events.push(MembershipEvent::MemberRemoved {
+        member: member.clone(),
+    });
+    Ok(())
+}
+
+/// Change an active member's role. An absent or inactive member is an error.
+fn apply_change_role<Id: MemberId, R: Role, S: SignatureScheme>(
+    state: &mut GroupState<Id, R, S>,
+    member: &Id,
+    new_role: &R,
+    events: &mut Vec<MembershipEvent<Id>>,
+) -> Result<(), String> {
+    let Some(s) = state.members.get_mut(member) else {
+        return Err(format!("{member:?} is not a member"));
+    };
+    if !s.is_active() {
+        return Err(format!("{member:?} is not an active member"));
+    }
+    s.role = new_role.clone();
+    s.access_counter += 1;
+    events.push(MembershipEvent::RoleChanged {
+        member: member.clone(),
+    });
+    Ok(())
+}
+
+/// Retarget an active member's signing + HPKE keys in place — the shared mechanics of `ReFound` and
+/// `Retarget`; `verb` names the operation for the error. Membership is untouched (the member stays active);
+/// authority is decided by the caller before this runs.
+fn retarget_keys<Id: MemberId, R: Role, S: SignatureScheme>(
+    state: &mut GroupState<Id, R, S>,
+    member: &Id,
+    new_author_public_key: &<S as SignatureScheme>::PublicKey,
+    new_hpke_public_key: &[u8; 32],
+    verb: &str,
+) -> Result<(), String> {
+    match state.members.get_mut(member) {
+        Some(s) if s.is_active() => {
+            s.author_public_key = new_author_public_key.clone();
+            s.hpke_public_key = *new_hpke_public_key;
+            s.access_counter += 1;
+        }
+        _ => return Err(format!("{member:?} is not an active member to {verb}")),
+    }
+    Ok(())
 }
 
 pub fn apply_remove_unsafe<Id: MemberId, R: Role, S: SignatureScheme>(
