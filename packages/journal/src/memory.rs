@@ -1,4 +1,4 @@
-use super::*;
+use super::{Snapshot, Update, DocStore, Caps, Result, StoreError};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -15,6 +15,7 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -48,7 +49,8 @@ impl DocStore for MemoryStore {
         let Some(d) = docs.get(doc) else {
             return Ok((vec![], 0));
         };
-        let from = since.unwrap_or(0) as usize;
+        // On a 32-bit target a seq past usize::MAX skips the whole log (empty) — the safe direction.
+        let from = usize::try_from(since.unwrap_or(0)).unwrap_or(usize::MAX);
         Ok((d.log.iter().skip(from).cloned().collect(), d.counter))
     }
 

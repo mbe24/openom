@@ -24,9 +24,9 @@ pub enum StoreError {
 pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Ein Log-Eintrag ist ein OPAKER Blob — die versiegelte Envelope. Seit der
-/// Verschlüsselung liegt jede Metadatenspalte (device_id, lamport, …) INNEN im
+/// Verschlüsselung liegt jede Metadatenspalte (`device_id`, lamport, …) INNEN im
 /// Chiffrat; der Store (und ein späterer Zero-Knowledge-Server) sieht nur Bytes
-/// plus die vergebene `seq`. Das JS-Modell ist identisch: IndexedDbStore und die
+/// plus die vergebene `seq`. Das JS-Modell ist identisch: `IndexedDbStore` und die
 /// SealedStore-Kette reichen rohe Envelope-Bytes durch, ohne Rahmenstruktur.
 pub type Update = Vec<u8>;
 
@@ -47,13 +47,41 @@ pub struct Caps {
 /// Die eine Schnittstelle, die ein Datenprovider implementiert.
 pub trait DocStore: Send + Sync {
     fn caps(&self) -> Caps;
+
+    /// Alle Dokument-Ids im Store.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] bei einem Backend-Fehler.
     fn list(&self) -> Result<Vec<String>>;
+
+    /// Der jüngste Snapshot eines Dokuments, oder `None`.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] bei einem Backend-Fehler.
     fn read_snapshot(&self, doc: &str) -> Result<Option<Snapshot>>;
+
     /// Alle Updates mit seq > since.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] bei einem Backend-Fehler.
     fn read_updates(&self, doc: &str, since: Option<u64>) -> Result<(Vec<Update>, u64)>;
+
+    /// Hängt Updates an das Log an und gibt den neuen seq-Zähler zurück.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] bei einem Backend-Fehler.
     fn append(&self, doc: &str, updates: &[Update]) -> Result<u64>;
+
     /// Compare-and-swap: schreibt nur, wenn die erwartete Version noch gilt.
+    ///
+    /// # Errors
+    /// [`StoreError::Conflict`], wenn `expected` nicht mehr gilt; [`StoreError::Backend`] sonst.
     fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> Result<String>;
+
+    /// Löscht ein Dokument.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`] bei einem Backend-Fehler.
     fn delete(&self, doc: &str) -> Result<()>;
 }
 
