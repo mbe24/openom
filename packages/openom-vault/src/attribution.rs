@@ -52,6 +52,9 @@ pub enum EntryError {
 /// The caller decides separately whether an *unattributed* entry (empty `author_signature`) is acceptable
 /// — that's a per-epoch property of the verified keyring, not something this function can judge from the
 /// entry alone (a hostile server must never be able to downgrade to "unattributed").
+///
+/// # Errors
+/// Returns [`VaultError`] if the entry is malformed or its author signature does not verify.
 pub fn verify_entry(
     version: u32,
     header: &Header,
@@ -119,10 +122,12 @@ pub fn verify_entry(
 /// entry and the reader requires one. Unlike [`epoch_is_attributed`] — a per-epoch property that a removal's
 /// re-key resets to founder-only — this never regresses, so a tree un-shared back to solo keeps signing +
 /// requiring signatures (ex-members still hold old-epoch DEKs, so its writes must stay attributed).
+#[must_use]
 pub fn has_been_shared(keyring: &Keyring) -> bool {
     keyring.first_shared_revision != 0
 }
 
+#[must_use]
 pub fn epoch_is_attributed(keyring: &Keyring, key_id: &[u8]) -> bool {
     // The founder is the sole OWNER-role member (the signer set is derived from members now, OPE-309),
     // so there is no separate authorized_signers roster to consult.

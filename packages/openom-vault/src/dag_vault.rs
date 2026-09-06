@@ -9,10 +9,14 @@
 //! types (`Epoch`/`Wrap`/`RecipientDescriptor`), the shared layer the sealing core is lifted onto (OPE-376).
 //!
 //! STATUS: all four [`KeyringLifecycle`] flows are built — provision, unlock, recover (RVK-authorized
-//! ReFound), change_passphrase (current-key Retarget) — with membership authoring (add/remove with
+//! `ReFound`), `change_passphrase` (current-key Retarget) — with membership authoring (add/remove with
 //! member-unlock), the effective-op sealing fold (reset-merge carve-out / quorum-Commit), and the
 //! anti-rollback watermark (the anchor's frontier op-id set; enforced as a floor on recover +
-//! change_passphrase). DagVault is interchangeable with ChainVault behind the trait.
+//! `change_passphrase`). `DagVault` is interchangeable with `ChainVault` behind the trait.
+
+// Recovery key material uses intentionally-close domain abbreviations (rrk / rvk / rk, old_/new_) that
+// clippy reads as typos; renaming would lose precision, so `similar_names` is off for this module.
+#![allow(clippy::similar_names)]
 
 use openom_crypto::{
     derive_kek, derive_root, derive_rvk, generate_dek, generate_hpke_keypair, generate_salt,
@@ -63,7 +67,7 @@ pub(crate) struct AddedWrap {
 }
 
 impl SealingPayload {
-    /// A payload that only sets/re-sets the escrow (provision's is built inline; recover / change_passphrase
+    /// A payload that only sets/re-sets the escrow (provision's is built inline; recover / `change_passphrase`
     /// re-escrow with no epoch change).
     fn escrow_only(escrow: RecoveryEscrow) -> Self {
         SealingPayload {
@@ -204,7 +208,7 @@ fn fold_sealing(
 /// Author a checkpoint's preserved sealing from the pre-cut sealing stream (OPE-348 step 2a): fold to the
 /// PRE-retain intermediate and re-express it as synthetic `SealingEntry`s — one per tagged epoch (its
 /// `added_wraps` already merged, so a below-cut joiner wrap is NOT lost) carrying the epoch's real origin +
-/// op_id (the winner tiebreak), plus one `Other`-origin escrow entry. Returns the segment (fold order
+/// `op_id` (the winner tiebreak), plus one `Other`-origin escrow entry. Returns the segment (fold order
 /// preserved) + the `minting_ops` baseline. PRE-retain, deliberately: the OPE-289 bound is time-varying, so
 /// dropping epochs at author time would permanently lose an epoch a full-history replica later resurrects.
 fn author_checkpoint_sealing(
@@ -228,7 +232,8 @@ fn author_checkpoint_sealing(
         origin: dag_client::SealingOrigin::Other,
         bytes: SealingPayload::escrow_only(escrow).to_bytes(),
     });
-    Ok((segment, state.minting_ops as u32))
+    // A count past u32::MAX is unreachable; saturate rather than truncate.
+    Ok((segment, u32::try_from(state.minting_ops).unwrap_or(u32::MAX)))
 }
 
 /// Resolve-from-checkpoint fold: seed the minting count from the checkpoint `baseline`, fold the checkpoint
@@ -242,7 +247,7 @@ fn fold_from_checkpoint(
     tail: &[dag_client::SealingEntry],
     members: &MembershipView,
 ) -> Result<FoldedSealing, VaultError> {
-    let mut state = FoldState { minting_ops: baseline as u64, ..Default::default() };
+    let mut state = FoldState { minting_ops: u64::from(baseline), ..Default::default() };
     fold_into(&mut state, segment, false)?;
     fold_into(&mut state, tail, true)?;
     finalize_sealing(state, members)
@@ -262,7 +267,7 @@ fn fold_resolved(resolved: &dag_client::Resolved) -> Result<FoldedSealing, Vault
 
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
 /// (owner) + every resolved ordinary member. Minting needs only PUBLIC keys — the RRK public in the escrow
-/// + each member's HPKE key — so both the owner (passphrase) and any active member (member_kdf) can produce
+/// and each member's HPKE key — so both the owner (passphrase) and any active member (`member_kdf`) can produce
 /// it; the caller appends it under their OWN identity (OPE-290). The RRK wrap's AAD is keyed to `owner_id`
 /// (the RRK belongs to the owner) whoever authors the op.
 fn covering_reseal_sealing(
@@ -310,7 +315,7 @@ fn covering_reseal_sealing(
 /// excluded — reached via the RRK — and empty-hpke-key members are excluded), each KEY-BOUND to their
 /// CURRENT hpke key (`expected_key = Some`), which is the OPE-290 stale-key guard: a wrap on a member's old
 /// key doesn't count toward coverage. `rrk` = the owner id with no key binding (the RRK wrap is checked by
-/// presence at the owner id). Fed to keyeo `covers_exact` (winner coverage / needs_reseal) and `missing`
+/// presence at the owner id). Fed to keyeo `covers_exact` (winner coverage / `needs_reseal`) and `missing`
 /// (backfill). Replaces the hand-rolled `epoch_covers` / `any_epoch_missing_a_member`.
 fn coverage_descriptors(
     members: &MembershipView,
@@ -502,7 +507,7 @@ impl KeyringLifecycle for DagVault {
     /// Recover with the recovery code: unwrap the RRK via the code, re-establish owner access under
     /// `new_passphrase` (fresh identity + recovery code), and append an RVK-signed `ReFound` retargeting the
     /// Owner + carrying the re-escrow. The RRK — and every DEK it reaches — is UNCHANGED (re-wrap, not
-    /// rotate), so the RVK is the same and the ReFound is authorized by the pinned recovery authority, and
+    /// rotate), so the RVK is the same and the `ReFound` is authorized by the pinned recovery authority, and
     /// the returned sealer opens exactly the same data.
     fn recover(
         &self,
@@ -635,12 +640,18 @@ impl DagVault {
     /// (the op-DAG is a set-union CRDT), so concurrent membership branches both survive and resolve
     /// deterministically. The host calls this to fold in a peer's anchor before persisting + re-watermarking;
     /// a following `unlock` reports `needs_reseal` if the merged write epoch is stale (see [`Self::reseal`]).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if either anchor is malformed.
     pub fn merge(&self, local: &[u8], remote: &[u8]) -> Result<Vec<u8>, VaultError> {
         dag_client::merge(local, remote).map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
     /// alongside the anchor and passes back as the floor on the next mutation. Opaque bytes to every caller.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed.
     pub fn watermark(&self, anchor: &[u8]) -> Result<Vec<u8>, VaultError> {
         dag_client::watermark(anchor).map_err(map_floor_err)
     }
@@ -649,6 +660,9 @@ impl DagVault {
     /// RRK via their passphrase, reaches every epoch's DEK, wraps each to the new member's HPKE key, and
     /// appends an `Add` op carrying those per-epoch wraps in its sealing. Returns the new anchor. Inherent,
     /// not a [`KeyringLifecycle`] flow — membership authoring stays engine-specific (OPE-277 gate, Q2=B).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the author isn't authorized, the anchor is malformed, or sealing the joiner's wraps fails.
     #[allow(clippy::too_many_arguments)]
     pub fn add_member(
         &self,
@@ -715,6 +729,9 @@ impl DagVault {
     /// identity from their passphrase + their account `member_kdf`, check it against their resolved key
     /// (anti-substitution), and reach the DEKs via their OWN per-epoch HPKE wraps (join-epoch-onward) — not
     /// the RRK, which only the owner holds. Inherent (the trait `unlock` is the owner/RRK path).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the member reaches no epoch or the anchor is malformed.
     pub fn unlock_as_member(
         &self,
         ctx: &VaultContext,
@@ -771,6 +788,9 @@ impl DagVault {
     /// removed member can't reach, wraps it to the RRK (owner) + each REMAINING ordinary member's HPKE key,
     /// and appends a `Remove` op carrying that new epoch in its sealing. Future entries seal under the new
     /// epoch, so the removed member — who has no wrap for it — can't read them. Returns the new anchor.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the author isn't authorized, the anchor is malformed, or the reseal fails.
     pub fn remove_member(
         &self,
         ctx: &VaultContext,
@@ -845,6 +865,9 @@ impl DagVault {
     /// is stale, so racing devices converge (a covering reseal makes `needs_reseal` false everywhere).
     /// Owner-authored via passphrase (a locked-out member's self-heal via `member_kdf` is a follow-up).
     /// Enforces the anti-rollback `floor`; returns the new anchor + watermark.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed or the reseal sealing fails.
     pub fn reseal(
         &self,
         ctx: &VaultContext,
@@ -905,6 +928,9 @@ impl DagVault {
     /// preservation is folded in via `author_checkpoint_sealing` (keyring-dag never interprets sealing). Returns
     /// the new anchor bytes. Choosing the frontier automatically over active members is OPE-371; this takes it
     /// as a parameter.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed or authoring the checkpoint fails.
     pub fn compact(
         &self,
         anchor: &[u8],
@@ -947,6 +973,9 @@ impl DagVault {
     /// online. Authorizes via the member's `passphrase` + account `member_kdf` (their identity signs the op),
     /// mirroring [`Self::unlock_as_member`]. The RRK wrap stays keyed to the OWNER (its holder). Idempotent + floor
     /// enforced, exactly like the owner path.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the member can't author the reseal or the anchor is malformed.
     pub fn reseal_as_member(
         &self,
         ctx: &VaultContext,
@@ -1017,6 +1046,9 @@ impl DagVault {
     /// inert; keyeo sees only an authored Reseal-kind op). Owner-authored (only the RRK opens the old DEKs).
     /// Idempotent: a no-op (`backfilled = false`) when no epoch is missing any resolved member. Enforces the
     /// anti-rollback `floor`; returns the new anchor + watermark. Orthogonal to `reseal` (forward secrecy).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed or authoring the backfill fails.
     pub fn backfill(
         &self,
         ctx: &VaultContext,
@@ -1073,8 +1105,7 @@ impl DagVault {
             let epoch_wraps = epochs
                 .iter()
                 .find(|e| e.key_id.as_bytes() == key_id.as_slice())
-                .map(|e| e.wraps.as_slice())
-                .unwrap_or(&[]);
+                .map_or(&[][..], |e| e.wraps.as_slice());
             for m in &resolved.members.members {
                 if m.is_owner() || m.hpke_public_key.is_empty() {
                     continue;

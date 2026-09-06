@@ -31,6 +31,7 @@ pub enum AppVault {
 
 impl AppVault {
     /// Build the vault for the deployment's configured engine.
+    #[must_use]
     pub fn from_kind(kind: EngineKind) -> Self {
         match kind {
             EngineKind::Chain => AppVault::Chain(ChainVault),
@@ -39,6 +40,7 @@ impl AppVault {
     }
 
     /// Which engine this is — for recording the tag in the host's local head record.
+    #[must_use]
     pub fn kind(&self) -> EngineKind {
         match self {
             AppVault::Chain(_) => EngineKind::Chain,
@@ -50,6 +52,7 @@ impl AppVault {
     /// (add/remove member, member-unlock, reseal, merge), which is deliberately NOT on the shared lifecycle
     /// trait (the chain and dag signatures differ). `None` on a chain deployment. `DagVault` is a zero-sized
     /// selector, so this hands back a value, not a borrow.
+    #[must_use]
     pub fn as_dag(&self) -> Option<DagVault> {
         match self {
             AppVault::Dag(_) => Some(DagVault),

@@ -16,6 +16,7 @@ use openom_keyring_api::{MembershipView, ROLE_MAINTAINER, ROLE_OWNER};
 /// trustworthy as the keyring it is read from, so never derive this from an unverified network keyring. A
 /// member whose `author_public_key` is not a 32-byte Ed25519 key is skipped (it could not have authored
 /// an entry anyway), so the function is total and never panics on malformed input.
+#[must_use]
 pub fn moderators(view: &MembershipView) -> BTreeSet<String> {
     // Roles are power-descending: Owner(1) < Co-owner(2) < Maintainer(3) < Editor(4) < Viewer(5). Ranks
     // 1..=3 moderate; 0 (unspecified) and 4/5 do not.

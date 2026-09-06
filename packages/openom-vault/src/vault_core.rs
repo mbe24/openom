@@ -1,5 +1,5 @@
 //! The engine-neutral **sealing core** — the DEK / epoch / recovery-root-key / KDF / recovery-code /
-//! SealerSet machinery, extracted from `vault.rs` so BOTH keyring engines (chain + dag) share one
+//! `SealerSet` machinery, extracted from `vault.rs` so BOTH keyring engines (chain + dag) share one
 //! implementation of the security-critical crypto path instead of duplicating it.
 //!
 //! **This module knows nothing about a keyring's membership, signing, or wire container.** The DEK epochs
@@ -261,6 +261,9 @@ pub(crate) fn open_epoch_dek(
 /// A legitimate epoch always opens under the correct RRK (a wrong passphrase is already caught by the
 /// anti-substitution check before this runs), so the chain — whose epochs are signature-protected — never
 /// skips, and the owner still reaches every real epoch.
+// Result-uniform with `member_epoch_deks` so the caller selects either owner/member path and `?`s it
+// identically; the tolerant-skip design (junk epochs dropped, not fatal) means it never errors today.
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn epoch_deks(
     epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
@@ -313,6 +316,8 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
 /// their wraps cover — join-epoch-onward). Empty means a removed member. TOLERANT (OPE-287): a wrap that
 /// won't open (a garbage member-authored epoch, or one wrapping the member's stale key) is skipped, not
 /// fatal — one junk epoch must not brick a member's unlock (see [`epoch_deks`]).
+// Result-uniform with `epoch_deks` (see there); the tolerant-skip design means it never errors today.
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn member_epoch_deks(
     epochs: &[KeyeoEpoch<String>],
     tree_id: &[u8],
@@ -337,8 +342,10 @@ pub(crate) fn member_epoch_deks(
     Ok(out)
 }
 
-/// Build a [`SealerSet`] from reachable epoch DEKs, writing under the latest one. Errors if
-/// the caller reaches no epoch (e.g. a removed member).
+/// Build a [`SealerSet`] from reachable epoch DEKs, writing under `write_key_id`. The empty-epoch
+/// (removed-member) check is the CALLER's, via [`write_epoch_by_ordinal`] — this constructor never fails.
+// Returns `Result` to stay uniform with the fallible steps around it in the seal pipeline (it never errors).
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn sealer_set_from_deks(
     tree_id: &[u8],
     replica_id: &[u8],

@@ -36,7 +36,7 @@ use openom_sealer::SealerSet;
 
 /// The tree + member context every lifecycle call needs: which tree is being operated on and who is
 /// acting. These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
-/// untrusted keyring — the trusted-context invariant the vault's "the AEAD binds tree_id" security rests
+/// untrusted keyring — the trusted-context invariant the vault's "the AEAD binds `tree_id`" security rests
 /// on (see [`crate::vault`]).
 pub struct VaultContext<'a> {
     pub tree_id: &'a TreeId,
@@ -101,6 +101,9 @@ pub struct Rekeyed {
 /// engine-opaque bytes; results carry the new anchor to publish plus the opaque watermark to persist.
 pub trait KeyringLifecycle {
     /// Create a brand-new encrypted tree.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if provisioning fails.
     fn provision(
         &self,
         ctx: &VaultContext,
@@ -108,6 +111,9 @@ pub trait KeyringLifecycle {
     ) -> Result<Provisioned, VaultError>;
 
     /// Re-open an existing tree from its trusted `anchor` + passphrase (returning / a new device).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if unlock fails (wrong passphrase, or a malformed/stale keyring).
     fn unlock(
         &self,
         ctx: &VaultContext,
@@ -118,6 +124,9 @@ pub trait KeyringLifecycle {
     /// Recover with the recovery code, re-establishing owner access under `new_passphrase`, preserving
     /// members + epochs. `floor` is the caller's opaque anti-rollback watermark (the served anchor is
     /// untrusted on recovery — see [`crate::vault::recover`]).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if recovery fails (wrong code, or a malformed/stale keyring).
     fn recover(
         &self,
         ctx: &VaultContext,
@@ -129,6 +138,9 @@ pub trait KeyringLifecycle {
 
     /// Change the passphrase: re-wrap under a new KEK. The DEKs (and any running sealer) are unchanged, so
     /// the tree is not re-sealed. `floor` is the opaque anti-rollback watermark.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the change fails (wrong current passphrase, or a malformed keyring).
     fn change_passphrase(
         &self,
         ctx: &VaultContext,

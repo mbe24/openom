@@ -1,17 +1,22 @@
 //! The keyring vault — the passphrase lifecycle that turns a passphrase into a [`openom_sealer::Sealer`].
 //! Four flows: **provision** (first time), **unlock** (returning / new device), **recover**
-//! (forgot passphrase, via the recovery code), **change_passphrase**. All fit the frozen
+//! (forgot passphrase, via the recovery code), **`change_passphrase`**. All fit the frozen
 //! `Keyring` proto; none add a field.
 //!
 //! ## Two invariants that carry the security (from the design review)
 //! - **Trusted context.** `tree_id` and `member_id` bound into every wrap's AAD (via keyeo's
 //!   `GroupContext` + the wrap recipient) come from the caller's own expectation (the tree the app is
-//!   operating on), NEVER from the parsed, untrusted keyring. Otherwise the "the AEAD binds tree_id"
+//!   operating on), NEVER from the parsed, untrusted keyring. Otherwise the "the AEAD binds `tree_id`"
 //!   argument is circular. The keyring's `tree_id` is only *checked* against the expected one, never the AAD.
 //! - **Untrusted revision on recovery.** Recovery skips the signature (it can't re-derive
 //!   the old passphrase-derived identity), and the wrap AAD does not cover `revision`. So the
 //!   served revision is untrusted: refuse a value below the caller's watermark *before*
 //!   unwrapping, and mint the new revision as `checked(max(watermark, served) + 1)`.
+
+// The recovery/rotation flows use intentionally-close domain abbreviations that clippy reads as typos:
+// `rrk` (recovery root key) / `rvk` (recovery verification key) / `rk` (recovery key), and `old_`/`new_`
+// pairs across a rotation. Renaming them would lose precision, so `similar_names` is off for this module.
+#![allow(clippy::similar_names)]
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_dek, generate_hpke_keypair, generate_salt,
@@ -139,6 +144,9 @@ pub struct Rekeyed {
 /// under the owner's passphrase and a fresh recovery code, all in a keyring signed by the
 /// passphrase-derived identity (revision 1). The owner reaches epochs via the RRK, so the
 /// keyring holds no per-epoch owner passphrase/recovery wrap.
+///
+/// # Errors
+/// Returns [`VaultError`] if key derivation or the initial sealing fails.
 pub fn provision(
     passphrase: &Passphrase,
     tree_id: &TreeId,
@@ -212,6 +220,9 @@ pub fn provision(
 /// Open an existing keyring with a passphrase and build a sealer set spanning every epoch
 /// the owner can reach (via the recovery root key). Verifies the keyring with the caller's
 /// own derived identity (§4a V1).
+///
+/// # Errors
+/// Returns [`VaultError`] if the passphrase is wrong, the served keyring is malformed or below the watermark, or no epoch is reachable.
 pub fn unlock(
     keyring_bytes: &[u8],
     passphrase: &Passphrase,
@@ -283,6 +294,12 @@ pub fn unlock(
 /// No old signature is available, so the new keyring is signed only by the new owner
 /// identity: members who pinned the old founder must **re-verify out-of-band** and re-pin —
 /// the documented owner-succession boundary. `min_revision` is the caller's watermark floor.
+///
+/// # Errors
+/// Returns [`VaultError`] if the recovery code is wrong, the served keyring is malformed or below the
+/// watermark, or no epoch can be re-wrapped.
+// A cohesive recovery entry point: every parameter is a distinct required input to the flow.
+#[allow(clippy::too_many_arguments)]
 pub fn recover(
     keyring_bytes: &[u8],
     recovery_code: &RecoveryCode,
@@ -418,6 +435,9 @@ pub fn recover(
 /// keyring is signed by **both** the old and new identity: a member who pinned the old
 /// founder key can still verify it (bridging the transition) while the new founder key it now
 /// names is what future revisions use. The member's client re-pins on seeing the change.
+///
+/// # Errors
+/// Returns [`VaultError`] if the current passphrase is wrong or the keyring is malformed.
 pub fn change_passphrase(
     keyring_bytes: &[u8],
     old_passphrase: &Passphrase,
@@ -479,6 +499,9 @@ pub fn change_passphrase(
 /// keypair, so anyone who ever unwrapped it keeps recovery power. The founder identity is unchanged (the
 /// passphrase doesn't change), so it's an ordinary transition that `verify_transition` accepts because the
 /// OLD RVK co-signs the RVK change. The old recovery code + any prior RRK copy stop reaching the DEKs.
+///
+/// # Errors
+/// Returns [`VaultError`] if the current recovery secret is wrong, the keyring is malformed, or re-wrapping the epochs fails.
 pub fn rotate_recovery(
     keyring_bytes: &[u8],
     passphrase: &Passphrase,
@@ -567,6 +590,9 @@ pub struct MemberProvision {
 /// Provision a member identity from a passphrase: derive the account's signing + HPKE
 /// keypairs and return the public keys (to share OOB) plus the KDF params (to persist).
 /// The secrets are never returned — they re-derive from the passphrase on unlock.
+///
+/// # Errors
+/// Returns [`VaultError`] if the member secret derivation fails.
 pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, VaultError> {
     let passphrase = passphrase.expose();
     let kdf = default_kdf_params(generate_salt()?.to_vec());
@@ -595,6 +621,9 @@ pub struct MemberAdded {
 /// the DEK to the member's public key, records them in the signed member list, and
 /// re-signs at the next revision (chained onto the prior one). The member's public keys
 /// MUST have been verified out-of-band (§4a) before calling — this function trusts them.
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or sealing the joiner's wraps fails.
 #[allow(clippy::too_many_arguments)]
 pub fn add_member(
     keyring_bytes: &[u8],
@@ -652,6 +681,9 @@ pub fn add_member(
 /// DEKs through the co-owner's own member wraps (not the RRK), verifies the keyring against a
 /// pinned signer set, checks the caller is an authorized co-owner, and signs with the
 /// co-owner's identity. The new member's public keys must have been OOB-verified.
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or sealing fails.
 #[allow(clippy::too_many_arguments)]
 pub fn add_member_as_co_owner(
     keyring_bytes: &[u8],
@@ -712,6 +744,9 @@ pub fn add_member_as_co_owner(
 /// caller's **pinned** signer set (learned out-of-band, §4a — never the member's own key
 /// and never the document's signer hints), then HPKE-unwrap the DEK with the member's
 /// passphrase-derived secret. `member_kdf` is the member's own account KDF params.
+///
+/// # Errors
+/// Returns [`VaultError`] if the member reaches no epoch or the keyring is malformed.
 #[allow(clippy::too_many_arguments)]
 pub fn unlock_as_member(
     keyring_bytes: &[u8],
@@ -791,6 +826,9 @@ pub struct MemberRemoved {
 /// from the member list and signer set, and re-sign at the next chained revision. Old epochs
 /// stay so remaining members still read pre-removal content; the removed member — who never
 /// receives a new-epoch wrap — cannot read anything sealed after removal.
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or the forward-secret reseal fails.
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member(
     keyring_bytes: &[u8],
@@ -859,6 +897,9 @@ pub fn remove_member(
 /// DEKs through the co-owner's own wraps, mints the new epoch, and signs with the co-owner's
 /// identity. A co-owner may only remove an *ordinary* member — removing a signer (co-owner or
 /// founder) is a signer-set change, which is founder-only.
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or the reseal fails.
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member_as_co_owner(
     keyring_bytes: &[u8],
@@ -942,6 +983,9 @@ pub struct CoOwnerChanged {
 /// signer set is founder-authorized ("founder-or-unanimity"): the new keyring is signed by
 /// the founder's identity. The member's own author key — pinned and OOB-verified when they
 /// were added — becomes their signer key, so no new key exchange is needed.
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized or the keyring is malformed.
 pub fn add_co_owner(
     keyring_bytes: &[u8],
     founder_passphrase: &Passphrase,
@@ -1018,6 +1062,9 @@ pub fn add_co_owner(
 /// read access — they keep their per-epoch member wraps (forward-secrecy bound). To also
 /// revoke read, remove them entirely with [`remove_member`]. `new_role` must be a non-signer
 /// role (admin/editor/viewer).
+///
+/// # Errors
+/// Returns [`VaultError`] if the author isn't authorized, the keyring is malformed, or the reseal fails.
 #[allow(clippy::too_many_arguments)]
 pub fn remove_co_owner(
     keyring_bytes: &[u8],
@@ -1100,7 +1147,7 @@ struct Opened {
     /// member). This is the founder key already in the signer set.
     identity: SigningKey,
     /// The recovery root private key (unwrapped via the passphrase) — reaches every epoch's
-    /// DEK, and is re-wrapped in place by change_passphrase.
+    /// DEK, and is re-wrapped in place by `change_passphrase`.
     rrk_secret: RrkSecret,
     /// The decoded prior keyring, so a mutating flow preserves its signers/members/epochs.
     keyring: Keyring,
@@ -1248,7 +1295,7 @@ fn open_as_co_owner(
 }
 
 
-/// The Ed25519 verify keys of the keyring's current authorized signers — the members at CO_OWNER or
+/// The Ed25519 verify keys of the keyring's current authorized signers — the members at `CO_OWNER` or
 /// stronger (the signer set is derived from members, OPE-309); malformed keys skipped. Used for any-of
 /// verification of an ordinary revision, which a co-owner may have signed. Trusting this document-provided
 /// set is hardened by the deferred client chain-walk.
@@ -1394,7 +1441,7 @@ fn recovery_key_for<'a>(
         .ok_or(VaultError::MissingWrap)
 }
 
-/// Replace the founder's recovery key entry in place (used by change_passphrase / recover).
+/// Replace the founder's recovery key entry in place (used by `change_passphrase` / recover).
 fn replace_recovery_key(keyring: &mut Keyring, member_id: &str, new: RecoveryKey) {
     for r in &mut keyring.recovery_keys {
         if r.member_id == member_id {
@@ -1412,13 +1459,11 @@ fn refounder(keyring: &mut Keyring, member_id: &str, new: &RootKeys) {
     let new_pub = new.identity.verifying_key().to_bytes().to_vec();
     for m in &mut keyring.members {
         if m.member_id == member_id {
-            m.author_public_key = new_pub.clone();
+            m.author_public_key.clone_from(&new_pub);
             m.hpke_public_key = new.hpke_public.to_vec();
         }
     }
 }
-
-/// Reject Argon2id params outside the runnable window (they come from an unverified keyring).
 
 const _: () = assert!(KEY_ID_LEN == 16);
 
