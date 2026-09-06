@@ -22,7 +22,7 @@ use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
 use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{Aead, Compression, Envelope, Format, KdfParams, KeyringUpdate, MemberRole};
+use openom_protocol::v1::{Aead, Compression, Envelope, Format, KeyringUpdate, MemberRole};
 use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
@@ -482,7 +482,7 @@ impl MemberIdentity {
 pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
     let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(to_js)?;
     Ok(MemberIdentity {
-        kdf_params: m.kdf_params.encode_to_vec(),
+        kdf_params: keyeo_crypto::codec::encode_kdf_params(&m.kdf_params),
         author_public: m.author_public,
         hpke_public: m.hpke_public,
     })
@@ -542,8 +542,8 @@ pub fn unlock_as_member(
     replica_id: &[u8],
     min_revision: u32,
 ) -> Result<VaultResult, JsError> {
-    let kdf = KdfParams::decode(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| JsError::new("bad kdf params"))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let u = vault::unlock_as_member(
         keyring,
@@ -754,8 +754,8 @@ pub fn dag_unlock_as_member(
     member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let kdf = KdfParams::decode(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| JsError::new("bad kdf params"))?;
     let (tree, member, rep) = (
         TreeId::new(tree_id),
         MemberId::new(member_id),
@@ -844,8 +844,8 @@ pub fn dag_reseal_as_member(
     replica_id: &[u8],
     floor: &[u8],
 ) -> Result<ResealResult, JsError> {
-    let kdf = KdfParams::decode(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| JsError::new("bad kdf params"))?;
     let (tree, member, rep) = (
         TreeId::new(tree_id),
         MemberId::new(member_id),
@@ -1066,8 +1066,8 @@ pub fn add_member_as_co_owner(
     member_hpke_public: &[u8],
     member_author_public: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let kdf = KdfParams::decode(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| JsError::new("bad kdf params"))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let added = vault::add_member_as_co_owner(
         keyring,
@@ -1109,8 +1109,8 @@ pub fn remove_member_as_co_owner(
     remove_member_id: &str,
     replica_id: &[u8],
 ) -> Result<VaultResult, JsError> {
-    let kdf = KdfParams::decode(member_kdf_params)
-        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|_| JsError::new("bad kdf params"))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
     let r = vault::remove_member_as_co_owner(
         keyring,

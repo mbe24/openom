@@ -9,11 +9,11 @@
 //! its op sealing payloads, the chain inside its keyring wire (with the recovery key's identity fields
 //! marshaled via [`From<&RecoveryEscrow>`](RecoveryKey) below).
 //!
-//! It touches `openom_protocol` for the sealer id types + the crypto-path (derive) `KdfParams` — converted
-//! to/from keyeo's `KdfParams` via [`kdf_proto_to_keyeo`] / [`kdf_keyeo_to_proto`] — and `openom_crypto` for
-//! the KDF / AEAD / derive primitives. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and
-//! keep the `openom-` prefix; only the engine layer below (keyeo / openom-keyring-api /
-//! openom-keyring-{chain,dag}) is openom-free.
+//! It holds keyeo's `KdfParams` throughout (the proto wire `KdfParams` only appears at the wasm↔JS / Tauri
+//! account-record boundary, converted via `keyeo_crypto::codec` there), and touches `openom_protocol` only
+//! for the sealer id types + `openom_crypto` for the KDF / AEAD / derive primitives. `openom-vault` (and
+//! `openom-crypto`) are openom-coupled BY DESIGN and keep the `openom-` prefix; only the engine layer below
+//! (keyeo / openom-keyring-api / openom-keyring-{chain,dag}) is openom-free.
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,
@@ -21,7 +21,6 @@ use openom_crypto::{
     HpkePrivate, Kek, RecoveryCode, RootKeys, RrkSecret,
 };
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
-use openom_protocol::v1::{KdfParams, WrapMethod};
 // The keyring key-material layer the vault crypto is lifted onto (aliased to avoid the proto WrapMethod /
 // openom KeyId name clashes).
 use keyeo_crypto::{
@@ -40,11 +39,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::VaultError;
 use openom_sealer::SealerSet;
-
-// The credential-KEK discriminants `open_rrk_secret` maps to a keyeo `KekKind` (the escrow's passphrase /
-// recovery-code wraps). The HPKE method discriminants moved into keyeo's `WrapMethod` enum (matched directly).
-pub(crate) const PASSPHRASE: i32 = WrapMethod::PassphraseArgon2id as i32;
-pub(crate) const RECOVERY: i32 = WrapMethod::RecoveryCodeArgon2id as i32;
 
 // The Argon2id window this build will actually run (checked before the KDF, on params read from an
 // unverified keyring). Rejects absurd values rather than clamping — clamping could silently weaken; a
@@ -67,26 +61,6 @@ pub(crate) struct RecoveryEscrow {
     pub recovery_verifying_key: Vec<u8>,
 }
 
-// ---- KDF marshaling between the proto wire `KdfParams` (the account/member KDF record + openom-crypto's
-// derive path) and keyeo's neutral `KdfParams` (what the vault holds everywhere else). Free fns, not `From`:
-// both types are foreign here, so the orphan rule blocks an impl. ----
-
-pub(crate) fn kdf_proto_to_keyeo(p: &KdfParams) -> KeyeoKdfParams {
-    KeyeoKdfParams {
-        salt: p.salt.clone(),
-        memory_kib: p.memory_kib,
-        iterations: p.iterations,
-        parallelism: p.parallelism,
-    }
-}
-pub(crate) fn kdf_keyeo_to_proto(k: &KeyeoKdfParams) -> KdfParams {
-    KdfParams {
-        salt: k.salt.clone(),
-        memory_kib: k.memory_kib,
-        iterations: k.iterations,
-        parallelism: k.parallelism,
-    }
-}
 impl From<&RecoveryEscrow> for RecoveryKey {
     fn from(r: &RecoveryEscrow) -> Self {
         Self {
@@ -204,15 +178,8 @@ pub(crate) fn open_rrk_secret(
     wrapped: &[u8],
     tree_id: &[u8],
     member_id: &str,
-    wrap_method: i32,
+    kind: KekKind,
 ) -> Result<RrkSecret, VaultError> {
-    let kind = if wrap_method == PASSPHRASE {
-        KekKind::Passphrase
-    } else if wrap_method == RECOVERY {
-        KekKind::RecoveryCode
-    } else {
-        return Err(VaultError::BadKeyring("escrow wrap is not a KEK method".into()));
-    };
     let wrap = KeyeoWrap {
         recipient: member_id.to_string(),
         method: KeyeoWrapMethod::Kek {
@@ -414,8 +381,7 @@ fn kdf_bounds() -> KdfBounds {
     }
 }
 
-/// Reject an out-of-window keyeo KDF. The member-KDF paths (whose KDF arrives as the proto wire `KdfParams`)
-/// convert via [`kdf_proto_to_keyeo`] first.
+/// Reject an out-of-window keyeo KDF (before running Argon2id against params from an unverified source).
 pub(crate) fn validate_kdf(p: &KeyeoKdfParams) -> Result<(), VaultError> {
     if p.validate(&kdf_bounds()) {
         Ok(())

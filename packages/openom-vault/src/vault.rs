@@ -21,11 +21,11 @@ use openom_crypto::{
 use did::DidKey;
 use openom_keyring_chain::{keyring_hash, sign_keyring, verify_keyring_any, SigningKey, VerifyingKey};
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{KdfParams, MemberRole};
+use openom_protocol::v1::MemberRole;
 // The keyring wire moved to openom-keyring-chain in OPE-300. The DEK epochs + recovery escrow wraps are
 // keyeo key material the chain stores as `codec` bytes (OPE-377).
 use openom_keyring_chain::wire::{Keyring, Member, RecoveryKey};
-use keyeo_crypto::{codec, Epoch as KeyeoEpoch, KekKind, KeyId as KeyeoKeyId};
+use keyeo_crypto::{codec, Epoch as KeyeoEpoch, KdfParams as KeyeoKdfParams, KekKind, KeyId as KeyeoKeyId};
 use openom_protocol::{Message, KEYRING_LAYOUT_VERSION};
 // The founder is the owner (the sole OWNER-role member) of a freshly-built single-owner keyring. The
 // signer set is DERIVED from members now (OPE-309): a member at CO_OWNER or stronger IS a signer, so there
@@ -36,8 +36,7 @@ use openom_roles::{MEMBER_CO_OWNER as CO_OWNER_MEMBER, MEMBER_OWNER as OWNER};
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
     new_owner_secrets, open_rrk_secret, owner_secrets_reusing_pass_kdf, rewrap_epochs_to_new_rrk,
-    kdf_keyeo_to_proto, kdf_proto_to_keyeo, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf,
-    validated_kdf, write_epoch_by_ordinal, PASSPHRASE, RECOVERY,
+    rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, validated_kdf, write_epoch_by_ordinal,
 };
 use crate::VaultError;
 use openom_sealer::SealerSet;
@@ -326,7 +325,7 @@ pub fn recover(
     let entropy = parse_recovery_code(recovery_code)?; // checksum first — fail fast on a typo
     let recovery_kek = derive_kek(entropy.as_slice(), &validated_kdf(kdf)?)?;
     let rrk_secret =
-        open_rrk_secret(&recovery_kek, rec_nonce, rec_wrapped, tree_id, member_id, RECOVERY)?;
+        open_rrk_secret(&recovery_kek, rec_nonce, rec_wrapped, tree_id, member_id, KekKind::RecoveryCode)?;
 
     let new_revision = min_revision
         .max(keyring.revision)
@@ -560,7 +559,7 @@ pub fn rotate_recovery(
 /// in their account record (to re-derive on any device) and the two **public** keys they
 /// hand a tree owner out-of-band (§4a) — the Ed25519 author key and the X25519 HPKE key.
 pub struct MemberProvision {
-    pub kdf_params: KdfParams,
+    pub kdf_params: KeyeoKdfParams,
     pub author_public: Vec<u8>,
     pub hpke_public: Vec<u8>,
 }
@@ -573,9 +572,9 @@ pub fn provision_member(passphrase: &Passphrase) -> Result<MemberProvision, Vaul
     let kdf = default_kdf_params(generate_salt()?.to_vec());
     let root = derive_root(passphrase, &kdf)?;
     Ok(MemberProvision {
-        // The account KDF record is the member's persisted wire format (proto) — the one place proto
-        // `KdfParams` is deliberately introduced (stored client-side, decoded on a later unlock).
-        kdf_params: kdf_keyeo_to_proto(&kdf),
+        // The member's account KDF record — keyeo's `KdfParams`, persisted client-side (the wasm / Tauri
+        // boundary serializes it via `keyeo_crypto::codec`) and replayed on a later unlock.
+        kdf_params: kdf,
         author_public: root.identity.verifying_key().to_bytes().to_vec(),
         hpke_public: root.hpke_public.to_vec(),
     })
@@ -657,7 +656,7 @@ pub fn add_member(
 pub fn add_member_as_co_owner(
     keyring_bytes: &[u8],
     co_owner_passphrase: &Passphrase,
-    co_owner_kdf: &KdfParams,
+    co_owner_kdf: &KeyeoKdfParams,
     tree_id: &TreeId,
     co_owner_member_id: &MemberId,
     trusted_signers: &[VerifyingKey],
@@ -717,7 +716,7 @@ pub fn add_member_as_co_owner(
 pub fn unlock_as_member(
     keyring_bytes: &[u8],
     member_passphrase: &Passphrase,
-    member_kdf: &KdfParams,
+    member_kdf: &KeyeoKdfParams,
     tree_id: &TreeId,
     member_id: &MemberId,
     trusted_signers: &[VerifyingKey],
@@ -742,11 +741,8 @@ pub fn unlock_as_member(
     // path's whole security — the member cannot derive the owner's key, so it must be
     // supplied, never taken from the (untrusted) document.
     verify_keyring_any(&keyring, trusted_signers).map_err(|_| CryptoError::Signature)?;
-    // `member_kdf` is the member's persisted account record (proto wire) — convert to keyeo once, here at
-    // the boundary, then the derive path is keyeo throughout.
-    let member_kdf = kdf_proto_to_keyeo(member_kdf);
-    validate_kdf(&member_kdf)?;
-    let root = derive_root(member_passphrase, &member_kdf)?;
+    validate_kdf(member_kdf)?;
+    let root = derive_root(member_passphrase, member_kdf)?;
 
     // A set over every epoch the member's HPKE wraps reach (full history); no wrap anywhere
     // means a removed member.
@@ -867,7 +863,7 @@ pub fn remove_member(
 pub fn remove_member_as_co_owner(
     keyring_bytes: &[u8],
     co_owner_passphrase: &Passphrase,
-    co_owner_kdf: &KdfParams,
+    co_owner_kdf: &KeyeoKdfParams,
     tree_id: &TreeId,
     co_owner_member_id: &MemberId,
     trusted_signers: &[VerifyingKey],
@@ -1146,7 +1142,7 @@ fn open_with_passphrase(
         return Err(CryptoError::Signature.into());
     }
     verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
-    let rrk_secret = open_rrk_secret(&root.kek, nonce, wrapped, tree_id, member_id, PASSPHRASE)?;
+    let rrk_secret = open_rrk_secret(&root.kek, nonce, wrapped, tree_id, member_id, KekKind::Passphrase)?;
 
     let epochs = keyring_epochs(&keyring)?;
     let key_id = epochs
@@ -1206,7 +1202,7 @@ struct CoOwnerAccess {
 fn open_as_co_owner(
     keyring_bytes: &[u8],
     passphrase: &[u8],
-    kdf: &KdfParams,
+    kdf: &KeyeoKdfParams,
     tree_id: &[u8],
     member_id: &str,
     trusted_signers: &[VerifyingKey],
@@ -1229,10 +1225,8 @@ fn open_as_co_owner(
         return Err(CryptoError::Signature.into());
     }
     verify_keyring_any(&keyring, &authorized_verify_keys(&keyring)).map_err(|_| CryptoError::Signature)?;
-    // `kdf` is the member's persisted account record (proto wire) — convert once at the boundary.
-    let kdf = kdf_proto_to_keyeo(kdf);
-    validate_kdf(&kdf)?;
-    let root = derive_root(passphrase, &kdf)?;
+    validate_kdf(kdf)?;
+    let root = derive_root(passphrase, kdf)?;
     // Authority: the caller must be a current co-owner signer (a CO_OWNER-role member) whose registered
     // author key is theirs.
     let my_pub = root.identity.verifying_key().to_bytes().to_vec();
@@ -3309,8 +3303,7 @@ mod tests {
 
         // A rogue co-owner appends a signer (a CO_OWNER-role member — the signer set is derived from
         // members) and signs ONLY with their own identity.
-        let co_identity =
-            derive_root(b"co pass", &crate::vault_core::kdf_proto_to_keyeo(&co.kdf_params)).unwrap().identity;
+        let co_identity = derive_root(b"co pass", &co.kdf_params).unwrap().identity;
         let mut k = Keyring::decode(promoted.keyring.as_slice()).unwrap();
         k.members.push(Member {
             member_id: "acct-rogue".into(),

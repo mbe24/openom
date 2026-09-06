@@ -11,6 +11,7 @@
 
 use serde::de::DeserializeOwned;
 
+use crate::kdf::KdfParams;
 use crate::keyring::{Epoch, RecipientId, Wrap};
 
 /// Decoding a stored key-material blob failed: malformed postcard, or trailing bytes after an otherwise
@@ -45,6 +46,17 @@ pub fn encode_wraps<Id: RecipientId>(wraps: &[Wrap<Id>]) -> Vec<u8> {
 
 /// Decode a wrap list from its canonical bytes, rejecting a malformed or trailing-byte blob.
 pub fn decode_wraps<Id: RecipientId>(bytes: &[u8]) -> Result<Vec<Wrap<Id>>, CodecError> {
+    decode_strict(bytes)
+}
+
+/// Encode a single [`KdfParams`] record (a member's account KDF) to canonical bytes. Infallible — see
+/// [`encode_epochs`].
+pub fn encode_kdf_params(k: &KdfParams) -> Vec<u8> {
+    postcard::to_allocvec(k).expect("postcard encode of kdf params is infallible")
+}
+
+/// Decode a [`KdfParams`] record from its canonical bytes, rejecting a malformed or trailing-byte blob.
+pub fn decode_kdf_params(bytes: &[u8]) -> Result<KdfParams, CodecError> {
     decode_strict(bytes)
 }
 
@@ -144,6 +156,15 @@ mod tests {
     fn wraps_round_trip() {
         let w = sample_wraps();
         assert_eq!(decode_wraps::<String>(&encode_wraps(&w)).unwrap(), w);
+    }
+
+    #[test]
+    fn kdf_params_round_trip_and_reject_trailing() {
+        let k = crate::kdf::KdfParams { salt: vec![9, 8, 7], memory_kib: 19_456, iterations: 3, parallelism: 2 };
+        assert_eq!(decode_kdf_params(&encode_kdf_params(&k)).unwrap(), k);
+        let mut bytes = encode_kdf_params(&k);
+        bytes.push(0);
+        assert_eq!(decode_kdf_params(&bytes), Err(CodecError::TrailingBytes));
     }
 
     #[test]

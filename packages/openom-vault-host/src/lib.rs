@@ -9,7 +9,7 @@ use openom_keyring_chain::{verify_transition, KeyringError, KeyringAnchor, Verif
 // direct openom-keyring-api dependency.
 pub use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-use openom_protocol::v1::{Compression, Format, KdfParams, MemberRole};
+use openom_protocol::v1::{Compression, Format, MemberRole};
 use openom_keyring_chain::wire::Keyring;
 use openom_protocol::Message;
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
@@ -608,7 +608,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     pub fn provision_member(&self, passphrase: String) -> Result<MemberProvisioned> {
         let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes()))?;
         Ok(MemberProvisioned {
-            kdf_params: m.kdf_params.encode_to_vec(),
+            kdf_params: keyeo_crypto::codec::encode_kdf_params(&m.kdf_params),
             author_public: m.author_public,
             hpke_public: m.hpke_public,
         })
@@ -677,7 +677,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = KdfParams::decode(member_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
@@ -768,7 +768,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = KdfParams::decode(co_owner_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(co_owner_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
@@ -814,7 +814,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = KdfParams::decode(co_owner_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(co_owner_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
@@ -1133,7 +1133,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ) -> Result<Unlocked> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
-        let kdf = KdfParams::decode(member_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let replica = self.fresh_replica()?;
@@ -1229,7 +1229,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
         let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
-        let kdf = KdfParams::decode(member_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
         let replica = self.fresh_replica()?;
