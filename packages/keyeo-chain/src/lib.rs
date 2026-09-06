@@ -111,6 +111,9 @@ pub trait Doc {
     /// The binding's payload/structural acceptance gate. The engine calls it at every entry point (incl.
     /// per hop in [`verify_walk`]); a binding cannot forget to wire it. Return `Err(&'static str)` to
     /// reject with [`Error::Structure`].
+    ///
+    /// # Errors
+    /// Returns `Err(&'static str)` (surfaced as [`Error::Structure`]) if the payload/structure is invalid.
     fn structure_ok(&self) -> Result<(), &'static str>;
 }
 
@@ -245,8 +248,7 @@ where
 {
     let founder = prior.signers.iter().find(|s| s.role.is_founder());
     let founder_signed = founder
-        .map(|f| verify_any::<S>(msg, sigs, std::slice::from_ref(&f.public_key)))
-        .unwrap_or(false);
+        .is_some_and(|f| verify_any::<S>(msg, sigs, std::slice::from_ref(&f.public_key)));
 
     // Target-exclusion: the co-owner denominator is the prior signers, minus the founder, minus any signer
     // this doc removes. Computed against the DERIVED candidate signer set.
@@ -257,7 +259,7 @@ where
         .map(|p| &p.public_key)
         .collect();
     let is_founder_key = |k: &S::PublicKey| {
-        founder.map(|f| f.public_key.as_ref() == k.as_ref()).unwrap_or(false)
+        founder.is_some_and(|f| f.public_key.as_ref() == k.as_ref())
     };
     let co_owner_keys: Vec<S::PublicKey> = prior
         .signers
@@ -312,12 +314,19 @@ fn anchor_from_doc<D: Doc>(doc: &D, msg: &[u8]) -> Anchor<D::Id, D::R, Pk<D>> {
 
 // ---- engine entry points ----
 
+/// A verified [`Anchor`] or the [`Error`] that rejected the doc — the result every entry point returns.
+type Verified<D> = Result<Anchor<<D as Doc>::Id, <D as Doc>::R, Pk<D>>, Error>;
+
 /// Validate `cand` as the successor of `prior` and return the new verified [`Anchor`]. Pure; no I/O.
 /// Reproduces chain.rs `verify_transition` generalized over `<Id, Role, Sig>`.
+///
+/// # Errors
+/// Returns the [`Error`] identifying why `cand` is not a valid successor of `prior` — a group mismatch,
+/// a structural failure, a non-sequential revision or fork, or an unendorsed/unauthorized change.
 pub fn verify_transition<D: Doc>(
     prior: &Anchor<D::Id, D::R, Pk<D>>,
     cand: &D,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+) -> Verified<D> {
     if cand.group_id() != &prior.group_id {
         return Err(Error::GroupMismatch);
     }
@@ -393,10 +402,13 @@ pub fn verify_transition<D: Doc>(
 /// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
 /// mandatory — a signature at N+k proves authorship under the set at N+k−1 — so `structure_ok` runs each
 /// hop (via `verify_transition`). `hops` must be ascending with no gaps; a gap surfaces as `NonSequential`.
+///
+/// # Errors
+/// Returns the first [`Error`] any hop's [`verify_transition`] rejects with.
 pub fn verify_walk<D: Doc>(
     prior: &Anchor<D::Id, D::R, Pk<D>>,
     hops: &[D],
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+) -> Verified<D> {
     let mut anchor = prior.clone();
     for hop in hops {
         anchor = verify_transition(&anchor, hop)?;
@@ -410,10 +422,14 @@ pub fn verify_walk<D: Doc>(
 /// self-signed by one of its own current signers. When `prior_rvk` is present (the PRIOR doc pinned a
 /// recovery authority) the reset must carry the SAME authority (continuity) AND be signed by it
 /// (authorization). Generalizes chain.rs `verify_reset`.
+///
+/// # Errors
+/// Returns an [`Error`] if the doc is structurally invalid, not self-signed by one of its own signers, or
+/// (when `prior_rvk` is set) does not carry and is not signed by that same recovery authority.
 pub fn verify_reset<D: Doc>(
     prior_rvk: Option<&Pk<D>>,
     doc: &D,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+) -> Verified<D> {
     doc.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(doc)?;
 
@@ -444,10 +460,14 @@ pub fn verify_reset<D: Doc>(
 /// Seed an anchor from a GENESIS doc (revision 1, all-zero `prev_hash`) as the founder: exactly one
 /// founder whose key is the caller's own, signed by it. Cryptographic first-sight for the founder path.
 /// Generalizes chain.rs `bootstrap_from_genesis`.
+///
+/// # Errors
+/// Returns an [`Error`] if the doc is structurally invalid, is not revision 1 with an all-zero
+/// `prev_hash`, has no founder matching `own_founder_key`, or is not signed by that founder.
 pub fn bootstrap_genesis<D: Doc>(
     genesis: &D,
     own_founder_key: &Pk<D>,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+) -> Verified<D> {
     genesis.structure_ok().map_err(Error::Structure)?;
     check_structure_generic(genesis)?;
     if genesis.revision().0 != 1 || genesis.prev_hash() != &DocHash([0u8; 32]) {
@@ -472,12 +492,16 @@ pub fn bootstrap_genesis<D: Doc>(
 /// Seed an anchor from a head doc pinned OUT-OF-BAND: the caller supplies `(group_id, revision, doc_hash)`
 /// and the doc must match exactly — the OOB channel, not any signature, is the trust root for this first
 /// revision. A hygiene self-signature is still checked. Generalizes chain.rs `bootstrap_from_oob`.
+///
+/// # Errors
+/// Returns an [`Error`] if the doc's group/revision/hash do not match the pinned values, it is
+/// structurally invalid, or it is not self-signed by one of its own signers.
 pub fn bootstrap_pinned<D: Doc>(
     head: &D,
     pinned_group: &GroupId,
     pinned_revision: Revision,
     pinned_hash: &DocHash,
-) -> Result<Anchor<D::Id, D::R, Pk<D>>, Error> {
+) -> Verified<D> {
     if head.group_id() != pinned_group {
         return Err(Error::GroupMismatch);
     }
@@ -515,6 +539,7 @@ pub struct Retained {
 
 impl Retained {
     /// The retained revisions in any order — deduped + sorted ascending on the way in.
+    #[must_use]
     pub fn new(mut revisions: Vec<Revision>) -> Self {
         revisions.sort_unstable();
         revisions.dedup();
@@ -549,7 +574,10 @@ impl keyeo_core::Compaction for Retained {
         // prune. Same split as the dag.
         let keep_last = match plan {
             keyeo_core::RetentionPlan::KeepAll => return Ok(None),
-            keyeo_core::RetentionPlan::Snapshot { keep_last } => keep_last as u32,
+            // A >u32 keep-count only means "keep more" (prune less) — the data-safe direction — so saturate.
+            keyeo_core::RetentionPlan::Snapshot { keep_last } => {
+                u32::try_from(keep_last).unwrap_or(u32::MAX)
+            }
         };
         let Some(&head) = state.revisions.iter().max() else {
             return Ok(None); // nothing retained

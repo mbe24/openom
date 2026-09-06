@@ -62,6 +62,10 @@ pub fn doc_hash<D: Doc>(doc: &D) -> DocHash {
 /// The exhaustive encoder. `#[deny(unused_variables)]` over the destructured `SignedFields` (and each
 /// `Signer` / `Governance`) is the guard: a newly-added signed field cannot silently escape the signed
 /// bytes. Taken by value (it holds only references + `Copy` scalars) so the destructure moves cleanly.
+// `SignedFields` is a lightweight bundle of references + `Copy` scalars, so by-value is cheap; it is taken
+// by value purely so the body owns its destructure without deref noise. (The exhaustiveness guard is the
+// `deny(unused_variables)` destructure itself — it holds by reference too, so this is style, not safety.)
+#[allow(clippy::needless_pass_by_value)]
 #[deny(unused_variables)]
 fn write_signed_bytes<Id, R, Pk>(fields: SignedFields<'_, Id, R, Pk>) -> Vec<u8>
 where
@@ -87,7 +91,8 @@ where
     put_bytes(&mut out, &prev_hash.0);
     put_u32(&mut out, layout_version);
 
-    put_u32(&mut out, members.len() as u32);
+    // Length prefix; a wrong count would only change the signing bytes (fail-closed), so saturate.
+    put_u32(&mut out, u32::try_from(members.len()).unwrap_or(u32::MAX));
     for m in members {
         let Signer {
             id,
@@ -103,15 +108,12 @@ where
     put_u32(&mut out, kind);
     put_u32(&mut out, threshold);
 
-    match recovery_authority {
-        Some(k) => {
-            put_u32(&mut out, 1);
-            put_bytes(&mut out, k.as_ref());
-        }
-        None => {
-            put_u32(&mut out, 0);
-            put_bytes(&mut out, &[]);
-        }
+    if let Some(k) = recovery_authority {
+        put_u32(&mut out, 1);
+        put_bytes(&mut out, k.as_ref());
+    } else {
+        put_u32(&mut out, 0);
+        put_bytes(&mut out, &[]);
     }
 
     put_bytes(&mut out, &payload_commitment.0);
@@ -142,7 +144,9 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 /// 4-byte big-endian length prefix, then the bytes.
 #[inline]
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    // Length prefix; a >u32 field would only change the signing bytes (fail-closed), so saturate.
+    let len = u32::try_from(b.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(b);
 }
 
