@@ -674,6 +674,124 @@ fn collect(deduped: &[&Record]) -> Collected {
 // destructured accumulators, so threading them through more call boundaries would mean passing a large
 // bundle for no readability gain — the AGENTS.md "irreducibly coupled" case. Kept as one pure function.
 #[allow(clippy::too_many_lines)]
+/// Canonical person id for `id`: its cluster's representative anchor (`None` if it maps to no person).
+fn canon_of(
+    rep: &BTreeMap<String, String>,
+    canonical: &BTreeMap<String, String>,
+    id: &str,
+) -> Option<String> {
+    rep.get(id).and_then(|key| canonical.get(key)).cloned()
+}
+
+/// The person a claim's subject re-homes to: its winning `reattribute_to`, else the original target.
+fn eff_target(rehome: &BTreeMap<String, String>, claim_id: &str, orig: &str) -> String {
+    rehome.get(claim_id).cloned().unwrap_or_else(|| orig.to_string())
+}
+
+/// The identity-resolution outputs (project phase 2): the cluster map (`rep`), each cluster's canonical
+/// anchor, the cluster membership, the reattribution winners (`rehome`), and the `different_from` cuts
+/// dropped by the constraint-repair union-find.
+struct Resolved {
+    rep: BTreeMap<String, String>,
+    canonical: BTreeMap<String, String>,
+    by_key: BTreeMap<String, BTreeSet<String>>,
+    rehome: BTreeMap<String, String>,
+    skipped: Vec<[String; 2]>,
+}
+
+/// Cluster the collected identity claims into canonical persons and resolve reattribution.
+fn resolve(c: &Collected, policy: &Policy) -> Resolved {
+    // nodes = every id that participates as a person.
+    let mut nodes: BTreeSet<String> = c.anchors.clone();
+    for p in c.same_as.keys().chain(c.different_from.keys()) {
+        nodes.insert(p[0].clone());
+        nodes.insert(p[1].clone());
+    }
+    for (t, _, _) in &c.name_claims {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _, _) in &c.sex_claims {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _, _) in &c.biography_claims {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _, _, _) in &c.custom_values {
+        nodes.insert(t.clone());
+    }
+    for (t, _, _) in &c.media_links {
+        nodes.insert(t.clone());
+    }
+    for options in c.reattribute.values() {
+        for person in options.keys() {
+            nodes.insert(person.clone());
+        }
+    }
+    for (child, parent, _) in c.parent_child.keys() {
+        nodes.insert(child.clone());
+        nodes.insert(parent.clone());
+    }
+    for (pair, _) in c.partnership.keys() {
+        nodes.insert(pair[0].clone());
+        nodes.insert(pair[1].clone());
+    }
+
+    // edges + cuts, each gated by its attestation-weighted score.
+    let edges: Vec<Edge> = c
+        .same_as
+        .iter()
+        .filter_map(|(pair, info)| {
+            let s = score(info, &c.attests);
+            (s >= policy.same_as_threshold).then(|| Edge {
+                a: pair[0].clone(),
+                b: pair[1].clone(),
+                score: s,
+            })
+        })
+        .collect();
+    let cuts: Vec<[String; 2]> = c
+        .different_from
+        .iter()
+        .filter(|(_, info)| score(info, &c.attests) >= policy.different_from_threshold)
+        .map(|(pair, _)| pair.clone())
+        .collect();
+
+    let Clustering { rep, skipped } = cluster(&nodes, edges, &cuts);
+
+    // Group nodes by cluster key, then pick each cluster's canonical PERSON id = its minimum *anchor*
+    // member. A cluster with no anchor is not a person and is dropped.
+    let mut by_key: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (node, key) in &rep {
+        by_key.entry(key.clone()).or_default().insert(node.clone());
+    }
+    let mut canonical: BTreeMap<String, String> = BTreeMap::new(); // cluster key -> min anchor
+    for (key, members) in &by_key {
+        if let Some(anchor) = members.iter().find(|m| c.anchors.contains(*m)) {
+            canonical.insert(key.clone(), anchor.clone());
+        }
+    }
+
+    // reattribution: per re-homed claim, the winning net-positive personId (highest score, ties by id).
+    let rehome: BTreeMap<String, String> = c
+        .reattribute
+        .iter()
+        .filter_map(|(claim, options)| {
+            options
+                .iter()
+                .filter(|(_, info)| score(info, &c.attests) >= policy.reattribute_threshold)
+                .max_by(|a, b| {
+                    score(a.1, &c.attests)
+                        .cmp(&score(b.1, &c.attests))
+                        .then(b.0.cmp(a.0))
+                })
+                .map(|(person, _)| (claim.clone(), person.clone()))
+        })
+        .collect();
+
+    Resolved { rep, canonical, by_key, rehome, skipped }
+}
+
+#[must_use]
 pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // The store guarantees unique content-hash ids, but be robust to a duplicated slice: keep the
     // first record per id, so projecting `recs` and `recs ++ recs` give the same result (set input).
@@ -683,138 +801,90 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         .filter(|r| seen_ids.insert(r.id().to_string()))
         .collect();
 
-    // --- collect (phase 1 of 3) — fold the deduped record set into per-kind accumulators, bundled
-    // into `Collected` and destructured back to locals so the resolve + assemble phases below read
-    // them unchanged. Adding a leaf predicate is a field on `Collected` plus its arm in the match here.
-    let Collected {
-        anchors,
-        same_as,
-        different_from,
-        attests,
-        name_claims,
-        sex_claims,
-        biography_claims,
-        field_label,
-        field_type,
-        custom_values,
-        reattribute,
-        preferred,
-        parent_child,
-        partnership,
-        event_anchors,
-        event_type,
-        event_date,
-        event_place,
-        participants,
-        sources,
-        citations,
-        place_point,
-        place_name,
-        part_of,
-        media_links,
-        other_claims,
-    } = collect(&deduped);
+    let collected = collect(&deduped);
+    let resolved = resolve(&collected, policy);
+    let mut maps = build_person_maps(&collected, &resolved, policy);
 
-    // --- resolve (phase 2 of 3): identity clustering + reattribution + canonicalization ---------
-    // --- nodes = every id that participates as a person -----------------------------------------
-    let mut nodes: BTreeSet<String> = anchors.clone();
-    for p in same_as.keys().chain(different_from.keys()) {
-        nodes.insert(p[0].clone());
-        nodes.insert(p[1].clone());
-    }
-    for (t, _, _) in &name_claims {
-        nodes.insert(t.clone());
-    }
-    for (t, _, _, _) in &sex_claims {
-        nodes.insert(t.clone());
-    }
-    for (t, _, _, _) in &biography_claims {
-        nodes.insert(t.clone());
-    }
-    for (t, _, _, _, _) in &custom_values {
-        nodes.insert(t.clone());
-    }
-    for (t, _, _) in &media_links {
-        nodes.insert(t.clone());
-    }
-    for options in reattribute.values() {
-        for person in options.keys() {
-            nodes.insert(person.clone());
-        }
-    }
-    for (child, parent, _) in parent_child.keys() {
-        nodes.insert(child.clone());
-        nodes.insert(parent.clone());
-    }
-    for (pair, _) in partnership.keys() {
-        nodes.insert(pair[0].clone());
-        nodes.insert(pair[1].clone());
-    }
+    let people = assemble_people(&collected, &resolved, &mut maps);
+    let events = assemble_events(&collected, &resolved);
 
-    // --- edges + cuts, each gated by its attestation-weighted score -----------------------------
-    let edges: Vec<Edge> = same_as
+    // Relationships between canonical persons (attestation-weighted; endpoints canonicalized through the
+    // same_as clusters; a dangling endpoint or self-loop is dropped; post-canonicalization dups merged).
+    let mut parent_child_edges: Vec<ParentChild> = collected
+        .parent_child
         .iter()
-        .filter_map(|(pair, info)| {
-            let s = score(info, &attests);
-            (s >= policy.same_as_threshold).then(|| Edge {
-                a: pair[0].clone(),
-                b: pair[1].clone(),
-                score: s,
+        .filter(|(_, info)| score(info, &collected.attests) >= policy.relationship_threshold)
+        .filter_map(|((child, parent, kind), _)| {
+            let cc = canon_of(&resolved.rep, &resolved.canonical, child)?;
+            let pp = canon_of(&resolved.rep, &resolved.canonical, parent)?;
+            (cc != pp).then(|| ParentChild {
+                parent: pp,
+                child: cc,
+                kind: kind.clone(),
             })
         })
         .collect();
-    let cuts: Vec<[String; 2]> = different_from
+    parent_child_edges.sort();
+    parent_child_edges.dedup();
+
+    let mut partnership_edges: Vec<Partnership> = collected
+        .partnership
         .iter()
-        .filter(|(_, info)| score(info, &attests) >= policy.different_from_threshold)
-        .map(|(pair, _)| pair.clone())
-        .collect();
-
-    let Clustering { rep, skipped } = cluster(&nodes, edges, &cuts);
-
-    // --- assemble people ------------------------------------------------------------------------
-    // Group nodes by cluster key (the min-node rep), then pick each cluster's canonical PERSON id =
-    // its minimum *anchor* member. A cluster with no anchor (e.g. a dangling `same_as` endpoint that
-    // sorts below the real anchors) is not a person and is dropped.
-    let mut by_key: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (node, key) in &rep {
-        by_key.entry(key.clone()).or_default().insert(node.clone());
-    }
-    let mut canonical: BTreeMap<String, String> = BTreeMap::new(); // cluster key -> min anchor
-    for (key, members) in &by_key {
-        if let Some(anchor) = members.iter().find(|m| anchors.contains(*m)) {
-            canonical.insert(key.clone(), anchor.clone());
-        }
-    }
-    let canon_of =
-        |id: &str| -> Option<String> { rep.get(id).and_then(|key| canonical.get(key)).cloned() };
-
-    // Resolve reattribute_to: per re-homed claim, the winning net-positive personId (highest score,
-    // ties by personId). eff_target then re-homes a claim's subject *before* it is grouped.
-    let rehome: BTreeMap<String, String> = reattribute
-        .iter()
-        .filter_map(|(claim, options)| {
-            options
-                .iter()
-                .filter(|(_, info)| score(info, &attests) >= policy.reattribute_threshold)
-                .max_by(|a, b| {
-                    score(a.1, &attests)
-                        .cmp(&score(b.1, &attests))
-                        .then(b.0.cmp(a.0))
-                })
-                .map(|(person, _)| (claim.clone(), person.clone()))
+        .filter(|(_, info)| score(info, &collected.attests) >= policy.relationship_threshold)
+        .filter_map(|((pair, role), _)| {
+            let a = canon_of(&resolved.rep, &resolved.canonical, &pair[0])?;
+            let b = canon_of(&resolved.rep, &resolved.canonical, &pair[1])?;
+            (a != b).then(|| Partnership {
+                pair: sorted_pair(&a, &b),
+                role: role.clone(),
+            })
         })
         .collect();
-    let eff_target = |claim_id: &str, orig: &str| -> String {
-        rehome
-            .get(claim_id)
-            .cloned()
-            .unwrap_or_else(|| orig.to_string())
-    };
+    partnership_edges.sort();
+    partnership_edges.dedup();
 
+    let unions = assemble_unions(&parent_child_edges, &partnership_edges, &events);
+    let conflicts = resolved
+        .skipped
+        .iter()
+        .map(|cut_pair| Conflict {
+            cut_pair: cut_pair.clone(),
+        })
+        .collect();
+    Projection {
+        people,
+        parent_child: parent_child_edges,
+        partnerships: partnership_edges,
+        unions,
+        events,
+        conflicts,
+        unclassified: maps.unclassified,
+    }
+}
+
+/// The per-canonical-person aggregates (project phase 3), ready for final assembly.
+struct PersonMaps {
+    names_by_person: BTreeMap<String, Vec<NameView>>,
+    sex_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    biography_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    customs_of: BTreeMap<String, Vec<CustomField>>,
+    sources_by_person: BTreeMap<String, Vec<Citation>>,
+    media_by_person: BTreeMap<String, Vec<MediaLink>>,
+    other_by_person: BTreeMap<String, Vec<GenericClaimView>>,
+    unclassified: Vec<GenericClaimView>,
+    preferred_name_of: BTreeMap<String, String>,
+}
+
+/// Group every per-person claim onto its canonical person (applying reattribution via `eff_target`),
+/// resolving the most-corroborated value where a slot takes one. One cohesive aggregation pass — one
+/// small independent block per record kind (names / sex / biography / custom / sources / media / other /
+/// preferred); splitting per-kind would fragment a coherent pass for no readability gain.
+#[allow(clippy::too_many_lines)]
+fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps {
     // Pre-group names + sex by canonical person (applying reattribute_to via eff_target).
     let mut names_by_person: BTreeMap<String, Vec<NameView>> = BTreeMap::new();
-    for (target, cid, parts) in &name_claims {
-        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+    for (target, cid, parts) in &c.name_claims {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             names_by_person.entry(canon).or_default().push(NameView {
                 claim_id: cid.clone(),
                 parts: parts.clone(),
@@ -834,8 +904,8 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     }
 
     let mut sex_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
-    for (target, cid, val, author) in &sex_claims {
-        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+    for (target, cid, val, author) in &c.sex_claims {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             sex_by_person
                 .entry(canon)
                 .or_default()
@@ -847,8 +917,8 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
 
     let mut biography_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> =
         BTreeMap::new();
-    for (target, cid, text, author) in &biography_claims {
-        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+    for (target, cid, text, author) in &c.biography_claims {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             biography_by_person
                 .entry(canon)
                 .or_default()
@@ -865,8 +935,8 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         String,
         BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>>,
     > = BTreeMap::new();
-    for (target, cid, fid, val, author) in &custom_values {
-        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+    for (target, cid, fid, val, author) in &c.custom_values {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             custom_by_person
                 .entry(canon)
                 .or_default()
@@ -888,11 +958,13 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
                     .max_by(|a, b| a.1 .0.len().cmp(&b.1 .0.len()).then(b.0.cmp(a.0)))
                     .map(|(_, (_, val))| CustomField {
                         field_id: fid.clone(),
-                        label: field_label
+                        label: c
+                            .field_label
                             .get(fid)
                             .and_then(most_corroborated)
                             .unwrap_or_else(|| fid.clone()),
-                        field_type: field_type
+                        field_type: c
+                            .field_type
                             .get(fid)
                             .and_then(most_corroborated)
                             .unwrap_or_else(|| "text".to_string()),
@@ -908,8 +980,8 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // resolving the `sourceId` to the source claim's description. An unresolved source id surfaces the
     // reference with empty source fields rather than dropping the citation.
     let mut sources_by_person: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
-    for (target, cid, pred, cit) in &citations {
-        let Some(canon) = canon_of(&eff_target(cid, target)) else {
+    for (target, cid, pred, cit) in &c.citations {
+        let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) else {
             continue;
         };
         let source_id = cit
@@ -917,7 +989,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let src = sources.get(&source_id);
+        let src = c.sources.get(&source_id);
         let field = |k: &str| {
             src.and_then(|s| s.get(k))
                 .and_then(Value::as_str)
@@ -950,8 +1022,8 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // Media: attach each `media_link` to the canonical person its (effective) target resolves to.
     // Links targeting events or sources don't resolve to a person and are dropped here (a seam).
     let mut media_by_person: BTreeMap<String, Vec<MediaLink>> = BTreeMap::new();
-    for (target, cid, value) in &media_links {
-        if let Some(canon) = canon_of(&eff_target(cid, target)) {
+    for (target, cid, value) in &c.media_links {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             let media_hash = value
                 .get("mediaHash")
                 .and_then(Value::as_str)
@@ -972,11 +1044,11 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
     }
 
     // Unknown-predicate claims (OPE-212b): attach each to the canonical person its (effective) target
-    // resolves to; claims whose target isn't a person (a newer anchor kind, an event, a not-yet-known
-    // subject) go to `unclassified` rather than minting a spurious person. Verbatim — no corroboration.
+    // resolves to; claims whose target isn't a person go to `unclassified` rather than minting a
+    // spurious person. Verbatim — no corroboration.
     let mut other_by_person: BTreeMap<String, Vec<GenericClaimView>> = BTreeMap::new();
     let mut unclassified: Vec<GenericClaimView> = Vec::new();
-    for (target, cid, pred, value, author) in &other_claims {
+    for (target, cid, pred, value, author) in &c.other_claims {
         let view = GenericClaimView {
             claim_id: cid.clone(),
             target_id: target.clone(),
@@ -984,7 +1056,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             value: value.clone(),
             created_by: author.clone(),
         };
-        match canon_of(&eff_target(cid, target)) {
+        match canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
             Some(canon) => other_by_person.entry(canon).or_default().push(view),
             None => unclassified.push(view),
         }
@@ -1001,17 +1073,17 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
 
     // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
     // whose referent resolves to one of the person's names wins (ties by content-ref).
-    let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new(); // person -> ref -> claimId
+    let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (person, views) in &names_by_person {
         let map = views
             .iter()
-            .filter_map(|v| name_ref(&v.parts).map(|r| (r, v.claim_id.clone())))
+            .filter_map(|v| name_ref(&v.parts).map(|rf| (rf, v.claim_id.clone())))
             .collect();
         name_ref_to_id.insert(person.clone(), map);
     }
     let mut by_slot: BTreeMap<(String, String), Vec<(&String, &PairInfo)>> = BTreeMap::new();
-    for ((person, for_pred, claim_ref), info) in &preferred {
-        if let Some(canon) = canon_of(person) {
+    for ((person, for_pred, claim_ref), info) in &c.preferred {
+        if let Some(canon) = canon_of(&r.rep, &r.canonical, person) {
             by_slot
                 .entry((canon, for_pred.clone()))
                 .or_default()
@@ -1027,47 +1099,59 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         let winner = options
             .iter()
             .filter(|(claim_ref, info)| {
-                score(info, &attests) >= policy.preferred_threshold
+                score(info, &c.attests) >= policy.preferred_threshold
                     && refs.is_some_and(|m| m.contains_key(*claim_ref))
             })
             .max_by(|a, b| {
-                score(a.1, &attests)
-                    .cmp(&score(b.1, &attests))
+                score(a.1, &c.attests)
+                    .cmp(&score(b.1, &c.attests))
                     .then(b.0.cmp(a.0))
             });
-        if let Some(name_id) = winner.and_then(|(r, _)| refs.and_then(|m| m.get(*r))) {
+        if let Some(name_id) = winner.and_then(|(rf, _)| refs.and_then(|m| m.get(*rf))) {
             preferred_name_of.insert(person.clone(), name_id.clone());
         }
     }
 
-    // --- assemble (phase 3 of 3): people, relationships, unions, events from the resolved state ---
+    PersonMaps {
+        names_by_person,
+        sex_by_person,
+        biography_by_person,
+        customs_of,
+        sources_by_person,
+        media_by_person,
+        other_by_person,
+        unclassified,
+        preferred_name_of,
+    }
+}
+
+/// Build the canonical `Person` records from the resolved clusters + per-person maps (project phase 4a).
+/// Consumes the owned per-person aggregates out of `m` (each belongs to exactly one person).
+fn assemble_people(c: &Collected, r: &Resolved, m: &mut PersonMaps) -> Vec<Person> {
     let mut people = Vec::new();
-    for (key, members) in &by_key {
-        let Some(canon) = canonical.get(key) else {
+    for (key, members) in &r.by_key {
+        let Some(canon) = r.canonical.get(key) else {
             continue;
         };
-
         let mut also: Vec<String> = Vec::new();
-        for m in members {
-            if anchors.contains(m) && m != canon {
-                also.push(m.clone());
+        for mem in members {
+            if c.anchors.contains(mem) && mem != canon {
+                also.push(mem.clone());
             }
         }
-
-        let names = names_by_person.remove(canon).unwrap_or_default();
-        let sex = sex_by_person.get(canon).and_then(|tally| {
+        let names = m.names_by_person.remove(canon).unwrap_or_default();
+        let sex = m.sex_by_person.get(canon).and_then(|tally| {
             tally
                 .iter()
                 .max_by(|x, y| x.1.len().cmp(&y.1.len()).then(y.0.cmp(x.0)))
                 .map(|(val, _)| val.clone())
         });
-
-        let preferred_name = preferred_name_of.get(canon).cloned();
-        let biography = biography_by_person.get(canon).and_then(most_corroborated);
-        let custom_fields = customs_of.remove(canon).unwrap_or_default();
-        let sources = sources_by_person.remove(canon).unwrap_or_default();
-        let media = media_by_person.remove(canon).unwrap_or_default();
-        let other = other_by_person.remove(canon).unwrap_or_default();
+        let preferred_name = m.preferred_name_of.get(canon).cloned();
+        let biography = m.biography_by_person.get(canon).and_then(most_corroborated);
+        let custom_fields = m.customs_of.remove(canon).unwrap_or_default();
+        let sources = m.sources_by_person.remove(canon).unwrap_or_default();
+        let media = m.media_by_person.remove(canon).unwrap_or_default();
+        let other = m.other_by_person.remove(canon).unwrap_or_default();
         people.push(Person {
             id: canon.clone(),
             also,
@@ -1082,50 +1166,23 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         });
     }
     people.sort_by(|a, b| a.id.cmp(&b.id));
+    people
+}
 
-    // Relationships between canonical persons (attestation-weighted; endpoints canonicalized through
-    // the same_as clusters; an edge with a dangling endpoint or that collapses to a self-loop is
-    // dropped; duplicates that coincide after canonicalization are merged).
-    let mut parent_child_edges: Vec<ParentChild> = parent_child
-        .iter()
-        .filter(|(_, info)| score(info, &attests) >= policy.relationship_threshold)
-        .filter_map(|((child, parent, kind), _)| {
-            let (c, p) = (canon_of(child)?, canon_of(parent)?);
-            (c != p).then(|| ParentChild {
-                parent: p,
-                child: c,
-                kind: kind.clone(),
-            })
-        })
-        .collect();
-    parent_child_edges.sort();
-    parent_child_edges.dedup();
-
-    let mut partnership_edges: Vec<Partnership> = partnership
-        .iter()
-        .filter(|(_, info)| score(info, &attests) >= policy.relationship_threshold)
-        .filter_map(|((pair, role), _)| {
-            let (a, b) = (canon_of(&pair[0])?, canon_of(&pair[1])?);
-            (a != b).then(|| Partnership {
-                pair: sorted_pair(&a, &b),
-                role: role.clone(),
-            })
-        })
-        .collect();
-    partnership_edges.sort();
-    partnership_edges.dedup();
-
-    // Resolve a place for a given event year: most-corroborated point + parent, and the name whose
-    // `validRange` covers the year (falling back to the most-corroborated name when none covers or
-    // there is no year).
+/// Assemble each Event anchor's targeting claims into a hyper-edge (project phase 4b): type / date /
+/// place most-corroborated; participants canonicalized to persons. Sorted by event id (`BTreeSet` order).
+fn assemble_events(c: &Collected, r: &Resolved) -> Vec<EventView> {
+    // Most-corroborated point + parent for a place, and the name whose `validRange` covers the year
+    // (falling back to the most-corroborated name when none covers or there is no year).
     let resolve_place = |pid: &str, year: Option<i32>| -> PlaceView {
-        let point = place_point.get(pid).and_then(|m| {
+        let point = c.place_point.get(pid).and_then(|m| {
             m.iter()
                 .max_by(|a, b| a.1 .0.len().cmp(&b.1 .0.len()).then(b.0.cmp(a.0)))
                 .map(|(_, (_, v))| v.clone())
         });
-        let part_of = part_of.get(pid).and_then(most_corroborated);
-        let name = place_name
+        let part_of = c.part_of.get(pid).and_then(most_corroborated);
+        let name = c
+            .place_name
             .get(pid)
             .and_then(|cands| pick_place_name(cands, year));
         PlaceView {
@@ -1136,24 +1193,23 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
         }
     };
 
-    // Events — assemble each Event anchor's targeting claims into a hyper-edge (type / date / place
-    // most-corroborated; participants canonicalized to persons). Sorted by event id (BTreeSet order).
-    let events: Vec<EventView> = event_anchors
+    c.event_anchors
         .iter()
         .map(|eid| {
-            let event_type = event_type.get(eid).and_then(most_corroborated);
-            let date_edtf = event_date.get(eid).and_then(most_corroborated);
+            let event_type = c.event_type.get(eid).and_then(most_corroborated);
+            let date_edtf = c.event_date.get(eid).and_then(most_corroborated);
             let (date_min_year, date_max_year) = date_edtf
                 .as_deref()
                 .and_then(|s| edtf::parse(s).ok())
                 .map_or((None, None), |e| (e.min.map(|d| d.year), e.max.map(|d| d.year)));
-            let place_id = event_place.get(eid).and_then(most_corroborated);
-            let mut parts: Vec<Participant> = participants
+            let place_id = c.event_place.get(eid).and_then(most_corroborated);
+            let mut parts: Vec<Participant> = c
+                .participants
                 .get(eid)
                 .into_iter()
                 .flatten()
                 .filter_map(|(person, role)| {
-                    canon_of(person).map(|p| Participant {
+                    canon_of(&r.rep, &r.canonical, person).map(|p| Participant {
                         person: p,
                         role: role.clone(),
                     })
@@ -1175,13 +1231,18 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
                 place,
             }
         })
-        .collect();
+        .collect()
+}
 
-    // Family unions — group children by their canonical parent-set, add childless partnerships, and
-    // attach a marriage/divorce event whose spouses match. The stable id gives the GUI an addressable
-    // "family" and makes full-vs-half siblings fall out of the parent-set grouping.
+/// Group children by canonical parent-set into family unions, add childless partnerships, and attach a
+/// marriage/divorce event whose spouse-set matches this union's parents (project phase 4c).
+fn assemble_unions(
+    parent_child_edges: &[ParentChild],
+    partnership_edges: &[Partnership],
+    events: &[EventView],
+) -> Vec<Union> {
     let mut parents_of_child: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for pc in &parent_child_edges {
+    for pc in parent_child_edges {
         parents_of_child
             .entry(pc.child.clone())
             .or_default()
@@ -1194,15 +1255,14 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             .or_default()
             .insert(child.clone());
     }
-    for pn in &partnership_edges {
+    for pn in partnership_edges {
         union_children.entry(pn.pair.to_vec()).or_default();
     }
-    let unions: Vec<Union> = union_children
+    union_children
         .iter()
         .map(|(parents, children)| {
             // The union's marriage/divorce event is one whose participant-person set is exactly this
-            // union's parents. Usually a couple, but a single-parent family can carry one too — a
-            // marriage whose other spouse isn't recorded in the tree — so this is not restricted to two.
+            // union's parents (not restricted to two — a single-parent family can carry one too).
             let want: BTreeSet<&String> = parents.iter().collect();
             let marriage_event = events
                 .iter()
@@ -1222,21 +1282,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
                 marriage_event,
             }
         })
-        .collect();
-
-    let conflicts = skipped
-        .into_iter()
-        .map(|cut_pair| Conflict { cut_pair })
-        .collect();
-    Projection {
-        people,
-        parent_child: parent_child_edges,
-        partnerships: partnership_edges,
-        unions,
-        events,
-        conflicts,
-        unclassified,
-    }
+        .collect()
 }
 
 // --- the constraint-repair union-find (§11) -----------------------------------------------------
