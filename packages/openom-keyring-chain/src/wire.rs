@@ -31,7 +31,7 @@ pub const WRAP_RRK_HPKE: i32 = 4;
 
 /// Per-tree key material AND governance: the DEK wrapped for each member across epochs and the signed
 /// membership/role list — one signed, anti-rollback, hash-chained document. The authorized-signer set is
-/// DERIVED from members (a member at CO_OWNER or stronger is a signer). Field numbers match the former
+/// DERIVED from members (a member at `CO_OWNER` or stronger is a signer). Field numbers match the former
 /// `openom.v1.Keyring` (reserved 4, 5, 8).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Keyring {
@@ -139,6 +139,9 @@ impl Keyring {
     /// material. Callers MUST propagate the error (never `unwrap_or_default`): an empty/defaulted fallback
     /// on a corrupt blob would silently drop epochs past the acceptance gate. The size cap runs before the
     /// postcard decode.
+    ///
+    /// # Errors
+    /// Returns [`KeyMaterialError`] if the stored epoch bytes exceed the size bound or fail to decode.
     pub fn key_material(&self) -> Result<Vec<Epoch<String>>, KeyMaterialError> {
         if self.epochs.len() > MAX_KEY_MATERIAL_BYTES {
             return Err(KeyMaterialError);
@@ -151,6 +154,9 @@ impl RecoveryKey {
     /// Decode this recovery key's escrow KEK wraps from their canonical bytes. Same propagate-don't-default
     /// discipline as [`Keyring::key_material`]. Note the RVK ([`Self::recovery_verifying_key`]) is a separate
     /// prost field and is NEVER gated on this decode succeeding.
+    ///
+    /// # Errors
+    /// Returns [`KeyMaterialError`] if the stored wrap bytes exceed the size bound or fail to decode.
     pub fn escrow_wraps(&self) -> Result<Vec<Wrap<String>>, KeyMaterialError> {
         if self.wraps.len() > MAX_KEY_MATERIAL_BYTES {
             return Err(KeyMaterialError);

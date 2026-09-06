@@ -39,6 +39,7 @@ fn unwrap_keyring(bytes: &[u8]) -> Result<Keyring, VerifyError> {
 /// go through this rather than reading `Keyring.members` directly, so they stay engine-agnostic. The
 /// caller MUST pass its VERIFIED, watermarked head; `reset_boundary` is `false` (this is the plain
 /// resolved view, not an admission outcome).
+#[must_use]
 pub fn membership_view(keyring: &Keyring) -> MembershipView {
     view_of(keyring, false)
 }
@@ -49,7 +50,8 @@ fn view_of(k: &Keyring, reset_boundary: bool) -> MembershipView {
         .iter()
         .map(|m| MemberView {
             member_id: m.member_id.clone(),
-            role: m.role as i16, // proto MemberRole (i32) → the shared i16 role axis (values 1..=5)
+            // proto MemberRole (i32) → the shared i16 role axis (values 1..=5); saturate the impossible >i16.
+            role: i16::try_from(m.role).unwrap_or(i16::MAX),
             author_public_key: m.author_public_key.clone(),
             hpke_public_key: m.hpke_public_key.clone(),
         })
@@ -64,6 +66,8 @@ fn prior_rvk(anchor: &KeyringAnchor) -> Option<&[u8]> {
 }
 
 /// Class the chain's error taxonomy into the neutral seam vocabulary.
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn classify(e: KeyringError) -> VerifyError {
     match e {
         KeyringError::Fork => VerifyError::Rollback,

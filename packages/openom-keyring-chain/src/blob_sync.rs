@@ -132,6 +132,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// Publish a locally-produced keyring (the vault's output bytes). Writes its immutable `rev/{n}` blob
     /// and CAS-advances the head; adopts it as the local anchor (own production is trusted). Returns
     /// [`SyncError::Conflict`] if another replica advanced the head first (pull + re-produce + retry).
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Conflict`] on a concurrent head advance, or [`SyncError`] on a store/decode error.
     pub fn publish(&mut self, keyring_bytes: &[u8]) -> Result<(), SyncError> {
         let keyring = decode(keyring_bytes)?;
         match self
@@ -148,7 +151,7 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         };
         let etag = self.store.put(HEAD, keyring_bytes, pre).map_err(|e| match e {
             BlobError::PreconditionFailed => SyncError::Conflict,
-            e => SyncError::Store(e),
+            err @ BlobError::Backend(_) => SyncError::Store(err),
         })?;
         self.head_etag = Some(etag);
         self.anchor = Some(KeyringAnchor::from_keyring(&keyring));
@@ -157,6 +160,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
 
     /// First-sight trust from the head (genesis, or an out-of-band-pinned head): [`verify_reset`] accepts
     /// it on its own terms. Sets the anchor. Returns the keyring bytes, or `None` if there is no head.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] on a store error or if the fetched head fails to decode or verify.
     pub fn bootstrap(&mut self) -> Result<Option<Vec<u8>>, SyncError> {
         let Some((bytes, etag)) = self.store.get(HEAD)? else {
             return Ok(None);
@@ -171,6 +177,10 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// Pull the head and verify it advances the anchor ([`verify_walk`] over any skipped revisions).
     /// Returns the new keyring bytes if it advanced, `None` if unchanged. Rejects a rollback; surfaces a
     /// recovery reset as [`PullError::ResetPending`].
+    ///
+    /// # Errors
+    /// Returns [`PullError::ResetPending`] if a recovery reset is pending, or [`PullError`] on a store,
+    /// decode, or verification failure.
     pub fn pull(&mut self) -> Result<Option<Vec<u8>>, PullError> {
         let Some(anchor) = self.anchor.clone() else {
             return self.bootstrap().map_err(PullError::Sync);
@@ -220,6 +230,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// Adopt the head as a recovery reset, AFTER the client's out-of-band confirmation: run
     /// [`verify_reset`] and set the anchor. Refuses a reset whose revision is behind the watermark.
     /// Returns the keyring bytes.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] on a store error or if the reset fails to decode or verify.
     pub fn accept_reset(&mut self) -> Result<Vec<u8>, SyncError> {
         let Some((bytes, etag)) = self.store.get(HEAD)? else {
             return Err(SyncError::Malformed("no head to accept"));
@@ -247,6 +260,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
 
     /// Open a draft: publish a candidate keyring (built on the current head, signed by >= 1 signer) under
     /// `proposal_id` for co-owners to countersign. Create-once (a proposal id is claimed once).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] on a store error or if the `proposal_id` is already claimed.
     pub fn propose(&self, proposal_id: &str, candidate_bytes: &[u8]) -> Result<(), SyncError> {
         decode(candidate_bytes)?; // must be a decodable keyring
         match self.store.put(&draft_key(proposal_id), candidate_bytes, Precondition::IfAbsent) {
@@ -257,6 +273,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     }
 
     /// The candidate bytes of a draft, if it exists.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] on a store error.
     pub fn get_draft(&self, proposal_id: &str) -> Result<Option<Vec<u8>>, SyncError> {
         Ok(self.store.get(&draft_key(proposal_id))?.map(|(b, _)| b))
     }
@@ -273,6 +292,10 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// (signatures are excluded from the signed content, so appending ours preserves the others'); we only
     /// require that copy's content still equals what was reviewed. Retried if another co-owner's
     /// countersignature landed first.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] on a store error, if the draft is missing, if its content changed since
+    /// review ([`SyncError::DraftContentChanged`]), or on a decode failure.
     pub fn countersign(
         &self,
         proposal_id: &str,
@@ -298,7 +321,7 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 .put(&dkey, &candidate.encode_to_vec(), Precondition::IfMatch(etag))
             {
                 Ok(_) => return Ok(()),
-                Err(BlobError::PreconditionFailed) => continue, // concurrent countersign — refetch + re-check
+                Err(BlobError::PreconditionFailed) => {} // concurrent countersign — refetch + re-check
                 Err(e) => return Err(SyncError::Store(e)),
             }
         }
@@ -308,6 +331,9 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
     /// head we currently trust (`verify_transition`), then CAS-advance the head. Call [`pull`](Self::pull)
     /// first for freshness. Returns [`Promotion`] — promoted, not-ready (needs more signatures), or stale
     /// (the head moved → rebuild + re-propose; a safe re-propose, never corruption).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if not bootstrapped, on a store/decode error, or if the draft fails to verify.
     pub fn promote(&mut self, proposal_id: &str) -> Result<Promotion, SyncError> {
         let Some(anchor) = self.anchor.clone() else {
             return Err(SyncError::Malformed("not bootstrapped"));
@@ -336,9 +362,10 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
                 }
             }
             // The draft no longer chains onto the head we trust — it moved; rebuild + re-propose.
-            Err(KeyringError::Fork) | Err(KeyringError::NonSequential) => Ok(Promotion::Stale),
+            Err(KeyringError::Fork | KeyringError::NonSequential) => Ok(Promotion::Stale),
             // A structurally-valid candidate that just lacks the quorum yet.
-            Err(KeyringError::UnendorsedSetChange) | Err(KeyringError::UnendorsedOrdinaryChange) => {
+            Err(KeyringError::UnendorsedSetChange |
+KeyringError::UnendorsedOrdinaryChange) => {
                 Ok(Promotion::NotReady)
             }
             Err(e) => Err(SyncError::Chain(format!("{e:?}"))),
@@ -350,6 +377,9 @@ fn decode(bytes: &[u8]) -> Result<Keyring, SyncError> {
     Keyring::decode(bytes).map_err(|e| SyncError::Decode(e.to_string()))
 }
 
+// A value->value error conversion used as a `.map_err(fn)` argument; taking `&` would force a closure
+// at every call site.
+#[allow(clippy::needless_pass_by_value)]
 fn chain_err(e: KeyringError) -> SyncError {
     SyncError::Chain(format!("{e:?}"))
 }

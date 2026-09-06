@@ -48,7 +48,7 @@ impl keyeo_core::Role for KeyringRole {
 }
 impl SignerRole for KeyringRole {
     fn is_founder(&self) -> bool {
-        self.0 == MEMBER_OWNER as i16
+        self.0 == i16::try_from(MEMBER_OWNER).unwrap_or(i16::MAX)
     }
     fn is_signer(&self) -> bool {
         (1..=2).contains(&self.0)
@@ -113,12 +113,14 @@ impl<'a> KeyringDoc<'a> {
         put_u32(&mut out, *layout_version);
         put_bytes(&mut out, prev_keyring_hash);
 
-        put_u32(&mut out, members.len() as u32);
+        // Length prefix; fail-closed on the impossible >u32 count, so saturate.
+        put_u32(&mut out, u32::try_from(members.len()).unwrap_or(u32::MAX));
         for m in members {
             #[deny(unused_variables)]
             let Member { member_id, role, author_public_key, hpke_public_key } = m;
             put_bytes(&mut out, member_id.as_bytes());
-            put_u32(&mut out, *role as u32);
+            // `role` is a non-negative proto tag: bit-identical to `as u32`, but sign-loss-free.
+            put_u32(&mut out, u32::try_from(*role).unwrap_or(0));
             put_bytes(&mut out, author_public_key);
             put_bytes(&mut out, hpke_public_key);
         }
@@ -131,7 +133,7 @@ impl<'a> KeyringDoc<'a> {
         // mutation tests — keeps every field bound without a second hand-encoder that could drift.
         put_bytes(&mut out, epochs);
 
-        put_u32(&mut out, recovery_keys.len() as u32);
+        put_u32(&mut out, u32::try_from(recovery_keys.len()).unwrap_or(u32::MAX));
         for rk in recovery_keys {
             #[deny(unused_variables)]
             let RecoveryKey { public_key, member_id, wraps, recovery_verifying_key } = rk;
@@ -216,7 +218,7 @@ impl Doc for KeyringDoc<'_> {
             .iter()
             .map(|m| Signer {
                 id: m.member_id.clone(),
-                role: KeyringRole(m.role as i16),
+                role: KeyringRole(i16::try_from(m.role).unwrap_or(i16::MAX)),
                 public_key: to_pk32(&m.author_public_key),
             })
             .collect()
@@ -319,6 +321,8 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 }
 #[inline]
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    // Length prefix; a >u32 field would only change the signing bytes (fail-closed), so saturate.
+    let len = u32::try_from(b.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(b);
 }

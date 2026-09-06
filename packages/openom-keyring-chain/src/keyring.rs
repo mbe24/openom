@@ -51,6 +51,9 @@ pub fn sign_keyring(keyring: &mut Keyring, signing_key: &SigningKey) {
 /// Verify the keyring carries **at least one** valid signature from the `trusted` set (§4a), returning the
 /// trusted key that verified. The signatures' `signer_public_key` hints are ignored — every trusted key is
 /// tried against every present signature. Fails as [`SigError`] if none match.
+///
+/// # Errors
+/// Returns [`SigError`] if no `trusted` key verifies any of the keyring's signatures.
 pub fn verify_keyring_any(
     keyring: &Keyring,
     trusted: &[VerifyingKey],
@@ -72,6 +75,9 @@ pub fn verify_keyring_any(
 
 /// Convenience for the single-trusted-key case: the keyring must carry a valid signature from
 /// `verifying_key`.
+///
+/// # Errors
+/// Returns [`SigError`] if the keyring carries no valid signature from `verifying_key`.
 pub fn verify_keyring(keyring: &Keyring, verifying_key: &VerifyingKey) -> Result<(), SigError> {
     verify_keyring_any(keyring, std::slice::from_ref(verifying_key)).map(|_| ())
 }
@@ -79,6 +85,7 @@ pub fn verify_keyring(keyring: &Keyring, verifying_key: &VerifyingKey) -> Result
 /// SHA-256 of a keyring's canonical signed bytes — the value the *next* revision records as its
 /// `prev_keyring_hash`, chaining the revision history (§4). Delegates to the engine's `doc_hash` so the
 /// chain hash is exactly what the engine chains on.
+#[must_use]
 pub fn keyring_hash(keyring: &Keyring) -> [u8; 32] {
     keyeo_chain::doc_hash(&KeyringDoc::new(keyring)).0
 }

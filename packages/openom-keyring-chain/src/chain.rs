@@ -17,7 +17,7 @@ use crate::keyring::{keyring_hash, VerifyingKey};
 use crate::wire::Keyring;
 
 /// An authorized signer — a founder or co-owner who may author keyring revisions. **Not a wire message**:
-/// the signer set is DERIVED from `members` (a member at CO_OWNER or stronger IS a signer), so signer
+/// the signer set is DERIVED from `members` (a member at `CO_OWNER` or stronger IS a signer), so signer
 /// authority and member role can never drift apart (OPE-309). This is the in-memory shape the persisted
 /// anchor's trust set works over; `role` carries the member's role value (Owner==Founder==1, CoOwner==2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub struct AuthorizedSigner {
     pub role: i32,
 }
 
-/// The signer set **derived** from a keyring's members: every member at CO_OWNER or stronger (role in
+/// The signer set **derived** from a keyring's members: every member at `CO_OWNER` or stronger (role in
 /// `1..=2`), carrying that member's own author key. This — not a separate roster — is the trust set the
 /// chain-walk verifies against.
 fn derived_signers(k: &Keyring) -> Vec<AuthorizedSigner> {
@@ -95,7 +95,7 @@ fn to_linear_anchor(prior: &KeyringAnchor) -> LinAnchor {
             .iter()
             .map(|s| Signer {
                 id: s.member_id.clone(),
-                role: KeyringRole(s.role as i16),
+                role: KeyringRole(i16::try_from(s.role).unwrap_or(i16::MAX)),
                 public_key: to_pk32(&s.public_key),
             })
             .collect(),
@@ -119,7 +119,7 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
             .map(|s| AuthorizedSigner {
                 public_key: s.public_key.to_vec(),
                 member_id: s.id,
-                role: s.role.0 as i32,
+                role: i32::from(s.role.0),
             })
             .collect(),
         governance_kind: out.governance.kind,
@@ -134,6 +134,8 @@ fn from_linear_anchor(out: LinAnchor) -> KeyringAnchor {
 /// Class the generic engine's `Error` into the chain's own error taxonomy, preserving the exact
 /// accept/reject behavior. The binding's `structure_ok` sentinels (see `crate::doc`) map back to the
 /// specific chain reasons (`LayoutAhead` / `WrapIncomplete` / else `BadStructure`).
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
 fn map_linear_err(e: Error) -> KeyringError {
     match e {
         Error::GroupMismatch => KeyringError::TreeMismatch,
@@ -157,12 +159,14 @@ fn map_linear_err(e: Error) -> KeyringError {
 /// Chain engine: encode a governing keyring's **revision** as the entry's opaque `governing_ref` — 4
 /// big-endian bytes. Opaque to every layer but this adapter (the verifier decodes it back to a revision,
 /// then walks the chain to that revision). Intentionally minimal to preserve V1 resolution semantics.
+#[must_use]
 pub fn encode_governing_ref(revision: u32) -> Vec<u8> {
     revision.to_be_bytes().to_vec()
 }
 
 /// Decode a chain [`encode_governing_ref`] back to a revision. `None` if the bytes aren't exactly a 4-byte
 /// big-endian revision (a malformed or foreign ref — the caller refuses to resolve it).
+#[must_use]
 pub fn decode_governing_ref(governing_ref: &[u8]) -> Option<u32> {
     let bytes: [u8; 4] = governing_ref.try_into().ok()?;
     Some(u32::from_be_bytes(bytes))
@@ -175,33 +179,46 @@ pub struct GoverningKeyring {
 
 impl GoverningKeyring {
     /// The revision this keyring governs.
+    #[must_use]
     pub fn revision(&self) -> u32 {
         self.keyring.revision
     }
 
     /// This keyring's [`governing reference`](encode_governing_ref).
+    #[must_use]
     pub fn governing_ref(&self) -> Vec<u8> {
         encode_governing_ref(self.revision())
     }
 
     /// The trust anchor to persist (so the next transition can chain onto it).
+    #[must_use]
     pub fn anchor(&self) -> KeyringAnchor {
         KeyringAnchor::from_keyring(&self.keyring)
     }
 
     /// Mint by validating `candidate` as the successor of `prior` — see [`verify_transition`].
+    ///
+    /// # Errors
+    /// Returns [`KeyringError`] if `candidate` is not a valid successor of `prior`.
     pub fn from_transition(prior: &KeyringAnchor, candidate: Keyring) -> Result<Self, KeyringError> {
         verify_transition(prior, &candidate)?;
         Ok(Self { keyring: candidate })
     }
 
     /// Mint a first-sight genesis the founder trusts by its own key — see [`bootstrap_from_genesis`].
+    ///
+    /// # Errors
+    /// Returns [`KeyringError`] if `genesis` is not a valid founder-signed genesis for `own_founder_key`.
     pub fn from_genesis(genesis: Keyring, own_founder_key: &VerifyingKey) -> Result<Self, KeyringError> {
         bootstrap_from_genesis(&genesis, own_founder_key)?;
         Ok(Self { keyring: genesis })
     }
 
     /// Mint a first-sight head pinned out-of-band — see [`bootstrap_from_oob`].
+    ///
+    /// # Errors
+    /// Returns [`KeyringError`] if `head` does not match the pinned `(tree_id, revision, hash)` or is
+    /// otherwise invalid.
     pub fn from_oob(
         head: Keyring,
         pinned_tree_id: &[u8],
@@ -213,6 +230,9 @@ impl GoverningKeyring {
     }
 
     /// Mint a recovery / succession reset validated on its own terms — see [`verify_reset`].
+    ///
+    /// # Errors
+    /// Returns [`KeyringError`] if `keyring` is not a valid self-signed reset.
     pub fn from_reset(keyring: Keyring) -> Result<Self, KeyringError> {
         verify_reset(None, &keyring)?;
         Ok(Self { keyring })
@@ -249,6 +269,9 @@ pub enum KeyringError {
 
 /// Validate `candidate` as the successor of `prior` and return the new anchor. Pure; no I/O. Delegates to
 /// [`keyeo_chain::verify_transition`] over the chain's [`KeyringDoc`].
+///
+/// # Errors
+/// Returns [`KeyringError`] identifying why `candidate` is not a valid successor of `prior`.
 pub fn verify_transition(
     prior: &KeyringAnchor,
     candidate: &Keyring,
@@ -274,6 +297,9 @@ pub fn verify_transition(
 
 /// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
 /// mandatory. `hops` must be in ascending revision order with no gaps; a gap surfaces as `NonSequential`.
+///
+/// # Errors
+/// Returns the first [`KeyringError`] any hop's transition is rejected with.
 pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnchor, KeyringError> {
     let mut anchor = prior.clone();
     for hop in hops {
@@ -284,6 +310,9 @@ pub fn verify_walk(prior: &KeyringAnchor, hops: &[Keyring]) -> Result<KeyringAnc
 
 /// Seed an anchor from a **genesis** keyring (revision 1) as the founder. Delegates to
 /// [`keyeo_chain::bootstrap_genesis`].
+///
+/// # Errors
+/// Returns [`KeyringError`] if the genesis is not revision 1, founder-signed, and structurally valid.
 pub fn bootstrap_from_genesis(
     genesis: &Keyring,
     own_founder_key: &VerifyingKey,
@@ -297,6 +326,9 @@ pub fn bootstrap_from_genesis(
 
 /// Seed an anchor from a keyring pinned out-of-band (§4a). Delegates to
 /// [`keyeo_chain::bootstrap_pinned`].
+///
+/// # Errors
+/// Returns [`KeyringError`] if the head does not match the pinned `(tree_id, revision, hash)` or is invalid.
 pub fn bootstrap_from_oob(
     head: &Keyring,
     pinned_tree_id: &[u8],
@@ -318,6 +350,10 @@ pub fn bootstrap_from_oob(
 /// Validate a keyring that establishes a **new anchor on its own terms** — a genesis, or a recovery /
 /// succession reset. Delegates to [`keyeo_chain::verify_reset`]; when `prior_rvk` is present the reset
 /// must carry the SAME authority AND be signed by it (continuity + authorization).
+///
+/// # Errors
+/// Returns [`KeyringError`] if the keyring is not a valid self-signed reset (and, when `prior_rvk` is set,
+/// does not carry and is not signed by that recovery authority).
 pub fn verify_reset(
     prior_rvk: Option<&[u8]>,
     keyring: &Keyring,
