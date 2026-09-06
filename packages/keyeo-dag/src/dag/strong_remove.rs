@@ -92,9 +92,6 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         state
     }
 
-    // One cohesive causal replay over shared `state`; splitting it would thread the replay state across a
-    // call boundary for no clarity gain (the AGENTS.md coupled-state case).
-    #[allow(clippy::too_many_lines)]
     fn process(
         mut state: Self::State,
         graph: &Graph<OId>,
@@ -147,121 +144,146 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
             .filter(|id| !authorized.get(id).copied().unwrap_or(false))
             .collect();
 
-        // Rule 5 — reset-merge carve-out (OPE-269). If a recovery re-founding is present, the single
-        // highest-ranked authorized `ReFound` `R*` (by `(depth, id)`) is the effective recovery: the
-        // fold's Kahn ordering applies it last among any concurrent resets, so its key deterministically
-        // wins with no separate election. Any PRIVILEGED op concurrent with `R*` — a signer/governance
-        // change, or a losing competing reset, plausibly the very escalation the recovery defends against —
-        // is voided; ordinary member edits are not privileged and so auto-merge across the recovery. This
-        // is seeded BEFORE the fixpoint so a voided signer-add cascades through rule 3 (presence). `R*`'s
-        // author is the Owner, who cannot be removed or presence-invalidated, so `R*` is a stable pivot —
-        // its selection depends only on the fixed `authorized` map, never on the growing ignore set.
-        let rstar = ops
-            .iter()
-            .filter(|(id, op)| {
-                matches!(op.action(), MembershipAction::ReFound { .. })
-                    && authorized.get(*id).copied().unwrap_or(false)
-            })
-            .map(|(id, _)| *id)
-            .max_by_key(|id| (*depth.get(id).unwrap_or(&0), *id));
-        if let Some(rstar) = rstar {
-            let carved: Vec<OId> = ops
-                .iter()
-                .filter(|(o, _)| **o != rstar && !invalid.contains(*o) && graph.is_concurrent(**o, rstar))
-                .filter(|(o, op)| {
-                    let st = resolved_state_before(**o, genesis_state, graph, ops, &authorized, &depth);
-                    ac.is_privileged(&st, op.action())
-                })
-                .map(|(o, _)| *o)
-                .collect();
-            invalid.extend(carved);
-        }
+        // Rule 5 — reset-merge carve-out (OPE-269), seeded BEFORE the fixpoint so a voided signer-add
+        // cascades through rule 3 (presence). Compute against the current `invalid` seed, then fold in.
+        let carved = reset_merge_carveout(ops, graph, genesis_state, ac, &authorized, &depth, &invalid);
+        invalid.extend(carved);
 
-        loop {
-            // Inner fixpoint: rules 1+2+3 iterated until stable (all monotone — the ignore set only
-            // grows — so this converges). Any rule-4 suppressions from a previous outer pass are
-            // already in `invalid` and cascade correctly through rule 3 here.
-            loop {
-                let mut changed = false;
-
-                // Rule 1 + 2: a valid remove invalidates the removed member's concurrent ops; because
-                // removes are processed in tiebreak order, a mutual remove leaves exactly one winner.
-                for (r, m) in &removes {
-                    if invalid.contains(r) {
-                        continue;
-                    }
-                    for (o, op) in ops {
-                        if o == r || invalid.contains(o) {
-                            continue;
-                        }
-                        if op.author() == m && graph.is_concurrent(*o, *r) && invalid.insert(*o) {
-                            changed = true;
-                        }
-                    }
-                }
-
-                // Rule 3: drop any op whose author is not active in the op's causal ancestry.
-                for (o, op) in ops {
-                    if invalid.contains(o) {
-                        continue;
-                    }
-                    if !author_active_before(
-                        op.author(),
-                        *o,
-                        ops,
-                        graph,
-                        &depth,
-                        &genesis,
-                        &invalid,
-                    ) && invalid.insert(*o)
-                    {
-                        changed = true;
-                    }
-                }
-
-                if !changed {
-                    break;
-                }
-            }
-
-            // Rule 4 (remove-wins-over-concurrent-re-add). An `Add(M)` that is *concurrent* with a
-            // *surviving* `Remove(M)` is suppressed, so an eviction wins the race against a re-add
-            // that doesn't causally follow it — the outcome no longer depends on the Kahn/id tiebreak
-            // ("lottery"). An `Add(M)` that causally *follows* a `Remove(M)` is a legitimate
-            // re-onboarding and is left alone (it isn't concurrent). Gating on `!invalid.contains(r)`
-            // is why this runs *after* the rules-1-3 inner fixpoint: a `Remove` dropped by rule 1/3
-            // (e.g. its author was concurrently strong-removed) must not suppress anything — reading a
-            // raw "is there any Remove(M)" from the op set instead of the resolved survivor set would
-            // be the bug. Suppressions feed back into rule 3 on the next outer pass (a suppressed
-            // re-add can't re-establish its member), and because they only grow the ignore set the
-            // outer loop also converges.
-            let mut suppressed = false;
-            for (a, op) in ops {
-                if invalid.contains(a) {
-                    continue;
-                }
-                let MembershipAction::Add { member, .. } = op.action() else {
-                    continue;
-                };
-                let concurrent_surviving_remove = removes.iter().any(|(r, m)| {
-                    m == member && !invalid.contains(r) && graph.is_concurrent(*a, *r)
-                });
-                if concurrent_surviving_remove && invalid.insert(*a) {
-                    suppressed = true;
-                }
-            }
-            if !suppressed {
-                break;
-            }
-        }
-
-        state.ignore = invalid;
+        state.ignore = strong_remove_fixpoint(ops, graph, &depth, &genesis, &removes, invalid);
         Ok(state)
     }
 
     fn ignored(state: &Self::State) -> HashSet<OId> {
         state.ignore.clone()
     }
+}
+
+/// Rule 5 — reset-merge carve-out (OPE-269). If a recovery re-founding is present, the single
+/// highest-ranked authorized `ReFound` `R*` (by `(depth, id)`) is the effective recovery: the fold's Kahn
+/// ordering applies it last among any concurrent resets, so its key deterministically wins with no separate
+/// election. Any PRIVILEGED op concurrent with `R*` — a signer/governance change, or a losing competing
+/// reset, plausibly the very escalation the recovery defends against — is voided; ordinary member edits are
+/// not privileged and so auto-merge across the recovery. `R*`'s author is the Owner, who cannot be removed
+/// or presence-invalidated, so `R*` is a stable pivot — its selection depends only on the fixed `authorized`
+/// map, never on the growing ignore set. Returns the ops to void (empty if there is no authorized `ReFound`).
+fn reset_merge_carveout<OId, R, S, Op>(
+    ops: &HashMap<OId, Op>,
+    graph: &Graph<OId>,
+    genesis_state: &GroupState<Op::MemberId, R, S>,
+    ac: &impl AccessControl<Op::MemberId, R, S>,
+    authorized: &HashMap<OId, bool>,
+    depth: &HashMap<OId, usize>,
+    invalid: &HashSet<OId>,
+) -> Vec<OId>
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    let Some(rstar) = ops
+        .iter()
+        .filter(|(id, op)| {
+            matches!(op.action(), MembershipAction::ReFound { .. })
+                && authorized.get(*id).copied().unwrap_or(false)
+        })
+        .map(|(id, _)| *id)
+        .max_by_key(|id| (*depth.get(id).unwrap_or(&0), *id))
+    else {
+        return Vec::new();
+    };
+    ops.iter()
+        .filter(|(o, _)| **o != rstar && !invalid.contains(*o) && graph.is_concurrent(**o, rstar))
+        .filter(|(o, op)| {
+            let st = resolved_state_before(**o, genesis_state, graph, ops, authorized, depth);
+            ac.is_privileged(&st, op.action())
+        })
+        .map(|(o, _)| *o)
+        .collect()
+}
+
+/// Strong-remove fixpoint (rules 1–4) over the seeded `invalid` set, returning the final ignore set. Every
+/// rule only GROWS `invalid` (monotone), so both the inner rules-1-3 loop and the outer rule-4 loop
+/// converge. Rule 4 runs after the inner fixpoint each pass so it reads the RESOLVED surviving removes, and
+/// its suppressions feed back into rule 3 on the next pass.
+fn strong_remove_fixpoint<OId: OpId, Op: SignedOp<OpId = OId>>(
+    ops: &HashMap<OId, Op>,
+    graph: &Graph<OId>,
+    depth: &HashMap<OId, usize>,
+    genesis: &HashSet<Op::MemberId>,
+    removes: &[(OId, Op::MemberId)],
+    mut invalid: HashSet<OId>,
+) -> HashSet<OId> {
+    loop {
+        // Inner fixpoint: rules 1+2+3 iterated until stable (all monotone — the ignore set only grows —
+        // so this converges). Any rule-4 suppressions from a previous outer pass are already in `invalid`
+        // and cascade correctly through rule 3 here.
+        loop {
+            let mut changed = false;
+
+            // Rule 1 + 2: a valid remove invalidates the removed member's concurrent ops; because removes
+            // are processed in tiebreak order, a mutual remove leaves exactly one winner.
+            for (r, m) in removes {
+                if invalid.contains(r) {
+                    continue;
+                }
+                for (o, op) in ops {
+                    if o == r || invalid.contains(o) {
+                        continue;
+                    }
+                    if op.author() == m && graph.is_concurrent(*o, *r) && invalid.insert(*o) {
+                        changed = true;
+                    }
+                }
+            }
+
+            // Rule 3: drop any op whose author is not active in the op's causal ancestry.
+            for (o, op) in ops {
+                if invalid.contains(o) {
+                    continue;
+                }
+                if !author_active_before(op.author(), *o, ops, graph, depth, genesis, &invalid)
+                    && invalid.insert(*o)
+                {
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        // Rule 4 (remove-wins-over-concurrent-re-add). An `Add(M)` that is *concurrent* with a *surviving*
+        // `Remove(M)` is suppressed, so an eviction wins the race against a re-add that doesn't causally
+        // follow it — the outcome no longer depends on the Kahn/id tiebreak ("lottery"). An `Add(M)` that
+        // causally *follows* a `Remove(M)` is a legitimate re-onboarding and is left alone (it isn't
+        // concurrent). Gating on `!invalid.contains(r)` is why this runs *after* the rules-1-3 inner
+        // fixpoint: a `Remove` dropped by rule 1/3 (e.g. its author was concurrently strong-removed) must
+        // not suppress anything — reading a raw "is there any Remove(M)" from the op set instead of the
+        // resolved survivor set would be the bug. Suppressions feed back into rule 3 on the next outer pass
+        // (a suppressed re-add can't re-establish its member), and because they only grow the ignore set the
+        // outer loop also converges.
+        let mut suppressed = false;
+        for (a, op) in ops {
+            if invalid.contains(a) {
+                continue;
+            }
+            let MembershipAction::Add { member, .. } = op.action() else {
+                continue;
+            };
+            let concurrent_surviving_remove = removes
+                .iter()
+                .any(|(r, m)| m == member && !invalid.contains(r) && graph.is_concurrent(*a, *r));
+            if concurrent_surviving_remove && invalid.insert(*a) {
+                suppressed = true;
+            }
+        }
+        if !suppressed {
+            break;
+        }
+    }
+    invalid
 }
 
 /// Authorization at every op's causal position, keyed on op id. `authorized[o]` = whether `o`'s author
