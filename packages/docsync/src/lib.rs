@@ -32,10 +32,16 @@ pub trait Engine {
     /// Apply a local edit; return the delta bytes it produced (empty ⇒ no-op).
     fn apply_local(&mut self, edit: Self::Edit) -> Vec<u8>;
     /// Merge a remote delta's bytes into local state.
+    ///
+    /// # Errors
+    /// Returns `Self::Error` if `delta` cannot be applied.
     fn merge(&mut self, delta: &[u8]) -> Result<(), Self::Error>;
     /// Full-state snapshot bytes (for compaction).
     fn snapshot(&self) -> Vec<u8>;
     /// Merge a snapshot's bytes (bootstrap). Defaults to [`merge`](Engine::merge).
+    ///
+    /// # Errors
+    /// Returns `Self::Error` if `bytes` isn't a valid snapshot.
     fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
         self.merge(bytes)
     }
@@ -45,7 +51,16 @@ pub trait Engine {
 pub trait Sealer {
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// Seal `plaintext` into a wire-ready envelope under `ctx`.
+    ///
+    /// # Errors
+    /// Returns `Self::Error` if sealing fails.
     fn seal(&mut self, ctx: &SealCtx, plaintext: &[u8]) -> Result<Sealed, Self::Error>;
+
+    /// Open an envelope of the given `kind`, returning the plaintext.
+    ///
+    /// # Errors
+    /// Returns `Self::Error` if the envelope is out of scope or fails to open.
     fn open(&self, kind: EntryKind, envelope: &[u8]) -> Result<Vec<u8>, Self::Error>;
     /// `covers_through_seq` recorded in a snapshot envelope (for bootstrap).
     fn covers_through_seq(&self, snapshot_envelope: &[u8]) -> u64;
@@ -145,6 +160,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     }
 
     /// Apply a local edit and immediately push it.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the edit cannot be applied or sealed.
     pub fn apply(&mut self, edit: E::Edit) -> Result<(), SyncError> {
         let delta = self.engine.apply_local(edit);
         self.push(EntryKind::Delta, &delta, 0)
@@ -172,6 +190,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
 
     /// Append every queued envelope (oldest first); a failed append leaves the rest queued for an
     /// idempotent retry.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the store push fails.
     pub fn flush(&mut self) -> Result<(), SyncError> {
         while let Some(env) = self.pending.first() {
             self.store.append(&self.doc, std::slice::from_ref(env))?;
@@ -185,6 +206,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     }
 
     /// Pull + merge every log entry newer than the last pull. Returns the count.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the store read or a merge fails.
     pub fn pull(&mut self) -> Result<usize, SyncError> {
         let (updates, new_cursor) = self.store.read_updates(&self.doc, self.pull_cursor)?;
         for env in &updates {
@@ -201,6 +225,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     }
 
     /// Fold state into a snapshot and CAS it, recording the seq it covers.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if snapshotting or the store write fails.
     pub fn compact(&mut self) -> Result<u64, SyncError> {
         let covered = match self.pull_cursor {
             Some(c) => c,
@@ -230,6 +257,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     /// Compact iff the [`SnapshotPolicy`] says so, given how much log has accrued since the last
     /// snapshot. Returns the covered seq if it compacted. The length estimate uses the pull cursor, so
     /// call after [`pull`](Self::pull) for an up-to-date view.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a triggered compaction fails.
     pub fn maybe_compact(
         &mut self,
         policy: &impl SnapshotPolicy,
@@ -248,6 +278,9 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
 
     /// Bring a fresh client current: load the snapshot (if any), then pull only the tail after the seq it
     /// covers. Idempotent.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the store read or a merge fails.
     pub fn bootstrap(&mut self) -> Result<(), SyncError> {
         if let Some(snap) = self.store.read_snapshot(&self.doc)? {
             let covered = self.sealer.covers_through_seq(&snap.bytes);
@@ -296,8 +329,7 @@ impl Sealer for PassthroughSealer {
         envelope
             .get(0..8)
             .and_then(|b| b.try_into().ok())
-            .map(u64::from_be_bytes)
-            .unwrap_or(0)
+            .map_or(0, u64::from_be_bytes)
     }
 }
 
