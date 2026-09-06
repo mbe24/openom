@@ -56,6 +56,10 @@ pub enum EdtfError {
 }
 
 /// Parse an EDTF string into a normalized [`Edtf`].
+///
+/// # Errors
+/// Returns [`EdtfError::Empty`] for blank input, or [`EdtfError::Malformed`] if `input` is not valid EDTF
+/// (bad shape, an out-of-range or impossible calendar date, or a backwards interval).
 pub fn parse(input: &str) -> Result<Edtf, EdtfError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -113,13 +117,13 @@ struct Bounds {
 }
 
 /// An interval side: a date, `..` (open), or empty (unknown). The latter two yield `None`.
-fn parse_side(s: &str) -> Result<(Option<Bounds>, bool, bool), EdtfError> {
-    let t = s.trim();
-    if t.is_empty() || t == ".." {
+fn parse_side(side: &str) -> Result<(Option<Bounds>, bool, bool), EdtfError> {
+    let trimmed = side.trim();
+    if trimmed.is_empty() || trimmed == ".." {
         return Ok((None, false, false));
     }
-    let (b, u, a) = parse_single(t)?;
-    Ok((Some(b), u, a))
+    let (bounds, uncertain, approximate) = parse_single(trimmed)?;
+    Ok((Some(bounds), uncertain, approximate))
 }
 
 fn parse_single(s: &str) -> Result<(Bounds, bool, bool), EdtfError> {
@@ -151,10 +155,13 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
         return Err(malformed());
     }
     let (ypos_min, ypos_max) = parse_digits_range(parts[0]).ok_or_else(malformed)?;
+    // parts[0] is 4 chars (checked above), so each bound is <= 9999 and fits i32; the fallback is unreachable.
+    let ypos_min = i32::try_from(ypos_min).unwrap_or(i32::MAX);
+    let ypos_max = i32::try_from(ypos_max).unwrap_or(i32::MAX);
     let (year_min, year_max) = if neg {
-        (-(ypos_max as i32), -(ypos_min as i32))
+        (-ypos_max, -ypos_min)
     } else {
-        (ypos_min as i32, ypos_max as i32)
+        (ypos_min, ypos_max)
     };
 
     // Year only.
@@ -170,26 +177,26 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
     if parts[1].len() != 2 {
         return Err(malformed());
     }
-    let (mlo, mhi) = parse_digits_range(parts[1]).ok_or_else(malformed)?;
+    let (mlo, mhi) = parse_u8_range(parts[1]).ok_or_else(malformed)?;
     let exact_month = mlo == mhi;
     if exact_month && (21..=24).contains(&mlo) {
         if parts.len() != 2 {
             return Err(malformed()); // a season takes no day component
         }
-        return Ok(season_bounds(year_min, year_max, mlo as u8));
+        return Ok(season_bounds(year_min, year_max, mlo));
     }
     let (month_min, month_max) = if exact_month {
         if !(1..=12).contains(&mlo) {
             return Err(malformed());
         }
-        (mlo as u8, mlo as u8)
+        (mlo, mlo)
     } else {
         let lo = mlo.max(1);
         let hi = mhi.min(12);
         if lo > hi {
             return Err(malformed());
         }
-        (lo as u8, hi as u8)
+        (lo, hi)
     };
 
     if parts.len() == 2 {
@@ -204,19 +211,19 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
     if parts[2].len() != 2 {
         return Err(malformed());
     }
-    let (dlo, dhi) = parse_digits_range(parts[2]).ok_or_else(malformed)?;
+    let (dlo, dhi) = parse_u8_range(parts[2]).ok_or_else(malformed)?;
     let (day_min, day_max) = if dlo == dhi {
         if !(1..=31).contains(&dlo) {
             return Err(malformed());
         }
-        (dlo as u8, dlo as u8)
+        (dlo, dlo)
     } else {
         let lo = dlo.max(1);
         let hi = dhi.min(31);
         if lo > hi {
             return Err(malformed());
         }
-        (lo as u8, hi as u8)
+        (lo, hi)
     };
 
     // A fully-specified date must be a real calendar day — reject e.g. 1985-02-30 or 1985-02-29
@@ -246,6 +253,13 @@ fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
         max,
         precision: Precision::Day,
     })
+}
+
+/// [min, max] of a 2-char month/day component as `u8`. The caller checks the field is 2 chars, so each
+/// bound is `<= 99` and fits `u8` — the saturating fallback is unreachable.
+fn parse_u8_range(s: &str) -> Option<(u8, u8)> {
+    let (lo, hi) = parse_digits_range(s)?;
+    Some((u8::try_from(lo).unwrap_or(u8::MAX), u8::try_from(hi).unwrap_or(u8::MAX)))
 }
 
 /// Numeric [min, max] of a run of digits and `X` (unspecified) — `X→0` for min, `X→9` for max.
@@ -294,7 +308,6 @@ fn is_leap(year: i32) -> bool {
 fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
         2 => {
             if is_leap(year) {
                 29
@@ -302,6 +315,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
                 28
             }
         }
+        // 4, 6, 9, 11 — and any out-of-range month, defensively.
         _ => 30,
     }
 }
