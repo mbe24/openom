@@ -712,17 +712,14 @@ impl DagVault {
             escrow: None,
         }
         .to_bytes();
-        dag_client::append_add(
-            anchor,
-            owner_id,
-            new_member_id,
+        let member = dag_client::KeyringMemberInit {
+            id: new_member_id.to_string(),
             role,
-            new_member_author_public,
-            new_member_hpke_public,
-            sealing,
-            &root.identity,
-        )
-        .map_err(|e| VaultError::BadKeyring(e.to_string()))
+            author_public_key: new_member_author_public,
+            hpke_public_key: new_member_hpke_public,
+        };
+        dag_client::append_add(anchor, owner_id, &member, sealing, &root.identity)
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
     /// Unlock as an ORDINARY member (not the owner): resolve the keyring, find `ctx.member_id`, derive their

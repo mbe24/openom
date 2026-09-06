@@ -123,7 +123,6 @@ struct AppendResult {
 /// Insert the log row and bump the tree's seq counter, inside the caller's transaction. `inline_payload`
 /// and `object_key` are mutually exclusive: inline rows carry the bytes, spilled rows carry the R2 key.
 /// The caller owns the commit (so a spilled object can be GC'd if the commit itself fails).
-#[allow(clippy::too_many_arguments)]
 async fn insert_delta_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tree_id: Uuid,

@@ -117,32 +117,15 @@ pub async fn put_tree(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let snap = SnapshotWrite {
+        object_key: &object_key,
+        version: &version,
+        size,
+        valid: &valid,
+    };
     let outcome = match &expected {
-        None => {
-            cas_create(
-                &state,
-                tree_id,
-                identity.member_id,
-                &object_key,
-                &version,
-                size,
-                &valid,
-            )
-            .await
-        }
-        Some(exp) => {
-            cas_update(
-                &state,
-                tree_id,
-                identity.member_id,
-                &object_key,
-                &version,
-                size,
-                &valid,
-                exp,
-            )
-            .await
-        }
+        None => cas_create(&state, tree_id, identity.member_id, &snap).await,
+        Some(exp) => cas_update(&state, tree_id, identity.member_id, &snap, exp).await,
     };
 
     match outcome {
@@ -203,16 +186,22 @@ pub async fn get_tree(
         .into_response())
 }
 
+/// The freshly-written snapshot a CAS points the tree row at: the R2 `object_key`, its opaque `version`
+/// token, byte `size`, and the `Validated` envelope facts (aead / `ciphertext_hash` / `covers_through_seq`).
+struct SnapshotWrite<'a> {
+    object_key: &'a str,
+    version: &'a str,
+    size: i64,
+    valid: &'a Validated,
+}
+
 /// First snapshot for a tree: insert the row iff the tree is new *and* the owner is
 /// under their `max_trees` entitlement (§9). 0 rows → disambiguate the reason.
 async fn cas_create(
     state: &AppState,
     tree_id: Uuid,
     owner: Uuid,
-    object_key: &str,
-    version: &str,
-    size: i64,
-    valid: &Validated,
+    snap: &SnapshotWrite<'_>,
 ) -> Result<(), ApiError> {
     let res = sqlx::query(
         "INSERT INTO trees
@@ -225,13 +214,13 @@ async fn cas_create(
     )
     .bind(tree_id)
     .bind(owner)
-    .bind(object_key)
-    .bind(version)
+    .bind(snap.object_key)
+    .bind(snap.version)
     .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
-    .bind(valid.aead)
-    .bind(size)
-    .bind(&valid.ciphertext_hash)
-    .bind(valid.covers_through_seq)
+    .bind(snap.valid.aead)
+    .bind(snap.size)
+    .bind(&snap.valid.ciphertext_hash)
+    .bind(snap.valid.covers_through_seq)
     .execute(&state.db)
     .await
     .map_err(internal)?;
@@ -281,15 +270,11 @@ async fn cas_create(
 
 /// Replace an existing snapshot under CAS: match the expected version and never let
 /// `covers_through_seq` regress (§9.6). 0 rows → not found / not owner / stale.
-#[allow(clippy::too_many_arguments)]
 async fn cas_update(
     state: &AppState,
     tree_id: Uuid,
     caller: Uuid,
-    object_key: &str,
-    version: &str,
-    size: i64,
-    valid: &Validated,
+    snap: &SnapshotWrite<'_>,
     expected: &str,
 ) -> Result<(), ApiError> {
     // Authorize through the seam on the tree's REAL owner, not the caller. A snapshot PUT is a
@@ -313,13 +298,13 @@ async fn cas_update(
           WHERE id = $8 AND snapshot_version = $9
             AND $7 >= covers_through_seq",
     )
-    .bind(object_key)
-    .bind(version)
+    .bind(snap.object_key)
+    .bind(snap.version)
     .bind(i32::try_from(ENVELOPE_VERSION).unwrap_or(i32::MAX))
-    .bind(valid.aead)
-    .bind(size)
-    .bind(&valid.ciphertext_hash)
-    .bind(valid.covers_through_seq)
+    .bind(snap.valid.aead)
+    .bind(snap.size)
+    .bind(&snap.valid.ciphertext_hash)
+    .bind(snap.valid.covers_through_seq)
     .bind(tree_id)
     .bind(expected)
     .execute(&state.db)

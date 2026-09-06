@@ -46,27 +46,23 @@ fn append(
     Ok(postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible"))
 }
 
-/// Append an **Add** op — an authorized signer (`author`) adds `member_id` at `role`, carrying the
-/// joiner's per-epoch DEK wraps in `sealing`. Signed by the author's current key.
+/// Append an **Add** op — an authorized signer (`author`) adds `member` (id + role + carried signing/HPKE
+/// keys) carrying the joiner's per-epoch DEK wraps in `sealing`. Signed by the author's current key.
 ///
 /// # Errors
 /// Returns [`ClientError`] if `anchor_bytes` is malformed.
-#[allow(clippy::too_many_arguments)]
 pub fn append_add(
     anchor_bytes: &[u8],
     author: &str,
-    member_id: &str,
-    role: KeyringRole,
-    new_author_public_key: [u8; 32],
-    new_hpke_public_key: [u8; 32],
+    member: &KeyringMemberInit,
     sealing: Vec<u8>,
     author_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Add {
-        member: member_id.to_string(),
-        role,
-        author_public_key: new_author_public_key,
-        hpke_public_key: new_hpke_public_key,
+        member: member.id.clone(),
+        role: member.role,
+        author_public_key: member.author_public_key,
+        hpke_public_key: member.hpke_public_key,
         member_proof: None,
     };
     append(anchor_bytes, author, action, sealing, author_signing_key)
@@ -165,7 +161,6 @@ fn mint(
 ///
 /// # Panics
 /// Never in practice: a freshly-built `DagAnchor` always serializes.
-#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn provision_anchor(
     tree_id: &[u8],
@@ -815,7 +810,7 @@ mod tests {
 
         // Append an Add — an authorized owner adds a co-owner; the frontier moves to the new op.
         let a1 = append_add(
-            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"wrap".to_vec(), &sk(1),
+            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"wrap".to_vec(), &sk(1),
         )
         .unwrap();
         let w1 = watermark(&a1).unwrap();
@@ -838,7 +833,7 @@ mod tests {
 
         // Admit a member → shared.
         let a1 = append_add(
-            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"wrap".to_vec(), &sk(1),
+            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"wrap".to_vec(), &sk(1),
         )
         .unwrap();
         assert!(resolve(&a1).unwrap().has_been_shared, "admitting a member makes the tree shared");
@@ -856,7 +851,7 @@ mod tests {
         let a0 =
             provision_anchor(b"tree-cp", "founder", vk(1), [1; 32], vk(3), b"g".to_vec(), &sk(1));
         let a1 = append_add(
-            &a0, "founder", "bob", KeyringRole::CO_OWNER, vk(2), [2; 32], b"w".to_vec(), &sk(1),
+            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1),
         )
         .unwrap();
 
