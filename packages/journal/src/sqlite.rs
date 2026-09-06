@@ -1,4 +1,4 @@
-use super::*;
+use super::{Result, StoreError, DocStore, Caps, Snapshot, Update};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::Mutex;
@@ -18,7 +18,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS docs (
        PRIMARY KEY (doc_id, seq)
      );";
 
-/// SQLite: dieselbe CAS-Logik und dasselbe Schema, ob flüchtig im Speicher (Tests) oder
+/// `SQLite`: dieselbe CAS-Logik und dasselbe Schema, ob flüchtig im Speicher (Tests) oder
 /// dauerhaft in einer Datei (Tauri-App).
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -26,6 +26,9 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     /// Flüchtig — für Tests und den früheren Prototyp.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`], wenn die In-Memory-DB nicht geöffnet oder das Schema nicht angelegt werden kann.
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.execute_batch(&format!("PRAGMA journal_mode = MEMORY;\n{SCHEMA}"))
@@ -38,6 +41,9 @@ impl SqliteStore {
     /// Dauerhaft, dateigestützt. WAL + `synchronous = NORMAL`, weil der Crash-Retry-Entwurf
     /// den dauerhaften lokalen Commit zum Write-Ahead-Punkt macht — ein `MEMORY`-Journal
     /// würde genau die Zusage brechen, dass ein bestätigter Append einen Neustart überlebt.
+    ///
+    /// # Errors
+    /// [`StoreError::Backend`], wenn die Datei nicht geöffnet oder das Schema nicht angelegt werden kann.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path).map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.execute_batch(&format!(
@@ -104,7 +110,8 @@ impl DocStore for SqliteStore {
 
     fn read_updates(&self, doc: &str, since: Option<u64>) -> Result<(Vec<Update>, u64)> {
         let conn = self.conn.lock().unwrap();
-        let from = since.unwrap_or(0) as i64;
+        // SQLite seq is a signed i64 column; a seq past i64::MAX is unreachable, so saturate.
+        let from = i64::try_from(since.unwrap_or(0)).unwrap_or(i64::MAX);
         let mut stmt = conn
             .prepare("SELECT bytes, seq FROM updates WHERE doc_id = ?1 AND seq > ?2 ORDER BY seq")
             .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -116,11 +123,11 @@ impl DocStore for SqliteStore {
             })
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let mut out = Vec::new();
-        let mut last = from as u64;
+        let mut last = u64::try_from(from).unwrap_or(0);
         for row in rows {
             let (bytes, seq) = row.map_err(|e| StoreError::Backend(e.to_string()))?;
             out.push(bytes);
-            last = seq as u64;
+            last = u64::try_from(seq).unwrap_or(0);
         }
         Ok((out, last))
     }
@@ -148,7 +155,7 @@ impl DocStore for SqliteStore {
             params![doc, seq],
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
-        Ok(seq as u64)
+        Ok(u64::try_from(seq).unwrap_or(0))
     }
 
     fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> Result<String> {
