@@ -50,12 +50,14 @@ pub struct SealOutcome {
 impl SealOutcome {
     /// The prost-encoded `Envelope`, ready to upload.
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn envelope(&self) -> Vec<u8> {
         self.envelope.clone()
     }
 
     /// `SHA-256(ciphertext)` — persist as the next entry's `prevCiphertextHash`.
     #[wasm_bindgen(getter, js_name = ciphertextHash)]
+    #[must_use]
     pub fn ciphertext_hash(&self) -> Vec<u8> {
         self.ciphertext_hash.clone()
     }
@@ -65,6 +67,7 @@ impl SealOutcome {
 impl WasmSealer {
     /// A local-development sealer (§16 reserved dev key): the full seal/open path with no
     /// server and no unlock flow, for fast UI iteration. Production refuses its `key_id`.
+    #[must_use]
     pub fn dev(tree_id: &[u8], replica_id: &[u8]) -> WasmSealer {
         WasmSealer {
             inner: SealerSet::single(Sealer::dev(
@@ -78,6 +81,9 @@ impl WasmSealer {
     /// provision flow (Argon2id KEK derivation, DEK unwrap, keyring verification) produces
     /// the DEK and calls this. `aead` is optional (`"xchacha20-poly1305"` default, or
     /// `"aes-256-gcm"`).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
     #[wasm_bindgen(js_name = fromUnwrapped)]
     pub fn from_unwrapped(
         dek: &[u8],
@@ -111,6 +117,9 @@ impl WasmSealer {
     /// Seal `plaintext` under this sealer's DEK/scope with the caller-supplied chain state.
     /// `kind` ∈ {`snapshot`,`delta`,`media`}, `format` ∈ {`openom-json`}, `compression` ∈
     /// {`none`,`zstd`} (the caller compresses; the sealer only records the label).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
     #[wasm_bindgen(js_name = sealEntry)]
     #[allow(clippy::too_many_arguments)]
     pub fn seal_entry(
@@ -141,6 +150,9 @@ impl WasmSealer {
     }
 
     /// Decode + scope/kind-verify + AEAD-open an envelope, returning the plaintext.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
     #[wasm_bindgen(js_name = openEntry)]
     pub fn open_entry(&self, expect_kind: &str, envelope_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
         let kind = parse_kind(expect_kind)?;
@@ -149,6 +161,7 @@ impl WasmSealer {
 
     /// The tree this sealer is scoped to.
     #[wasm_bindgen(getter, js_name = treeId)]
+    #[must_use]
     pub fn tree_id(&self) -> Vec<u8> {
         self.inner.tree_id().to_vec()
     }
@@ -199,7 +212,10 @@ fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
             "{field} must be a non-negative integer within 2^53"
         )));
     }
-    Ok(n as u64)
+    // Validated above: `n` is a non-negative integer within 2^53, so the f64->u64 cast is exact.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let v = n as u64;
+    Ok(v)
 }
 
 // Generic over Display so it maps BOTH the vault flows' `VaultError` and a running sealer's lean
@@ -241,12 +257,14 @@ pub struct VaultResult {
 impl VaultResult {
     /// The encoded keyring to persist (empty for unlock).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn keyring(&self) -> Vec<u8> {
         self.keyring.clone()
     }
 
     /// The recovery code to show once (empty for unlock).
     #[wasm_bindgen(getter, js_name = recoveryCode)]
+    #[must_use]
     pub fn recovery_code(&self) -> String {
         self.recovery_code.clone()
     }
@@ -254,24 +272,28 @@ impl VaultResult {
     /// The author `did:key` (over the member's PUBLIC identity key) — stable across tabs; the claim
     /// `createdBy`. Empty for change-passphrase (no new session).
     #[wasm_bindgen(getter, js_name = didKey)]
+    #[must_use]
     pub fn did_key(&self) -> String {
         self.did_key.clone()
     }
 
     /// The engine-opaque anti-rollback cursor the caller must persist and pass back as the floor.
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn watermark(&self) -> Vec<u8> {
         self.watermark.clone()
     }
 
     /// Whether the dag write epoch needs a reseal (always `false` for the chain).
     #[wasm_bindgen(getter, js_name = needsReseal)]
+    #[must_use]
     pub fn needs_reseal(&self) -> bool {
         self.needs_reseal
     }
 
     /// Whether some retained epoch needs a historical-read backfill (always `false` for the chain).
     #[wasm_bindgen(getter, js_name = needsBackfill)]
+    #[must_use]
     pub fn needs_backfill(&self) -> bool {
         self.needs_backfill
     }
@@ -291,6 +313,9 @@ impl VaultResult {
 
 /// Create a new encrypted tree. Returns the keyring, the recovery code (show once), revision
 /// 1, and the sealer.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen]
 pub fn provision(
     engine: &str,
@@ -325,6 +350,9 @@ pub fn provision(
 }
 
 /// Open an existing keyring with a passphrase; returns the sealer + the opaque watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen]
 pub fn unlock(
     engine: &str,
@@ -361,7 +389,12 @@ pub fn unlock(
 
 /// Recover with the recovery code, re-provisioning under a new passphrase. `floor` is the caller's
 /// stored opaque watermark (empty if none) — a served anchor below it is refused inside the engine.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen]
+// A wasm-bindgen JS export; each parameter is a distinct required input to the recovery flow.
+#[allow(clippy::too_many_arguments)]
 pub fn recover(
     engine: &str,
     keyring: &[u8],
@@ -405,7 +438,12 @@ pub fn recover(
 
 /// Change the passphrase (rotates the recovery code, advances the watermark). No new sealer — the
 /// DEK is unchanged, so the running one keeps working. `floor` is the caller's opaque watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = changePassphrase)]
+// A wasm-bindgen JS export; each parameter is a distinct required input to the change-passphrase flow.
+#[allow(clippy::too_many_arguments)]
 pub fn change_passphrase(
     engine: &str,
     keyring: &[u8],
@@ -462,22 +500,28 @@ pub struct MemberIdentity {
 impl MemberIdentity {
     /// The encoded KDF params to persist in the member's account record.
     #[wasm_bindgen(getter, js_name = kdfParams)]
+    #[must_use]
     pub fn kdf_params(&self) -> Vec<u8> {
         self.kdf_params.clone()
     }
     /// The Ed25519 author verify-key to share OOB.
     #[wasm_bindgen(getter, js_name = authorPublic)]
+    #[must_use]
     pub fn author_public(&self) -> Vec<u8> {
         self.author_public.clone()
     }
     /// The X25519 HPKE public key to share OOB.
     #[wasm_bindgen(getter, js_name = hpkePublic)]
+    #[must_use]
     pub fn hpke_public(&self) -> Vec<u8> {
         self.hpke_public.clone()
     }
 }
 
 /// Provision a member identity from a passphrase. Stateless — touches no keyring.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = provisionMember)]
 pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
     let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(to_js)?;
@@ -491,6 +535,9 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
 /// Add a member (owner action): HPKE-wrap the DEK to their OOB-verified public key and
 /// record them in the signed member list. Returns the new keyring to persist and the new
 /// revision (no sealer — the owner's session is unchanged).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = addMember)]
 #[allow(clippy::too_many_arguments)]
 pub fn add_member(
@@ -530,6 +577,9 @@ pub fn add_member(
 /// Unlock a shared tree as a member: verify against the caller's pinned signer keys
 /// (`trusted_signers` = concatenated 32-byte Ed25519 verify-keys), then HPKE-unwrap with
 /// the member's passphrase. `member_kdf_params` is the blob from [`provision_member`].
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = unlockAsMember)]
 #[allow(clippy::too_many_arguments)]
 pub fn unlock_as_member(
@@ -569,6 +619,9 @@ pub fn unlock_as_member(
 
 /// Remove a member (owner action) with forward-secure re-key. Returns the new keyring, a
 /// rotated recovery code, the new revision, and a sealer scoped to the new epoch.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeMember)]
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member(
@@ -640,16 +693,19 @@ pub struct ResealResult {
 impl ResealResult {
     /// The anchor to persist (unchanged when `resealed` is false).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn keyring(&self) -> Vec<u8> {
         self.keyring.clone()
     }
     /// The frontier watermark to persist.
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn watermark(&self) -> Vec<u8> {
         self.watermark.clone()
     }
     /// Whether a covering reseal op was appended (false = nothing was stale).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn resealed(&self) -> bool {
         self.resealed
     }
@@ -657,6 +713,9 @@ impl ResealResult {
 
 /// Add a member to a dag tree (owner action): wrap the DEK to the joiner's OOB-verified keys and append a
 /// signed Add op. Returns the new anchor + watermark; no sealer (Add mints no epoch, the owner's is intact).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagAddMember)]
 #[allow(clippy::too_many_arguments)]
 pub fn dag_add_member(
@@ -706,6 +765,9 @@ pub fn dag_add_member(
 /// Remove a member from a dag tree (owner action) with forward secrecy: append a Remove op minting a fresh
 /// epoch the removed member can't reach, then re-unlock under it — returns the new anchor + watermark + a
 /// sealer scoped to the new epoch.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagRemoveMember)]
 pub fn dag_remove_member(
     keyring: &[u8],
@@ -745,6 +807,9 @@ pub fn dag_remove_member(
 /// Unlock a dag tree AS AN ORDINARY member: reach the DEKs via the member's own per-epoch HPKE wraps (not
 /// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key. No trusted-signer
 /// set (dag membership resolves from the op-DAG). Returns a sealer + watermark + `needsReseal`.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagUnlockAsMember)]
 pub fn dag_unlock_as_member(
     keyring: &[u8],
@@ -783,6 +848,9 @@ pub fn dag_unlock_as_member(
 /// Merge a peer's dag anchor of the SAME tree into the local one (the causal set-union of their op closures)
 /// and return the merged anchor + advanced watermark. Merge only ADDS ops, so it can't roll back — no floor.
 /// Unlock the result to learn whether the merged write epoch needs a reseal.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagMerge)]
 pub fn dag_merge(local: &[u8], remote: &[u8]) -> Result<VaultResult, JsError> {
     let merged = DagVault.merge(local, remote).map_err(to_js)?;
@@ -801,6 +869,9 @@ pub fn dag_merge(local: &[u8], remote: &[u8]) -> Result<VaultResult, JsError> {
 /// Repair a stale write epoch (OPE-282) after a concurrent membership merge: if the resolved keyring needs
 /// it, append a covering Reseal op. Idempotent — `resealed=false` (anchor unchanged) when nothing is stale.
 /// `floor` is the caller's stored watermark (the anti-rollback floor).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagReseal)]
 pub fn dag_reseal(
     keyring: &[u8],
@@ -834,6 +905,9 @@ pub fn dag_reseal(
 /// ACTIVE member can drive it, authorizing with their own `passphrase` + account `member_kdf_params` instead
 /// of the owner passphrase — so a member locked out by a concurrent merge doesn't wait for the owner.
 /// Idempotent; `floor` is the anti-rollback watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagResealAsMember)]
 pub fn dag_reseal_as_member(
     keyring: &[u8],
@@ -879,16 +953,19 @@ pub struct BackfillResult {
 impl BackfillResult {
     /// The anchor to persist (unchanged when `backfilled` is false).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn keyring(&self) -> Vec<u8> {
         self.keyring.clone()
     }
     /// The frontier watermark to persist.
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn watermark(&self) -> Vec<u8> {
         self.watermark.clone()
     }
     /// Whether a backfill op was appended (false = every epoch already wrapped every resolved member).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn backfilled(&self) -> bool {
         self.backfilled
     }
@@ -898,6 +975,9 @@ impl BackfillResult {
 /// missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
 /// Idempotent — `backfilled=false` (anchor unchanged) when nothing is missing. `floor` is the anti-rollback
 /// watermark. Owner-authored: only the RRK opens the old DEKs.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagBackfill)]
 pub fn dag_backfill(
     keyring: &[u8],
@@ -949,9 +1029,10 @@ struct SummaryMemberDto {
 }
 
 fn hex(b: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(b.len() * 2);
     for x in b {
-        s.push_str(&format!("{x:02x}"));
+        let _ = write!(s, "{x:02x}");
     }
     s
 }
@@ -983,6 +1064,9 @@ fn dag_floor_from_tokens(tokens: &[String]) -> Option<Vec<u8>> {
 
 /// The resolved advisory membership + the engine-opaque basis for a keyring anchor, as a JSON string
 /// `{"members":[{"memberId","role"}],"basis":[...]}` — what the client asserts to the server's /access.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = keyringSummary)]
 pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> {
     let dto = match parse_engine(engine)? {
@@ -1009,7 +1093,7 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
                     .iter()
                     .map(|m| SummaryMemberDto {
                         member_id: m.member_id.clone(),
-                        role: m.role as i16,
+                        role: i16::try_from(m.role).unwrap_or(i16::MAX),
                     })
                     .collect(),
                 basis: vec![format!("rev:{}:{}", k.revision, hex(keyring_hash(&k).as_slice()))],
@@ -1023,7 +1107,12 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
 /// from) — the client's pre-push staleness guard. dag: every stored tip op-id is in our op closure
 /// (`check_floor`); chain: our revision ≥ the stored revision. An empty basis is trivially covered; a
 /// malformed stored basis is treated as NOT covered (safe default — the caller then refreshes).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = keyringCovers)]
+// `stored_basis` is an owned `Vec<String>` because wasm-bindgen marshals a JS string array as owned.
+#[allow(clippy::needless_pass_by_value)]
 pub fn keyring_covers(engine: &str, keyring: &[u8], stored_basis: Vec<String>) -> Result<bool, JsError> {
     if stored_basis.is_empty() {
         return Ok(true);
@@ -1051,6 +1140,9 @@ pub fn keyring_covers(engine: &str, keyring: &[u8], stored_basis: Vec<String>) -
 /// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
 /// verifies against their pinned signer set (`trusted_signers` = concatenated 32-byte keys),
 /// and signs with the co-owner's identity.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = addMemberAsCoOwner)]
 #[allow(clippy::too_many_arguments)]
 pub fn add_member_as_co_owner(
@@ -1096,6 +1188,9 @@ pub fn add_member_as_co_owner(
 
 /// Remove an ordinary member **as a co-owner** (any-of). Returns the re-keyed keyring, new
 /// revision, and a sealer scoped to the new epoch.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeMemberAsCoOwner)]
 #[allow(clippy::too_many_arguments)]
 pub fn remove_member_as_co_owner(
@@ -1137,6 +1232,9 @@ pub fn remove_member_as_co_owner(
 
 /// Promote an existing member to co-owner (founder action). Returns the new keyring +
 /// revision (no sealer — signing authority, not keys).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = addCoOwner)]
 pub fn add_co_owner(
     keyring: &[u8],
@@ -1170,6 +1268,9 @@ pub fn add_co_owner(
 
 /// Demote a co-owner to an ordinary `new_role` (founder action). Revokes signing authority,
 /// not read access (use removeMember to fully revoke).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeCoOwner)]
 #[allow(clippy::too_many_arguments)]
 pub fn remove_co_owner(
@@ -1221,6 +1322,9 @@ fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
 /// must retain per revision and feed §B3 verify. `verifyEntry`/`epochIsAttributed`/`wrapChainKeyringUpdate`
 /// all `Keyring::decode` their input, so a stored WRAPPED body fails to decode (a wire-type mismatch on
 /// field 1); the sync path must unwrap before persisting. Exposed for exactly that.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = unwrapChainKeyring)]
 pub fn unwrap_chain_keyring_wasm(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     unwrap_chain_keyring(bytes)
@@ -1232,7 +1336,12 @@ pub fn unwrap_chain_keyring_wasm(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
 /// rogue-signer injection, or unendorsed change throws and the caller persists nothing. On
 /// success returns the validated head keyring to store + its revision (no sealer — keyring state
 /// only; re-unlock to read a newly-rotated epoch). An empty run is a no-op at the current head.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = acceptRemoteKeyring)]
+/// # Panics
+/// Never in practice: the hop run is validated non-empty before its last element is taken.
 pub fn accept_remote_keyring(
     anchor: &[u8],
     tree_id: &[u8],
@@ -1297,12 +1406,14 @@ pub struct WalkResult {
 impl WalkResult {
     /// The verified head revision (equals the invite's pinned revision).
     #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn revision(&self) -> u32 {
         self.revision
     }
 
     /// The RAW head `Keyring` body — stored as the head and fed to `unlockAsMember`.
     #[wasm_bindgen(getter, js_name = headKeyring)]
+    #[must_use]
     pub fn head_keyring(&self) -> Vec<u8> {
         self.head_keyring.clone()
     }
@@ -1310,6 +1421,7 @@ impl WalkResult {
     /// The head's authorized signers as a JSON string `[{"memberId","authorPublic"(hex)}]`. The JS
     /// computes the canonical fingerprint over these and cross-checks the invite's human-readable `fp`.
     #[wasm_bindgen(getter, js_name = signersJson)]
+    #[must_use]
     pub fn signers_json(&self) -> String {
         self.signers_json.clone()
     }
@@ -1318,6 +1430,7 @@ impl WalkResult {
     /// the same framing `acceptRemoteKeyring` consumes). The JS unframes and retains each so
     /// `keyringStore.at(rev)` resolves the whole history for pre-join attributed entries.
     #[wasm_bindgen(getter, js_name = bodiesFramed)]
+    #[must_use]
     pub fn bodies_framed(&self) -> Vec<u8> {
         self.bodies_framed.clone()
     }
@@ -1346,7 +1459,12 @@ struct WalkSignerDto {
 /// persists nothing) on: an empty/truncated history, a first revision that isn't a genesis (revision 1) or
 /// lacks exactly one owner, any invalid transition, a wrong tree, or a pinned revision that's outside the
 /// history or whose hash doesn't match.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = verifyKeyringWalk)]
+/// # Panics
+/// Never in practice: the hop run is validated non-empty before its last element is taken.
 pub fn verify_keyring_walk(
     tree_id: &[u8],
     hops: &[u8],
@@ -1452,6 +1570,9 @@ pub fn verify_keyring_walk(
 /// [`encode_governing_ref`] of its `revision`); `engine` = `"chain"`; `payload` = the engine-opaque
 /// [`MembershipEnvelope`] wrapping the signed keyring bytes (the exact framing the server stores and
 /// `accept_remote_keyring` later unwraps). Fails closed if `keyring` isn't a decodable chain `Keyring`.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = wrapChainKeyringUpdate)]
 pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
     // The server checks `update.version != KEYRING_UPDATE_VERSION` (openom/src/keyring.rs) and refuses a
@@ -1480,6 +1601,9 @@ pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
 /// responsibility (it can't yet hold the chain-walk's verified Rust token across the wasm boundary), so
 /// this wraps the decoded bytes with the deliberately-named `from_unverified_wasm_boundary`. When JS-side
 /// verified handles land, this marshals a handle instead and the boundary stops trusting the caller.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = verifyEntry)]
 pub fn verify_entry_wasm(
     version: u32,
@@ -1525,11 +1649,13 @@ pub struct EntryAttribution {
 impl EntryAttribution {
     /// The keyring revision that governed this entry when authored.
     #[wasm_bindgen(getter, js_name = keyringRevision)]
+    #[must_use]
     pub fn keyring_revision(&self) -> u32 {
         self.keyring_revision
     }
-    /// The DEK epoch (key_id) this entry was sealed under.
+    /// The DEK epoch (`key_id`) this entry was sealed under.
     #[wasm_bindgen(getter, js_name = keyId)]
+    #[must_use]
     pub fn key_id(&self) -> Vec<u8> {
         self.key_id.clone()
     }
@@ -1538,18 +1664,25 @@ impl EntryAttribution {
     /// pre-coverage deltas are never replayed. Returned as an f64 (a plain JS number, like the seal input);
     /// a log seq is always well within 2^53.
     #[wasm_bindgen(getter, js_name = coversThroughSeq)]
+    #[must_use]
     pub fn covers_through_seq(&self) -> f64 {
-        self.covers_through_seq as f64
+        // JS numbers are f64; a seq past 2^53 loses precision, an accepted limit at the JS boundary.
+        #[allow(clippy::cast_precision_loss)]
+        let v = self.covers_through_seq as f64;
+        v
     }
 }
 
-/// Read an entry's attribution coordinates (governing keyring revision + sealing key_id) from its header,
+/// Read an entry's attribution coordinates (governing keyring revision + sealing `key_id`) from its header,
 /// so the client can pick the governing keyring + check whether the epoch is attributed. Both fields are
 /// AAD-bound (a keyless server can't rewrite them without failing the AEAD open), so they're trustworthy.
 ///
 /// The header stores the opaque `governing_ref`; this chain-side veneer decodes it to a revision for the
 /// JS resolver (empty ⇒ 0, an unattributed V1 entry). A non-empty ref that isn't a valid chain reference
 /// is rejected — the caller must not resolve a foreign/malformed ref to a keyring.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = entryAttribution)]
 pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
     let env =
@@ -1575,6 +1708,9 @@ pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
 /// founder (the tree is shared under it), so entries under it MUST be signed. The client uses this,
 /// derived from the VERIFIED keyring (never an entry's own emptiness), to decide whether an unattributed
 /// entry is acceptable — closing the downgrade attack.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = epochIsAttributed)]
 pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
@@ -1588,6 +1724,9 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 /// the VERIFIED keyring the caller supplies (walked/synced). Chain arm: `first_shared_revision != 0`. Dag arm
 /// (Phase C, OPE-351): the resolved anchor's `has_been_shared` — a monotonic scan for any effective `Add`, so an
 /// un-shared-back-to-solo dag still reports true (the effective Add persists).
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = keyringHasBeenShared)]
 pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsError> {
     match parse_engine(engine)? {
@@ -1606,6 +1745,9 @@ pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsE
 /// claim engine's fold treats as authorized to remove/supersede/revoke any claim. Returns a JS
 /// `string[]`. The caller MUST pass its VERIFIED, watermarked keyring head; feed the result to
 /// `FamilyTree.setModerators` on unlock and on every accepted keyring-head change.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = moderatorsFromKeyring)]
 pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsError> {
     let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
@@ -1623,6 +1765,9 @@ pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsErr
 /// hash at exactly `anchor.revision + 1`. Trust in the *new signer set* is NOT established here — the
 /// CALLER must have shown the new signer fingerprints for out-of-band re-verification and gotten explicit
 /// user confirmation BEFORE calling this (it is the commit step). Returns the validated keyring to store.
+///
+/// # Errors
+/// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = acceptResetKeyring)]
 pub fn accept_reset_keyring(
     anchor: &[u8],
@@ -1672,7 +1817,7 @@ pub fn accept_reset_keyring(
 fn frame_length_prefixed(runs: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(runs.iter().map(|r| r.len() + 4).sum());
     for r in runs {
-        out.extend_from_slice(&(r.len() as u32).to_be_bytes());
+        out.extend_from_slice(&u32::try_from(r.len()).unwrap_or(u32::MAX).to_be_bytes());
         out.extend_from_slice(r);
     }
     out
