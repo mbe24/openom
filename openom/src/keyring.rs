@@ -22,7 +22,7 @@ use axum::Json;
 use base64::Engine;
 use openom_keyring_chain::decode_governing_ref;
 use openom_keyring_chain::verifier::ChainVerifier;
-use openom_keyring_api::{EngineKind, KeyringVerifier, VerifyError};
+use openom_keyring_api::{EngineKind, KeyringVerifier, MembershipView, VerifyError};
 use openom_protocol::v1::KeyringUpdate;
 use openom_protocol::Message;
 use serde::{Deserialize, Serialize};
@@ -91,9 +91,6 @@ fn verify_err(e: VerifyError) -> ApiError {
 ///
 /// # Errors
 /// Returns [`ApiError`] if the update is rejected (auth/rate/CAS) or the store write fails.
-// One cohesive HTTP handler: parse → authorize → admit → persist → derive-ACL, all in one tx; splitting it
-// would thread the transaction + verified facts across boundaries for no clarity gain.
-#[allow(clippy::too_many_lines)]
 pub async fn put_keyring(
     State(state): State<AppState>,
     identity: Identity,
@@ -101,23 +98,7 @@ pub async fn put_keyring(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let _p = crate::prof::span("keyring.put");
-    if body.len() > MAX_KEYRING_BYTES {
-        return Err(ApiError::BadRequest(
-            "keyring exceeds the size limit".into(),
-        ));
-    }
-    // Parse ONLY the engine-agnostic outer envelope — never a keyring body. Its `engine` tag routes to a
-    // verifier; its `payload` is the opaque membership update the verifier admits; its tree_id/update_ref
-    // are hints the server will cross-check against the VERIFIED facts `admit` returns (never trusts alone).
-    let update = KeyringUpdate::decode(body.as_ref())
-        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring update: {e}")))?;
-    if update.version != KEYRING_UPDATE_VERSION {
-        return Err(ApiError::BadRequest(
-            "unsupported keyring update version".into(),
-        ));
-    }
-    let verifier = verifier_for(&update.engine)
-        .ok_or_else(|| ApiError::BadRequest("unknown or unsupported keyring engine".into()))?;
+    let (update, verifier) = parse_update(&body)?;
 
     let mut tx = state.db.begin().await.map_err(internal)?;
     // Serialize concurrent keyring PUTs on this tree; read the owner + current head revision.
@@ -147,22 +128,7 @@ pub async fn put_keyring(
     // serve the dag engine once its admit arm lands. The server is not the security boundary: it trusts the
     // founding keyring (first sight) and re-verifies every transition; the CLIENT re-verifies a reset's new
     // signer set out-of-band (is_reset surfaces it).
-    let prior_state: Option<Vec<u8>> = if head_rev == 0 {
-        // "First keyring is revision 1" is enforced inside the verifier's bootstrap (it verifies the signed
-        // genesis), so the server no longer re-checks a body field it no longer parses.
-        None
-    } else {
-        Some(
-            sqlx::query_scalar(
-                "SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2",
-            )
-            .bind(tree_id)
-            .bind(head_rev)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(internal)?,
-        )
-    };
+    let prior_state = load_prior_state(&mut tx, tree_id, head_rev).await?;
     let admitted = verifier
         .admit(prior_state.as_deref(), &update.payload)
         .map_err(verify_err)?;
@@ -180,42 +146,108 @@ pub async fn put_keyring(
     let revision = i32::try_from(revision_u).unwrap_or(i32::MAX);
     let is_reset = admitted.view.reset_boundary;
 
-    // A reset bypasses the prior-signer signature gate, so rate-cap it per tree (a stolen Administer token
-    // could otherwise spam resets, forking every member into an OOB-reverify prompt). Atomic in SQL: the
-    // UPDATE lands only outside the cooldown, and stamps the new reset time.
     if is_reset {
-        let capped = sqlx::query(
-            "UPDATE trees SET last_reset_at = now()
-              WHERE id = $1 AND (last_reset_at IS NULL OR last_reset_at <= now() - make_interval(secs => $2))",
-        )
-        .bind(tree_id)
-        .bind(RESET_COOLDOWN_SECS)
-        .execute(&mut *tx)
-        .await
-        .map_err(internal)?;
-        if capped.rows_affected() != 1 {
-            tracing::info!(event = "rate_rejected", resource = "keyring_reset", %tree_id);
-            // A whole-second f64 const; as a retry-after it is an exact positive integer, so the
-            // saturating f64->u64 cast is intentional.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let retry_after = RESET_COOLDOWN_SECS as u64;
-            return Err(ApiError::TooManyRequests(retry_after));
-        }
-        tracing::info!(event = "keyring_reset", %tree_id, revision);
+        enforce_reset_cooldown(&mut tx, tree_id, revision).await?;
     }
 
-    // Persist append-only, storing the ENGINE-OPAQUE `Admitted.state` (never a parsed body). The PK
-    // (tree_id, revision) is the CAS backstop: a racing PUT that verified against the same head inserts 0
-    // rows here and loses — and the revision-only governing-ref makes two same-revision successors collide.
+    persist_revision(&mut tx, tree_id, revision, &admitted.state, is_reset).await?;
+    let member_count = derive_acl(&mut tx, tree_id, owner, &admitted.view).await?;
+
+    tx.commit().await.map_err(internal)?;
+    tracing::info!(event = "keyring_put", %tree_id, revision, members = member_count);
+    Ok((StatusCode::OK, Json(json!({ "revision": revision }))).into_response())
+}
+
+/// Parse and route the engine-agnostic outer envelope — never a keyring body. Enforces the size ceiling and
+/// version, then resolves the `engine` tag to its verifier. The `payload` stays opaque; the update's
+/// `tree_id`/`update_ref` are hints the caller cross-checks against the VERIFIED facts `admit` returns.
+fn parse_update(
+    body: &Bytes,
+) -> Result<(KeyringUpdate, Box<dyn KeyringVerifier + Send + Sync>), ApiError> {
+    if body.len() > MAX_KEYRING_BYTES {
+        return Err(ApiError::BadRequest("keyring exceeds the size limit".into()));
+    }
+    let update = KeyringUpdate::decode(body.as_ref())
+        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring update: {e}")))?;
+    if update.version != KEYRING_UPDATE_VERSION {
+        return Err(ApiError::BadRequest(
+            "unsupported keyring update version".into(),
+        ));
+    }
+    let verifier = verifier_for(&update.engine)
+        .ok_or_else(|| ApiError::BadRequest("unknown or unsupported keyring engine".into()))?;
+    Ok((update, verifier))
+}
+
+/// The stored opaque payload at the current head, or `None` at head 0 (genesis). "First keyring is revision
+/// 1" is enforced inside the verifier's bootstrap, so the server no longer re-checks a body field it doesn't
+/// parse.
+async fn load_prior_state(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tree_id: Uuid,
+    head_rev: i32,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    if head_rev == 0 {
+        return Ok(None);
+    }
+    let payload =
+        sqlx::query_scalar("SELECT payload FROM tree_keyrings WHERE tree_id = $1 AND revision = $2")
+            .bind(tree_id)
+            .bind(head_rev)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(internal)?;
+    Ok(Some(payload))
+}
+
+/// Per-tree cooldown on recovery/succession resets. A reset bypasses the prior-signer signature gate, so a
+/// stolen Administer token could otherwise spam resets, forking every member into an OOB-reverify prompt.
+/// Atomic in SQL: the UPDATE lands only outside the cooldown and stamps the new reset time.
+async fn enforce_reset_cooldown(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tree_id: Uuid,
+    revision: i32,
+) -> Result<(), ApiError> {
+    let capped = sqlx::query(
+        "UPDATE trees SET last_reset_at = now()
+          WHERE id = $1 AND (last_reset_at IS NULL OR last_reset_at <= now() - make_interval(secs => $2))",
+    )
+    .bind(tree_id)
+    .bind(RESET_COOLDOWN_SECS)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if capped.rows_affected() != 1 {
+        tracing::info!(event = "rate_rejected", resource = "keyring_reset", %tree_id);
+        // A whole-second f64 const; as a retry-after it is an exact positive integer, so the saturating
+        // f64->u64 cast is intentional.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let retry_after = RESET_COOLDOWN_SECS as u64;
+        return Err(ApiError::TooManyRequests(retry_after));
+    }
+    tracing::info!(event = "keyring_reset", %tree_id, revision);
+    Ok(())
+}
+
+/// Append the ENGINE-OPAQUE verified state at `revision` and advance the head. The PK (`tree_id`, revision)
+/// is the CAS backstop: a racing PUT that verified against the same head inserts 0 rows and loses — and the
+/// revision-only governing-ref makes two same-revision successors collide.
+async fn persist_revision(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tree_id: Uuid,
+    revision: i32,
+    state: &[u8],
+    is_reset: bool,
+) -> Result<(), ApiError> {
     let inserted = sqlx::query(
         "INSERT INTO tree_keyrings (tree_id, revision, payload, is_reset)
          VALUES ($1, $2, $3, $4) ON CONFLICT (tree_id, revision) DO NOTHING",
     )
     .bind(tree_id)
     .bind(revision)
-    .bind(admitted.state.as_slice())
+    .bind(state)
     .bind(is_reset)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(internal)?;
     if inserted.rows_affected() != 1 {
@@ -224,26 +256,31 @@ pub async fn put_keyring(
     sqlx::query("UPDATE trees SET keyring_revision = $1, updated_at = now() WHERE id = $2")
         .bind(revision)
         .bind(tree_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(internal)?;
+    Ok(())
+}
 
-    // Derive the advisory ACL from the resolved membership view via the SHARED writer — the same path the
-    // engine-neutral membership-summary endpoint (`access::put_access`) uses, so the chain (in-tx here,
-    // drift-free) and the dag (over `/access`) can never derive different ACLs. `MemberView.role` is already
-    // the shared i16 role axis. Departed members' transient state (proposals + rate bucket) is reclaimed
-    // inside `apply_membership`.
-    let mut members: Vec<(Uuid, i16)> = Vec::with_capacity(admitted.view.members.len());
-    for m in &admitted.view.members {
+/// Derive the advisory ACL from the resolved membership view via the SHARED writer — the same path the
+/// engine-neutral membership-summary endpoint (`access::put_access`) uses, so the chain (in-tx here,
+/// drift-free) and the dag (over `/access`) can never derive different ACLs. `MemberView.role` is already the
+/// shared i16 role axis. Departed members' transient state (proposals + rate bucket) is reclaimed inside
+/// `apply_membership`. Returns the member count (for logging).
+async fn derive_acl(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tree_id: Uuid,
+    owner: Uuid,
+    view: &MembershipView,
+) -> Result<usize, ApiError> {
+    let mut members: Vec<(Uuid, i16)> = Vec::with_capacity(view.members.len());
+    for m in &view.members {
         let id = Uuid::parse_str(&m.member_id)
             .map_err(|_| ApiError::BadRequest("keyring member_id is not a uuid".into()))?;
         members.push((id, m.role));
     }
-    crate::access::apply_membership(&mut tx, tree_id, owner, &members).await?;
-
-    tx.commit().await.map_err(internal)?;
-    tracing::info!(event = "keyring_put", %tree_id, revision, members = members.len());
-    Ok((StatusCode::OK, Json(json!({ "revision": revision }))).into_response())
+    crate::access::apply_membership(tx, tree_id, owner, &members).await?;
+    Ok(members.len())
 }
 
 #[derive(Deserialize)]

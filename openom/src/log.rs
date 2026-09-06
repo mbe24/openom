@@ -177,7 +177,6 @@ async fn spill_gc(state: &AppState, object_key: Option<&str>) {
 /// Returns [`ApiError`] if the entry is rejected (auth/rate/CAS) or the store write fails.
 // One cohesive HTTP handler: validate → authorize → meter → assign-seq → insert, all in one tx; splitting
 // it would thread the transaction + metering state across boundaries for no clarity gain.
-#[allow(clippy::too_many_lines)]
 pub async fn append_log(
     State(state): State<AppState>,
     identity: Identity,
@@ -225,88 +224,13 @@ pub async fn append_log(
         return Ok((StatusCode::OK, Json(AppendResult { seq })).into_response());
     }
 
-    // Metering — capacity charged to the tree OWNER (owner-pays, §17); rate is PER-MEMBER so one
-    // abusive member can't drain a shared bucket and DoS the owner + co-members. Only a genuinely new
-    // append is metered (re-deliveries returned above, so a retrying client is never metered).
-    //
-    // (1a) Per-member abuse rate: a token bucket keyed (tree, member), refilled at the OWNER's plan rate
-    // (owner-pays sets the budget; the member holds the state). Lazily created full on first append. The
-    // WHERE guard on the UPDATE branch re-derives the balance so check and debit can't race; 0 rows → over.
-    let (m_rate, m_burst): (f64, i32) =
-        sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
-            .bind(owner)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(internal)?;
-    let member_ok = sqlx::query(
-        "INSERT INTO member_rate (tree_id, member_id, tokens, refilled_at)
-         VALUES ($1, $2, $3::float8 - 1, now())
-         ON CONFLICT (tree_id, member_id) DO UPDATE
-           SET tokens = LEAST($3::float8, member_rate.tokens
-                              + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) - 1,
-               refilled_at = now()
-           WHERE LEAST($3::float8, member_rate.tokens
-                       + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) >= 1",
-    )
-    .bind(tree_id)
-    .bind(identity.member_id)
-    .bind(m_burst)
-    .bind(m_rate)
-    .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-    if member_ok.rows_affected() != 1 {
-        // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let retry = if m_rate > 0.0 {
-            (1.0 / m_rate).ceil() as u64
-        } else {
-            60
-        };
-        tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %identity.member_id);
-        return Err(ApiError::TooManyRequests(retry.max(1)));
-    }
-
-    // (A coarse per-account backstop against *coordinated* multi-member bursts is a follow-up — it needs
-    // its own burst budget with headroom above one member's, not the shared log_burst the per-member
-    // bucket already uses. The per-member bucket above is the substantive abuse isolation.)
-
-    // (2) Byte capacity: the tree-byte meter (§17), an axis independent of the media
-    // pool. Charge the delta's size; 0 rows → the tree reserve is full.
-    let capped = sqlx::query(
-        "UPDATE accounts SET tree_used_bytes = tree_used_bytes + $2
-          WHERE id = $1 AND tree_used_bytes + $2 <= max_tree_bytes",
-    )
-    .bind(owner)
-    .bind(d.size)
-    .execute(&mut *tx)
-    .await
-    .map_err(internal)?;
-    if capped.rows_affected() != 1 {
-        tracing::info!(event = "quota_rejected", resource = "log", %tree_id, %owner);
-        return Err(ApiError::QuotaExceeded);
-    }
+    // Metering — capacity charged to the tree OWNER (owner-pays, §17); rate is PER-MEMBER so one abusive
+    // member can't drain a shared bucket and DoS the owner + co-members. Only a genuinely new append is
+    // metered (re-deliveries returned above, so a retrying client is never metered).
+    charge_metering(&mut tx, tree_id, owner, identity.member_id, d.size).await?;
 
     let seq = next_seq;
-
-    // Spill an oversized payload to R2 rather than storing it inline in Postgres. The PUT runs inside
-    // the append transaction — the object key is `…/log/{seq}` and seq is only known under the row lock,
-    // and it must be after the authz/idempotency/quota gates so no object is written for a request that
-    // is then rejected. Large deltas are rare (settled ops are tiny; this mainly covers bulk imports),
-    // so the extra time the tree row lock is held across the PUT is paid only on that uncommon path. If
-    // the transaction fails after the PUT, the object is orphaned — GC'd best-effort below, mirroring the
-    // snapshot path in `trees::put_tree`.
-    let object_key = if body.len() > INLINE_MAX_BYTES {
-        let key = crate::storage::keys::delta(tree_id, seq);
-        state
-            .storage
-            .put_object(&key, body.to_vec())
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        Some(key)
-    } else {
-        None
-    };
+    let object_key = spill_if_oversized(&state, tree_id, seq, &body).await?;
     // Inline rows carry the sealed bytes; spilled rows carry a NULL payload + the R2 key.
     let inline_payload: Option<&[u8]> = if object_key.is_some() {
         None
@@ -335,6 +259,97 @@ pub async fn append_log(
     }
     tracing::info!(event = "log_append", %tree_id, seq, spilled = object_key.is_some(), "delta appended");
     Ok((StatusCode::OK, Json(AppendResult { seq })).into_response())
+}
+
+/// Meter a genuinely-new append (re-deliveries are returned before this runs, so a retrying client is never
+/// metered). Two independent gates, each atomic in SQL. (1a) Per-member abuse rate: a token bucket keyed
+/// (tree, member), refilled at the OWNER's plan rate (owner-pays sets the budget, the member holds the
+/// state), lazily created full on first append; the WHERE guard on the UPDATE branch re-derives the balance
+/// so check and debit can't race (0 rows → over). This isolates one abusive member from draining a shared
+/// bucket. (2) Byte capacity: the tree-byte meter (§17), an axis independent of the media pool; charge the
+/// delta's size (0 rows → the tree reserve is full). A coarse per-account backstop against *coordinated*
+/// multi-member bursts is a follow-up — it needs its own burst budget above one member's `log_burst`.
+async fn charge_metering(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tree_id: Uuid,
+    owner: Uuid,
+    member_id: Uuid,
+    size: i64,
+) -> Result<(), ApiError> {
+    let (m_rate, m_burst): (f64, i32) =
+        sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
+            .bind(owner)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(internal)?;
+    let member_ok = sqlx::query(
+        "INSERT INTO member_rate (tree_id, member_id, tokens, refilled_at)
+         VALUES ($1, $2, $3::float8 - 1, now())
+         ON CONFLICT (tree_id, member_id) DO UPDATE
+           SET tokens = LEAST($3::float8, member_rate.tokens
+                              + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) - 1,
+               refilled_at = now()
+           WHERE LEAST($3::float8, member_rate.tokens
+                       + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) >= 1",
+    )
+    .bind(tree_id)
+    .bind(member_id)
+    .bind(m_burst)
+    .bind(m_rate)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if member_ok.rows_affected() != 1 {
+        // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let retry = if m_rate > 0.0 {
+            (1.0 / m_rate).ceil() as u64
+        } else {
+            60
+        };
+        tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %member_id);
+        return Err(ApiError::TooManyRequests(retry.max(1)));
+    }
+
+    let capped = sqlx::query(
+        "UPDATE accounts SET tree_used_bytes = tree_used_bytes + $2
+          WHERE id = $1 AND tree_used_bytes + $2 <= max_tree_bytes",
+    )
+    .bind(owner)
+    .bind(size)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    if capped.rows_affected() != 1 {
+        tracing::info!(event = "quota_rejected", resource = "log", %tree_id, %owner);
+        return Err(ApiError::QuotaExceeded);
+    }
+    Ok(())
+}
+
+/// Spill an oversized delta to R2 rather than storing it inline in Postgres, returning its object key (or
+/// `None` when it fits inline). The PUT runs inside the append transaction — the key is `…/log/{seq}`, seq is
+/// known only under the tree row lock, and it must follow the authz/idempotency/quota gates so no object is
+/// written for a request that is then rejected. Large deltas are rare (settled ops are tiny; this mainly
+/// covers bulk imports), so the extra lock time across the PUT is paid only on that uncommon path. If the
+/// transaction later fails the object is orphaned and GC'd best-effort by the caller, mirroring the snapshot
+/// path in `trees::put_tree`.
+async fn spill_if_oversized(
+    state: &AppState,
+    tree_id: Uuid,
+    seq: i64,
+    body: &Bytes,
+) -> Result<Option<String>, ApiError> {
+    if body.len() <= INLINE_MAX_BYTES {
+        return Ok(None);
+    }
+    let key = crate::storage::keys::delta(tree_id, seq);
+    state
+        .storage
+        .put_object(&key, body.to_vec())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Some(key))
 }
 
 #[derive(Deserialize)]
