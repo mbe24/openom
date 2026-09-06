@@ -102,10 +102,10 @@ impl From<&RecoveryEscrow> for RecoveryKey {
 
 // ---- owner secrets + recovery escrow ----
 
-/// The new owner secrets minted by provision / passphrase change / recovery: the new
-/// passphrase KEK + KDF (and derived identity/HPKE keys), plus a fresh recovery code + its
-/// KEK/KDF. Used to (re)wrap the recovery root key under the owner's two credentials.
-pub(crate) struct NewOwnerSecrets {
+/// The owner's freshly-minted credential material (provision / passphrase change / recovery-rotation): the
+/// passphrase KEK + KDF (and derived identity/HPKE keys), plus a fresh recovery code + its KEK/KDF. Used to
+/// (re)wrap the recovery root key under the owner's two credentials.
+pub(crate) struct OwnerSecrets {
     pub(crate) root: RootKeys,
     pub(crate) pass_kdf: KeyeoKdfParams,
     pub(crate) recovery_code: RecoveryCode,
@@ -113,19 +113,19 @@ pub(crate) struct NewOwnerSecrets {
     pub(crate) recovery_kdf: KeyeoKdfParams,
 }
 
-pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, VaultError> {
+pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<OwnerSecrets, VaultError> {
     let pass_kdf = default_kdf_params(generate_salt()?.to_vec());
     let root = derive_root(new_passphrase, &pass_kdf)?;
     let recovery_code = generate_recovery_code()?;
     let entropy = parse_recovery_code(&recovery_code)?;
     let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
     let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(NewOwnerSecrets {
+    Ok(OwnerSecrets {
         root,
-        pass_kdf: kdf_proto_to_keyeo(&pass_kdf),
+        pass_kdf,
         recovery_code,
         recovery_kek,
-        recovery_kdf: kdf_proto_to_keyeo(&recovery_kdf),
+        recovery_kdf,
     })
 }
 
@@ -136,18 +136,18 @@ pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets
 pub(crate) fn owner_secrets_reusing_pass_kdf(
     passphrase: &[u8],
     pass_kdf: KeyeoKdfParams,
-) -> Result<NewOwnerSecrets, VaultError> {
-    let root = derive_root(passphrase, &kdf_keyeo_to_proto(&pass_kdf))?;
+) -> Result<OwnerSecrets, VaultError> {
+    let root = derive_root(passphrase, &pass_kdf)?;
     let recovery_code = generate_recovery_code()?;
     let entropy = parse_recovery_code(&recovery_code)?;
     let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
     let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
-    Ok(NewOwnerSecrets {
+    Ok(OwnerSecrets {
         root,
         pass_kdf,
         recovery_code,
         recovery_kek,
-        recovery_kdf: kdf_proto_to_keyeo(&recovery_kdf),
+        recovery_kdf,
     })
 }
 
@@ -159,7 +159,7 @@ pub(crate) fn build_recovery_escrow(
     rrk_public: &[u8],
     tree_id: &[u8],
     member_id: &str,
-    s: &NewOwnerSecrets,
+    s: &OwnerSecrets,
 ) -> Result<RecoveryEscrow, VaultError> {
     let group_id = KeyeoGroupId::new(tree_id.to_vec());
     let pass = keyeo_kek_wrap(
@@ -424,23 +424,16 @@ pub(crate) fn validate_kdf(p: &KeyeoKdfParams) -> Result<(), VaultError> {
     }
 }
 
-/// Validate a keyeo KDF (from an escrow KEK wrap) against the same window and return the proto `KdfParams`
-/// the crypto derivations (`derive_root` / `derive_kek`) consume.
-pub(crate) fn validated_proto_kdf(k: &KeyeoKdfParams) -> Result<KdfParams, VaultError> {
-    if !k.validate(&kdf_bounds()) {
-        return Err(VaultError::BadKdfParams);
-    }
-    Ok(KdfParams {
-        salt: k.salt.clone(),
-        memory_kib: k.memory_kib,
-        iterations: k.iterations,
-        parallelism: k.parallelism,
-    })
+/// Validate a keyeo KDF (from an escrow KEK wrap) against this build's Argon2id window and hand it back for
+/// the crypto derivations (`derive_root` / `derive_kek`, which take keyeo's `KdfParams` directly).
+pub(crate) fn validated_kdf(k: &KeyeoKdfParams) -> Result<KeyeoKdfParams, VaultError> {
+    validate_kdf(k)?;
+    Ok(k.clone())
 }
 
 /// The escrow's KEK wrap of the RRK secret for a credential (`Passphrase` / `RecoveryCode`), returned as its
 /// `(kdf, nonce, ciphertext)` — the pieces the owner/recoverer needs to re-derive the KEK and open the RRK
-/// (via [`validated_proto_kdf`] + [`open_rrk_secret`]).
+/// (via [`validated_kdf`] + [`open_rrk_secret`]).
 pub(crate) fn escrow_kek_wrap(
     wraps: &[KeyeoWrap<String>],
     kind: KekKind,

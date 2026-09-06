@@ -1,5 +1,4 @@
-//! Proto-edge root-key derivation: pin the frozen `openom:*` HKDF labels and convert the wire
-//! `KdfParams` into the neutral form, delegating the actual Argon2id→HKDF split to
+//! Root-key derivation: pin the frozen `openom:*` HKDF labels, delegating the Argon2id→HKDF split to
 //! [`keyeo_crypto::derive_root`].
 //!
 //! The generic construction (one Argon2id master, then HKDF-SHA256 into sibling KEK / Ed25519
@@ -8,10 +7,8 @@
 //! byte-for-byte. (The RVK label `keyeo:rvk:v1` is engine-neutral and owned by keyeo-crypto;
 //! [`derive_rvk`](keyeo_crypto::derive_rvk) is re-exported unchanged.)
 
-use keyeo_crypto::{RootKeys, RootLabels};
-use openom_protocol::v1::KdfParams;
+use keyeo_crypto::{KdfParams, RootKeys, RootLabels};
 
-use crate::kdf::to_core;
 use crate::CryptoError;
 
 /// HKDF `info` label for the KEK. **Frozen.**
@@ -28,11 +25,11 @@ const OPENOM_ROOT_LABELS: RootLabels = RootLabels {
     hpke: HKDF_HPKE_INFO,
 };
 
-/// Derive [`RootKeys`] from a passphrase under the frozen `openom:*` HKDF labels. Converts the wire
-/// `params` to the neutral form (a plain field copy) and delegates to [`keyeo_crypto::derive_root`];
-/// see that crate for the frozen construction and the zeroize-on-drop guarantees.
+/// Derive [`RootKeys`] from a passphrase under the frozen `openom:*` HKDF labels, delegating to
+/// [`keyeo_crypto::derive_root`]; see that crate for the frozen construction and the zeroize-on-drop
+/// guarantees.
 pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, CryptoError> {
-    keyeo_crypto::derive_root(passphrase, &to_core(params), &OPENOM_ROOT_LABELS)
+    keyeo_crypto::derive_root(passphrase, params, &OPENOM_ROOT_LABELS)
 }
 
 #[cfg(test)]
