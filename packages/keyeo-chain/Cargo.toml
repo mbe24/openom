@@ -6,6 +6,10 @@ license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# Opt into the workspace lints (declares the `#[cfg(kani)]` proof-harness cfg as known).
+[lints]
+workspace = true
+
 [dependencies]
 keyeo-core.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -1927,7 +1927,6 @@ mod tests {
         let carol = a.provision_member("carol pass".into()).unwrap();
         b.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public)
             .unwrap();
-        let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
 
         // Device B merges A's branch (drive the repair through B, a NON-owner device). carol can unlock but
         // her unlock reports the merged write epoch is stale — it doesn't cover her.
