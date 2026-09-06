@@ -47,12 +47,12 @@ pub use ids::KeyId;
 pub use keyeo_core::GroupId;
 pub use keyring::{Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
 pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
-// The fixed-size material newtypes now live in the lean `keyeo-wrap` crate; re-exported here because
-// they are part of this crate's public wrap/HPKE API (RecipientDescriptor, HpkeWrap records, epoch wraps).
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfBounds, KdfParams, DEFAULT_ARGON2_ITERATIONS,
     DEFAULT_ARGON2_MEMORY_KIB, DEFAULT_ARGON2_PARALLELISM,
 };
+// The fixed-size wrap-material newtypes now live in the lean `keyeo-wrap` crate; re-exported here because
+// they are part of this crate's public wrap/HPKE API (RecipientDescriptor, HpkeWrap records, epoch wraps).
 pub use keyeo_wrap::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 pub use recovery::{
     generate_recovery_code, parse_recovery_code, RECOVERY_ARGON2_ITERATIONS,
