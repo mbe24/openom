@@ -16,6 +16,11 @@ pub trait SignatureScheme: Debug + Clone + PartialEq + Eq + Send + Sync {
     // bytes, which also sidesteps serde's lack of a `Serialize` impl for `[u8; 64]` (Ed25519 sigs).
     type PublicKey: Debug + Clone + Eq + std::hash::Hash + Ord + Send + Sync + AsRef<[u8]>;
     type Signature: Debug + Clone + Eq + Hash + Ord + Send + Sync + AsRef<[u8]>;
+    /// Verify that `sig` is a valid signature of `msg` under `pk`.
+    ///
+    /// # Errors
+    /// Returns [`SigError`] if the signature does not verify (wrong key, tampered message, or a malformed
+    /// signature).
     fn verify(pk: &Self::PublicKey, msg: &[u8], sig: &Self::Signature) -> Result<(), SigError>;
 
     /// A **structural** check that `pk` is a well-formed key of this scheme (e.g. a valid curve point),

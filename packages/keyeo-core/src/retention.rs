@@ -73,7 +73,9 @@ impl RetentionPolicy for Retention {
                     // horizon (that's the `RetentionPlan` contract), so it converts via the average item size
                     // — a deliberate, documented approximation, not a byte-exact cut.
                     let avg = (m.bytes / (m.items.max(1) as u64)).max(1);
-                    RetentionPlan::Snapshot { keep_last: (b / avg) as usize }
+                    // Saturate on 32-bit targets (wasm): an overflowing horizon means "keep more", the safe
+                    // direction — pruning too little never loses data, pruning too much does.
+                    RetentionPlan::Snapshot { keep_last: usize::try_from(b / avg).unwrap_or(usize::MAX) }
                 } else {
                     RetentionPlan::KeepAll
                 }
@@ -104,6 +106,11 @@ pub trait Compaction {
     /// What the caller stores + prunes to — a checkpoint plus the marker of what may be dropped.
     type Output;
 
+    /// Produce the compaction for `state` up to the `stable` cut under `plan` (see the trait docs).
+    ///
+    /// # Errors
+    /// Returns [`CompactionError`] if the implementation cannot compact the given state; the engine-specific
+    /// reason is carried in the error string.
     fn compact(
         state: &Self::State,
         stable: &Self::Cut,
