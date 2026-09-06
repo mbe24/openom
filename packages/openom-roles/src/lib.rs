@@ -13,7 +13,7 @@ pub const ROLE_VIEWER: i16 = MemberRole::Viewer as i16; // 5
 /// The proto **`i32`** role values a keyring `Member.role` carries — the single home for the constants
 /// the keyring + sealer compare a stored role against, so `m.role == MEMBER_OWNER` is one definition
 /// rather than a per-crate `MemberRole::Owner as i32`. The keyring's signer set is DERIVED from members
-/// (OPE-309): a member at CO_OWNER or stronger IS a signer, so there is no longer a separate signer-role
+/// (OPE-309): a member at `CO_OWNER` or stronger IS a signer, so there is no longer a separate signer-role
 /// axis — the founder is `MEMBER_OWNER`, a co-owner signer is `MEMBER_CO_OWNER`.
 pub const MEMBER_OWNER: i32 = MemberRole::Owner as i32;
 pub const MEMBER_CO_OWNER: i32 = MemberRole::CoOwner as i32;
@@ -35,6 +35,7 @@ pub enum Access {
 
 impl Access {
     /// The weakest (highest-numbered) role allowed to exercise this capability.
+    #[must_use]
     pub fn min_role(self) -> i16 {
         match self {
             Access::Read => ROLE_VIEWER,
@@ -47,6 +48,7 @@ impl Access {
 /// The weakest role allowed to AUTHOR an entry of `kind` — the client-side verify mapping, mirroring the
 /// server's endpoint matrix. Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+.
 /// `None` for a kind that can't be role-gated (unspecified).
+#[must_use]
 pub fn required_role_for_kind(kind: Kind) -> Option<i16> {
     match kind {
         Kind::Snapshot | Kind::Delta => Some(ROLE_MAINTAINER),
