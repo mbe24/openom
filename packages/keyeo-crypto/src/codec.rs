@@ -29,33 +29,53 @@ pub enum CodecError {
 
 /// Encode an epoch list to its canonical bytes. Infallible for these owned, alloc-backed records (postcard
 /// only errors on IO / size limits, neither of which applies to `to_allocvec` of in-memory data).
+///
+/// # Panics
+/// Never in practice: `to_allocvec` of these owned, alloc-backed records cannot fail.
+#[must_use]
 pub fn encode_epochs<Id: RecipientId>(epochs: &[Epoch<Id>]) -> Vec<u8> {
     postcard::to_allocvec(epochs).expect("postcard encode of key-material epochs is infallible")
 }
 
 /// Decode an epoch list from its canonical bytes, rejecting a malformed or trailing-byte blob.
+///
+/// # Errors
+/// Returns [`CodecError`] if `bytes` is not a valid encoding or has trailing bytes.
 pub fn decode_epochs<Id: RecipientId>(bytes: &[u8]) -> Result<Vec<Epoch<Id>>, CodecError> {
     decode_strict(bytes)
 }
 
 /// Encode a wrap list (a recovery escrow's KEK wraps) to its canonical bytes. Infallible — see
 /// [`encode_epochs`].
+///
+/// # Panics
+/// Never in practice: `to_allocvec` of these owned, alloc-backed records cannot fail.
 pub fn encode_wraps<Id: RecipientId>(wraps: &[Wrap<Id>]) -> Vec<u8> {
     postcard::to_allocvec(wraps).expect("postcard encode of key-material wraps is infallible")
 }
 
 /// Decode a wrap list from its canonical bytes, rejecting a malformed or trailing-byte blob.
+///
+/// # Errors
+/// Returns [`CodecError`] if `bytes` is not a valid encoding or has trailing bytes.
 pub fn decode_wraps<Id: RecipientId>(bytes: &[u8]) -> Result<Vec<Wrap<Id>>, CodecError> {
     decode_strict(bytes)
 }
 
 /// Encode a single [`KdfParams`] record (a member's account KDF) to canonical bytes. Infallible — see
 /// [`encode_epochs`].
+///
+/// # Panics
+/// Never in practice: `to_allocvec` of this owned, alloc-backed record cannot fail.
+#[must_use]
 pub fn encode_kdf_params(k: &KdfParams) -> Vec<u8> {
     postcard::to_allocvec(k).expect("postcard encode of kdf params is infallible")
 }
 
 /// Decode a [`KdfParams`] record from its canonical bytes, rejecting a malformed or trailing-byte blob.
+///
+/// # Errors
+/// Returns [`CodecError`] if `bytes` is not a valid encoding or has trailing bytes.
 pub fn decode_kdf_params(bytes: &[u8]) -> Result<KdfParams, CodecError> {
     decode_strict(bytes)
 }

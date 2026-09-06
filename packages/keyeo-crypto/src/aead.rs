@@ -2,7 +2,7 @@
 //! `(key, nonce, aad, data)`. These carry no header/proto knowledge.
 //!
 //! The header-driven envelope `seal`/`open` (which build the §5 AAD from a proto `Header`)
-//! live in openom-crypto and call these; the DEK-wrap path (§4) reuses the XChaCha20 pair
+//! live in openom-crypto and call these; the DEK-wrap path (§4) reuses the `XChaCha20` pair
 //! with a wrap-context AAD instead. Keeping the ciphers here (openom-free) lets both the
 //! envelope layer and the keyeo engine share one implementation.
 
@@ -15,6 +15,10 @@ use crate::{CryptoError, KEY_LEN};
 const XCHACHA_NONCE_LEN: usize = 24;
 const AES_GCM_NONCE_LEN: usize = 12;
 
+/// Seal `data` under XChaCha20-Poly1305 with `key`, `nonce`, and `aad`.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a wrong key/nonce length or an encryption failure.
 pub fn xchacha_seal(
     key: &[u8; KEY_LEN],
     nonce: &[u8],
@@ -29,6 +33,10 @@ pub fn xchacha_seal(
         .map_err(|_| CryptoError::Seal)
 }
 
+/// Open `data` sealed with [`xchacha_seal`] under the same `key`/`nonce`/`aad`.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a wrong key/nonce length or if authentication/decryption fails.
 pub fn xchacha_open(
     key: &[u8; KEY_LEN],
     nonce: &[u8],
@@ -43,6 +51,10 @@ pub fn xchacha_open(
         .map_err(|_| CryptoError::Open)
 }
 
+/// Seal `data` under AES-256-GCM with `key`, `nonce`, and `aad`.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a wrong key/nonce length or an encryption failure.
 pub fn aesgcm_seal(
     key: &[u8; KEY_LEN],
     nonce: &[u8],
@@ -57,6 +69,10 @@ pub fn aesgcm_seal(
         .map_err(|_| CryptoError::Seal)
 }
 
+/// Open `data` sealed with [`aesgcm_seal`] under the same `key`/`nonce`/`aad`.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a wrong key/nonce length or if authentication/decryption fails.
 pub fn aesgcm_open(
     key: &[u8; KEY_LEN],
     nonce: &[u8],
@@ -71,6 +87,10 @@ pub fn aesgcm_open(
         .map_err(|_| CryptoError::Open)
 }
 
+/// Check that `nonce` is exactly `want` bytes.
+///
+/// # Errors
+/// Returns [`CryptoError::NonceLength`] if the length differs.
 pub fn check_nonce(nonce: &[u8], want: usize) -> Result<(), CryptoError> {
     if nonce.len() == want {
         Ok(())

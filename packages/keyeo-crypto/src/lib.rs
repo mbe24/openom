@@ -9,7 +9,7 @@ pub type Cipher = chacha20poly1305::XChaCha20Poly1305;
 /// ever used for deltas. Matches `Aead::Aes256Gcm`.
 pub type CipherAlt = aes_gcm::Aes256Gcm;
 
-/// Symmetric key length in bytes — XChaCha20 and AES-256 both use 256-bit keys.
+/// Symmetric key length in bytes — `XChaCha20` and AES-256 both use 256-bit keys.
 pub const KEY_LEN: usize = 32;
 
 /// Argon2id salt length in bytes.
@@ -68,7 +68,7 @@ pub enum CryptoError {
     /// The DEK is not [`KEY_LEN`] bytes.
     #[error("wrong DEK length")]
     KeyLength,
-    /// The header's nonce is the wrong length for the selected AEAD (24 for XChaCha20,
+    /// The header's nonce is the wrong length for the selected AEAD (24 for `XChaCha20`,
     /// 12 for AES-256-GCM).
     #[error("wrong nonce length for the selected AEAD")]
     NonceLength,

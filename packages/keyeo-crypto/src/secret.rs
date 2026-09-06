@@ -101,6 +101,7 @@ impl Passphrase {
         Self(Zeroizing::new(bytes.into()))
     }
     /// Borrow the raw bytes — the single explicit exposure point (grep `.expose()`).
+    #[must_use]
     pub fn expose(&self) -> &[u8] {
         &self.0
     }
@@ -125,10 +126,12 @@ impl RecoveryCode {
         Self(s.into())
     }
     /// Borrow the code string.
+    #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
     }
     /// Consume into the owned string — for the one boundary that must display it (a wasm getter / IPC).
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }

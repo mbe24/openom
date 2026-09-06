@@ -18,12 +18,15 @@ impl GroupId {
     }
     /// The explicit "no group scope" marker — a single-group or test context. Distinct in intent from a
     /// forgotten binding: a caller writes `GroupId::unscoped()` on purpose.
+    #[must_use]
     pub fn unscoped() -> Self {
         Self(Vec::new())
     }
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+    #[must_use]
     pub fn is_unscoped(&self) -> bool {
         self.0.is_empty()
     }
@@ -39,6 +42,7 @@ impl KeyId {
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
         Self(bytes.into())
     }
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

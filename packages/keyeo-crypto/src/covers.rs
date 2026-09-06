@@ -27,7 +27,7 @@ pub struct RecipientDescriptor<Id: RecipientId> {
     pub expected_key: Option<X25519PublicKey>,
 }
 
-fn key_ok(recipient_key: &X25519PublicKey, expected: &Option<X25519PublicKey>) -> bool {
+fn key_ok(recipient_key: &X25519PublicKey, expected: Option<&X25519PublicKey>) -> bool {
     match expected {
         Some(k) => recipient_key == k,
         None => true,
@@ -38,7 +38,7 @@ fn key_ok(recipient_key: &X25519PublicKey, expected: &Option<X25519PublicKey>) -
 fn member_covers<Id: RecipientId>(wrap: &Wrap<Id>, d: &RecipientDescriptor<Id>) -> bool {
     match &wrap.method {
         WrapMethod::MemberHpke { recipient_key, .. } => {
-            wrap.recipient == d.id && key_ok(recipient_key, &d.expected_key)
+            wrap.recipient == d.id && key_ok(recipient_key, d.expected_key.as_ref())
         }
         _ => false,
     }
@@ -48,7 +48,7 @@ fn member_covers<Id: RecipientId>(wrap: &Wrap<Id>, d: &RecipientDescriptor<Id>) 
 fn rrk_covers<Id: RecipientId>(wrap: &Wrap<Id>, d: &RecipientDescriptor<Id>) -> bool {
     match &wrap.method {
         WrapMethod::RrkHpke { recipient_key, .. } => {
-            wrap.recipient == d.id && key_ok(recipient_key, &d.expected_key)
+            wrap.recipient == d.id && key_ok(recipient_key, d.expected_key.as_ref())
         }
         _ => false,
     }

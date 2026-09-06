@@ -76,6 +76,7 @@ impl WrapMethod {
     pub const TAG_RRK_HPKE: i32 = 4;
 
     /// The discriminant fed into the wrap AAD (and used as a lookup key).
+    #[must_use]
     pub fn tag(&self) -> i32 {
         match self {
             WrapMethod::Kek { kind: KekKind::Passphrase, .. } => Self::TAG_PASSPHRASE_KEK,

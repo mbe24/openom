@@ -13,6 +13,9 @@ use crate::{CryptoError, Dek};
 
 /// HPKE-wrap `dek` to a member's X25519 public key — the per-member wrap that gives them access to this
 /// epoch.
+///
+/// # Errors
+/// Returns [`CryptoError`] if the HPKE seal fails.
 pub fn member_wrap<Id: RecipientId>(
     dek: &Dek,
     recipient: Id,
@@ -35,6 +38,9 @@ pub fn member_wrap<Id: RecipientId>(
 
 /// HPKE-wrap `dek` to the recovery root's public key — the founder's cross-epoch access, sealed to a key
 /// whose secret the escrow protects. Distinct from a member wrap by its method (an AAD input).
+///
+/// # Errors
+/// Returns [`CryptoError`] if the HPKE seal fails.
 pub fn rrk_wrap<Id: RecipientId>(
     dek: &Dek,
     recipient: Id,
@@ -59,6 +65,9 @@ pub fn rrk_wrap<Id: RecipientId>(
 /// AAD is rebuilt from the wrap's own recipient + method + the context, so a wrap tampered onto another
 /// recipient/epoch/group fails the AEAD tag. A KEK escrow wrap is not a DEK wrap — it is opened elsewhere —
 /// so it is rejected here.
+///
+/// # Errors
+/// Returns [`CryptoError`] if the wrap is a non-DEK (escrow) wrap or the AEAD open fails.
 pub fn unwrap_dek<Id: RecipientId>(
     wrap: &Wrap<Id>,
     hpke_secret: &[u8],

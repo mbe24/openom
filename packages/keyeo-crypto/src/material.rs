@@ -1,6 +1,6 @@
 //! Fixed-size crypto-material newtypes — the wrap byte-strings whose lengths the pinned suite fixes.
 //!
-//! The suite (frozen): DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + ChaCha20Poly1305 for HPKE, and
+//! The suite (frozen): DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + `ChaCha20Poly1305` for HPKE, and
 //! XChaCha20-Poly1305 for the symmetric KEK wrap. So an X25519 point is 32 bytes and a sealed 32-byte
 //! secret is 48 (32 + a 16-byte AEAD tag). Encoding those lengths in the *type* makes a wrong-length key
 //! or ciphertext unconstructable (illegal states unrepresentable) and removes a heap allocation per field
@@ -29,10 +29,12 @@ impl EncappedKey {
     /// The fixed length of an X25519 encapsulated key.
     pub const LEN: usize = 32;
     /// Wrap a known-length array (no validation needed — the length is in the type).
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
+    #[must_use]
     pub fn to_bytes(self) -> [u8; 32] {
         self.0
     }
@@ -64,10 +66,12 @@ impl X25519PublicKey {
     /// The fixed length of an X25519 public key.
     pub const LEN: usize = 32;
     /// Wrap a known-length array (no validation needed — the length is in the type).
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
+    #[must_use]
     pub fn to_bytes(self) -> [u8; 32] {
         self.0
     }
@@ -98,10 +102,12 @@ impl Nonce {
     /// The fixed length of an XChaCha20-Poly1305 nonce.
     pub const LEN: usize = 24;
     /// Wrap a known-length array (no validation needed — the length is in the type).
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 24]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
+    #[must_use]
     pub fn to_bytes(self) -> [u8; 24] {
         self.0
     }
@@ -122,7 +128,7 @@ impl TryFrom<&[u8]> for Nonce {
 }
 
 /// A wrapped 32-byte secret (a DEK or the RRK secret) + its 16-byte AEAD tag = 48 bytes, whether sealed
-/// via HPKE (ChaCha20Poly1305) or the symmetric KEK wrap (XChaCha20-Poly1305) — both land on 48.
+/// via HPKE (`ChaCha20Poly1305`) or the symmetric KEK wrap (XChaCha20-Poly1305) — both land on 48.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WrappedDek([u8; 48]);
@@ -131,10 +137,12 @@ impl WrappedDek {
     /// The fixed length: a 32-byte secret plus a 16-byte Poly1305 tag.
     pub const LEN: usize = 48;
     /// Wrap a known-length array (no validation needed — the length is in the type).
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 48]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
+    #[must_use]
     pub fn to_bytes(self) -> [u8; 48] {
         self.0
     }

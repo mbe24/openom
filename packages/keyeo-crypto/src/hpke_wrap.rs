@@ -6,7 +6,7 @@
 //! sharee who never knew the owner's passphrase still receive the tree key.
 //!
 //! Suite (the one the format pins for this wrap method): **DHKEM(X25519, HKDF-SHA256) +
-//! HKDF-SHA256 + ChaCha20Poly1305**, HPKE base mode. The wrap's context tuple
+//! HKDF-SHA256 + `ChaCha20Poly1305`**, HPKE base mode. The wrap's context tuple
 //! (`tree_id, key_id, member_id, wrap_method, epoch`) is passed as the HPKE `info`, so a
 //! wrap can't be transplanted across members, epochs, or trees — the same binding the
 //! symmetric wrap gets from its AAD.
@@ -84,6 +84,7 @@ pub struct HpkeKeypair {
 
 /// Deterministically derive a member's X25519 HPKE keypair from 32 bytes of key material
 /// (their passphrase root, `derive_root`).
+#[must_use]
 pub fn derive_hpke_keypair(ikm: &[u8; 32]) -> HpkeKeypair {
     let (sk, pk) = KemImpl::derive_keypair(ikm);
     let mut secret = Zeroizing::new([0u8; HPKE_SECRET_LEN]);
@@ -95,17 +96,23 @@ pub fn derive_hpke_keypair(ikm: &[u8; 32]) -> HpkeKeypair {
 
 /// Generate a fresh random X25519 HPKE keypair — for a per-tree escrow key (the recovery
 /// root key) that is NOT derived from any passphrase.
+///
+/// # Errors
+/// Returns [`CryptoError::Rng`] if the system RNG fails.
 pub fn generate_hpke_keypair() -> Result<HpkeKeypair, CryptoError> {
     let mut ikm = [0u8; 32];
     getrandom::fill(&mut ikm).map_err(|e| CryptoError::Rng(e.to_string()))?;
     let out = derive_hpke_keypair(&ikm);
-    ikm.iter_mut().for_each(|b| *b = 0); // scrub the IKM
+    ikm.fill(0); // scrub the IKM
     Ok(out)
 }
 
 /// Seal `dek` to a member's X25519 public key, binding `info` (the wrap context tuple) so
 /// the wrap can't be replayed for another member/epoch/tree. Draws HPKE's ephemeral key from the
 /// OS/browser CSPRNG; delegates to [`hpke_wrap_dek_with_rng`].
+///
+/// # Errors
+/// Returns [`CryptoError`] if the recipient key is malformed or the HPKE seal fails.
 pub fn hpke_wrap_dek(
     recipient_public: &[u8],
     dek: &Dek,
@@ -118,6 +125,9 @@ pub fn hpke_wrap_dek(
 /// the context-binding + round-trip properties are testable/fuzzable without touching OS entropy.
 /// (HPKE's KEM/AEAD internals stay external-crate logic; this seam is for deterministic testing, not
 /// for Kani reaching inside the cipher.)
+///
+/// # Errors
+/// Returns [`CryptoError`] if the recipient key is malformed or the HPKE seal fails.
 pub fn hpke_wrap_dek_with_rng<R: rand_core::RngCore + rand_core::CryptoRng>(
     rng: &mut R,
     recipient_public: &[u8],
@@ -148,6 +158,9 @@ pub fn hpke_wrap_dek_with_rng<R: rand_core::RngCore + rand_core::CryptoRng>(
 /// RRK wrap, so it is generic over "any 32-byte X25519 scalar" — the caller (`RrkSecret` vs
 /// `HpkePrivate`) is role-typed one layer up, and `.expose()`s here. `info` must be the exact context
 /// tuple used at wrap time, or the AEAD tag fails. Returns the zeroizing DEK.
+///
+/// # Errors
+/// Returns [`CryptoError`] if the secret/encapsulated key is malformed or the AEAD open fails.
 pub fn hpke_unwrap_dek(
     recipient_secret: &[u8],
     encapped_key: &[u8],

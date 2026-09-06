@@ -27,6 +27,9 @@ fn kek_method_tag(kind: KekKind) -> i32 {
 
 /// KEK-wrap a 32-byte `secret` (the recovery-root secret) under `kek`, bound to the tree-scoped rrk AAD.
 /// Generates a fresh nonce; delegates to [`kek_wrap_with_nonce`].
+///
+/// # Errors
+/// Returns [`CryptoError`] if the RNG or the KEK seal fails.
 pub fn kek_wrap<Id: RecipientId>(
     secret: &[u8],
     recipient: Id,
@@ -43,6 +46,9 @@ pub fn kek_wrap<Id: RecipientId>(
 /// The deterministic core of [`kek_wrap`], with the `nonce` supplied by the caller — same inputs yield the
 /// same wrap, so the context-binding property is testable without the RNG. **Contract:** `nonce` must be a
 /// fresh, unique 24-byte value.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a bad nonce length or if the seal fails.
 pub fn kek_wrap_with_nonce<Id: RecipientId>(
     nonce: Nonce,
     secret: &[u8],
@@ -64,6 +70,10 @@ pub fn kek_wrap_with_nonce<Id: RecipientId>(
 /// Open a KEK escrow wrap under `kek`, returning the sealed 32-byte secret (zeroizing). Rebuilds the
 /// tree-scoped rrk AAD from the wrap's own recipient + method, so a wrong KEK / tampered wrap / mismatched
 /// group all fail as [`CryptoError::Open`]. A DEK (HPKE) wrap is not an escrow wrap and is rejected.
+///
+/// # Errors
+/// Returns [`CryptoError`] on a wrong KEK, tampered wrap, or mismatched context; a non-escrow (DEK)
+/// wrap is rejected.
 pub fn unwrap_kek<Id: RecipientId>(
     wrap: &Wrap<Id>,
     kek: &Kek,

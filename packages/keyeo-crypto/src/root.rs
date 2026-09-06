@@ -17,7 +17,7 @@
 //! - master = Argon2id(passphrase, params)  — 32 bytes (same as [`derive_kek`]).
 //! - HKDF-SHA256 with **Extract salt = empty** (`Hkdf::new(None, master)`).
 //! - Expand 32-byte outputs with the exact ASCII labels the caller pins; the HPKE output is
-//!   the IKM fed to the KEM's DeriveKeyPair (`derive_hpke_keypair`).
+//!   the IKM fed to the KEM's `DeriveKeyPair` (`derive_hpke_keypair`).
 
 use edsign::SigningKey;
 use hkdf::Hkdf;
@@ -49,6 +49,7 @@ pub struct RootLabels {
 /// HKDF-SHA256(rrk_secret) under the frozen RVK label, then an Ed25519 key from the 32-byte output — via
 /// the shared [`edsign::derive_signing_key`], so this is byte-identical to `openom_keyring_dag::recovery::derive_rvk`
 /// (an openom-vault cross-check test guards the two).
+#[must_use]
 pub fn derive_rvk(rrk_secret: &[u8; 32]) -> SigningKey {
     edsign::derive_signing_key(rrk_secret, HKDF_RVK_INFO)
 }
@@ -65,6 +66,9 @@ pub struct RootKeys {
 /// Derive [`RootKeys`] from a passphrase under the caller-supplied `labels` (see the module docs for the
 /// frozen construction). The passphrase should already be a [`Zeroizing`] buffer at the call site; this
 /// scrubs every intermediate (the master, the identity seed, and the HPKE IKM) on the way out.
+///
+/// # Errors
+/// Returns [`CryptoError`] if Argon2id derivation fails.
 pub fn derive_root(
     passphrase: &[u8],
     params: &KdfParams,

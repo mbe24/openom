@@ -16,7 +16,10 @@
 /// `"ab"+"c" == "a"+"bc"` forgery class.
 #[inline]
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    // AAD components are keyring identifiers (never near 4 GiB); a >u32 length would only make the AAD
+    // mismatch on decrypt (fail-closed), so saturate rather than reach for a fallible edge that can't fire.
+    let len = u32::try_from(b.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(b);
 }
 
@@ -29,13 +32,15 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 /// can't be transplanted between members, epochs, or trees. `key_id` is a fresh per-epoch salt, so it
 /// already identifies the epoch. The leading domain tag makes it byte-disjoint from [`rrk_wrap_aad`] and
 /// from any content AAD.
+#[must_use]
 pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &[u8], wrap_method: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     put_bytes(&mut out, b"keyeo:wrap:v1");
     put_bytes(&mut out, group_id);
     put_bytes(&mut out, key_id);
     put_bytes(&mut out, member_id);
-    put_u32(&mut out, wrap_method as u32);
+    // `wrap_method` is a non-negative tag, so this is bit-identical to `as u32` but sign-loss-free.
+    put_u32(&mut out, u32::try_from(wrap_method).unwrap_or(0));
     out
 }
 
@@ -43,12 +48,14 @@ pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &[u8], wrap_method: i
 /// tree-scoped, not epoch-scoped, so it binds only `(group_id, member_id, wrap_method)` under its own
 /// `keyeo:rrk:v1` tag — byte-disjoint from [`wrap_aad`], so an RRK wrap can never be reinterpreted as an
 /// epoch-DEK wrap even when it reuses the passphrase/recovery `wrap_method` values.
+#[must_use]
 pub fn rrk_wrap_aad(group_id: &[u8], member_id: &[u8], wrap_method: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(48);
     put_bytes(&mut out, b"keyeo:rrk:v1");
     put_bytes(&mut out, group_id);
     put_bytes(&mut out, member_id);
-    put_u32(&mut out, wrap_method as u32);
+    // `wrap_method` is a non-negative tag, so this is bit-identical to `as u32` but sign-loss-free.
+    put_u32(&mut out, u32::try_from(wrap_method).unwrap_or(0));
     out
 }
 

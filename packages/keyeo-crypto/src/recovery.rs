@@ -26,6 +26,9 @@ pub const RECOVERY_ARGON2_PARALLELISM: u32 = 1;
 
 /// Generate a fresh printable recovery code (entropy + checksum, base32, hyphenated).
 /// Display it once; it can't be recovered if lost (§17).
+///
+/// # Errors
+/// Returns [`CryptoError::Rng`] if the system RNG fails.
 pub fn generate_recovery_code() -> Result<RecoveryCode, CryptoError> {
     let mut entropy = Zeroizing::new([0u8; RECOVERY_ENTROPY_LEN]);
     getrandom::fill(entropy.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
@@ -34,13 +37,16 @@ pub fn generate_recovery_code() -> Result<RecoveryCode, CryptoError> {
 
 /// Parse + checksum-verify a recovery code (tolerant of case, spaces, hyphens),
 /// returning its raw entropy. Fails fast on a typo (checksum) before any KDF runs.
+///
+/// # Errors
+/// Returns [`CryptoError`] if the code is malformed or fails its checksum.
 pub fn parse_recovery_code(
     code: &RecoveryCode,
 ) -> Result<Zeroizing<[u8; RECOVERY_ENTROPY_LEN]>, CryptoError> {
     let input = code.expose();
     let cleaned: String = input
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_uppercase())
         .collect();
     let decoded = BASE32_NOPAD

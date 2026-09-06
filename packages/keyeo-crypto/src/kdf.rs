@@ -44,6 +44,7 @@ pub struct KdfBounds {
 impl KdfParams {
     /// True iff every parameter is inside `bounds`. A consumer runs this before deriving a KEK from
     /// untrusted params, and REJECTS (never clamps — clamping could silently weaken) when it returns false.
+    #[must_use]
     pub fn validate(&self, bounds: &KdfBounds) -> bool {
         bounds.memory_kib.contains(&self.memory_kib)
             && bounds.iterations.contains(&self.iterations)
@@ -55,6 +56,9 @@ impl KdfParams {
 /// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt +
 /// costs). Deterministic in its inputs — the same passphrase + params yield the same
 /// KEK, which is what lets a second device join from the passphrase alone (§4).
+///
+/// # Errors
+/// Returns [`CryptoError`] if Argon2id key derivation fails.
 pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Kek, CryptoError> {
     let p = Params::new(
         params.memory_kib,
@@ -72,6 +76,9 @@ pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Kek, CryptoEr
 }
 
 /// A fresh random 256-bit DEK (per tree, per epoch — §6).
+///
+/// # Errors
+/// Returns [`CryptoError::Rng`] if the system RNG fails.
 pub fn generate_dek() -> Result<Dek, CryptoError> {
     let mut dek = Zeroizing::new([0u8; KEY_LEN]);
     getrandom::fill(dek.as_mut_slice()).map_err(|e| CryptoError::Rng(e.to_string()))?;
@@ -79,6 +86,9 @@ pub fn generate_dek() -> Result<Dek, CryptoError> {
 }
 
 /// A fresh random Argon2id salt.
+///
+/// # Errors
+/// Returns [`CryptoError::Rng`] if the system RNG fails.
 pub fn generate_salt() -> Result<[u8; SALT_LEN], CryptoError> {
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).map_err(|e| CryptoError::Rng(e.to_string()))?;
