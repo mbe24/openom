@@ -284,6 +284,7 @@ pub struct Projection {
 /// a single delimited phase and makes adding a leaf predicate a field here plus its match arm — not a
 /// free variable threaded end-to-end through a 1000-line body.
 #[allow(clippy::type_complexity)]
+#[derive(Default)]
 struct Collected {
     anchors: BTreeSet<String>,
     same_as: BTreeMap<[String; 2], PairInfo>,
@@ -313,367 +314,287 @@ struct Collected {
     other_claims: Vec<(String, String, String, Value, String)>,
 }
 
-// One cohesive fold: ~30 per-kind accumulators built in a single match, then bundled into `Collected`.
-// Splitting the arms out would thread all of them across a call boundary (a 30-field `&mut`) for no
-// clarity gain — the AGENTS.md "irreducibly coupled shared mutable state" case; length tracks the field
-// count, not tangled logic.
-#[allow(clippy::too_many_lines)]
 fn collect(deduped: &[&Record]) -> Collected {
-    // Anchors, and person-scoped claims. Deletion and edit-supersession are operations applied
-    // upstream (the ops→snapshot layer, §8.2); the projection consumes the already-live claim set.
-    let mut anchors: BTreeSet<String> = BTreeSet::new();
-    let mut same_as: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
-    let mut different_from: BTreeMap<[String; 2], PairInfo> = BTreeMap::new();
-    let mut attests: BTreeMap<String, Votes> = BTreeMap::new(); // target (claim id | fingerprint) -> votes
-    let mut name_claims: Vec<(String, String, Value)> = Vec::new(); // (targetId, claimId, parts)
-    let mut sex_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, value, author)
-    let mut biography_claims: Vec<(String, String, String, String)> = Vec::new(); // (targetId, claimId, text, author)
-    let mut field_label: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> label -> authors
-    let mut field_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // fieldId -> type -> authors
-    let mut custom_values: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, fieldId, value, author)
-    let mut reattribute: BTreeMap<String, BTreeMap<String, PairInfo>> = BTreeMap::new(); // re-homed claim id -> personId -> info
-    let mut preferred: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (person, for, claim content-ref) -> info
-    let mut parent_child: BTreeMap<(String, String, String), PairInfo> = BTreeMap::new(); // (child, parent, kind) -> info
-    let mut partnership: BTreeMap<([String; 2], String), PairInfo> = BTreeMap::new(); // (canonical pair, role) -> info
-    let mut event_anchors: BTreeSet<String> = BTreeSet::new();
-    let mut event_type: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> type -> authors
-    let mut event_date: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> edtf -> authors
-    let mut event_place: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // eventId -> placeId -> authors
-    let mut participants: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new(); // eventId -> {(personId, role)}
-    let mut sources: BTreeMap<String, Value> = BTreeMap::new(); // source claim id -> its value
-    let mut citations: Vec<(String, String, String, Value)> = Vec::new(); // (targetId, citing claimId, predicate, citation)
-    #[allow(clippy::type_complexity)]
-    let mut place_point: BTreeMap<String, BTreeMap<String, (BTreeSet<String>, Value)>> =
-        BTreeMap::new(); // placeId -> canonical(point) -> (authors, pointValue)
-    let mut place_name: BTreeMap<String, BTreeMap<(String, String), BTreeSet<String>>> =
-        BTreeMap::new(); // placeId -> (validRange, name) -> authors
-    let mut part_of: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new(); // placeId -> parentId -> authors
-    let mut media_links: Vec<(String, String, Value)> = Vec::new(); // (target, claimId, value)
-    let mut other_claims: Vec<(String, String, String, Value, String)> = Vec::new(); // (target, claimId, predicate, value, author) — unrecognized predicates
-
+    // Anchors + person-scoped claims. Deletion and edit-supersession are operations applied upstream
+    // (the ops->snapshot layer, §8.2); the projection consumes the already-live claim set.
+    let mut acc = Collected::default();
     for &r in deduped {
         let c: &Claim = match r {
             Record::Anchor(a) => {
                 match a.type_uri.as_str() {
                     TYPE_PERSON => {
-                        anchors.insert(a.id.clone());
+                        acc.anchors.insert(a.id.clone());
                     }
                     TYPE_EVENT => {
-                        event_anchors.insert(a.id.clone());
+                        acc.event_anchors.insert(a.id.clone());
                     }
                     _ => {}
                 }
                 continue;
             }
-            // A record of a type this build doesn't recognize is not part of any structured view yet.
-            // It still survives in the materialized set (reachable for a generic renderer — OPE-212b/c);
-            // here it is simply skipped.
+            // A record of a type this build doesn't recognize is not part of any structured view yet; it
+            // still survives in the materialized set (a generic renderer reaches it — OPE-212b/c).
             Record::Unknown(_) => continue,
             Record::Claim(c) => c,
         };
-        let pred = c.predicate.as_str();
-        let id = c.id.as_str();
         // Any claim (whatever its predicate) may carry an inline citation backing the fact it asserts.
         // Today only a single-object citation is captured; an array citation is a documented seam.
         if let Some(Citations::One(cit)) = &c.citation {
             if let Ok(cit_val) = serde_json::to_value(cit) {
-                citations.push((
+                acc.citations.push((
                     c.target_id.clone(),
-                    id.to_string(),
-                    pred.to_string(),
+                    c.id.clone(),
+                    c.predicate.clone(),
                     cit_val,
                 ));
             }
         }
-        match pred {
-            P_SOURCE => {
-                sources.insert(id.to_string(), c.value.clone());
-            }
-            P_PLACE_POINT => {
-                if let (Some(t), Some(v), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    Some(&c.value),
-                    Some(c.created_by.as_str()),
-                ) {
-                    place_point
-                        .entry(t.to_string())
-                        .or_default()
-                        .entry(v.to_string())
-                        .or_insert_with(|| (BTreeSet::new(), v.clone()))
-                        .0
-                        .insert(a.to_string());
-                }
-            }
-            P_PLACE_NAME => {
-                if let (Some(t), Some(name), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("name").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let range = c
-                        .value
-                        .get("validRange")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    place_name
-                        .entry(t.to_string())
-                        .or_default()
-                        .entry((range.to_string(), name.to_string()))
-                        .or_default()
-                        .insert(a.to_string());
-                }
-            }
-            P_PART_OF => tally(&mut part_of, c, "parentPlaceId"),
-            P_MEDIA_LINK => {
-                // Keep the whole value so the media view round-trips mime/width/height/role/order/
-                // caption/crop/kind (§10.2); require only `mediaHash` (the blob this links).
-                if c.value.get("mediaHash").and_then(Value::as_str).is_some() {
-                    media_links.push((c.target_id.clone(), id.to_string(), c.value.clone()));
-                }
-            }
-            P_SAME_AS => collect_pair(&mut same_as, c, id),
-            P_DIFFERENT_FROM => collect_pair(&mut different_from, c, id),
-            P_ATTEST => {
-                if let (Some(t), Some(verdict), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("verdict").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let v = attests.entry(t.to_string()).or_default();
-                    match verdict {
-                        "support" => {
-                            v.support.insert(a.to_string());
-                        }
-                        "reject" => {
-                            v.reject.insert(a.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            P_PREFERRED => {
-                // The referent is a `contentRef` (a `sha256:` content-ref of the name it prefers), NOT
-                // a claim id — stable across authors/merges, which is the point of `preferred` (§4.1).
-                if let (Some(person), Some(for_pred), Some(content_ref), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("for").and_then(Value::as_str),
-                    c.value.get("contentRef").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let info = preferred
-                        .entry((
-                            person.to_string(),
-                            for_pred.to_string(),
-                            content_ref.to_string(),
-                        ))
-                        .or_default();
-                    info.authors.insert(a.to_string());
-                    info.claim_ids.insert(id.to_string());
-                    if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(c);
-                    }
-                }
-            }
-            P_PARENT => {
-                if let (Some(child), Some(parent), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("parentPersonId").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let kind = c
-                        .value
-                        .get("kind")
-                        .and_then(Value::as_str)
-                        .unwrap_or(DEFAULT_KIND);
-                    let info = parent_child
-                        .entry((child.to_string(), parent.to_string(), kind.to_string()))
-                        .or_default();
-                    info.authors.insert(a.to_string());
-                    info.claim_ids.insert(id.to_string());
-                    if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(c);
-                    }
-                }
-            }
-            P_PARTNERSHIP => {
-                if let (Some(p), Some(a)) = (pair(c), Some(c.created_by.as_str())) {
-                    let role = c
-                        .value
-                        .get("role")
-                        .and_then(Value::as_str)
-                        .unwrap_or(DEFAULT_ROLE);
-                    let info = partnership.entry((p, role.to_string())).or_default();
-                    info.authors.insert(a.to_string());
-                    info.claim_ids.insert(id.to_string());
-                    if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(c);
-                    }
-                }
-            }
-            P_EVENT_TYPE => tally(&mut event_type, c, "type"),
-            P_DATE => tally(&mut event_date, c, "edtf"),
-            P_EVENT_PLACE => tally(&mut event_place, c, "placeId"),
-            P_PARTICIPANT => {
-                if let (Some(evt), Some(person), Some(role)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("personId").and_then(Value::as_str),
-                    c.value.get("role").and_then(Value::as_str),
-                ) {
-                    participants
-                        .entry(evt.to_string())
-                        .or_default()
-                        .insert((person.to_string(), role.to_string()));
-                }
-            }
-            P_NAME => {
-                if let (Some(t), Some(v)) = (Some(c.target_id.as_str()), Some(&c.value)) {
-                    name_claims.push((t.to_string(), id.to_string(), v.clone()));
-                }
-            }
-            P_SEX => {
-                if let (Some(t), Some(sex), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("sex").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    sex_claims.push((
-                        t.to_string(),
-                        id.to_string(),
-                        sex.to_string(),
-                        a.to_string(),
-                    ));
-                }
-            }
-            P_BIOGRAPHY => {
-                if let (Some(t), Some(text), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("text").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    biography_claims.push((
-                        t.to_string(),
-                        id.to_string(),
-                        text.to_string(),
-                        a.to_string(),
-                    ));
-                }
-            }
-            P_CUSTOM_FIELD => {
-                if let (Some(fid), Some(a)) = (
-                    c.value.get("fieldId").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let val = &c.value;
-                    if let Some(label) = val.get("label").and_then(Value::as_str) {
-                        field_label
-                            .entry(fid.to_string())
-                            .or_default()
-                            .entry(label.to_string())
-                            .or_default()
-                            .insert(a.to_string());
-                    }
-                    if let Some(ty) = val.get("type").and_then(Value::as_str) {
-                        field_type
-                            .entry(fid.to_string())
-                            .or_default()
-                            .entry(ty.to_string())
-                            .or_default()
-                            .insert(a.to_string());
-                    }
-                }
-            }
-            P_CUSTOM_VALUE => {
-                if let (Some(t), Some(fid), Some(val), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("fieldId").and_then(Value::as_str),
-                    c.value.get("value"),
-                    Some(c.created_by.as_str()),
-                ) {
-                    custom_values.push((
-                        t.to_string(),
-                        id.to_string(),
-                        fid.to_string(),
-                        val.clone(),
-                        a.to_string(),
-                    ));
-                }
-            }
-            P_REATTRIBUTE => {
-                if let (Some(target), Some(person), Some(a)) = (
-                    Some(c.target_id.as_str()),
-                    c.value.get("personId").and_then(Value::as_str),
-                    Some(c.created_by.as_str()),
-                ) {
-                    let info = reattribute
-                        .entry(target.to_string())
-                        .or_default()
-                        .entry(person.to_string())
-                        .or_default();
-                    info.authors.insert(a.to_string());
-                    info.claim_ids.insert(id.to_string());
-                    if info.fingerprint.is_none() {
-                        info.fingerprint = fingerprint_str(c);
-                    }
-                }
-            }
-            P_EXISTENCE => {
-                // The root existence proposition, auto-minted with each anchor (value {}). Any citation
-                // it carries is already harvested above into `citations` (→ Person.sources), and any
-                // attestation targeting it is collected under P_ATTEST for the deferred existence-dispute
-                // view; the claim itself asserts no structured fact, so it is consumed here rather than
-                // surfaced as an unknown/"other" claim. Its target is the anchor, already a node.
-            }
-            // A predicate this build doesn't recognize: keep the claim verbatim (OPE-212b). It is
-            // NOT added to `nodes` — an unknown predicate must not mint a spurious person — and is
-            // routed after clustering to its target's person, or to `Projection.unclassified`.
-            _ => other_claims.push((
-                c.target_id.clone(),
-                id.to_string(),
-                pred.to_string(),
-                c.value.clone(),
-                c.created_by.clone(),
-            )),
-        }
+        parse_claim(&mut acc, c);
     }
+    acc
+}
 
-    Collected {
-        anchors,
-        same_as,
-        different_from,
-        attests,
-        name_claims,
-        sex_claims,
-        biography_claims,
-        field_label,
-        field_type,
-        custom_values,
-        reattribute,
-        preferred,
-        parent_child,
-        partnership,
-        event_anchors,
-        event_type,
-        event_date,
-        event_place,
-        participants,
-        sources,
-        citations,
-        place_point,
-        place_name,
-        part_of,
-        media_links,
-        other_claims,
+/// Fold one claim's structured fact into the matching accumulator, dispatched on its predicate. An
+/// unrecognized predicate is kept verbatim in `other_claims` (OPE-212b), never minting a person.
+fn parse_claim(acc: &mut Collected, c: &Claim) {
+    let id = c.id.as_str();
+    match c.predicate.as_str() {
+        P_SOURCE => {
+            acc.sources.insert(id.to_string(), c.value.clone());
+        }
+        P_PLACE_POINT => parse_place_point(acc, c),
+        P_PLACE_NAME => parse_place_name(acc, c),
+        P_PART_OF => tally(&mut acc.part_of, c, "parentPlaceId"),
+        P_MEDIA_LINK => parse_media_link(acc, c),
+        P_SAME_AS => collect_pair(&mut acc.same_as, c, id),
+        P_DIFFERENT_FROM => collect_pair(&mut acc.different_from, c, id),
+        P_ATTEST => parse_attest(acc, c),
+        P_PREFERRED => parse_preferred(acc, c),
+        P_PARENT => parse_parent(acc, c),
+        P_PARTNERSHIP => parse_partnership(acc, c),
+        P_EVENT_TYPE => tally(&mut acc.event_type, c, "type"),
+        P_DATE => tally(&mut acc.event_date, c, "edtf"),
+        P_EVENT_PLACE => tally(&mut acc.event_place, c, "placeId"),
+        P_PARTICIPANT => parse_participant(acc, c),
+        P_NAME => acc
+            .name_claims
+            .push((c.target_id.clone(), id.to_string(), c.value.clone())),
+        P_SEX => parse_sex(acc, c),
+        P_BIOGRAPHY => parse_biography(acc, c),
+        P_CUSTOM_FIELD => parse_custom_field(acc, c),
+        P_CUSTOM_VALUE => parse_custom_value(acc, c),
+        P_REATTRIBUTE => parse_reattribute(acc, c),
+        // The root existence proposition, auto-minted with each anchor (value {}). Its citation is
+        // harvested above; an attestation on it is collected under P_ATTEST; the claim asserts no
+        // structured fact, so it is consumed here rather than surfaced as an "other" claim.
+        P_EXISTENCE => {}
+        _ => acc.other_claims.push((
+            c.target_id.clone(),
+            id.to_string(),
+            c.predicate.clone(),
+            c.value.clone(),
+            c.created_by.clone(),
+        )),
     }
 }
 
-/// Project a record set into the read model. Pure: the result depends only on the set of records and
-/// the policy, never on their order. Three phases: **collect** (fold records into [`Collected`]),
-/// **resolve** identity (cluster `same_as/different_from`, reattribute, canonicalize), **assemble** the
-/// people / relationships / unions / events.
-// The three phases are named inline (collect is already its own fn); resolve + assemble share the ~30
-// destructured accumulators, so threading them through more call boundaries would mean passing a large
-// bundle for no readability gain — the AGENTS.md "irreducibly coupled" case. Kept as one pure function.
-#[allow(clippy::too_many_lines)]
+/// Record a claim's author + id into a `PairInfo`, seeding its fingerprint once — the shared tail of the
+/// pair-relation predicates (preferred / parent / partnership / reattribute).
+fn bump_pair_info(info: &mut PairInfo, author: &str, id: &str, c: &Claim) {
+    info.authors.insert(author.to_string());
+    info.claim_ids.insert(id.to_string());
+    if info.fingerprint.is_none() {
+        info.fingerprint = fingerprint_str(c);
+    }
+}
+
+fn parse_place_point(acc: &mut Collected, c: &Claim) {
+    acc.place_point
+        .entry(c.target_id.clone())
+        .or_default()
+        .entry(c.value.to_string())
+        .or_insert_with(|| (BTreeSet::new(), c.value.clone()))
+        .0
+        .insert(c.created_by.clone());
+}
+
+fn parse_place_name(acc: &mut Collected, c: &Claim) {
+    let Some(name) = c.value.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    let range = c
+        .value
+        .get("validRange")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    acc.place_name
+        .entry(c.target_id.clone())
+        .or_default()
+        .entry((range.to_string(), name.to_string()))
+        .or_default()
+        .insert(c.created_by.clone());
+}
+
+fn parse_media_link(acc: &mut Collected, c: &Claim) {
+    // Keep the whole value so the media view round-trips mime/width/height/role/order/caption/crop/kind
+    // (§10.2); require only `mediaHash` (the blob this links).
+    if c.value.get("mediaHash").and_then(Value::as_str).is_some() {
+        acc.media_links
+            .push((c.target_id.clone(), c.id.clone(), c.value.clone()));
+    }
+}
+
+fn parse_attest(acc: &mut Collected, c: &Claim) {
+    let Some(verdict) = c.value.get("verdict").and_then(Value::as_str) else {
+        return;
+    };
+    let v = acc.attests.entry(c.target_id.clone()).or_default();
+    match verdict {
+        "support" => {
+            v.support.insert(c.created_by.clone());
+        }
+        "reject" => {
+            v.reject.insert(c.created_by.clone());
+        }
+        _ => {}
+    }
+}
+
+fn parse_preferred(acc: &mut Collected, c: &Claim) {
+    // The referent is a `contentRef` (a `sha256:` content-ref of the name it prefers), NOT a claim id —
+    // stable across authors/merges, which is the point of `preferred` (§4.1).
+    let (Some(for_pred), Some(content_ref)) = (
+        c.value.get("for").and_then(Value::as_str),
+        c.value.get("contentRef").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    let info = acc
+        .preferred
+        .entry((
+            c.target_id.clone(),
+            for_pred.to_string(),
+            content_ref.to_string(),
+        ))
+        .or_default();
+    bump_pair_info(info, c.created_by.as_str(), c.id.as_str(), c);
+}
+
+fn parse_parent(acc: &mut Collected, c: &Claim) {
+    let Some(parent) = c.value.get("parentPersonId").and_then(Value::as_str) else {
+        return;
+    };
+    let kind = c
+        .value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_KIND);
+    let info = acc
+        .parent_child
+        .entry((c.target_id.clone(), parent.to_string(), kind.to_string()))
+        .or_default();
+    bump_pair_info(info, c.created_by.as_str(), c.id.as_str(), c);
+}
+
+fn parse_partnership(acc: &mut Collected, c: &Claim) {
+    let Some(p) = pair(c) else {
+        return;
+    };
+    let role = c
+        .value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_ROLE);
+    let info = acc.partnership.entry((p, role.to_string())).or_default();
+    bump_pair_info(info, c.created_by.as_str(), c.id.as_str(), c);
+}
+
+fn parse_participant(acc: &mut Collected, c: &Claim) {
+    let (Some(person), Some(role)) = (
+        c.value.get("personId").and_then(Value::as_str),
+        c.value.get("role").and_then(Value::as_str),
+    ) else {
+        return;
+    };
+    acc.participants
+        .entry(c.target_id.clone())
+        .or_default()
+        .insert((person.to_string(), role.to_string()));
+}
+
+fn parse_sex(acc: &mut Collected, c: &Claim) {
+    if let Some(sex) = c.value.get("sex").and_then(Value::as_str) {
+        acc.sex_claims.push((
+            c.target_id.clone(),
+            c.id.clone(),
+            sex.to_string(),
+            c.created_by.clone(),
+        ));
+    }
+}
+
+fn parse_biography(acc: &mut Collected, c: &Claim) {
+    if let Some(text) = c.value.get("text").and_then(Value::as_str) {
+        acc.biography_claims.push((
+            c.target_id.clone(),
+            c.id.clone(),
+            text.to_string(),
+            c.created_by.clone(),
+        ));
+    }
+}
+
+fn parse_custom_field(acc: &mut Collected, c: &Claim) {
+    let Some(fid) = c.value.get("fieldId").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(label) = c.value.get("label").and_then(Value::as_str) {
+        acc.field_label
+            .entry(fid.to_string())
+            .or_default()
+            .entry(label.to_string())
+            .or_default()
+            .insert(c.created_by.clone());
+    }
+    if let Some(ty) = c.value.get("type").and_then(Value::as_str) {
+        acc.field_type
+            .entry(fid.to_string())
+            .or_default()
+            .entry(ty.to_string())
+            .or_default()
+            .insert(c.created_by.clone());
+    }
+}
+
+fn parse_custom_value(acc: &mut Collected, c: &Claim) {
+    let (Some(fid), Some(val)) = (
+        c.value.get("fieldId").and_then(Value::as_str),
+        c.value.get("value"),
+    ) else {
+        return;
+    };
+    acc.custom_values.push((
+        c.target_id.clone(),
+        c.id.clone(),
+        fid.to_string(),
+        val.clone(),
+        c.created_by.clone(),
+    ));
+}
+
+fn parse_reattribute(acc: &mut Collected, c: &Claim) {
+    let Some(person) = c.value.get("personId").and_then(Value::as_str) else {
+        return;
+    };
+    let info = acc
+        .reattribute
+        .entry(c.target_id.clone())
+        .or_default()
+        .entry(person.to_string())
+        .or_default();
+    bump_pair_info(info, c.created_by.as_str(), c.id.as_str(), c);
+}
+
 /// Canonical person id for `id`: its cluster's representative anchor (`None` if it maps to no person).
 fn canon_of(
     rep: &BTreeMap<String, String>,
@@ -791,6 +712,10 @@ fn resolve(c: &Collected, policy: &Policy) -> Resolved {
     Resolved { rep, canonical, by_key, rehome, skipped }
 }
 
+/// Project a record set into the read model. Pure: the result depends only on the set of records and the
+/// policy, never on their order. Four phases: **collect** (fold records into [`Collected`]), **resolve**
+/// identity (cluster `same_as`/`different_from`, reattribute, canonicalize), **`build_person_maps`**
+/// (per-person aggregation), and **assemble** the people / relationships / unions / events.
 #[must_use]
 pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // The store guarantees unique content-hash ids, but be robust to a duplicated slice: keep the
@@ -875,13 +800,26 @@ struct PersonMaps {
     preferred_name_of: BTreeMap<String, String>,
 }
 
-/// Group every per-person claim onto its canonical person (applying reattribution via `eff_target`),
-/// resolving the most-corroborated value where a slot takes one. One cohesive aggregation pass — one
-/// small independent block per record kind (names / sex / biography / custom / sources / media / other /
-/// preferred); splitting per-kind would fragment a coherent pass for no readability gain.
-#[allow(clippy::too_many_lines)]
+/// Group every per-person claim onto its canonical person (project phase 3), one aggregation per kind.
 fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps {
-    // Pre-group names + sex by canonical person (applying reattribute_to via eff_target).
+    let names_by_person = names_map(c, r);
+    let (other_by_person, unclassified) = other_map(c, r);
+    let preferred_name_of = preferred_names_map(c, r, &names_by_person, policy);
+    PersonMaps {
+        sex_by_person: sex_map(c, r),
+        biography_by_person: biography_map(c, r),
+        customs_of: customs_map(c, r),
+        sources_by_person: sources_map(c, r),
+        media_by_person: media_map(c, r),
+        names_by_person,
+        other_by_person,
+        unclassified,
+        preferred_name_of,
+    }
+}
+
+/// Names per canonical person, each tagged with its `equivalent_to` equivalence class.
+fn names_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<NameView>> {
     let mut names_by_person: BTreeMap<String, Vec<NameView>> = BTreeMap::new();
     for (target, cid, parts) in &c.name_claims {
         if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
@@ -902,7 +840,11 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
                 .unwrap_or_else(|| v.claim_id.clone());
         }
     }
+    names_by_person
+}
 
+/// Sex claims tallied per person as value -> attesting authors (a majority pick is made at assembly).
+fn sex_map(c: &Collected, r: &Resolved) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
     let mut sex_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     for (target, cid, val, author) in &c.sex_claims {
         if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
@@ -914,7 +856,14 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
                 .insert(author.clone());
         }
     }
+    sex_by_person
+}
 
+/// Biography claims tallied per person as text -> attesting authors (most-corroborated wins at assembly).
+fn biography_map(
+    c: &Collected,
+    r: &Resolved,
+) -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
     let mut biography_by_person: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> =
         BTreeMap::new();
     for (target, cid, text, author) in &c.biography_claims {
@@ -927,9 +876,12 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
                 .insert(author.clone());
         }
     }
+    biography_by_person
+}
 
-    // Custom fields: per (person, fieldId) resolve the most-corroborated value; label/type from the
-    // field's most-corroborated definition (dangling fieldId → label = fieldId, type = "text").
+/// Custom fields per person: per (person, fieldId) the most-corroborated value, with label/type from the
+/// field's most-corroborated definition (dangling fieldId -> label = fieldId, type = "text").
+fn customs_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<CustomField>> {
     #[allow(clippy::type_complexity)]
     let mut custom_by_person: BTreeMap<
         String,
@@ -975,10 +927,12 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
         fields.sort_by(|a, b| a.field_id.cmp(&b.field_id));
         customs_of.insert(person.clone(), fields);
     }
+    customs_of
+}
 
-    // Sources: attach each citing claim to the canonical person its (effective) target resolves to,
-    // resolving the `sourceId` to the source claim's description. An unresolved source id surfaces the
-    // reference with empty source fields rather than dropping the citation.
+/// Source citations per person, the `sourceId` resolved to its source claim's description (an unresolved
+/// id surfaces the reference with empty source fields rather than dropping it).
+fn sources_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<Citation>> {
     let mut sources_by_person: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
     for (target, cid, pred, cit) in &c.citations {
         let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) else {
@@ -1018,9 +972,11 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
         });
         cits.dedup();
     }
+    sources_by_person
+}
 
-    // Media: attach each `media_link` to the canonical person its (effective) target resolves to.
-    // Links targeting events or sources don't resolve to a person and are dropped here (a seam).
+/// Media links per person (links targeting events or sources don't resolve to a person and are dropped).
+fn media_map(c: &Collected, r: &Resolved) -> BTreeMap<String, Vec<MediaLink>> {
     let mut media_by_person: BTreeMap<String, Vec<MediaLink>> = BTreeMap::new();
     for (target, cid, value) in &c.media_links {
         if let Some(canon) = canon_of(&r.rep, &r.canonical, &eff_target(&r.rehome, cid, target)) {
@@ -1042,10 +998,15 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
         links.sort_by(|a, b| a.claim_id.cmp(&b.claim_id));
         links.dedup();
     }
+    media_by_person
+}
 
-    // Unknown-predicate claims (OPE-212b): attach each to the canonical person its (effective) target
-    // resolves to; claims whose target isn't a person go to `unclassified` rather than minting a
-    // spurious person. Verbatim — no corroboration.
+/// Unknown-predicate claims (OPE-212b): each attached verbatim to its canonical person, or to
+/// `unclassified` when its target isn't a person. Returns `(by_person, unclassified)`.
+fn other_map(
+    c: &Collected,
+    r: &Resolved,
+) -> (BTreeMap<String, Vec<GenericClaimView>>, Vec<GenericClaimView>) {
     let mut other_by_person: BTreeMap<String, Vec<GenericClaimView>> = BTreeMap::new();
     let mut unclassified: Vec<GenericClaimView> = Vec::new();
     for (target, cid, pred, value, author) in &c.other_claims {
@@ -1070,11 +1031,19 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
             .then_with(|| a.predicate.cmp(&b.predicate))
             .then_with(|| a.claim_id.cmp(&b.claim_id))
     });
+    (other_by_person, unclassified)
+}
 
-    // Resolve `preferred` for the name slot: per person, the highest-scored net-positive `preferred`
-    // whose referent resolves to one of the person's names wins (ties by content-ref).
+/// The `preferred` name selection per person: the highest-scored net-positive `preferred` whose referent
+/// resolves to one of the person's names (ties by content-ref).
+fn preferred_names_map(
+    c: &Collected,
+    r: &Resolved,
+    names_by_person: &BTreeMap<String, Vec<NameView>>,
+    policy: &Policy,
+) -> BTreeMap<String, String> {
     let mut name_ref_to_id: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    for (person, views) in &names_by_person {
+    for (person, views) in names_by_person {
         let map = views
             .iter()
             .filter_map(|v| name_ref(&v.parts).map(|rf| (rf, v.claim_id.clone())))
@@ -1093,7 +1062,7 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
     let mut preferred_name_of: BTreeMap<String, String> = BTreeMap::new();
     for ((person, for_pred), options) in &by_slot {
         if for_pred != P_NAME {
-            continue; // other slots (birthdate, portrait…) use the same mechanism — a later increment
+            continue; // other slots (birthdate, portrait...) use the same mechanism - a later increment
         }
         let refs = name_ref_to_id.get(person);
         let winner = options
@@ -1111,18 +1080,7 @@ fn build_person_maps(c: &Collected, r: &Resolved, policy: &Policy) -> PersonMaps
             preferred_name_of.insert(person.clone(), name_id.clone());
         }
     }
-
-    PersonMaps {
-        names_by_person,
-        sex_by_person,
-        biography_by_person,
-        customs_of,
-        sources_by_person,
-        media_by_person,
-        other_by_person,
-        unclassified,
-        preferred_name_of,
-    }
+    preferred_name_of
 }
 
 /// Build the canonical `Person` records from the resolved clusters + per-person maps (project phase 4a).
