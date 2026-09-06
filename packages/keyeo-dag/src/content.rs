@@ -26,7 +26,6 @@ impl OpId for ContentId {}
 /// Compute the content id from an op's fields: `H(canonical(parents, author, action, sealing) ‖ signature
 /// ‖ author_public_key)`. `sealing` is folded in via the canonical bytes, so tampering with it changes the
 /// id (the whole op — including its opaque payload — is content-addressed).
-#[allow(clippy::too_many_arguments)]
 pub fn content_id<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
     group_id: &GroupId,
     parents: &[OId],

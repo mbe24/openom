@@ -122,7 +122,6 @@ where
     /// NOTE: this preserves MEMBERSHIP + the shared-marker, matching openom's members-only checkpoint. The
     /// keyring's DEK material rides the op's opaque `sealing` envelope (folded by the consumer), not
     /// `GroupState`, so nothing epoch-related needs seeding here.
-    #[allow(clippy::too_many_arguments)]
     pub fn adopt(
         base_state: GroupState<Op::MemberId, Op::R, Op::S>,
         base_frontier_depths: HashMap<Op::OpId, usize>,

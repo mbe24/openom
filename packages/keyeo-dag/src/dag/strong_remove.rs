@@ -303,18 +303,33 @@ where
     S: SignatureScheme,
     Op: SignedOp<OpId = OId, R = R, S = S>,
 {
-    let mut memo: HashMap<OId, bool> = HashMap::new();
-    let mut on_stack: HashSet<OId> = HashSet::new();
+    let mut memo = AuthMemo::default();
     for &id in ops.keys() {
-        authorized_at(id, genesis, graph, ops, ac, depth, &mut memo, &mut on_stack);
+        authorized_at(id, genesis, graph, ops, ac, depth, &mut memo);
     }
-    memo
+    memo.done
+}
+
+/// Recursion scratch shared across an `authorized_map` pass: `done` memoizes each op's decided
+/// authorization; `on_stack` is the DFS cycle guard (never triggers on a DAG). The two always travel
+/// together, so they ride as one value through the `authorized_at` recursion.
+struct AuthMemo<OId: OpId> {
+    done: HashMap<OId, bool>,
+    on_stack: HashSet<OId>,
+}
+
+impl<OId: OpId> Default for AuthMemo<OId> {
+    fn default() -> Self {
+        Self {
+            done: HashMap::new(),
+            on_stack: HashSet::new(),
+        }
+    }
 }
 
 /// Memoized: is `id`'s author authorized at `id`'s causal position? Folds `id`'s authorized ancestors
 /// (topological, by `(depth, id)`) onto `genesis`, then asks `AccessControl`. Recurses only into strict
 /// ancestors, so it terminates on any DAG (the `on_stack` guard degrades a stray cycle to `false`).
-#[allow(clippy::too_many_arguments)]
 fn authorized_at<OId, R, S, Op>(
     id: OId,
     genesis: &GroupState<Op::MemberId, R, S>,
@@ -322,8 +337,7 @@ fn authorized_at<OId, R, S, Op>(
     ops: &HashMap<OId, Op>,
     ac: &impl AccessControl<Op::MemberId, R, S>,
     depth: &HashMap<OId, usize>,
-    memo: &mut HashMap<OId, bool>,
-    on_stack: &mut HashSet<OId>,
+    memo: &mut AuthMemo<OId>,
 ) -> bool
 where
     OId: OpId,
@@ -331,10 +345,10 @@ where
     S: SignatureScheme,
     Op: SignedOp<OpId = OId, R = R, S = S>,
 {
-    if let Some(&a) = memo.get(&id) {
+    if let Some(&a) = memo.done.get(&id) {
         return a;
     }
-    if !on_stack.insert(id) {
+    if !memo.on_stack.insert(id) {
         return false; // cycle guard (never in a DAG)
     }
     // Fold the authorized ancestors of `id` in topological order to reconstruct the state `id` saw.
@@ -346,7 +360,7 @@ where
     ancestors.sort_by_key(|a| (*depth.get(a).unwrap_or(&0), *a));
     let mut state = genesis.clone();
     for a in ancestors {
-        if authorized_at(a, genesis, graph, ops, ac, depth, memo, on_stack) {
+        if authorized_at(a, genesis, graph, ops, ac, depth, memo) {
             if let Ok((next, _)) = apply_action(state.clone(), ops[&a].action()) {
                 state = next;
             }
@@ -358,8 +372,8 @@ where
     // so this is where a spoofed or since-retargeted key is caught, identically on every replica.
     let result = ac.is_authorized(&state, op.author(), op.action())
         && crate::dag::resolver::key_matches_registration(&state, op);
-    on_stack.remove(&id);
-    memo.insert(id, result);
+    memo.on_stack.remove(&id);
+    memo.done.insert(id, result);
     result
 }
 
@@ -484,7 +498,6 @@ pub(crate) fn compute_depths<OId: OpId, Op: SignedOp<OpId = OId>>(
 
 /// Is `author` an active member in `target`'s causal ancestry? Replay the author's valid
 /// `Add`/`Remove` events that happen-before `target`, in depth order; genesis members start active.
-#[allow(clippy::too_many_arguments)]
 fn author_active_before<OId: OpId, Op: SignedOp<OpId = OId>>(
     author: &Op::MemberId,
     target: OId,
