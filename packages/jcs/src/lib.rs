@@ -29,11 +29,17 @@ pub enum JcsError {
 pub const MAX_DEPTH: usize = 128;
 
 /// Canonicalize any [`Serialize`] value to RFC 8785 bytes.
+///
+/// # Errors
+/// Returns [`JcsError`] if `value` fails to serialize, contains a float, or nests deeper than [`MAX_DEPTH`].
 pub fn to_canonical<T: Serialize>(value: &T) -> Result<Vec<u8>, JcsError> {
     to_canonical_value(&serde_json::to_value(value)?)
 }
 
 /// Canonicalize an already-parsed [`Value`] to RFC 8785 bytes.
+///
+/// # Errors
+/// Returns [`JcsError::Float`] on any float, or [`JcsError::TooDeep`] past [`MAX_DEPTH`] of nesting.
 pub fn to_canonical_value(value: &Value) -> Result<Vec<u8>, JcsError> {
     let mut out = Vec::new();
     write_value(&mut out, value, 0)?;
@@ -43,6 +49,9 @@ pub fn to_canonical_value(value: &Value) -> Result<Vec<u8>, JcsError> {
 /// Canonicalize **only** the named top-level fields (order-independent; absent keys are skipped).
 /// This is the fingerprint primitive: `canonical_subset(claim, &["targetId","predicate","value"])`.
 /// `value` must be a JSON object.
+///
+/// # Errors
+/// Returns [`JcsError::NotObject`] if `value` is not an object, or a float/depth error from canonicalization.
 pub fn canonical_subset(value: &Value, include: &[&str]) -> Result<Vec<u8>, JcsError> {
     let obj = value.as_object().ok_or(JcsError::NotObject)?;
     let mut sub = serde_json::Map::new();
@@ -56,6 +65,9 @@ pub fn canonical_subset(value: &Value, include: &[&str]) -> Result<Vec<u8>, JcsE
 
 /// Canonicalize a top-level object **excluding** the named fields — the id primitive:
 /// `canonical_excluding(envelope, &["id","signature"])`. `value` must be a JSON object.
+///
+/// # Errors
+/// Returns [`JcsError::NotObject`] if `value` is not an object, or a float/depth error from canonicalization.
 pub fn canonical_excluding(value: &Value, exclude: &[&str]) -> Result<Vec<u8>, JcsError> {
     let obj = value.as_object().ok_or(JcsError::NotObject)?;
     let mut sub = serde_json::Map::new();
@@ -68,24 +80,30 @@ pub fn canonical_excluding(value: &Value, exclude: &[&str]) -> Result<Vec<u8>, J
 }
 
 /// `sha256(JCS(value))` — the raw 32-byte content hash of a value's canonical form.
+///
+/// # Errors
+/// Returns [`JcsError`] if `value` fails to canonicalize (see [`to_canonical`]).
 pub fn canonical_hash<T: Serialize>(value: &T) -> Result<[u8; 32], JcsError> {
     Ok(Sha256::digest(to_canonical(value)?).into())
 }
 
 /// Lowercase-hex SHA-256 of arbitrary bytes — the encoding used in `"sha256:"` content references.
+#[must_use]
 pub fn hex256(bytes: &[u8]) -> String {
     hex(Sha256::digest(bytes).as_slice())
 }
 
 /// Lowercase-hex encoding of arbitrary bytes. Shared so every crate in the content-addressing path
 /// encodes hashes and signatures identically.
+#[must_use]
 pub fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
+    // `hex_lower` only ever emits ASCII 0-9a-f, so the byte buffer is always valid UTF-8 — no panic path.
+    let mut s = Vec::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap());
+        s.push(hex_lower(b >> 4));
+        s.push(hex_lower(b & 0x0f));
     }
-    s
+    String::from_utf8(s).unwrap_or_default()
 }
 
 fn write_value(out: &mut Vec<u8>, v: &Value, depth: usize) -> Result<(), JcsError> {
@@ -139,7 +157,7 @@ fn utf16_cmp(a: &str, b: &str) -> Ordering {
     let mut bi = b.encode_utf16();
     loop {
         match (ai.next(), bi.next()) {
-            (Some(x), Some(y)) if x == y => continue,
+            (Some(x), Some(y)) if x == y => {}
             (Some(x), Some(y)) => return x.cmp(&y),
             (Some(_), None) => return Ordering::Greater,
             (None, Some(_)) => return Ordering::Less,
@@ -164,9 +182,11 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
             '\u{0d}' => out.extend_from_slice(b"\\r"),
             c if (c as u32) < 0x20 => {
                 out.extend_from_slice(b"\\u00");
-                let code = c as u32;
-                out.push(hex_lower((code >> 4) as u8));
-                out.push(hex_lower((code & 0x0f) as u8));
+                // Guarded above: c < 0x20, so it fits a u8 with each nibble a single hex digit. `try_from`
+                // keeps this cast-truncation-free; the `unwrap_or` fallback is unreachable given the guard.
+                let code = u8::try_from(u32::from(c)).unwrap_or(0);
+                out.push(hex_lower(code >> 4));
+                out.push(hex_lower(code & 0x0f));
             }
             c => {
                 let mut buf = [0u8; 4];
