@@ -165,7 +165,7 @@ fn mint(
 pub fn provision_anchor(
     tree_id: &[u8],
     founder_id: &str,
-    author_public_key: [u8; 32],
+    author_public_key: edsign::VerifyingKey,
     hpke_public_key: [u8; 32],
     reset_authority: [u8; 32],
     sealing: Vec<u8>,
@@ -175,7 +175,9 @@ pub fn provision_anchor(
     let founder = KeyringMemberInit {
         id: founder_id.to_string(),
         role: KeyringRole::OWNER,
-        author_public_key,
+        // The author key is a typed `VerifyingKey`; HPKE stays raw `[u8; 32]`. Distinct types → the two
+        // can't be transposed (a compile error), without pulling an X25519 crate into this lean crate.
+        author_public_key: author_public_key.to_bytes(),
         hpke_public_key,
     };
     let action = MembershipAction::Create {
@@ -627,7 +629,7 @@ pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
 pub fn append_refound(
     anchor_bytes: &[u8],
     owner_id: &str,
-    new_author_public_key: [u8; 32],
+    new_author_public_key: edsign::VerifyingKey,
     new_hpke_public_key: [u8; 32],
     era: u64,
     sealing: Vec<u8>,
@@ -635,7 +637,7 @@ pub fn append_refound(
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::ReFound {
         member: owner_id.to_string(),
-        new_author_public_key,
+        new_author_public_key: new_author_public_key.to_bytes(),
         new_hpke_public_key,
         era,
     };
@@ -651,14 +653,14 @@ pub fn append_refound(
 pub fn append_retarget(
     anchor_bytes: &[u8],
     member_id: &str,
-    new_author_public_key: [u8; 32],
+    new_author_public_key: edsign::VerifyingKey,
     new_hpke_public_key: [u8; 32],
     sealing: Vec<u8>,
     current_signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
     let action = MembershipAction::Retarget {
         member: member_id.to_string(),
-        new_author_public_key,
+        new_author_public_key: new_author_public_key.to_bytes(),
         new_hpke_public_key,
     };
     append(anchor_bytes, member_id, action, sealing, current_signing_key)
@@ -706,6 +708,9 @@ mod tests {
     }
     fn vk(seed: u8) -> [u8; 32] {
         sk(seed).verifying_key().to_bytes()
+    }
+    fn vpk(seed: u8) -> edsign::VerifyingKey {
+        sk(seed).verifying_key()
     }
     fn minit(id: &str, role: KeyringRole, seed: u8) -> KeyringMemberInit {
         KeyringMemberInit {
@@ -798,7 +803,7 @@ mod tests {
     /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
     #[test]
     fn watermark_advances_and_check_floor_catches_rollback() {
-        let a0 = provision_anchor(b"tree-1", "founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
         let w0 = watermark(&a0).unwrap();
         assert_eq!(w0.len(), 32, "a single tip (the genesis op) encodes to 32 bytes");
         assert!(check_floor(&a0, &w0).is_ok(), "the current frontier satisfies its own floor");
@@ -828,7 +833,7 @@ mod tests {
     #[test]
     fn has_been_shared_is_monotonic_true_after_an_add_even_once_removed() {
         // Solo genesis: never shared.
-        let a0 = provision_anchor(b"tree-es", "founder", vk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        let a0 = provision_anchor(b"tree-es", "founder", vpk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
         assert!(!resolve(&a0).unwrap().has_been_shared, "a solo tree has never been shared");
 
         // Admit a member → shared.
@@ -849,7 +854,7 @@ mod tests {
     #[test]
     fn compact_computes_a_decision_over_the_rebuilt_engine() {
         let a0 =
-            provision_anchor(b"tree-cp", "founder", vk(1), [1; 32], vk(3), b"g".to_vec(), &sk(1));
+            provision_anchor(b"tree-cp", "founder", vpk(1), [1; 32], vk(3), b"g".to_vec(), &sk(1));
         let a1 = append_add(
             &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1),
         )

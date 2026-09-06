@@ -468,7 +468,7 @@ impl KeyringLifecycle for DagVault {
         let anchor = dag_client::provision_anchor(
             tree_id,
             member_id,
-            author_public,
+            secrets.root.identity.verifying_key(),
             secrets.root.hpke_public,
             rvk_public,
             sealing,
@@ -624,7 +624,7 @@ impl KeyringLifecycle for DagVault {
         let new_anchor = dag_client::append_refound(
             anchor,
             member_id,
-            new_author,
+            secrets.root.identity.verifying_key(),
             secrets.root.hpke_public,
             // era is a UX/rate-limit scalar only; a monotone counter is a later refinement (single recover).
             1,
@@ -701,14 +701,12 @@ impl KeyringLifecycle for DagVault {
             member_id,
             &secrets,
         )?;
-        let new_author = secrets.root.identity.verifying_key().to_bytes();
-
         // Mint the Retarget signed by the OLD (current) owner key, retargeting to the new identity.
         let sealing = SealingPayload::escrow_only(new_escrow).to_bytes();
         let new_anchor = dag_client::append_retarget(
             anchor,
             member_id,
-            new_author,
+            secrets.root.identity.verifying_key(),
             secrets.root.hpke_public,
             sealing,
             &old_root.identity,
@@ -1492,7 +1490,7 @@ mod tests {
     #[test]
     fn compact_to_checkpoint_round_trips_through_resolve() {
         let sk = edsign::SigningKey::from_seed(&[9u8; 32]);
-        let pk = sk.verifying_key().to_bytes();
+        let pk = sk.verifying_key();
         let seal = |key: &[u8], ord: u64, esc: Option<RecoveryEscrow>| {
             SealingPayload {
                 new_epochs: vec![keyeo_crypto::Epoch {
