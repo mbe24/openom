@@ -4,17 +4,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use openom_crypto::{Passphrase, RecoveryCode, SALT_LEN};
-use openom_keyring_chain::{verify_transition, KeyringError, KeyringAnchor, VerifyingKey};
+use openom_keyring_chain::{verify_transition, KeyringAnchor, KeyringError, VerifyingKey};
 // Re-exported: `with_engine` takes an `EngineKind`, so callers select the engine preset without a
 // direct openom-keyring-api dependency.
 pub use openom_keyring_api::EngineKind;
+use openom_keyring_chain::wire::Keyring;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Compression, Format, MemberRole};
-use openom_keyring_chain::wire::Keyring;
 use openom_protocol::Message;
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
 use openom_vault::{vault, AppVault, DagVault, KeyringRole};
-use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "sqlite")]
@@ -262,8 +262,8 @@ pub struct Sealed {
 #[serde(rename_all = "camelCase")]
 pub struct MemberProvisioned {
     pub kdf_params: Vec<u8>,
-    pub author_public: Vec<u8>,
-    pub hpke_public: Vec<u8>,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -317,8 +317,20 @@ pub struct Backfilled {
 // credentials + the target member/entry). Each rides as one named request struct — deserialized straight
 // from the Tauri invoke payload and reused by the host method — instead of a long positional argument list.
 
+/// The member being admitted, as it crosses the IPC boundary: id + role + the OOB-received public key
+/// bytes. Nested inside every add request so the three share one shape (and one author-then-hpke order) by
+/// construction; the host narrows it into a typed [`openom_vault::Joiner`] via `Joiner::from_bytes`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinerDto {
+    pub member_id: String,
+    pub role: String,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
+}
+
 /// Request for [`VaultHost::add_member`] (owner action): the tree + owner credentials and the
-/// OOB-verified new member.
+/// OOB-verified new `member`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddMemberRequest {
@@ -326,14 +338,11 @@ pub struct AddMemberRequest {
     pub tree_id: Vec<u8>,
     pub owner_passphrase: String,
     pub owner_member_id: String,
-    pub new_member_id: String,
-    pub role: String,
-    pub member_hpke_public: Vec<u8>,
-    pub member_author_public: Vec<u8>,
+    pub member: JoinerDto,
 }
 
 /// Request for [`VaultHost::add_member_as_co_owner`] (any-of administration): the co-owner's credentials
-/// (passphrase + kdf + pinned trusted signers) and the OOB-verified new member.
+/// (passphrase + kdf + pinned trusted signers) and the OOB-verified new `member`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddMemberAsCoOwnerRequest {
@@ -343,10 +352,7 @@ pub struct AddMemberAsCoOwnerRequest {
     pub co_owner_kdf_params: Vec<u8>,
     pub co_owner_member_id: String,
     pub trusted_signers: Vec<Vec<u8>>,
-    pub new_member_id: String,
-    pub role: String,
-    pub member_hpke_public: Vec<u8>,
-    pub member_author_public: Vec<u8>,
+    pub member: JoinerDto,
 }
 
 /// Request for [`VaultHost::remove_member_as_co_owner`].
@@ -362,8 +368,7 @@ pub struct RemoveMemberAsCoOwnerRequest {
     pub remove_member_id: String,
 }
 
-/// Request for [`VaultHost::dag_add_member`] (owner action on a dag tree). Note the author/HPKE key order
-/// mirrors the dag veneer.
+/// Request for [`VaultHost::dag_add_member`] (owner action on a dag tree).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DagAddMemberRequest {
@@ -371,10 +376,7 @@ pub struct DagAddMemberRequest {
     pub tree_id: Vec<u8>,
     pub owner_passphrase: String,
     pub owner_member_id: String,
-    pub new_member_id: String,
-    pub role: String,
-    pub member_author_public: Vec<u8>,
-    pub member_hpke_public: Vec<u8>,
+    pub member: JoinerDto,
 }
 
 /// Request for [`VaultHost::seal_entry`]: the sealer handle plus the entry's chain state and plaintext.
@@ -405,7 +407,9 @@ struct Registry {
 
 impl Registry {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SealerSet>>> {
-        self.map.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
     fn insert(&self, id: String, sealer: SealerSet) {
         self.lock().insert(id, Arc::new(sealer));
@@ -466,7 +470,11 @@ impl SeededEntropy {
     /// Seed the stream (a zero seed is remapped so the generator never sticks at 0).
     pub fn new(seed: u64) -> Self {
         SeededEntropy {
-            state: Mutex::new(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed }),
+            state: Mutex::new(if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            }),
         }
     }
 }
@@ -636,7 +644,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         member_id: &str,
     ) -> Result<Recovered> {
         let keyring = self.require_keyring(tree_key)?;
-        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let replica = self.fresh_replica()?;
         let (tree, member, rep) = (
             TreeId::new(tree_id),
@@ -683,7 +694,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         member_id: &str,
     ) -> Result<Rekeyed> {
         let keyring = self.require_keyring(tree_key)?;
-        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let replica = self.fresh_replica()?;
         let (tree, member, rep) = (
             TreeId::new(tree_id),
@@ -721,8 +735,8 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let m = vault::provision_member(&Passphrase::new(passphrase.into_bytes()))?;
         Ok(MemberProvisioned {
             kdf_params: keyeo_crypto::codec::encode_kdf_params(&m.kdf_params),
-            author_public: m.author_public,
-            hpke_public: m.hpke_public,
+            author_public_key: m.author_public_key,
+            hpke_public_key: m.hpke_public_key,
         })
     }
 
@@ -741,18 +755,19 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
+        let joiner = vault::Joiner::from_bytes(
+            &MemberId::new(&req.member.member_id),
+            parse_member_role(&req.member.role)?,
+            &req.member.author_public_key,
+            &req.member.hpke_public_key,
+        )?;
         let added = vault::add_member(
             &keyring,
             &Passphrase::new(req.owner_passphrase.into_bytes()),
             &TreeId::new(req.tree_id.as_slice()),
             &MemberId::new(&req.owner_member_id),
             floor,
-            &vault::NewMemberSpec {
-                member_id: &MemberId::new(&req.new_member_id),
-                role: parse_member_role(&req.role)?,
-                hpke_public: &req.member_hpke_public,
-                author_public: &req.member_author_public,
-            },
+            &joiner,
         )?;
         let watermark = self.commit_transition(
             &req.tree_key,
@@ -875,10 +890,17 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
-            VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
-        })?;
+        let kdf =
+            keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
+                VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
+            })?;
         let trusted = parse_trusted_signers(&req.trusted_signers)?;
+        let joiner = vault::Joiner::from_bytes(
+            &MemberId::new(&req.member.member_id),
+            parse_member_role(&req.member.role)?,
+            &req.member.author_public_key,
+            &req.member.hpke_public_key,
+        )?;
         let added = vault::add_member_as_co_owner(
             &keyring,
             &vault::MemberAuth {
@@ -889,12 +911,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             },
             &TreeId::new(req.tree_id.as_slice()),
             floor,
-            &vault::NewMemberSpec {
-                member_id: &MemberId::new(&req.new_member_id),
-                role: parse_member_role(&req.role)?,
-                hpke_public: &req.member_hpke_public,
-                author_public: &req.member_author_public,
-            },
+            &joiner,
         )?;
         let watermark = self.commit_transition(
             &req.tree_key,
@@ -921,9 +938,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
-            VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
-        })?;
+        let kdf =
+            keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
+                VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
+            })?;
         let trusted = parse_trusted_signers(&req.trusted_signers)?;
         let replica = self.fresh_replica()?;
         let r = vault::remove_member_as_co_owner(
@@ -1056,7 +1074,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         // An empty run is "already up to date" — a no-op that must leave the stored watermark (and its
         // recover pin) exactly as-is rather than rewrite it to a bare revision (OPE-286 phase 2).
         if hops.is_empty() {
-            let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+            let stored = self
+                .store
+                .watermark(tree_key)
+                .map_err(VaultError::storage)?;
             return Ok(AcceptedKeyring {
                 watermark: chain_watermark_carry(anchor_keyring.revision, &stored),
             });
@@ -1072,15 +1093,20 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
                 })
             })
             .collect::<Result<_>>()?;
-        let new_anchor =
-            openom_keyring_chain::verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
-                .map_err(remote_chain_err)?;
+        let new_anchor = openom_keyring_chain::verify_walk(
+            &KeyringAnchor::from_keyring(&anchor_keyring),
+            &decoded,
+        )
+        .map_err(remote_chain_err)?;
         // Persist the validated head (the last hop) + advance the floor, atomically. This path doesn't
         // open the DEK, so it can't compute a fresh pin — carry the stored one forward (never erase it; a
         // remote epoch rotation makes it stale → recover fails closed until the next unlock, per
         // `chain_watermark_carry`'s residual note).
         let head = hops.last().expect("non-empty run");
-        let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let stored = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let watermark = chain_watermark_carry(new_anchor.revision, &stored);
         self.store
             .commit_keyring(tree_key, head, &watermark)
@@ -1177,16 +1203,17 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             member_id: &member,
             replica_id: &rep,
         };
+        let joiner = openom_vault::vault::Joiner::from_bytes(
+            &MemberId::new(&req.member.member_id),
+            parse_keyring_role(&req.member.role)?,
+            &req.member.author_public_key,
+            &req.member.hpke_public_key,
+        )?;
         let new_anchor = dag.add_member(
             &ctx,
             &anchor,
             &Passphrase::new(req.owner_passphrase.into_bytes()),
-            &openom_vault::KeyringMemberInit {
-                id: req.new_member_id.clone(),
-                role: parse_keyring_role(&req.role)?,
-                author_public_key: key32(&req.member_author_public, "member author key")?,
-                hpke_public_key: key32(&req.member_hpke_public, "member hpke key")?,
-            },
+            &joiner,
         )?;
         let watermark = dag.watermark(&new_anchor)?;
         self.store
@@ -1267,7 +1294,12 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             member_id: &member,
             replica_id: &rep,
         };
-        let u = dag.unlock_as_member(&ctx, &anchor, &Passphrase::new(passphrase.into_bytes()), &kdf)?;
+        let u = dag.unlock_as_member(
+            &ctx,
+            &anchor,
+            &Passphrase::new(passphrase.into_bytes()),
+            &kdf,
+        )?;
         let id = self.register(u.sealer)?;
         Ok(Unlocked {
             sealer_id: id,
@@ -1285,7 +1317,11 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the vault operation or host store access fails.
-    pub fn dag_merge_remote(&self, tree_key: &str, remote_anchor: &[u8]) -> Result<AcceptedKeyring> {
+    pub fn dag_merge_remote(
+        &self,
+        tree_key: &str,
+        remote_anchor: &[u8],
+    ) -> Result<AcceptedKeyring> {
         let dag = self.dag()?;
         let local = self.require_keyring(tree_key)?;
         let merged = dag.merge(&local, remote_anchor)?;
@@ -1311,7 +1347,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ) -> Result<Resealed> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
-        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let replica = self.fresh_replica()?;
         let (tree, member, rep) = (
             TreeId::new(tree_id),
@@ -1357,7 +1396,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ) -> Result<Resealed> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
-        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
@@ -1406,7 +1448,10 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ) -> Result<Backfilled> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
-        let floor = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
         let replica = self.fresh_replica()?;
         let (tree, member, rep) = (
             TreeId::new(tree_id),
@@ -1480,8 +1525,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let produced = decode_keyring(produced_bytes)?;
         let new_anchor = verify_transition(&KeyringAnchor::from_keyring(&prior), &produced)
             .map_err(self_check_failed)?;
-        let watermark = if let Some((key_id, dek_hash)) = pin { chain_watermark_pinned(new_anchor.revision, key_id, dek_hash) } else {
-            let stored = self.store.watermark(tree_key).map_err(VaultError::storage)?;
+        let watermark = if let Some((key_id, dek_hash)) = pin {
+            chain_watermark_pinned(new_anchor.revision, key_id, dek_hash)
+        } else {
+            let stored = self
+                .store
+                .watermark(tree_key)
+                .map_err(VaultError::storage)?;
             chain_watermark_carry(new_anchor.revision, &stored)
         };
         self.store
@@ -1683,16 +1733,6 @@ fn parse_keyring_role(s: &str) -> Result<KeyringRole> {
     }
 }
 
-/// A 32-byte public key from wire bytes, or a `BadRequest` naming the field.
-fn key32(b: &[u8], what: &str) -> Result<[u8; 32]> {
-    b.try_into().map_err(|_| {
-        VaultError::new(
-            VaultErrorCode::BadRequest,
-            format!("{what} must be 32 bytes, got {}", b.len()),
-        )
-    })
-}
-
 /// Decode the caller's pinned signer verify-keys (32-byte Ed25519 each). At least one is
 /// required — a member unlock with no trust anchor would be verifying against nothing.
 fn parse_trusted_signers(raw: &[Vec<u8>]) -> Result<Vec<VerifyingKey>> {
@@ -1741,10 +1781,12 @@ mod tests {
             tree_id: tree_id.into(),
             owner_passphrase,
             owner_member_id: owner_member_id.into(),
-            new_member_id: new_member_id.into(),
-            role: role.into(),
-            member_hpke_public: member_hpke_public.into(),
-            member_author_public: member_author_public.into(),
+            member: JoinerDto {
+                member_id: new_member_id.into(),
+                role: role.into(),
+                author_public_key: member_author_public.into(),
+                hpke_public_key: member_hpke_public.into(),
+            },
         }
     }
     fn mk_co_add(
@@ -1766,10 +1808,12 @@ mod tests {
             co_owner_kdf_params: co_owner_kdf_params.into(),
             co_owner_member_id: co_owner_member_id.into(),
             trusted_signers,
-            new_member_id: new_member_id.into(),
-            role: role.into(),
-            member_hpke_public: member_hpke_public.into(),
-            member_author_public: member_author_public.into(),
+            member: JoinerDto {
+                member_id: new_member_id.into(),
+                role: role.into(),
+                author_public_key: member_author_public.into(),
+                hpke_public_key: member_hpke_public.into(),
+            },
         }
     }
     fn mk_co_remove(
@@ -1806,10 +1850,12 @@ mod tests {
             tree_id: tree_id.into(),
             owner_passphrase,
             owner_member_id: owner_member_id.into(),
-            new_member_id: new_member_id.into(),
-            role: role.into(),
-            member_author_public: member_author_public.into(),
-            member_hpke_public: member_hpke_public.into(),
+            member: JoinerDto {
+                member_id: new_member_id.into(),
+                role: role.into(),
+                author_public_key: member_author_public.into(),
+                hpke_public_key: member_hpke_public.into(),
+            },
         }
     }
     fn mk_seal(
@@ -1868,30 +1914,33 @@ mod tests {
 
     #[test]
     fn add_member_request_deserializes_from_camelcase() {
+        // The admitted member nests under `member` and shares the JoinerDto shape across all add requests.
         let payload = serde_json::json!({
             "treeKey": "my-tree",
             "treeId": [1, 2],
             "ownerPassphrase": "pw",
             "ownerMemberId": "owner",
-            "newMemberId": "m",
-            "role": "editor",
-            "memberHpkePublic": [3],
-            "memberAuthorPublic": [4]
+            "member": {
+                "memberId": "m",
+                "role": "editor",
+                "authorPublicKey": [4],
+                "hpkePublicKey": [3]
+            }
         });
         let req: AddMemberRequest = serde_json::from_value(payload).unwrap();
         assert_eq!(req.tree_key, "my-tree");
         assert_eq!(req.tree_id, vec![1, 2]);
         assert_eq!(req.owner_passphrase, "pw");
         assert_eq!(req.owner_member_id, "owner");
-        assert_eq!(req.new_member_id, "m");
-        assert_eq!(req.role, "editor");
-        assert_eq!(req.member_hpke_public, vec![3]);
-        assert_eq!(req.member_author_public, vec![4]);
+        assert_eq!(req.member.member_id, "m");
+        assert_eq!(req.member.role, "editor");
+        assert_eq!(req.member.author_public_key, vec![4]);
+        assert_eq!(req.member.hpke_public_key, vec![3]);
     }
 
     #[test]
     fn add_member_as_co_owner_request_deserializes_trusted_signer_list() {
-        // `trustedSigners` is an array-of-byte-arrays; prove the nested shape survives.
+        // `trustedSigners` is an array-of-byte-arrays; prove the nested shapes survive.
         let payload = serde_json::json!({
             "treeKey": "t",
             "treeId": [0],
@@ -1899,15 +1948,17 @@ mod tests {
             "coOwnerKdfParams": [5, 6],
             "coOwnerMemberId": "co",
             "trustedSigners": [[1, 1], [2, 2]],
-            "newMemberId": "m",
-            "role": "editor",
-            "memberHpkePublic": [7],
-            "memberAuthorPublic": [8]
+            "member": {
+                "memberId": "m",
+                "role": "editor",
+                "authorPublicKey": [8],
+                "hpkePublicKey": [7]
+            }
         });
         let req: AddMemberAsCoOwnerRequest = serde_json::from_value(payload).unwrap();
         assert_eq!(req.co_owner_kdf_params, vec![5, 6]);
         assert_eq!(req.trusted_signers, vec![vec![1, 1], vec![2, 2]]);
-        assert_eq!(req.member_author_public, vec![8]);
+        assert_eq!(req.member.author_public_key, vec![8]);
     }
 
     /// An in-memory VaultStore: keyring bytes + a monotonic revision floor per tree.
@@ -1986,7 +2037,11 @@ mod tests {
                 .unwrap()
                 .sealer_id
         };
-        assert_eq!(provision(42), provision(42), "same seed → same host-minted id");
+        assert_eq!(
+            provision(42),
+            provision(42),
+            "same seed → same host-minted id"
+        );
         assert_ne!(provision(42), provision(7), "different seed → different id");
     }
 
@@ -2051,14 +2106,20 @@ mod tests {
             !p.watermark.is_empty(),
             "dag provision reports an opaque frontier watermark, not a stub"
         );
-        assert!(!p.needs_reseal, "a fresh single-replica dag tree is not stale");
+        assert!(
+            !p.needs_reseal,
+            "a fresh single-replica dag tree is not stale"
+        );
         let envelope = seal(&h, &p.sealer_id, b"the family tree");
 
         // Lock frees the sealer; a fresh unlock re-derives the same DEK from the stored anchor and opens
         // pre-lock data — the anchor + frontier round-tripped through the store as opaque bytes.
         h.lock(&p.sealer_id);
         let u = h.unlock(KEY, TREE, "correct horse".into(), MEMBER).unwrap();
-        assert_eq!(u.did_key, p.did_key, "same owner identity across provision + unlock");
+        assert_eq!(
+            u.did_key, p.did_key,
+            "same owner identity across provision + unlock"
+        );
         assert_eq!(
             h.open_entry(&u.sealer_id, "snapshot", &envelope).unwrap(),
             b"the family tree"
@@ -2066,15 +2127,23 @@ mod tests {
 
         // Change the passphrase (a current-key Retarget, floor = the stored frontier): the old passphrase
         // is retired, the new one opens, and the DEK is unchanged so pre-change data still opens.
-        h.change_passphrase(KEY, TREE, "correct horse".into(), "battery staple".into(), MEMBER)
-            .unwrap();
+        h.change_passphrase(
+            KEY,
+            TREE,
+            "correct horse".into(),
+            "battery staple".into(),
+            MEMBER,
+        )
+        .unwrap();
         assert_eq!(
             h.unlock(KEY, TREE, "correct horse".into(), MEMBER)
                 .unwrap_err()
                 .code,
             VaultErrorCode::CryptoOpen
         );
-        let u2 = h.unlock(KEY, TREE, "battery staple".into(), MEMBER).unwrap();
+        let u2 = h
+            .unlock(KEY, TREE, "battery staple".into(), MEMBER)
+            .unwrap();
         assert_eq!(
             h.open_entry(&u2.sealer_id, "snapshot", &envelope).unwrap(),
             b"the family tree"
@@ -2092,8 +2161,14 @@ mod tests {
         let r = h
             .recover(KEY, TREE, p.recovery_code.clone(), "new".into(), MEMBER)
             .unwrap();
-        assert!(!r.watermark.is_empty(), "recover advances to a fresh frontier watermark");
-        assert_ne!(r.did_key, p.did_key, "recovery mints a fresh owner identity");
+        assert!(
+            !r.watermark.is_empty(),
+            "recover advances to a fresh frontier watermark"
+        );
+        assert_ne!(
+            r.did_key, p.did_key,
+            "recovery mints a fresh owner identity"
+        );
         assert_eq!(
             h.open_entry(&r.sealer_id, "snapshot", &envelope).unwrap(),
             b"heirloom"
@@ -2107,17 +2182,28 @@ mod tests {
         // MEMBER with his own passphrase + account kdf (reaching the DEK via his HPKE wrap, not the RRK) and
         // reads the shared data. The dag membership ops are refused on a chain deployment.
         let h = dag_host();
-        let p = h.provision(KEY, TREE, "owner horse".into(), MEMBER).unwrap();
+        let p = h
+            .provision(KEY, TREE, "owner horse".into(), MEMBER)
+            .unwrap();
         let envelope = seal(&h, &p.sealer_id, b"shared data");
 
         let bob = h.provision_member("bob pass".into()).unwrap();
         let added = h
             .dag_add_member(mk_dag_add(
-                KEY, TREE, "owner horse".into(), MEMBER, "acct-bob", "editor",
-                &bob.author_public, &bob.hpke_public,
+                KEY,
+                TREE,
+                "owner horse".into(),
+                MEMBER,
+                "acct-bob",
+                "editor",
+                &bob.author_public_key,
+                &bob.hpke_public_key,
             ))
             .unwrap();
-        assert!(!added.watermark.is_empty(), "adding a member advances the persisted frontier");
+        assert!(
+            !added.watermark.is_empty(),
+            "adding a member advances the persisted frontier"
+        );
 
         let u = h
             .dag_unlock_as_member(KEY, TREE, "bob pass".into(), &bob.kdf_params, "acct-bob")
@@ -2138,8 +2224,14 @@ mod tests {
         assert_eq!(
             chain
                 .dag_add_member(mk_dag_add(
-                    KEY, TREE, "owner".into(), MEMBER, "acct-x", "editor",
-                    &bob.author_public, &bob.hpke_public,
+                    KEY,
+                    TREE,
+                    "owner".into(),
+                    MEMBER,
+                    "acct-x",
+                    "editor",
+                    &bob.author_public_key,
+                    &bob.hpke_public_key,
                 ))
                 .unwrap_err()
                 .code,
@@ -2169,8 +2261,17 @@ mod tests {
             ("acct-carol", &carol),
             ("acct-dave", &dave),
         ] {
-            a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, id, "editor", &m.author_public, &m.hpke_public))
-                .unwrap();
+            a.dag_add_member(mk_dag_add(
+                KEY,
+                TREE,
+                owner.into(),
+                MEMBER,
+                id,
+                "editor",
+                &m.author_public_key,
+                &m.hpke_public_key,
+            ))
+            .unwrap();
         }
         // Snapshot the shared anchor after the three adds, and seed host B (the second device) with it.
         let shared = a.store.load_keyring(KEY).unwrap().unwrap();
@@ -2179,8 +2280,10 @@ mod tests {
         b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
 
         // --- Concurrent removals: A removes bob, B removes carol (both children of `shared`'s frontier) ---
-        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
-        b.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-carol").unwrap();
+        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob")
+            .unwrap();
+        b.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-carol")
+            .unwrap();
         let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
 
         // --- A merges B's branch: the two concurrent removals set-union onto A's anchor ---
@@ -2188,14 +2291,20 @@ mod tests {
 
         // The merged write epoch is stale (still wraps a concurrently-removed member).
         let u = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
-        assert!(u.needs_reseal, "concurrent removals leave the merged write epoch stale");
+        assert!(
+            u.needs_reseal,
+            "concurrent removals leave the merged write epoch stale"
+        );
         a.lock(&u.sealer_id);
 
         // Reseal repairs it; the flag clears and the owner seals a post-merge entry under the covering epoch.
         let re = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(re.resealed, "a stale write epoch is repaired");
         let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
-        assert!(!u2.needs_reseal, "after reseal the write epoch covers the resolved membership");
+        assert!(
+            !u2.needs_reseal,
+            "after reseal the write epoch covers the resolved membership"
+        );
         let post = seal(&a, &u2.sealer_id, b"after the merge");
 
         // dave (survivor) still reads it; bob and carol (both concurrently removed) are locked out.
@@ -2212,8 +2321,14 @@ mod tests {
             "a concurrently-removed member is locked out after the merge + reseal"
         );
         assert!(
-            a.dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
-                .is_err(),
+            a.dag_unlock_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol"
+            )
+            .is_err(),
             "the other concurrently-removed member is locked out too"
         );
 
@@ -2233,8 +2348,17 @@ mod tests {
         let a = dag_host();
         a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
         let bob = a.provision_member("bob pass".into()).unwrap();
-        a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public))
-            .unwrap();
+        a.dag_add_member(mk_dag_add(
+            KEY,
+            TREE,
+            owner.into(),
+            MEMBER,
+            "acct-bob",
+            "editor",
+            &bob.author_public_key,
+            &bob.hpke_public_key,
+        ))
+        .unwrap();
 
         let shared = a.store.load_keyring(KEY).unwrap().unwrap();
         let shared_wm = a.store.watermark(KEY).unwrap();
@@ -2242,45 +2366,88 @@ mod tests {
         b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
 
         // A removes bob (epoch 1, owner-only); B concurrently adds carol (wrapped only in epoch 0).
-        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
-        let carol = a.provision_member("carol pass".into()).unwrap();
-        b.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public))
+        a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob")
             .unwrap();
+        let carol = a.provision_member("carol pass".into()).unwrap();
+        b.dag_add_member(mk_dag_add(
+            KEY,
+            TREE,
+            owner.into(),
+            MEMBER,
+            "acct-carol",
+            "editor",
+            &carol.author_public_key,
+            &carol.hpke_public_key,
+        ))
+        .unwrap();
 
         // Device B merges A's branch (drive the repair through B, a NON-owner device). carol can unlock but
         // her unlock reports the merged write epoch is stale — it doesn't cover her.
         let a_branch = a.store.load_keyring(KEY).unwrap().unwrap();
         b.dag_merge_remote(KEY, &a_branch).unwrap();
         let u0 = b
-            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .dag_unlock_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol",
+            )
             .unwrap();
-        assert!(u0.needs_reseal, "the merged write epoch doesn't cover the concurrently-added carol");
+        assert!(
+            u0.needs_reseal,
+            "the merged write epoch doesn't cover the concurrently-added carol"
+        );
         b.lock(&u0.sealer_id);
 
         // carol self-heals with only her OWN credentials — no owner passphrase.
         let re = b
-            .dag_reseal_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .dag_reseal_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol",
+            )
             .unwrap();
         assert!(re.resealed, "a member reseals a stale write epoch herself");
 
         let u = b
-            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .dag_unlock_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol",
+            )
             .unwrap();
-        assert!(!u.needs_reseal, "after the self-heal the write epoch covers carol");
+        assert!(
+            !u.needs_reseal,
+            "after the self-heal the write epoch covers carol"
+        );
         b.lock(&u.sealer_id);
 
         // The owner's device converges once it sees carol's covering epoch — nothing owner-side required.
         let b_after = b.store.load_keyring(KEY).unwrap().unwrap();
         a.dag_merge_remote(KEY, &b_after).unwrap();
         let uo = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
-        assert!(!uo.needs_reseal, "the owner converges on the member's covering epoch");
+        assert!(
+            !uo.needs_reseal,
+            "the owner converges on the member's covering epoch"
+        );
         a.lock(&uo.sealer_id);
 
         // Idempotent: a second member reseal is a no-op.
         assert!(
-            !b.dag_reseal_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
-                .unwrap()
-                .resealed,
+            !b.dag_reseal_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol"
+            )
+            .unwrap()
+            .resealed,
             "nothing stale -> member reseal is a no-op"
         );
     }
@@ -2296,8 +2463,17 @@ mod tests {
         let a = dag_host();
         a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
         let bob = a.provision_member("bob pass".into()).unwrap();
-        a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public))
-            .unwrap();
+        a.dag_add_member(mk_dag_add(
+            KEY,
+            TREE,
+            owner.into(),
+            MEMBER,
+            "acct-bob",
+            "editor",
+            &bob.author_public_key,
+            &bob.hpke_public_key,
+        ))
+        .unwrap();
 
         // Seed device B with the shared anchor (before A's removal / B's add).
         let shared = a.store.load_keyring(KEY).unwrap().unwrap();
@@ -2306,34 +2482,58 @@ mod tests {
         b.store.commit_keyring(KEY, &shared, &shared_wm).unwrap();
 
         // A removes bob (mints epoch 1) and seals a secret under that new epoch.
-        let removed = a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
+        let removed = a
+            .dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob")
+            .unwrap();
         let secret = seal(&a, &removed.sealer_id, b"branch-A history");
         a.lock(&removed.sealer_id);
 
         // B concurrently adds carol — she gets a wrap for epoch 0 only (B never saw A's epoch 1).
         let carol = a.provision_member("carol pass".into()).unwrap();
-        b.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public))
-            .unwrap();
+        b.dag_add_member(mk_dag_add(
+            KEY,
+            TREE,
+            owner.into(),
+            MEMBER,
+            "acct-carol",
+            "editor",
+            &carol.author_public_key,
+            &carol.hpke_public_key,
+        ))
+        .unwrap();
         let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
 
         // A merges B's branch: resolved = {owner, carol} (bob removed). The write epoch doesn't cover carol.
         a.dag_merge_remote(KEY, &b_branch).unwrap();
         let u = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
-        assert!(u.needs_reseal, "the merged write epoch doesn't cover the concurrently-added carol");
+        assert!(
+            u.needs_reseal,
+            "the merged write epoch doesn't cover the concurrently-added carol"
+        );
         a.lock(&u.sealer_id);
 
         // Reseal → a fresh covering epoch so carol can unlock; but she STILL can't read A's epoch-1 history.
         a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
         let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(!u2.needs_reseal, "reseal covers the write epoch");
-        assert!(u2.needs_backfill, "carol still lacks a wrap in A's older epoch 1");
+        assert!(
+            u2.needs_backfill,
+            "carol still lacks a wrap in A's older epoch 1"
+        );
         a.lock(&u2.sealer_id);
 
         let carol_pre = a
-            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .dag_unlock_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol",
+            )
             .unwrap();
         assert!(
-            a.open_entry(&carol_pre.sealer_id, "snapshot", &secret).is_err(),
+            a.open_entry(&carol_pre.sealer_id, "snapshot", &secret)
+                .is_err(),
             "carol can't read history sealed under the epoch she's missing"
         );
         a.lock(&carol_pre.sealer_id);
@@ -2342,14 +2542,24 @@ mod tests {
         let bf = a.dag_backfill(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(bf.backfilled, "a missing historical wrap is backfilled");
         let u3 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
-        assert!(!u3.needs_backfill, "after backfill every epoch covers every resolved member");
+        assert!(
+            !u3.needs_backfill,
+            "after backfill every epoch covers every resolved member"
+        );
         a.lock(&u3.sealer_id);
 
         let carol_post = a
-            .dag_unlock_as_member(KEY, TREE, "carol pass".into(), &carol.kdf_params, "acct-carol")
+            .dag_unlock_as_member(
+                KEY,
+                TREE,
+                "carol pass".into(),
+                &carol.kdf_params,
+                "acct-carol",
+            )
             .unwrap();
         assert_eq!(
-            a.open_entry(&carol_post.sealer_id, "snapshot", &secret).unwrap(),
+            a.open_entry(&carol_post.sealer_id, "snapshot", &secret)
+                .unwrap(),
             b"branch-A history",
             "after backfill carol reads the previously-unreachable history"
         );
@@ -2357,7 +2567,9 @@ mod tests {
 
         // Idempotent: a second backfill is a no-op.
         assert!(
-            !a.dag_backfill(KEY, TREE, owner.into(), MEMBER).unwrap().backfilled,
+            !a.dag_backfill(KEY, TREE, owner.into(), MEMBER)
+                .unwrap()
+                .backfilled,
             "nothing missing -> backfill is a no-op"
         );
     }
@@ -2370,7 +2582,9 @@ mod tests {
         // enforced engine-side on the untrusted paths (recover + keyring sync). So even an artificially-ahead
         // watermark doesn't block unlock, and unlock (a pure read) doesn't touch the watermark either.
         let anchor = h.store.load_keyring(KEY).unwrap().unwrap();
-        h.store.commit_keyring(KEY, &anchor, &chain_watermark(7)).unwrap();
+        h.store
+            .commit_keyring(KEY, &anchor, &chain_watermark(7))
+            .unwrap();
         assert!(h.unlock(KEY, TREE, "pass".into(), MEMBER).is_ok());
         h.lock(&p.sealer_id);
     }
@@ -2432,11 +2646,15 @@ mod tests {
                 MEMBER,
                 MEMBER2,
                 "editor",
-                &m.hpke_public,
-                &m.author_public,
+                &m.hpke_public_key,
+                &m.author_public_key,
             ))
             .unwrap();
-        assert_eq!(added.watermark.len(), PINNED, "an add must not erase the pin");
+        assert_eq!(
+            added.watermark.len(),
+            PINNED,
+            "an add must not erase the pin"
+        );
         // An add mints no epoch → the SAME write-epoch pin is carried forward.
         assert_eq!(&added.watermark[4..], &p.watermark[4..]);
 
@@ -2449,7 +2667,13 @@ mod tests {
 
         // The pin survived both ops, so recover authenticates the write epoch and succeeds.
         let r = h
-            .recover(KEY, TREE, p.recovery_code.clone(), "new pass".into(), MEMBER)
+            .recover(
+                KEY,
+                TREE,
+                p.recovery_code.clone(),
+                "new pass".into(),
+                MEMBER,
+            )
             .unwrap();
         assert_eq!(chain_floor(&r.watermark), 4);
         assert!(h.unlock(KEY, TREE, "new pass".into(), MEMBER).is_ok());
@@ -2542,8 +2766,8 @@ mod tests {
                 MEMBER,
                 MEMBER2,
                 "editor",
-                &m.hpke_public,
-                &m.author_public,
+                &m.hpke_public_key,
+                &m.author_public_key,
             ))
             .unwrap();
         assert_eq!(chain_floor(&added.watermark), 2);
@@ -2578,8 +2802,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "viewer",
-            &m.hpke_public,
-            &m.author_public,
+            &m.hpke_public_key,
+            &m.author_public_key,
         ))
         .unwrap();
         // No pinned keys at all → bad request (a member must supply a trust anchor).
@@ -2610,8 +2834,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "editor",
-            &m.hpke_public,
-            &m.author_public,
+            &m.hpke_public_key,
+            &m.author_public_key,
         ))
         .unwrap();
         let pinned = vec![founder_key(&h, KEY)];
@@ -2651,8 +2875,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "editor",
-            &m.hpke_public,
-            &m.author_public,
+            &m.hpke_public_key,
+            &m.author_public_key,
         ))
         .unwrap();
         let old_founder = founder_key(&h, KEY);
@@ -2682,8 +2906,8 @@ mod tests {
 
     #[test]
     fn the_writer_self_check_refuses_an_unendorsed_keyring_and_persists_nothing() {
-        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
         use openom_keyring_chain::wire::Member;
+        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
 
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
@@ -2740,8 +2964,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "editor",
-            &m2.hpke_public,
-            &m2.author_public,
+            &m2.hpke_public_key,
+            &m2.author_public_key,
         ))
         .unwrap();
         let rev2 = a.store.load_keyring(KEY).unwrap().unwrap();
@@ -2753,8 +2977,8 @@ mod tests {
             MEMBER,
             MEMBER3,
             "viewer",
-            &m3.hpke_public,
-            &m3.author_public,
+            &m3.hpke_public_key,
+            &m3.author_public_key,
         ))
         .unwrap();
         let rev3 = a.store.load_keyring(KEY).unwrap().unwrap();
@@ -2769,7 +2993,9 @@ mod tests {
         // Device B is anchored at rev1 (as if it had synced/bootstrapped the genesis), then pulls
         // and accepts the rev2..rev3 run.
         let b = host();
-        b.store.commit_keyring(KEY, &rev1, &chain_watermark(1)).unwrap();
+        b.store
+            .commit_keyring(KEY, &rev1, &chain_watermark(1))
+            .unwrap();
         let accepted = b
             .accept_remote_keyring(KEY, TREE, vec![rev2.clone(), rev3.clone()])
             .unwrap();
@@ -2779,7 +3005,11 @@ mod tests {
 
         // An empty run is a no-op at the current revision.
         assert_eq!(
-            chain_floor(&b.accept_remote_keyring(KEY, TREE, vec![]).unwrap().watermark),
+            chain_floor(
+                &b.accept_remote_keyring(KEY, TREE, vec![])
+                    .unwrap()
+                    .watermark
+            ),
             3
         );
         // Replaying the old run now rolls backward → refused, store untouched.
@@ -2797,7 +3027,9 @@ mod tests {
         let a = host();
         let (rev1, _rev2, rev3) = produce_three_revisions(&a);
         let b = host();
-        b.store.commit_keyring(KEY, &rev1, &chain_watermark(1)).unwrap();
+        b.store
+            .commit_keyring(KEY, &rev1, &chain_watermark(1))
+            .unwrap();
         // Skipping rev2 (a server withholding a hop) breaks the contiguous walk.
         assert_eq!(
             b.accept_remote_keyring(KEY, TREE, vec![rev3])
@@ -2810,8 +3042,8 @@ mod tests {
 
     #[test]
     fn a_rogue_signer_in_a_remote_hop_is_refused_and_nothing_is_persisted() {
-        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
         use openom_keyring_chain::wire::Member;
+        use openom_keyring_chain::{generate_identity, keyring_hash, sign_keyring};
 
         let a = host();
         let (rev1, _rev2, _rev3) = produce_three_revisions(&a);
@@ -2844,7 +3076,9 @@ mod tests {
         sign_keyring(&mut bad, &rogue);
 
         let b = host();
-        b.store.commit_keyring(KEY, &rev1, &chain_watermark(1)).unwrap();
+        b.store
+            .commit_keyring(KEY, &rev1, &chain_watermark(1))
+            .unwrap();
         assert_eq!(
             b.accept_remote_keyring(KEY, TREE, vec![bad.encode_to_vec()])
                 .unwrap_err()
@@ -2879,8 +3113,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "editor",
-            &co.hpke_public,
-            &co.author_public,
+            &co.hpke_public_key,
+            &co.author_public_key,
         ))
         .unwrap();
         let promoted = h
@@ -2905,8 +3139,8 @@ mod tests {
             MEMBER,
             MEMBER2,
             "editor",
-            &co.hpke_public,
-            &co.author_public,
+            &co.hpke_public_key,
+            &co.author_public_key,
         ))
         .unwrap();
         h.add_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2)
@@ -2925,8 +3159,8 @@ mod tests {
                 vec![founder.clone()],
                 MEMBER3,
                 "viewer",
-                &m3.hpke_public,
-                &m3.author_public,
+                &m3.hpke_public_key,
+                &m3.author_public_key,
             ))
             .unwrap();
         assert_eq!(chain_floor(&added.watermark), 4);
@@ -2952,8 +3186,8 @@ mod tests {
             MEMBER,
             "acct-ed",
             "editor",
-            &ed.hpke_public,
-            &ed.author_public,
+            &ed.hpke_public_key,
+            &ed.author_public_key,
         ))
         .unwrap();
         let founder2 = founder_key(&h, KEY);
