@@ -57,6 +57,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
+# Two `cargo` lints are not actionable for a private, unpublished monorepo (NOT a low-value dismissal):
+# `cargo_common_metadata` wants crates.io publish fields (repository/keywords/categories) we don't set — a
+# repo move is likely pending anyway; `multiple_crate_versions` flags duplicate TRANSITIVE dep versions we
+# don't control. Revisit `cargo_common_metadata` if the standalone-publishable keyeo-* crates ship.
+cargo_common_metadata = "allow"
+multiple_crate_versions = "allow"
 
 [workspace.dependencies]
 # Internal crates (path relative to this root manifest).
