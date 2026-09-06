@@ -12,6 +12,7 @@ pub struct MemoryBlob {
 }
 
 impl MemoryBlob {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -25,7 +26,7 @@ impl BlobStore for MemoryBlob {
 
     fn put(&self, key: &str, bytes: &[u8], pre: Precondition) -> Result<Etag> {
         let mut map = self.map.lock().unwrap();
-        check_pre(&pre, map.get(key).map(|b| b.as_slice()))?;
+        check_pre(&pre, map.get(key).map(std::vec::Vec::as_slice))?;
         map.insert(key.to_string(), bytes.to_vec());
         Ok(etag_of(bytes))
     }
@@ -41,7 +42,7 @@ impl BlobStore for MemoryBlob {
 
     fn delete(&self, key: &str, pre: Precondition) -> Result<()> {
         let mut map = self.map.lock().unwrap();
-        check_pre(&pre, map.get(key).map(|b| b.as_slice()))?;
+        check_pre(&pre, map.get(key).map(std::vec::Vec::as_slice))?;
         map.remove(key);
         Ok(())
     }

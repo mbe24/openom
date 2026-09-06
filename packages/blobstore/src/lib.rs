@@ -43,16 +43,28 @@ pub type Result<T> = std::result::Result<T, BlobError>;
 /// backend satisfy this with zero compute, so an engine written against `BlobStore` runs on either.
 pub trait BlobStore: Send + Sync {
     /// Fetch a blob and its current version, or `None` if absent.
+    ///
+    /// # Errors
+    /// Returns [`BlobError::Backend`] if the underlying store fails.
     fn get(&self, key: &str) -> Result<Option<(Vec<u8>, Etag)>>;
 
-    /// Write a blob under `pre`; return the new version. [`BlobError::PreconditionFailed`] on a CAS miss.
+    /// Write a blob under `pre`; return the new version.
+    ///
+    /// # Errors
+    /// Returns [`BlobError::PreconditionFailed`] on a CAS miss, or [`BlobError::Backend`] on store failure.
     fn put(&self, key: &str, bytes: &[u8], pre: Precondition) -> Result<Etag>;
 
     /// The keys under `prefix`, with their current versions. Order is unspecified.
+    ///
+    /// # Errors
+    /// Returns [`BlobError::Backend`] if the underlying store fails.
     fn list(&self, prefix: &str) -> Result<Vec<(String, Etag)>>;
 
     /// Delete a blob under `pre`. `Any` is idempotent (deleting an absent key is `Ok`); `IfMatch`/
-    /// `IfAbsent` guard it. [`BlobError::PreconditionFailed`] on a CAS miss.
+    /// `IfAbsent` guard it.
+    ///
+    /// # Errors
+    /// Returns [`BlobError::PreconditionFailed`] on a CAS miss, or [`BlobError::Backend`] on store failure.
     fn delete(&self, key: &str, pre: Precondition) -> Result<()>;
 }
 
@@ -82,11 +94,13 @@ pub(crate) fn etag_of(bytes: &[u8]) -> Etag {
 /// Shared precondition check: given the CURRENT bytes (or `None` if absent), does `pre` hold? The one
 /// place CAS semantics live, so every impl agrees.
 pub(crate) fn check_pre(pre: &Precondition, current: Option<&[u8]>) -> Result<()> {
+    // Arms are enumerated (no `_`) so a new `Precondition` variant is a compile error, not a silent
+    // `Err`; the guardless Ok/Err pairs are merged only to satisfy `match_same_arms`.
     match (pre, current) {
-        (Precondition::Any, _) => Ok(()),
-        (Precondition::IfAbsent, None) => Ok(()),
-        (Precondition::IfAbsent, Some(_)) => Err(BlobError::PreconditionFailed),
+        (Precondition::Any, _) | (Precondition::IfAbsent, None) => Ok(()),
         (Precondition::IfMatch(e), Some(b)) if &etag_of(b) == e => Ok(()),
-        (Precondition::IfMatch(_), _) => Err(BlobError::PreconditionFailed),
+        (Precondition::IfAbsent, Some(_)) | (Precondition::IfMatch(_), _) => {
+            Err(BlobError::PreconditionFailed)
+        }
     }
 }
