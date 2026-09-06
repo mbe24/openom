@@ -63,13 +63,14 @@ pub struct SealContext {
     pub prev_ciphertext_hash: Vec<u8>,
     /// The snapshot coordinate this entry covers through (§10 watermark input).
     pub covers_through_seq: u64,
-    /// KIND_MEDIA only; empty otherwise.
+    /// `KIND_MEDIA` only; empty otherwise.
     pub blob_id: Vec<u8>,
 }
 
 impl SealContext {
     /// A snapshot at the chain head — the common case. `format` defaults to openom-json,
     /// uncompressed; adjust the fields for compressed payloads or media.
+    #[must_use]
     pub fn snapshot(
         replica_counter: u64,
         prev_ciphertext_hash: Vec<u8>,
@@ -149,6 +150,7 @@ impl Sealer {
     /// Build a sealer from an already-unwrapped DEK and its scope. The default AEAD is
     /// XChaCha20-Poly1305 (§6); use [`with_aead`](Self::with_aead) to seal snapshots under
     /// AES-256-GCM. `version` is normally [`openom_protocol::ENVELOPE_VERSION`].
+    #[must_use]
     pub fn from_unwrapped(
         version: u32,
         dek: Key32,
@@ -170,6 +172,7 @@ impl Sealer {
     /// Attach the member's author identity so entries this sealer seals are SIGNED + attributed
     /// (shared trees). Builder-style; set at unlock from the verified keyring's member identity + the
     /// watermarked keyring head. Omit for unattributed (single-owner V1) trees.
+    #[must_use]
     pub fn with_author(
         mut self,
         signing_key: edsign::SigningKey,
@@ -199,6 +202,7 @@ impl Sealer {
     /// well-known DEK, tagged with `DEV_KEY_ID` — which the server refuses under
     /// `RUN_MODE=production`. This is what lets the web app run the full seal/open path
     /// with no server and no unlock flow, for fast UI iteration.
+    #[must_use]
     pub fn dev(tree_id: TreeId, replica_id: ReplicaId) -> Self {
         Self::from_unwrapped(
             openom_protocol::ENVELOPE_VERSION,
@@ -210,17 +214,20 @@ impl Sealer {
     }
 
     /// Override the AEAD (default XChaCha20-Poly1305). Builder-style.
+    #[must_use]
     pub fn with_aead(mut self, aead: Aead) -> Self {
         self.aead = aead;
         self
     }
 
     /// The tree this sealer is scoped to.
+    #[must_use]
     pub fn tree_id(&self) -> &[u8] {
         &self.tree_id
     }
 
     /// The key epoch (`key_id`) this sealer is scoped to.
+    #[must_use]
     pub fn key_id(&self) -> &[u8] {
         &self.key_id
     }
@@ -228,6 +235,9 @@ impl Sealer {
     /// Seal `plaintext` into a wire-ready envelope under this sealer's DEK and scope,
     /// using the caller-supplied chain state in `ctx`. Returns the encoded bytes plus the
     /// `ciphertext_hash` to thread into the next call.
+    ///
+    /// # Errors
+    /// Returns [`SealerError`] if building the header or sealing the envelope fails.
     pub fn seal_entry(
         &self,
         ctx: &SealContext,
@@ -266,6 +276,10 @@ impl Sealer {
 
     /// Decode `envelope_bytes`, verify it belongs to this sealer's `(tree_id, key_id)`
     /// scope and is the `expect` kind, then AEAD-open it. Returns the plaintext.
+    ///
+    /// # Errors
+    /// Returns [`SealerError`] if the envelope fails to decode, is out of scope, is the wrong kind, or
+    /// fails to AEAD-open.
     pub fn open_entry(
         &self,
         expect: EntryKind,
@@ -307,6 +321,7 @@ pub struct SealerSet {
 impl SealerSet {
     /// Build a set from `(key_id, dek)` per reachable epoch. `write_key_id` must be one of
     /// them (the latest epoch) — new entries seal under it.
+    #[must_use]
     pub fn new(
         tree_id: TreeId,
         replica_id: ReplicaId,
@@ -338,6 +353,7 @@ impl SealerSet {
     /// Attach the member's author identity to the WRITE-epoch sealer, so new entries are signed +
     /// attributed (§B3 shared trees). Old-epoch sealers only open (never seal new entries), so they need
     /// no author. Set at unlock, gated on the write epoch being attributed (shared).
+    #[must_use]
     pub fn with_author(
         mut self,
         signing_key: edsign::SigningKey,
@@ -352,6 +368,7 @@ impl SealerSet {
     }
 
     /// A single-epoch set — the local-development / demo path (one dev sealer).
+    #[must_use]
     pub fn single(sealer: Sealer) -> Self {
         SealerSet {
             tree_id: sealer.tree_id.clone(),
@@ -361,11 +378,15 @@ impl SealerSet {
     }
 
     /// The tree this set is scoped to.
+    #[must_use]
     pub fn tree_id(&self) -> &[u8] {
         &self.tree_id
     }
 
     /// Seal a new entry under the **write** (latest) epoch.
+    ///
+    /// # Errors
+    /// Returns [`SealerError`] if there is no write epoch or sealing the entry fails.
     pub fn seal_entry(
         &self,
         ctx: &SealContext,
@@ -381,6 +402,10 @@ impl SealerSet {
     /// Open an envelope by routing to the sealer for its epoch. A `tree_id` mismatch is a
     /// misrouted blob (`WrongScope`); a `key_id` the set doesn't hold is an access boundary
     /// (`EpochUnreachable`).
+    ///
+    /// # Errors
+    /// Returns [`SealerError`] on a `tree_id` mismatch (`WrongScope`), a `key_id` the set doesn't hold
+    /// (`EpochUnreachable`), or an open failure.
     pub fn open_entry(
         &self,
         expect: EntryKind,

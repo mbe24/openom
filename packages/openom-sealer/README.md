@@ -17,7 +17,7 @@ know about. **This crate is engine-free** (no keyring dependency), so envelope-o
 `openom-sync` don't transitively rebuild the keyring engines.
 
 The passphrase-driven keyring lifecycle that PRODUCES an unlocked DEK — `vault` (provision, unlock,
-recover, change_passphrase, add/remove member, promote/demote co-owner), both engines' vaults, the
+recover, `change_passphrase`, add/remove member, promote/demote co-owner), both engines' vaults, the
 `AppVault` dispatch, and the browser `wasm` veneer — was extracted to the **`openom-vault`** crate
 (OPE-279). That crate compiles to wasm32 with its `wasm` feature for the browser and runs natively
 inside Tauri — one implementation, two bindings, so a web and a native
