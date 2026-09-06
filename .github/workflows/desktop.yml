@@ -52,6 +52,13 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
+      # Clippy pedantic + cargo are wired as `deny` in [workspace.lints.clippy], so a new finding fails
+      # here. --all-features covers the feature-gated code (wasm/sqlite/profiling). Linux only (one run
+      # is enough; GTK is installed above so the tauri crate compiles).
+      - name: Clippy (pedantic + cargo gate)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-features
+
       - name: Store conformance suite
         run: cargo test --workspace --all-features
 

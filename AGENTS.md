@@ -37,13 +37,16 @@ mood, lowercase start, no trailing period.
 
 Run quick type checks, format checks, and unit tests after a series of commits.
 
-**Clippy is a gate.** `clippy::pedantic` + `clippy::cargo` are wired workspace-wide via
-`[workspace.lints.clippy]` (each crate opts in with `[lints] workspace = true`). For every crate you
-touch, run `node scripts/cargo.mjs clippy -p <crate>` and clear any new findings before committing —
-never let them accumulate. When you change a `Cargo.toml` or dependencies, also run one workspace-root
-pass — `node scripts/cargo.mjs clippy --workspace --exclude openom-tauri` — to catch the `clippy::cargo`
-(project-file) lints, which only surface at the workspace level. If a lint is genuinely wrong for a
-call site, `#[allow(clippy::…)]` it with a one-line reason rather than reaching for a blanket allow.
+**Clippy is a gate (`deny`).** `clippy::pedantic` + `clippy::cargo` are wired workspace-wide as `deny`
+in `[workspace.lints.clippy]` (each crate opts in with `[lints] workspace = true`), so a finding FAILS
+the build under clippy — CI runs `cargo clippy --workspace --all-features`. For every crate you touch,
+run `node scripts/cargo.mjs clippy -p <crate> --all-features` and clear any finding before committing.
+**Pass `--all-features`** — without it the feature-gated modules (`wasm`, `sqlite`, `profiling`, the
+`test-util` gates) are not compiled, so a finding there stays invisible until CI. After a
+`Cargo.toml`/dependency change, run one workspace-root pass —
+`node scripts/cargo.mjs clippy --workspace --exclude openom-tauri --all-features` — which also catches
+the project-file `clippy::cargo` lints. If a lint is genuinely wrong for a call site,
+`#[allow(clippy::…)]` it with a one-line reason rather than reaching for a blanket allow.
 
 ## Code style
 

@@ -51,12 +51,13 @@ rust-version = "1.85"
 # with harnesses opt in via `[lints] workspace = true`. See scripts/kani.mjs and docker/kani.Dockerfile.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
-# Clippy pedantic + cargo, opted into per-crate via `[lints] workspace = true`. Set to `warn` during the
-# cleanup sweep; flip to `deny` once the tree is clean so a new finding can't land (CI runs clippy too).
-# `priority = -1` lets a specific `#[allow(clippy::x)]` / lint override win over the group.
+# Clippy pedantic + cargo, opted into per-crate via `[lints] workspace = true`. `deny`, so a new finding
+# fails the build under clippy (CI runs `clippy --workspace --all-features -D warnings`). `priority = -1`
+# lets a specific `#[allow(clippy::x)]` / lint override win over the group. Only clippy enforces these —
+# plain `cargo build` ignores the `clippy::` tool lints.
 [workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
 # Two `cargo` lints are not actionable for a private, unpublished monorepo (NOT a low-value dismissal):
 # `cargo_common_metadata` wants crates.io publish fields (repository/keywords/categories) we don't set — a
 # repo move is likely pending anyway; `multiple_crate_versions` flags duplicate TRANSITIVE dep versions we
