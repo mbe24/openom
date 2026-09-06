@@ -41,7 +41,14 @@ fn append(
         .collect::<Result<_, _>>()
         .map_err(|e| ClientError::Malformed(e.to_string()))?;
     let group_id = keyeo_dag::GroupId::new(anchor.group_id.clone());
-    let op = mint(&group_id, frontier(&ops), author.to_string(), action, sealing, signing_key);
+    let op = mint(
+        &group_id,
+        frontier(&ops),
+        author.to_string(),
+        action,
+        sealing,
+        signing_key,
+    );
     anchor.ops.push(encode_op(&op));
     Ok(postcard::to_allocvec(&anchor).expect("DagAnchor serialization is infallible"))
 }
@@ -148,9 +155,25 @@ fn mint(
     let canonical = keyeo_dag::canonical_encode(group_id, &parents, &author, &action, &sealing);
     let signature = signing_key.sign(&canonical).to_bytes();
     let author_public_key = signing_key.verifying_key().to_bytes();
-    let id =
-        keyeo_dag::content_id(group_id, &parents, &author, &action, &sealing, &signature, &author_public_key).0;
-    let mut op = KeyringOp::new(id, group_id.clone(), parents, author, action, signature, author_public_key);
+    let id = keyeo_dag::content_id(
+        group_id,
+        &parents,
+        &author,
+        &action,
+        &sealing,
+        &signature,
+        &author_public_key,
+    )
+    .0;
+    let mut op = KeyringOp::new(
+        id,
+        group_id.clone(),
+        parents,
+        author,
+        action,
+        signature,
+        author_public_key,
+    );
     op.sealing = sealing;
     op
 }
@@ -183,7 +206,14 @@ pub fn provision_anchor(
     let action = MembershipAction::Create {
         initial_members: vec![founder.clone()],
     };
-    let op = mint(&group_id, vec![], founder_id.to_string(), action, sealing, signing_key);
+    let op = mint(
+        &group_id,
+        vec![],
+        founder_id.to_string(),
+        action,
+        sealing,
+        signing_key,
+    );
     let anchor = DagAnchor {
         group_id: tree_id.to_vec(),
         genesis: vec![minit_to_dto(&founder)],
@@ -255,7 +285,9 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
     // Build the engine: from an adopted CHECKPOINT base (its pre-frontier history pruned), or from the pinned
     // genesis. Both arms produce the same engine type (Individual governance).
-    let (mut engine, checkpoint_sealing, minting_ops_baseline) = if let Some(signed_cp) = &anchor.checkpoint {
+    let (mut engine, checkpoint_sealing, minting_ops_baseline) = if let Some(signed_cp) =
+        &anchor.checkpoint
+    {
         let cp = signed_cp
             .verify()
             .ok_or_else(|| ClientError::Malformed("checkpoint signature does not verify".into()))?;
@@ -279,11 +311,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         );
         (engine, Some(cp.sealing.clone()), cp.minting_ops_baseline)
     } else {
-        let genesis: Vec<KeyringMemberInit> = anchor
-            .genesis
-            .iter()
-            .map(dto_to_minit)
-            .collect();
+        let genesis: Vec<KeyringMemberInit> = anchor.genesis.iter().map(dto_to_minit).collect();
         let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
             .with_reset_authority(anchor.reset_authority);
         (Keyeo::new(base, KeyringAccess, StrongRemove), None, 0)
@@ -337,7 +365,13 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         }
     }
     let has_been_shared = engine.has_been_shared();
-    Ok(Resolved { members, sealing, has_been_shared, checkpoint_sealing, minting_ops_baseline })
+    Ok(Resolved {
+        members,
+        sealing,
+        has_been_shared,
+        checkpoint_sealing,
+        minting_ops_baseline,
+    })
 }
 
 /// The dag's compaction DECISION for a concrete openom keyring: the checkpoint to author + the ops that may be
@@ -362,11 +396,7 @@ pub fn compact(
 ) -> Result<Option<KeyringCompacted>, ClientError> {
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
-    let genesis: Vec<KeyringMemberInit> = anchor
-        .genesis
-        .iter()
-        .map(dto_to_minit)
-        .collect();
+    let genesis: Vec<KeyringMemberInit> = anchor.genesis.iter().map(dto_to_minit).collect();
     let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
         .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
@@ -418,7 +448,9 @@ pub fn compact_to_checkpoint(
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
     if anchor.checkpoint.is_some() {
-        return Err(ClientError::Malformed("re-compacting a checkpoint anchor is not yet supported".into()));
+        return Err(ClientError::Malformed(
+            "re-compacting a checkpoint anchor is not yet supported".into(),
+        ));
     }
     let ops: Vec<KeyringOp> = anchor
         .ops
@@ -442,20 +474,20 @@ pub fn compact_to_checkpoint(
     }
 
     // Resolve the pre-cut sub-DAG → the cut state (membership), its op depths, and its sealing.
-    let genesis: Vec<KeyringMemberInit> = anchor
-        .genesis
-        .iter()
-        .map(dto_to_minit)
-        .collect();
+    let genesis: Vec<KeyringMemberInit> = anchor.genesis.iter().map(dto_to_minit).collect();
     let base = KeyringState::create(keyeo_dag::GroupId::new(anchor.group_id.clone()), &genesis)
         .with_reset_authority(anchor.reset_authority);
     let mut engine = Keyeo::new(base, KeyringAccess, StrongRemove);
     for op in &ops {
         if pre_cut.contains(&op.id) {
-            engine.apply(op.clone()).map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+            engine
+                .apply(op.clone())
+                .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
         }
     }
-    engine.flush().map_err(|e| ClientError::Engine(format!("{e:?}")))?;
+    engine
+        .flush()
+        .map_err(|e| ClientError::Engine(format!("{e:?}")))?;
 
     // Pre-cut sealing (genesis first, then effective pre-cut ops) — the input to the segment authoring.
     let mut pre_sealing = Vec::new();
@@ -486,8 +518,10 @@ pub fn compact_to_checkpoint(
     let (segment, baseline) = author_sealing(&pre_sealing).map_err(ClientError::Malformed)?;
 
     let depths = engine.op_depths();
-    let frontier_depths: Vec<([u8; 32], u64)> =
-        frontier.iter().map(|t| (*t, *depths.get(t).unwrap_or(&0) as u64)).collect();
+    let frontier_depths: Vec<([u8; 32], u64)> = frontier
+        .iter()
+        .map(|t| (*t, *depths.get(t).unwrap_or(&0) as u64))
+        .collect();
 
     let checkpoint = crate::checkpoint::Checkpoint {
         frontier_depths,
@@ -498,9 +532,14 @@ pub fn compact_to_checkpoint(
         minting_ops_baseline: baseline,
         author,
     };
-    let signed: crate::checkpoint::SignedCheckpoint = keyeo_dag::Signed::sign(checkpoint, signing_key);
+    let signed: crate::checkpoint::SignedCheckpoint =
+        keyeo_dag::Signed::sign(checkpoint, signing_key);
 
-    let retained: Vec<Vec<u8>> = ops.iter().filter(|o| !pre_cut.contains(&o.id)).map(encode_op).collect();
+    let retained: Vec<Vec<u8>> = ops
+        .iter()
+        .filter(|o| !pre_cut.contains(&o.id))
+        .map(encode_op)
+        .collect();
 
     let new_anchor = DagAnchor {
         group_id: anchor.group_id,
@@ -663,7 +702,13 @@ pub fn append_retarget(
         new_author_public_key: new_author_public_key.to_bytes(),
         new_hpke_public_key,
     };
-    append(anchor_bytes, member_id, action, sealing, current_signing_key)
+    append(
+        anchor_bytes,
+        member_id,
+        action,
+        sealing,
+        current_signing_key,
+    )
 }
 
 /// Append a **Reseal** op (OPE-282) — a membership-inert forward-secrecy repair authored by active
@@ -678,7 +723,13 @@ pub fn append_reseal(
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
-    append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
+    append(
+        anchor_bytes,
+        member_id,
+        MembershipAction::Reseal,
+        sealing,
+        signing_key,
+    )
 }
 
 /// Append a **Backfill** op (OPE-288) — a membership-inert HISTORICAL-READ repair authored by `member_id`,
@@ -695,7 +746,13 @@ pub fn append_backfill(
     sealing: Vec<u8>,
     signing_key: &edsign::SigningKey,
 ) -> Result<Vec<u8>, ClientError> {
-    append(anchor_bytes, member_id, MembershipAction::Reseal, sealing, signing_key)
+    append(
+        anchor_bytes,
+        member_id,
+        MembershipAction::Reseal,
+        sealing,
+        signing_key,
+    )
 }
 
 #[cfg(test)]
@@ -732,7 +789,8 @@ mod tests {
         let rvk_pub = rvk.verifying_key().to_bytes();
 
         // Genesis {founder Owner, bob CoOwner}, RVK pinned; carries a genesis sealing.
-        let genesis_op = mint(&keyeo_dag::GroupId::unscoped(),
+        let genesis_op = mint(
+            &keyeo_dag::GroupId::unscoped(),
             vec![],
             "founder".to_string(),
             MembershipAction::Create {
@@ -745,7 +803,8 @@ mod tests {
 
         // (A) the compromised founder key adds a co-owner (a signer = privileged), concurrent with (B) an
         // RVK-signed recovery ReFound. Both are children of genesis. Each carries a sealing delta.
-        let thief = mint(&keyeo_dag::GroupId::unscoped(),
+        let thief = mint(
+            &keyeo_dag::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::Add {
@@ -758,7 +817,8 @@ mod tests {
             b"THIEF-SEALING".to_vec(),
             &sk(1),
         );
-        let recovery_op = mint(&keyeo_dag::GroupId::unscoped(),
+        let recovery_op = mint(
+            &keyeo_dag::GroupId::unscoped(),
             vec![genesis_id],
             "founder".to_string(),
             MembershipAction::ReFound {
@@ -785,15 +845,30 @@ mod tests {
         };
         let resolved = resolve(&postcard::to_allocvec(&anchor).unwrap()).unwrap();
 
-        let has = |needle: &[u8]| resolved.sealing.iter().any(|s| s.bytes.as_slice() == needle);
-        assert!(has(b"GENESIS-SEALING"), "the pinned genesis op always contributes");
-        assert!(has(b"RECOVERY-SEALING"), "the surviving recovery contributes");
+        let has = |needle: &[u8]| {
+            resolved
+                .sealing
+                .iter()
+                .any(|s| s.bytes.as_slice() == needle)
+        };
+        assert!(
+            has(b"GENESIS-SEALING"),
+            "the pinned genesis op always contributes"
+        );
+        assert!(
+            has(b"RECOVERY-SEALING"),
+            "the surviving recovery contributes"
+        );
         assert!(
             !has(b"THIEF-SEALING"),
             "a carve-out-voided op's sealing is dropped, not folded"
         );
         assert!(
-            !resolved.members.members.iter().any(|m| m.member_id == "mallory"),
+            !resolved
+                .members
+                .members
+                .iter()
+                .any(|m| m.member_id == "mallory"),
             "and the voided op has no membership effect either"
         );
     }
@@ -803,19 +878,41 @@ mod tests {
     /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
     #[test]
     fn watermark_advances_and_check_floor_catches_rollback() {
-        let a0 = provision_anchor(b"tree-1", "founder", vpk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
+        let a0 = provision_anchor(
+            b"tree-1",
+            "founder",
+            vpk(1),
+            [1; 32],
+            vk(3),
+            b"seal".to_vec(),
+            &sk(1),
+        );
         let w0 = watermark(&a0).unwrap();
-        assert_eq!(w0.len(), 32, "a single tip (the genesis op) encodes to 32 bytes");
-        assert!(check_floor(&a0, &w0).is_ok(), "the current frontier satisfies its own floor");
+        assert_eq!(
+            w0.len(),
+            32,
+            "a single tip (the genesis op) encodes to 32 bytes"
+        );
+        assert!(
+            check_floor(&a0, &w0).is_ok(),
+            "the current frontier satisfies its own floor"
+        );
         assert!(check_floor(&a0, &[]).is_ok(), "an empty floor is no floor");
         assert!(
-            matches!(check_floor(&a0, &[1, 2, 3]), Err(ClientError::BadWatermark(_))),
+            matches!(
+                check_floor(&a0, &[1, 2, 3]),
+                Err(ClientError::BadWatermark(_))
+            ),
             "a floor whose length isn't a multiple of 32 is refused"
         );
 
         // Append an Add — an authorized owner adds a co-owner; the frontier moves to the new op.
         let a1 = append_add(
-            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"wrap".to_vec(), &sk(1),
+            &a0,
+            "founder",
+            &minit("bob", KeyringRole::CO_OWNER, 2),
+            b"wrap".to_vec(),
+            &sk(1),
         )
         .unwrap();
         let w1 = watermark(&a1).unwrap();
@@ -833,15 +930,33 @@ mod tests {
     #[test]
     fn has_been_shared_is_monotonic_true_after_an_add_even_once_removed() {
         // Solo genesis: never shared.
-        let a0 = provision_anchor(b"tree-es", "founder", vpk(1), [1; 32], vk(3), b"seal".to_vec(), &sk(1));
-        assert!(!resolve(&a0).unwrap().has_been_shared, "a solo tree has never been shared");
+        let a0 = provision_anchor(
+            b"tree-es",
+            "founder",
+            vpk(1),
+            [1; 32],
+            vk(3),
+            b"seal".to_vec(),
+            &sk(1),
+        );
+        assert!(
+            !resolve(&a0).unwrap().has_been_shared,
+            "a solo tree has never been shared"
+        );
 
         // Admit a member → shared.
         let a1 = append_add(
-            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"wrap".to_vec(), &sk(1),
+            &a0,
+            "founder",
+            &minit("bob", KeyringRole::CO_OWNER, 2),
+            b"wrap".to_vec(),
+            &sk(1),
         )
         .unwrap();
-        assert!(resolve(&a1).unwrap().has_been_shared, "admitting a member makes the tree shared");
+        assert!(
+            resolve(&a1).unwrap().has_been_shared,
+            "admitting a member makes the tree shared"
+        );
 
         // Remove the member → solo membership again, but has_been_shared stays TRUE (the effective Add persists).
         let a2 = append_remove(&a1, "founder", "bob", b"reseal".to_vec(), &sk(1)).unwrap();
@@ -853,26 +968,49 @@ mod tests {
 
     #[test]
     fn compact_computes_a_decision_over_the_rebuilt_engine() {
-        let a0 =
-            provision_anchor(b"tree-cp", "founder", vpk(1), [1; 32], vk(3), b"g".to_vec(), &sk(1));
+        let a0 = provision_anchor(
+            b"tree-cp",
+            "founder",
+            vpk(1),
+            [1; 32],
+            vk(3),
+            b"g".to_vec(),
+            &sk(1),
+        );
         let a1 = append_add(
-            &a0, "founder", &minit("bob", KeyringRole::CO_OWNER, 2), b"w".to_vec(), &sk(1),
+            &a0,
+            "founder",
+            &minit("bob", KeyringRole::CO_OWNER, 2),
+            b"w".to_vec(),
+            &sk(1),
         )
         .unwrap();
 
         // KeepAll → the engine builds, but there's nothing to compact.
-        assert!(compact(&a1, &Frontier { ops: vec![] }, RetentionPlan::KeepAll)
-            .unwrap()
-            .is_none());
+        assert!(
+            compact(&a1, &Frontier { ops: vec![] }, RetentionPlan::KeepAll)
+                .unwrap()
+                .is_none()
+        );
 
         // With the current head as the stable frontier, the decision carries the resolved state (has_been_shared
         // for this now-shared tree) and marks the subsumed history below the head as prunable.
         let wm = watermark(&a1).unwrap();
         let tips: Vec<[u8; 32]> = wm.chunks(32).map(|c| c.try_into().unwrap()).collect();
-        let out = compact(&a1, &Frontier { ops: tips }, RetentionPlan::Snapshot { keep_last: 0 })
-            .unwrap()
-            .expect("a shared tree with history below the head has a compaction decision");
-        assert!(out.has_been_shared, "the checkpoint records the shared marker");
-        assert!(!out.prune.is_empty(), "history below the head frontier is prunable");
+        let out = compact(
+            &a1,
+            &Frontier { ops: tips },
+            RetentionPlan::Snapshot { keep_last: 0 },
+        )
+        .unwrap()
+        .expect("a shared tree with history below the head has a compaction decision");
+        assert!(
+            out.has_been_shared,
+            "the checkpoint records the shared marker"
+        );
+        assert!(
+            !out.prune.is_empty(),
+            "history below the head frontier is prunable"
+        );
     }
 }
