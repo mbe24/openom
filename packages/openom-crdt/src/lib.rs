@@ -57,6 +57,7 @@ impl TryFrom<Value> for ChannelItem {
 
 impl ChannelItem {
     /// The item's id: the record id for an [`Assert`](ChannelItem::Assert), the op id for an [`Op`].
+    #[must_use]
     pub fn id(&self) -> &str {
         match self {
             ChannelItem::Assert(r) => r.id(),
@@ -65,6 +66,7 @@ impl ChannelItem {
     }
 
     /// The item's author (`createdBy`).
+    #[must_use]
     pub fn created_by(&self) -> &str {
         match self {
             ChannelItem::Assert(r) => r.created_by(),
@@ -75,6 +77,7 @@ impl ChannelItem {
     /// The item's timestamp (`createdAt`). Lets an ingesting engine advance its own clock past every
     /// timestamp it has seen (the HLC receive rule), so a later local mint can never reproduce an
     /// already-used id.
+    #[must_use]
     pub fn created_at(&self) -> Hlc {
         match self {
             ChannelItem::Assert(r) => r.created_at(),
@@ -144,6 +147,9 @@ pub enum OpKind {
 impl Op {
     /// Build an operation, computing its content-hash id. `signature` starts empty — signing is a
     /// separate, deferred step (see the module docs).
+    ///
+    /// # Errors
+    /// Returns a [`CrdtError`] if the op can't be canonicalized to compute its id.
     pub fn new(
         created_at: Hlc,
         created_by: impl Into<String>,
@@ -264,6 +270,7 @@ pub enum CrdtError {
 ///
 /// The returned records are cloned once here (the compaction/snapshot fold, not the read hot path).
 /// Output is ordered by id.
+#[must_use]
 pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record> {
     // 1. Every asserted record by id (bare Asserts + Supersede replacements in the acting author's own
     //    name — a replacement attributed to someone else is a forgery, dropped, else the projection
@@ -332,11 +339,17 @@ pub mod codec {
     use crate::ChannelItem;
 
     /// Encode a batch of channel items to the sealed payload bytes.
+    ///
+    /// # Errors
+    /// Returns a [`serde_json::Error`] if the items fail to serialize.
     pub fn encode(items: &[ChannelItem]) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(items)
     }
 
     /// Decode a sealed payload back to channel items (each id re-verified on decode).
+    ///
+    /// # Errors
+    /// Returns a [`serde_json::Error`] if `bytes` is not a valid encoded batch.
     pub fn decode(bytes: &[u8]) -> Result<Vec<ChannelItem>, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
