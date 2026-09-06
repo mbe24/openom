@@ -11,6 +11,7 @@ use keyeo_crypto::{
 };
 
 /// `KdfParams` for a recovery-code wrap (minimal cost) with the given `salt`.
+#[must_use]
 pub fn recovery_kdf_params(salt: Vec<u8>) -> KdfParams {
     KdfParams {
         salt,

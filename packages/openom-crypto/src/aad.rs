@@ -51,10 +51,10 @@ pub(crate) fn header_aad(version: u32, header: &Header) -> Vec<u8> {
     } = header;
     let mut out = Vec::with_capacity(160);
     put_u32(&mut out, version);
-    put_u32(&mut out, *kind as u32);
-    put_u32(&mut out, *format as u32);
-    put_u32(&mut out, *aead as u32);
-    put_u32(&mut out, *compression as u32);
+    put_enum(&mut out, *kind);
+    put_enum(&mut out, *format);
+    put_enum(&mut out, *aead);
+    put_enum(&mut out, *compression);
     put_bytes(&mut out, key_id);
     put_bytes(&mut out, nonce);
     put_bytes(&mut out, tree_id);
@@ -88,6 +88,7 @@ pub(crate) fn header_aad(version: u32, header: &Header) -> Vec<u8> {
 /// against this exact ciphertext) → compute `SHA-256(plaintext)` → rebuild these bytes → Ed25519-verify
 /// against the claimed member's `author_public_key` at the governing keyring revision.
 #[deny(unused_variables)]
+#[must_use]
 pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]) -> Vec<u8> {
     // Exhaustive destructure (no `..`) + deny(unused): a new Header field can't slip out of what the
     // author signs without a compile error. EXCLUDES nonce (minted inside seal), ciphertext_hash
@@ -114,10 +115,10 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
     let mut out = Vec::with_capacity(224);
     put_bytes(&mut out, b"openom:author:v1");
     put_u32(&mut out, version);
-    put_u32(&mut out, *kind as u32);
-    put_u32(&mut out, *format as u32);
-    put_u32(&mut out, *aead as u32);
-    put_u32(&mut out, *compression as u32);
+    put_enum(&mut out, *kind);
+    put_enum(&mut out, *format);
+    put_enum(&mut out, *aead);
+    put_enum(&mut out, *compression);
     put_bytes(&mut out, key_id);
     put_bytes(&mut out, tree_id);
     put_bytes(&mut out, replica_id);
@@ -142,6 +143,12 @@ pub fn author_signing_bytes(version: u32, header: &Header, plaintext_hash: &[u8]
 fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
+/// A proto enum tag (always a non-negative `i32`) as a 4-byte big-endian `u32` — bit-identical to `as u32`
+/// for valid tags, but sign-loss-free.
+#[inline]
+fn put_enum(out: &mut Vec<u8>, tag: i32) {
+    put_u32(out, u32::try_from(tag).unwrap_or(0));
+}
 #[inline]
 fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -150,7 +157,9 @@ fn put_u64(out: &mut Vec<u8>, v: u64) {
 /// `"ab"+"c" == "a"+"bc"` forgery class (§5).
 #[inline]
 fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
-    out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    // Length prefix; a >u32 field would only change the AAD (fail-closed on decrypt), so saturate.
+    let len = u32::try_from(b.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(b);
 }
 

@@ -12,11 +12,15 @@ use crate::CryptoError;
 /// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt + costs). Deterministic
 /// in its inputs — the same passphrase + params yield the same KEK, which is what lets a second device join
 /// from the passphrase alone (§4).
+///
+/// # Errors
+/// Returns [`CryptoError`] if Argon2id key derivation fails.
 pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Kek, CryptoError> {
     keyeo_crypto::derive_kek(passphrase, params)
 }
 
 /// `KdfParams` with the default Argon2id costs and the given `salt`.
+#[must_use]
 pub fn default_kdf_params(salt: Vec<u8>) -> KdfParams {
     KdfParams {
         salt,

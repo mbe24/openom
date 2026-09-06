@@ -2,7 +2,7 @@
 //! complete, wire-ready [`Envelope`], and back.
 //!
 //! It owns the two things easy to get wrong by hand: generating a fresh per-AEAD nonce
-//! (24 bytes XChaCha20 / 12 bytes AES-GCM) from the CSPRNG, and computing
+//! (24 bytes `XChaCha20` / 12 bytes AES-GCM) from the CSPRNG, and computing
 //! `ciphertext_hash = SHA-256(ciphertext)` *after* sealing (the field is excluded from
 //! the AAD precisely because it's circular otherwise, §5). Compression is the caller's
 //! concern: `seal_envelope` seals the plaintext **as given** and just records
@@ -27,7 +27,7 @@ pub struct AuthorIdentity {
     pub governing_ref: Vec<u8>,
 }
 
-/// Inputs for a sealed envelope's header (everything but the nonce + ciphertext_hash,
+/// Inputs for a sealed envelope's header (everything but the nonce + `ciphertext_hash`,
 /// which [`seal_envelope`] fills in).
 pub struct SealParams<'a> {
     pub version: u32,
@@ -41,7 +41,7 @@ pub struct SealParams<'a> {
     pub replica_counter: u64,
     pub prev_ciphertext_hash: &'a [u8],
     pub covers_through_seq: u64,
-    /// KIND_MEDIA only; empty otherwise.
+    /// `KIND_MEDIA` only; empty otherwise.
     pub blob_id: &'a [u8],
     /// Author attribution for a shared tree (§B3). `None` → unattributed (V1). Borrowed like every
     /// other field — the caller owns the [`AuthorIdentity`] (e.g. the sealer holds it for the session).
@@ -52,7 +52,8 @@ fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
     match aead {
         Aead::Xchacha20Poly1305 => Ok(24),
         Aead::Aes256Gcm => Ok(12),
-        _ => Err(CryptoError::UnsupportedAead(aead as i32)),
+        // Exhaustive (no `_`) so a future proto AEAD is a compile error to handle, not a silent runtime miss.
+        Aead::Unspecified => Err(CryptoError::UnsupportedAead(aead as i32)),
     }
 }
 
@@ -61,6 +62,9 @@ fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
 ///
 /// This is the thin CSPRNG shim over [`seal_envelope_with_nonce`]: it mints the fresh per-AEAD nonce
 /// and delegates the deterministic work.
+///
+/// # Errors
+/// Returns [`CryptoError`] if the AEAD is unsupported, the RNG fails, or sealing fails.
 pub fn seal_envelope(
     dek: &[u8; KEY_LEN],
     params: &SealParams,
@@ -75,7 +79,7 @@ pub fn seal_envelope(
 /// header, sign the attribution (§B3) into the AAD, seal, and set `ciphertext_hash`. Same inputs →
 /// same [`Envelope`] byte-for-byte, so the header/AAD/author-signing-binding logic is testable and
 /// Kani-verifiable without the RNG. **Contract:** `nonce` must be unique per (key, message) and the
-/// right length for `params.aead` (24 XChaCha20 / 12 AES-GCM) — [`seal_envelope`] guarantees both.
+/// right length for `params.aead` (24 `XChaCha20` / 12 AES-GCM) — [`seal_envelope`] guarantees both.
 pub fn seal_envelope_with_nonce(
     nonce: Vec<u8>,
     dek: &[u8; KEY_LEN],
@@ -106,7 +110,7 @@ pub fn seal_envelope_with_nonce(
         author_member_id: params
             .author
             .as_ref()
-            .map(|a| a.member_id.to_string())
+            .map(|a| a.member_id.clone())
             .unwrap_or_default(),
         governing_ref: params
             .author
@@ -139,6 +143,10 @@ pub fn seal_envelope_with_nonce(
 
 /// Open an [`Envelope`] under `dek`: check `ciphertext_hash` (the reader-side integrity
 /// check, matching the server's keyless one), then AEAD-open. Returns the plaintext.
+///
+/// # Errors
+/// Returns [`CryptoError::Open`] if the header is missing, the `ciphertext_hash` mismatches, or the
+/// AEAD authentication/decryption fails.
 pub fn open_envelope(dek: &[u8; KEY_LEN], envelope: &Envelope) -> Result<Vec<u8>, CryptoError> {
     let header = envelope.header.as_ref().ok_or(CryptoError::Open)?;
     if Sha256::digest(&envelope.ciphertext).as_slice() != header.ciphertext_hash.as_slice() {

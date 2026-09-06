@@ -18,6 +18,9 @@ use crate::{CryptoError, KEY_LEN};
 /// (§5). The AEAD and nonce come from `header` (`aead` + `nonce`). Returns the
 /// ciphertext with the AEAD tag appended; the caller then sets `header.ciphertext_hash
 /// = sha256(ciphertext)` (excluded from the AAD — see [`crate::aad`]).
+///
+/// # Errors
+/// Returns [`CryptoError`] if `header.aead` is unsupported or the AEAD seal fails.
 pub fn seal(
     version: u32,
     header: &Header,
@@ -35,6 +38,9 @@ pub fn seal(
 /// Open `ciphertext` under the DEK `key` for `header`. Rebuilds the AAD from the
 /// header and requires the AEAD tag to verify — so any tampered header field (or
 /// ciphertext) fails as [`CryptoError::Open`].
+///
+/// # Errors
+/// Returns [`CryptoError`] if `header.aead` is unsupported or the AEAD open/authentication fails.
 pub fn open(
     version: u32,
     header: &Header,

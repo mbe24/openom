@@ -28,6 +28,9 @@ const OPENOM_ROOT_LABELS: RootLabels = RootLabels {
 /// Derive [`RootKeys`] from a passphrase under the frozen `openom:*` HKDF labels, delegating to
 /// [`keyeo_crypto::derive_root`]; see that crate for the frozen construction and the zeroize-on-drop
 /// guarantees.
+///
+/// # Errors
+/// Returns [`CryptoError`] if Argon2id derivation fails.
 pub fn derive_root(passphrase: &[u8], params: &KdfParams) -> Result<RootKeys, CryptoError> {
     keyeo_crypto::derive_root(passphrase, params, &OPENOM_ROOT_LABELS)
 }
