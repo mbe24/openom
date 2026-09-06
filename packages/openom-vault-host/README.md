@@ -61,7 +61,7 @@ under WSL2/Docker).
 ## Usage
 
 ```rust
-use openom_vault_host::{VaultHost, VaultStore};
+use openom_vault_host::{SealEntryRequest, VaultHost, VaultStore};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -95,10 +95,17 @@ let p = host.provision("my-tree", tree_id, "correct horse".into(), "owner").unwr
 assert!(!p.watermark.is_empty());
 
 let sealed = host
-    .seal_entry(
-        &p.sealer_id, "snapshot", "openom-json", "none",
-        0, Vec::new(), 0, Vec::new(), b"the family tree",
-    )
+    .seal_entry(SealEntryRequest {
+        sealer_id: p.sealer_id.clone(),
+        kind: "snapshot".into(),
+        format: "openom-json".into(),
+        compression: "none".into(),
+        replica_counter: 0,
+        prev_ciphertext_hash: Vec::new(),
+        covers_through_seq: 0,
+        blob_id: Vec::new(),
+        plaintext: b"the family tree".to_vec(),
+    })
     .unwrap();
 
 // Lock frees the sealer; the handle is dead afterwards.

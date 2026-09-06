@@ -32,6 +32,8 @@ sqlite = ["dep:rusqlite"]
 [dev-dependencies]
 # Tests mint ad-hoc signer identities via openom_keyring_chain::generate_identity (test-util gated).
 openom-keyring-chain = { workspace = true, features = ["test-util"] }
+# The IPC-boundary tests deserialize the request structs from the exact camelCase JSON the JS callers send.
+serde_json.workspace = true
 
 [lints]
 workspace = true

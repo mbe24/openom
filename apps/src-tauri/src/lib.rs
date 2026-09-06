@@ -5,8 +5,10 @@ use std::sync::Arc;
 use journal::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
-    AcceptedKeyring, CoOwnerChanged, EngineKind, MemberAdded, MemberProvisioned, MemberRemoved,
-    Provisioned, Recovered, Rekeyed, Sealed, Unlocked, VaultError, VaultErrorCode, VaultHost,
+    AcceptedKeyring, AddMemberAsCoOwnerRequest, AddMemberRequest, CoOwnerChanged, EngineKind,
+    MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed,
+    RemoveMemberAsCoOwnerRequest, Sealed, SealEntryRequest, Unlocked, VaultError, VaultErrorCode,
+    VaultHost,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -197,33 +199,14 @@ async fn vault_provision_member(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 async fn vault_add_member(
     state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    owner_passphrase: String,
-    owner_member_id: String,
-    new_member_id: String,
-    role: String,
-    member_hpke_public: Vec<u8>,
-    member_author_public: Vec<u8>,
+    req: AddMemberRequest,
 ) -> Result<MemberAdded, VaultError> {
     let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.add_member(
-            &tree_key,
-            &tree_id,
-            owner_passphrase,
-            &owner_member_id,
-            &new_member_id,
-            &role,
-            &member_hpke_public,
-            &member_author_public,
-        )
-    })
-    .await
-    .map_err(join_err)?
+    tauri::async_runtime::spawn_blocking(move || host.add_member(req))
+        .await
+        .map_err(join_err)?
 }
 
 #[tauri::command]
@@ -275,61 +258,24 @@ async fn vault_remove_member(
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 async fn vault_add_member_as_co_owner(
     state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    passphrase: String,
-    co_owner_kdf_params: Vec<u8>,
-    co_owner_member_id: String,
-    trusted_signers: Vec<Vec<u8>>,
-    new_member_id: String,
-    role: String,
-    member_hpke_public: Vec<u8>,
-    member_author_public: Vec<u8>,
+    req: AddMemberAsCoOwnerRequest,
 ) -> Result<MemberAdded, VaultError> {
     let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.add_member_as_co_owner(
-            &tree_key,
-            &tree_id,
-            passphrase,
-            &co_owner_kdf_params,
-            &co_owner_member_id,
-            trusted_signers,
-            &new_member_id,
-            &role,
-            &member_hpke_public,
-            &member_author_public,
-        )
-    })
-    .await
-    .map_err(join_err)?
+    tauri::async_runtime::spawn_blocking(move || host.add_member_as_co_owner(req))
+        .await
+        .map_err(join_err)?
 }
 
 #[tauri::command]
 async fn vault_remove_member_as_co_owner(
     state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    passphrase: String,
-    co_owner_kdf_params: Vec<u8>,
-    co_owner_member_id: String,
-    trusted_signers: Vec<Vec<u8>>,
-    remove_member_id: String,
+    req: RemoveMemberAsCoOwnerRequest,
 ) -> Result<MemberRemoved, VaultError> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member_as_co_owner(
-            &tree_key,
-            &tree_id,
-            passphrase,
-            &co_owner_kdf_params,
-            &co_owner_member_id,
-            trusted_signers,
-            &remove_member_id,
-        )
+        host.remove_member_as_co_owner(req)
     })
     .await
     .map_err(join_err)?
@@ -403,30 +349,8 @@ fn sealer_dev(state: State<'_, Vault>, tree_id: Vec<u8>) -> Result<Unlocked, Vau
 }
 
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
-fn sealer_seal_entry(
-    state: State<'_, Vault>,
-    sealer_id: String,
-    kind: String,
-    format: String,
-    compression: String,
-    replica_counter: u64,
-    prev_ciphertext_hash: Vec<u8>,
-    covers_through_seq: u64,
-    blob_id: Vec<u8>,
-    plaintext: Vec<u8>,
-) -> Result<Sealed, VaultError> {
-    state.seal_entry(
-        &sealer_id,
-        &kind,
-        &format,
-        &compression,
-        replica_counter,
-        prev_ciphertext_hash,
-        covers_through_seq,
-        blob_id,
-        &plaintext,
-    )
+fn sealer_seal_entry(state: State<'_, Vault>, req: SealEntryRequest) -> Result<Sealed, VaultError> {
+    state.seal_entry(req)
 }
 
 #[tauri::command]

@@ -15,7 +15,7 @@ use openom_protocol::Message;
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
 use openom_vault::{vault, AppVault, DagVault, KeyringRole};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -309,6 +309,87 @@ pub struct Resealed {
 pub struct Backfilled {
     pub watermark: Vec<u8>,
     pub backfilled: bool,
+}
+
+// ---------------------------------------------------------------- requests
+
+// The member-administration and sealing entry points take many distinct inputs (tree + caller
+// credentials + the target member/entry). Each rides as one named request struct — deserialized straight
+// from the Tauri invoke payload and reused by the host method — instead of a long positional argument list.
+
+/// Request for [`VaultHost::add_member`] (owner action): the tree + owner credentials and the
+/// OOB-verified new member.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddMemberRequest {
+    pub tree_key: String,
+    pub tree_id: Vec<u8>,
+    pub owner_passphrase: String,
+    pub owner_member_id: String,
+    pub new_member_id: String,
+    pub role: String,
+    pub member_hpke_public: Vec<u8>,
+    pub member_author_public: Vec<u8>,
+}
+
+/// Request for [`VaultHost::add_member_as_co_owner`] (any-of administration): the co-owner's credentials
+/// (passphrase + kdf + pinned trusted signers) and the OOB-verified new member.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddMemberAsCoOwnerRequest {
+    pub tree_key: String,
+    pub tree_id: Vec<u8>,
+    pub passphrase: String,
+    pub co_owner_kdf_params: Vec<u8>,
+    pub co_owner_member_id: String,
+    pub trusted_signers: Vec<Vec<u8>>,
+    pub new_member_id: String,
+    pub role: String,
+    pub member_hpke_public: Vec<u8>,
+    pub member_author_public: Vec<u8>,
+}
+
+/// Request for [`VaultHost::remove_member_as_co_owner`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveMemberAsCoOwnerRequest {
+    pub tree_key: String,
+    pub tree_id: Vec<u8>,
+    pub passphrase: String,
+    pub co_owner_kdf_params: Vec<u8>,
+    pub co_owner_member_id: String,
+    pub trusted_signers: Vec<Vec<u8>>,
+    pub remove_member_id: String,
+}
+
+/// Request for [`VaultHost::dag_add_member`] (owner action on a dag tree). Note the author/HPKE key order
+/// mirrors the dag veneer.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagAddMemberRequest {
+    pub tree_key: String,
+    pub tree_id: Vec<u8>,
+    pub owner_passphrase: String,
+    pub owner_member_id: String,
+    pub new_member_id: String,
+    pub role: String,
+    pub member_author_public: Vec<u8>,
+    pub member_hpke_public: Vec<u8>,
+}
+
+/// Request for [`VaultHost::seal_entry`]: the sealer handle plus the entry's chain state and plaintext.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealEntryRequest {
+    pub sealer_id: String,
+    pub kind: String,
+    pub format: String,
+    pub compression: String,
+    pub replica_counter: u64,
+    pub prev_ciphertext_hash: Vec<u8>,
+    pub covers_through_seq: u64,
+    pub blob_id: Vec<u8>,
+    pub plaintext: Vec<u8>,
 }
 
 // ---------------------------------------------------------------- registry
@@ -652,40 +733,29 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the vault operation or host store access fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_member(
-        &self,
-        tree_key: &str,
-        tree_id: &[u8],
-        owner_passphrase: String,
-        owner_member_id: &str,
-        new_member_id: &str,
-        role: &str,
-        member_hpke_public: &[u8],
-        member_author_public: &[u8],
-    ) -> Result<MemberAdded> {
-        let keyring = self.require_keyring(tree_key)?;
+    pub fn add_member(&self, req: AddMemberRequest) -> Result<MemberAdded> {
+        let keyring = self.require_keyring(&req.tree_key)?;
         let floor = chain_floor(
             &self
                 .store
-                .watermark(tree_key)
+                .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
         let added = vault::add_member(
             &keyring,
-            &Passphrase::new(owner_passphrase.into_bytes()),
-            &TreeId::new(tree_id),
-            &MemberId::new(owner_member_id),
+            &Passphrase::new(req.owner_passphrase.into_bytes()),
+            &TreeId::new(req.tree_id.as_slice()),
+            &MemberId::new(&req.owner_member_id),
             floor,
             &vault::NewMemberSpec {
-                member_id: &MemberId::new(new_member_id),
-                role: parse_member_role(role)?,
-                hpke_public: member_hpke_public,
-                author_public: member_author_public,
+                member_id: &MemberId::new(&req.new_member_id),
+                role: parse_member_role(&req.role)?,
+                hpke_public: &req.member_hpke_public,
+                author_public: &req.member_author_public,
             },
         )?;
         let watermark = self.commit_transition(
-            tree_key,
+            &req.tree_key,
             &keyring,
             &added.keyring,
             Some((&added.write_key_id, &added.write_dek_hash)),
@@ -797,51 +867,37 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the vault operation or host store access fails.
-    // `trusted_signers` arrives owned from the IPC/host boundary; only borrowed here (see unlock_as_member).
-    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-    pub fn add_member_as_co_owner(
-        &self,
-        tree_key: &str,
-        tree_id: &[u8],
-        passphrase: String,
-        co_owner_kdf_params: &[u8],
-        co_owner_member_id: &str,
-        trusted_signers: Vec<Vec<u8>>,
-        new_member_id: &str,
-        role: &str,
-        member_hpke_public: &[u8],
-        member_author_public: &[u8],
-    ) -> Result<MemberAdded> {
-        let keyring = self.require_keyring(tree_key)?;
+    pub fn add_member_as_co_owner(&self, req: AddMemberAsCoOwnerRequest) -> Result<MemberAdded> {
+        let keyring = self.require_keyring(&req.tree_key)?;
         let floor = chain_floor(
             &self
                 .store
-                .watermark(tree_key)
+                .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = keyeo_crypto::codec::decode_kdf_params(co_owner_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
-        let trusted = parse_trusted_signers(&trusted_signers)?;
+        let trusted = parse_trusted_signers(&req.trusted_signers)?;
         let added = vault::add_member_as_co_owner(
             &keyring,
             &vault::MemberAuth {
-                passphrase: &Passphrase::new(passphrase.into_bytes()),
+                passphrase: &Passphrase::new(req.passphrase.into_bytes()),
                 kdf: &kdf,
-                member_id: &MemberId::new(co_owner_member_id),
+                member_id: &MemberId::new(&req.co_owner_member_id),
                 trusted_signers: &trusted,
             },
-            &TreeId::new(tree_id),
+            &TreeId::new(req.tree_id.as_slice()),
             floor,
             &vault::NewMemberSpec {
-                member_id: &MemberId::new(new_member_id),
-                role: parse_member_role(role)?,
-                hpke_public: member_hpke_public,
-                author_public: member_author_public,
+                member_id: &MemberId::new(&req.new_member_id),
+                role: parse_member_role(&req.role)?,
+                hpke_public: &req.member_hpke_public,
+                author_public: &req.member_author_public,
             },
         )?;
         let watermark = self.commit_transition(
-            tree_key,
+            &req.tree_key,
             &keyring,
             &added.keyring,
             Some((&added.write_key_id, &added.write_dek_hash)),
@@ -854,45 +910,37 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the vault operation or host store access fails.
-    // `trusted_signers` arrives owned from the IPC/host boundary; only borrowed here (see unlock_as_member).
-    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     pub fn remove_member_as_co_owner(
         &self,
-        tree_key: &str,
-        tree_id: &[u8],
-        passphrase: String,
-        co_owner_kdf_params: &[u8],
-        co_owner_member_id: &str,
-        trusted_signers: Vec<Vec<u8>>,
-        remove_member_id: &str,
+        req: RemoveMemberAsCoOwnerRequest,
     ) -> Result<MemberRemoved> {
-        let keyring = self.require_keyring(tree_key)?;
+        let keyring = self.require_keyring(&req.tree_key)?;
         let floor = chain_floor(
             &self
                 .store
-                .watermark(tree_key)
+                .watermark(&req.tree_key)
                 .map_err(VaultError::storage)?,
         );
-        let kdf = keyeo_crypto::codec::decode_kdf_params(co_owner_kdf_params).map_err(|e| {
+        let kdf = keyeo_crypto::codec::decode_kdf_params(&req.co_owner_kdf_params).map_err(|e| {
             VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
         })?;
-        let trusted = parse_trusted_signers(&trusted_signers)?;
+        let trusted = parse_trusted_signers(&req.trusted_signers)?;
         let replica = self.fresh_replica()?;
         let r = vault::remove_member_as_co_owner(
             &keyring,
             &vault::MemberAuth {
-                passphrase: &Passphrase::new(passphrase.into_bytes()),
+                passphrase: &Passphrase::new(req.passphrase.into_bytes()),
                 kdf: &kdf,
-                member_id: &MemberId::new(co_owner_member_id),
+                member_id: &MemberId::new(&req.co_owner_member_id),
                 trusted_signers: &trusted,
             },
-            &TreeId::new(tree_id),
+            &TreeId::new(req.tree_id.as_slice()),
             floor,
-            &MemberId::new(remove_member_id),
+            &MemberId::new(&req.remove_member_id),
             &ReplicaId::new(replica),
         )?;
         let watermark = self.commit_transition(
-            tree_key,
+            &req.tree_key,
             &keyring,
             &r.keyring,
             Some((&r.write_key_id, &r.write_dek_hash)),
@@ -1064,30 +1112,18 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the sealer is unknown or sealing fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn seal_entry(
-        &self,
-        sealer_id: &str,
-        kind: &str,
-        format: &str,
-        compression: &str,
-        replica_counter: u64,
-        prev_ciphertext_hash: Vec<u8>,
-        covers_through_seq: u64,
-        blob_id: Vec<u8>,
-        plaintext: &[u8],
-    ) -> Result<Sealed> {
-        let sealer = self.sealer(sealer_id)?;
+    pub fn seal_entry(&self, req: SealEntryRequest) -> Result<Sealed> {
+        let sealer = self.sealer(&req.sealer_id)?;
         let ctx = SealContext {
-            kind: parse_kind(kind)?,
-            format: parse_format(format)?,
-            compression: parse_compression(compression)?,
-            replica_counter,
-            prev_ciphertext_hash,
-            covers_through_seq,
-            blob_id,
+            kind: parse_kind(&req.kind)?,
+            format: parse_format(&req.format)?,
+            compression: parse_compression(&req.compression)?,
+            replica_counter: req.replica_counter,
+            prev_ciphertext_hash: req.prev_ciphertext_hash,
+            covers_through_seq: req.covers_through_seq,
+            blob_id: req.blob_id,
         };
-        let out = sealer.seal_entry(&ctx, plaintext)?;
+        let out = sealer.seal_entry(&ctx, &req.plaintext)?;
         Ok(Sealed {
             envelope: out.envelope,
             ciphertext_hash: out.ciphertext_hash,
@@ -1127,24 +1163,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     ///
     /// # Errors
     /// Returns [`VaultError`] if the vault operation or host store access fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn dag_add_member(
-        &self,
-        tree_key: &str,
-        tree_id: &[u8],
-        owner_passphrase: String,
-        owner_member_id: &str,
-        new_member_id: &str,
-        role: &str,
-        member_author_public: &[u8],
-        member_hpke_public: &[u8],
-    ) -> Result<MemberAdded> {
+    pub fn dag_add_member(&self, req: DagAddMemberRequest) -> Result<MemberAdded> {
         let dag = self.dag()?;
-        let anchor = self.require_keyring(tree_key)?;
+        let anchor = self.require_keyring(&req.tree_key)?;
         let replica = self.fresh_replica()?;
         let (tree, member, rep) = (
-            TreeId::new(tree_id),
-            MemberId::new(owner_member_id),
+            TreeId::new(req.tree_id.as_slice()),
+            MemberId::new(&req.owner_member_id),
             ReplicaId::new(replica),
         );
         let ctx = VaultContext {
@@ -1155,17 +1180,17 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         let new_anchor = dag.add_member(
             &ctx,
             &anchor,
-            &Passphrase::new(owner_passphrase.into_bytes()),
+            &Passphrase::new(req.owner_passphrase.into_bytes()),
             &openom_vault::KeyringMemberInit {
-                id: new_member_id.to_string(),
-                role: parse_keyring_role(role)?,
-                author_public_key: key32(member_author_public, "member author key")?,
-                hpke_public_key: key32(member_hpke_public, "member hpke key")?,
+                id: req.new_member_id.clone(),
+                role: parse_keyring_role(&req.role)?,
+                author_public_key: key32(&req.member_author_public, "member author key")?,
+                hpke_public_key: key32(&req.member_hpke_public, "member hpke key")?,
             },
         )?;
         let watermark = dag.watermark(&new_anchor)?;
         self.store
-            .commit_keyring(tree_key, &new_anchor, &watermark)
+            .commit_keyring(&req.tree_key, &new_anchor, &watermark)
             .map_err(VaultError::storage)?;
         Ok(MemberAdded { watermark })
     }
@@ -1699,6 +1724,192 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    // Concise builders for the request structs from the pre-bundling positional arguments, so the tests
+    // stay flat. Test-only, so their argument counts are irrelevant to the lint gate.
+    fn mk_add(
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        new_member_id: &str,
+        role: &str,
+        member_hpke_public: &[u8],
+        member_author_public: &[u8],
+    ) -> AddMemberRequest {
+        AddMemberRequest {
+            tree_key: tree_key.into(),
+            tree_id: tree_id.into(),
+            owner_passphrase,
+            owner_member_id: owner_member_id.into(),
+            new_member_id: new_member_id.into(),
+            role: role.into(),
+            member_hpke_public: member_hpke_public.into(),
+            member_author_public: member_author_public.into(),
+        }
+    }
+    fn mk_co_add(
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        co_owner_kdf_params: &[u8],
+        co_owner_member_id: &str,
+        trusted_signers: Vec<Vec<u8>>,
+        new_member_id: &str,
+        role: &str,
+        member_hpke_public: &[u8],
+        member_author_public: &[u8],
+    ) -> AddMemberAsCoOwnerRequest {
+        AddMemberAsCoOwnerRequest {
+            tree_key: tree_key.into(),
+            tree_id: tree_id.into(),
+            passphrase,
+            co_owner_kdf_params: co_owner_kdf_params.into(),
+            co_owner_member_id: co_owner_member_id.into(),
+            trusted_signers,
+            new_member_id: new_member_id.into(),
+            role: role.into(),
+            member_hpke_public: member_hpke_public.into(),
+            member_author_public: member_author_public.into(),
+        }
+    }
+    fn mk_co_remove(
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        co_owner_kdf_params: &[u8],
+        co_owner_member_id: &str,
+        trusted_signers: Vec<Vec<u8>>,
+        remove_member_id: &str,
+    ) -> RemoveMemberAsCoOwnerRequest {
+        RemoveMemberAsCoOwnerRequest {
+            tree_key: tree_key.into(),
+            tree_id: tree_id.into(),
+            passphrase,
+            co_owner_kdf_params: co_owner_kdf_params.into(),
+            co_owner_member_id: co_owner_member_id.into(),
+            trusted_signers,
+            remove_member_id: remove_member_id.into(),
+        }
+    }
+    fn mk_dag_add(
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+        new_member_id: &str,
+        role: &str,
+        member_author_public: &[u8],
+        member_hpke_public: &[u8],
+    ) -> DagAddMemberRequest {
+        DagAddMemberRequest {
+            tree_key: tree_key.into(),
+            tree_id: tree_id.into(),
+            owner_passphrase,
+            owner_member_id: owner_member_id.into(),
+            new_member_id: new_member_id.into(),
+            role: role.into(),
+            member_author_public: member_author_public.into(),
+            member_hpke_public: member_hpke_public.into(),
+        }
+    }
+    fn mk_seal(
+        sealer_id: &str,
+        kind: &str,
+        format: &str,
+        compression: &str,
+        replica_counter: u64,
+        prev_ciphertext_hash: Vec<u8>,
+        covers_through_seq: u64,
+        blob_id: Vec<u8>,
+        plaintext: &[u8],
+    ) -> SealEntryRequest {
+        SealEntryRequest {
+            sealer_id: sealer_id.into(),
+            kind: kind.into(),
+            format: format.into(),
+            compression: compression.into(),
+            replica_counter,
+            prev_ciphertext_hash,
+            covers_through_seq,
+            blob_id,
+            plaintext: plaintext.into(),
+        }
+    }
+
+    // The request structs are the IPC contract: the Tauri commands deserialize them straight from the
+    // invoke payload, so these lock the camelCase field names + byte-array shape the JS callers depend on.
+
+    #[test]
+    fn seal_entry_request_deserializes_from_the_js_payload() {
+        // The exact object `apps/app/src/core/sealer/invokeSealer.js` nests under `req`; byte fields cross
+        // as JSON number arrays over Tauri IPC.
+        let payload = serde_json::json!({
+            "sealerId": "s-1",
+            "kind": "snapshot",
+            "format": "openom-json",
+            "compression": "none",
+            "replicaCounter": 7,
+            "prevCiphertextHash": [1, 2, 3],
+            "coversThroughSeq": 42,
+            "blobId": [],
+            "plaintext": [9, 9]
+        });
+        let req: SealEntryRequest = serde_json::from_value(payload).unwrap();
+        assert_eq!(req.sealer_id, "s-1");
+        assert_eq!(req.kind, "snapshot");
+        assert_eq!(req.format, "openom-json");
+        assert_eq!(req.compression, "none");
+        assert_eq!(req.replica_counter, 7);
+        assert_eq!(req.prev_ciphertext_hash, vec![1, 2, 3]);
+        assert_eq!(req.covers_through_seq, 42);
+        assert!(req.blob_id.is_empty());
+        assert_eq!(req.plaintext, vec![9, 9]);
+    }
+
+    #[test]
+    fn add_member_request_deserializes_from_camelcase() {
+        let payload = serde_json::json!({
+            "treeKey": "my-tree",
+            "treeId": [1, 2],
+            "ownerPassphrase": "pw",
+            "ownerMemberId": "owner",
+            "newMemberId": "m",
+            "role": "editor",
+            "memberHpkePublic": [3],
+            "memberAuthorPublic": [4]
+        });
+        let req: AddMemberRequest = serde_json::from_value(payload).unwrap();
+        assert_eq!(req.tree_key, "my-tree");
+        assert_eq!(req.tree_id, vec![1, 2]);
+        assert_eq!(req.owner_passphrase, "pw");
+        assert_eq!(req.owner_member_id, "owner");
+        assert_eq!(req.new_member_id, "m");
+        assert_eq!(req.role, "editor");
+        assert_eq!(req.member_hpke_public, vec![3]);
+        assert_eq!(req.member_author_public, vec![4]);
+    }
+
+    #[test]
+    fn add_member_as_co_owner_request_deserializes_trusted_signer_list() {
+        // `trustedSigners` is an array-of-byte-arrays; prove the nested shape survives.
+        let payload = serde_json::json!({
+            "treeKey": "t",
+            "treeId": [0],
+            "passphrase": "pw",
+            "coOwnerKdfParams": [5, 6],
+            "coOwnerMemberId": "co",
+            "trustedSigners": [[1, 1], [2, 2]],
+            "newMemberId": "m",
+            "role": "editor",
+            "memberHpkePublic": [7],
+            "memberAuthorPublic": [8]
+        });
+        let req: AddMemberAsCoOwnerRequest = serde_json::from_value(payload).unwrap();
+        assert_eq!(req.co_owner_kdf_params, vec![5, 6]);
+        assert_eq!(req.trusted_signers, vec![vec![1, 1], vec![2, 2]]);
+        assert_eq!(req.member_author_public, vec![8]);
+    }
+
     /// An in-memory VaultStore: keyring bytes + a monotonic revision floor per tree.
     #[derive(Default)]
     struct MemStore {
@@ -1749,7 +1960,7 @@ mod tests {
     }
 
     fn seal(h: &VaultHost<MemStore>, id: &str, plaintext: &[u8]) -> Vec<u8> {
-        h.seal_entry(
+        h.seal_entry(mk_seal(
             id,
             "snapshot",
             "openom-json",
@@ -1759,7 +1970,7 @@ mod tests {
             0,
             Vec::new(),
             plaintext,
-        )
+        ))
         .unwrap()
         .envelope
     }
@@ -1793,7 +2004,7 @@ mod tests {
         // Lock frees the sealer; the handle is dead afterwards.
         h.lock(&p.sealer_id);
         assert_eq!(
-            h.seal_entry(
+            h.seal_entry(mk_seal(
                 &p.sealer_id,
                 "snapshot",
                 "openom-json",
@@ -1803,7 +2014,7 @@ mod tests {
                 0,
                 Vec::new(),
                 b"x"
-            )
+            ))
             .unwrap_err()
             .code,
             VaultErrorCode::UnknownSealer
@@ -1901,10 +2112,10 @@ mod tests {
 
         let bob = h.provision_member("bob pass".into()).unwrap();
         let added = h
-            .dag_add_member(
+            .dag_add_member(mk_dag_add(
                 KEY, TREE, "owner horse".into(), MEMBER, "acct-bob", "editor",
                 &bob.author_public, &bob.hpke_public,
-            )
+            ))
             .unwrap();
         assert!(!added.watermark.is_empty(), "adding a member advances the persisted frontier");
 
@@ -1926,10 +2137,10 @@ mod tests {
         chain.provision(KEY, TREE, "owner".into(), MEMBER).unwrap();
         assert_eq!(
             chain
-                .dag_add_member(
+                .dag_add_member(mk_dag_add(
                     KEY, TREE, "owner".into(), MEMBER, "acct-x", "editor",
                     &bob.author_public, &bob.hpke_public,
-                )
+                ))
                 .unwrap_err()
                 .code,
             VaultErrorCode::BadRequest
@@ -1958,7 +2169,7 @@ mod tests {
             ("acct-carol", &carol),
             ("acct-dave", &dave),
         ] {
-            a.dag_add_member(KEY, TREE, owner.into(), MEMBER, id, "editor", &m.author_public, &m.hpke_public)
+            a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, id, "editor", &m.author_public, &m.hpke_public))
                 .unwrap();
         }
         // Snapshot the shared anchor after the three adds, and seed host B (the second device) with it.
@@ -2022,7 +2233,7 @@ mod tests {
         let a = dag_host();
         a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
         let bob = a.provision_member("bob pass".into()).unwrap();
-        a.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public)
+        a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public))
             .unwrap();
 
         let shared = a.store.load_keyring(KEY).unwrap().unwrap();
@@ -2033,7 +2244,7 @@ mod tests {
         // A removes bob (epoch 1, owner-only); B concurrently adds carol (wrapped only in epoch 0).
         a.dag_remove_member(KEY, TREE, owner.into(), MEMBER, "acct-bob").unwrap();
         let carol = a.provision_member("carol pass".into()).unwrap();
-        b.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public)
+        b.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public))
             .unwrap();
 
         // Device B merges A's branch (drive the repair through B, a NON-owner device). carol can unlock but
@@ -2085,7 +2296,7 @@ mod tests {
         let a = dag_host();
         a.provision(KEY, TREE, owner.into(), MEMBER).unwrap();
         let bob = a.provision_member("bob pass".into()).unwrap();
-        a.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public)
+        a.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-bob", "editor", &bob.author_public, &bob.hpke_public))
             .unwrap();
 
         // Seed device B with the shared anchor (before A's removal / B's add).
@@ -2101,7 +2312,7 @@ mod tests {
 
         // B concurrently adds carol — she gets a wrap for epoch 0 only (B never saw A's epoch 1).
         let carol = a.provision_member("carol pass".into()).unwrap();
-        b.dag_add_member(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public)
+        b.dag_add_member(mk_dag_add(KEY, TREE, owner.into(), MEMBER, "acct-carol", "editor", &carol.author_public, &carol.hpke_public))
             .unwrap();
         let b_branch = b.store.load_keyring(KEY).unwrap().unwrap();
 
@@ -2214,7 +2425,7 @@ mod tests {
 
         let m = h.provision_member("member pass".into()).unwrap();
         let added = h
-            .add_member(
+            .add_member(mk_add(
                 KEY,
                 TREE,
                 "owner pass".into(),
@@ -2223,7 +2434,7 @@ mod tests {
                 "editor",
                 &m.hpke_public,
                 &m.author_public,
-            )
+            ))
             .unwrap();
         assert_eq!(added.watermark.len(), PINNED, "an add must not erase the pin");
         // An add mints no epoch → the SAME write-epoch pin is carried forward.
@@ -2283,7 +2494,7 @@ mod tests {
         let h = host();
         let p = h.provision(KEY, TREE, "p".into(), MEMBER).unwrap();
         let err = h
-            .seal_entry(
+            .seal_entry(mk_seal(
                 &p.sealer_id,
                 "nope",
                 "openom-json",
@@ -2293,7 +2504,7 @@ mod tests {
                 0,
                 Vec::new(),
                 b"x",
-            )
+            ))
             .unwrap_err();
         assert_eq!(err.code, VaultErrorCode::BadRequest);
     }
@@ -2324,7 +2535,7 @@ mod tests {
 
         let m = h.provision_member("member pass".into()).unwrap();
         let added = h
-            .add_member(
+            .add_member(mk_add(
                 KEY,
                 TREE,
                 "owner pass".into(),
@@ -2333,7 +2544,7 @@ mod tests {
                 "editor",
                 &m.hpke_public,
                 &m.author_public,
-            )
+            ))
             .unwrap();
         assert_eq!(chain_floor(&added.watermark), 2);
 
@@ -2360,7 +2571,7 @@ mod tests {
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let m = h.provision_member("member pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2369,7 +2580,7 @@ mod tests {
             "viewer",
             &m.hpke_public,
             &m.author_public,
-        )
+        ))
         .unwrap();
         // No pinned keys at all → bad request (a member must supply a trust anchor).
         assert_eq!(
@@ -2392,7 +2603,7 @@ mod tests {
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let m = h.provision_member("member pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2401,7 +2612,7 @@ mod tests {
             "editor",
             &m.hpke_public,
             &m.author_public,
-        )
+        ))
         .unwrap();
         let pinned = vec![founder_key(&h, KEY)];
 
@@ -2433,7 +2644,7 @@ mod tests {
         let owner = h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let sealed = seal(&h, &owner.sealer_id, b"shared");
         let m = h.provision_member("member pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2442,7 +2653,7 @@ mod tests {
             "editor",
             &m.hpke_public,
             &m.author_public,
-        )
+        ))
         .unwrap();
         let old_founder = founder_key(&h, KEY);
 
@@ -2522,7 +2733,7 @@ mod tests {
         a.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap(); // rev1
         let rev1 = a.store.load_keyring(KEY).unwrap().unwrap();
         let m2 = a.provision_member("m2 pass".into()).unwrap();
-        a.add_member(
+        a.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2531,11 +2742,11 @@ mod tests {
             "editor",
             &m2.hpke_public,
             &m2.author_public,
-        )
+        ))
         .unwrap();
         let rev2 = a.store.load_keyring(KEY).unwrap().unwrap();
         let m3 = a.provision_member("m3 pass".into()).unwrap();
-        a.add_member(
+        a.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2544,7 +2755,7 @@ mod tests {
             "viewer",
             &m3.hpke_public,
             &m3.author_public,
-        )
+        ))
         .unwrap();
         let rev3 = a.store.load_keyring(KEY).unwrap().unwrap();
         (rev1, rev2, rev3)
@@ -2661,7 +2872,7 @@ mod tests {
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let co = h.provision_member("co pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2670,7 +2881,7 @@ mod tests {
             "editor",
             &co.hpke_public,
             &co.author_public,
-        )
+        ))
         .unwrap();
         let promoted = h
             .add_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2)
@@ -2687,7 +2898,7 @@ mod tests {
         let h = host();
         h.provision(KEY, TREE, "owner pass".into(), MEMBER).unwrap();
         let co = h.provision_member("co pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2696,7 +2907,7 @@ mod tests {
             "editor",
             &co.hpke_public,
             &co.author_public,
-        )
+        ))
         .unwrap();
         h.add_co_owner(KEY, TREE, "owner pass".into(), MEMBER, MEMBER2)
             .unwrap(); // rev 3
@@ -2705,7 +2916,7 @@ mod tests {
         // The CO-OWNER adds and then removes an ordinary member through the host.
         let m3 = h.provision_member("m3 pass".into()).unwrap();
         let added = h
-            .add_member_as_co_owner(
+            .add_member_as_co_owner(mk_co_add(
                 KEY,
                 TREE,
                 "co pass".into(),
@@ -2716,11 +2927,11 @@ mod tests {
                 "viewer",
                 &m3.hpke_public,
                 &m3.author_public,
-            )
+            ))
             .unwrap();
         assert_eq!(chain_floor(&added.watermark), 4);
         let removed = h
-            .remove_member_as_co_owner(
+            .remove_member_as_co_owner(mk_co_remove(
                 KEY,
                 TREE,
                 "co pass".into(),
@@ -2728,13 +2939,13 @@ mod tests {
                 MEMBER2,
                 vec![founder],
                 MEMBER3,
-            )
+            ))
             .unwrap();
         assert_eq!(chain_floor(&removed.watermark), 5);
 
         // A non-signer (an ordinary member) can't administer.
         let ed = h.provision_member("ed pass".into()).unwrap();
-        h.add_member(
+        h.add_member(mk_add(
             KEY,
             TREE,
             "owner pass".into(),
@@ -2743,11 +2954,11 @@ mod tests {
             "editor",
             &ed.hpke_public,
             &ed.author_public,
-        )
+        ))
         .unwrap();
         let founder2 = founder_key(&h, KEY);
         let err = h
-            .remove_member_as_co_owner(
+            .remove_member_as_co_owner(mk_co_remove(
                 KEY,
                 TREE,
                 "ed pass".into(),
@@ -2755,7 +2966,7 @@ mod tests {
                 "acct-ed",
                 vec![founder2],
                 MEMBER,
-            )
+            ))
             .unwrap_err();
         assert_eq!(err.code, VaultErrorCode::NotAuthorized);
     }

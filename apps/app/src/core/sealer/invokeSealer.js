@@ -33,16 +33,19 @@ export function invokeCore(invoke, sealerId) {
   return {
     sealEntry: (kind, format, compression, counter, prev, covers, blobId, plaintext) =>
       guard(
+        // The command takes one `SealEntryRequest` struct, so the payload nests under `req`.
         invoke('sealer_seal_entry', {
-          sealerId,
-          kind,
-          format,
-          compression,
-          replicaCounter: counter,
-          prevCiphertextHash: arr(prev),
-          coversThroughSeq: covers,
-          blobId: arr(blobId),
-          plaintext: arr(plaintext),
+          req: {
+            sealerId,
+            kind,
+            format,
+            compression,
+            replicaCounter: counter,
+            prevCiphertextHash: arr(prev),
+            coversThroughSeq: covers,
+            blobId: arr(blobId),
+            plaintext: arr(plaintext),
+          },
         }),
       ).then((r) => ({ envelope: u8(r.envelope), ciphertextHash: u8(r.ciphertextHash) })),
     openEntry: (kind, bytes) =>

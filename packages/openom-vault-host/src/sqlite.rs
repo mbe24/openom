@@ -154,17 +154,17 @@ mod tests {
             .provision("my-tree", TREE, "correct horse".into(), "owner")
             .unwrap();
         let envelope = host
-            .seal_entry(
-                &p.sealer_id,
-                "snapshot",
-                "openom-json",
-                "none",
-                0,
-                Vec::new(),
-                0,
-                Vec::new(),
-                b"data",
-            )
+            .seal_entry(crate::SealEntryRequest {
+                sealer_id: p.sealer_id.clone(),
+                kind: "snapshot".into(),
+                format: "openom-json".into(),
+                compression: "none".into(),
+                replica_counter: 0,
+                prev_ciphertext_hash: Vec::new(),
+                covers_through_seq: 0,
+                blob_id: Vec::new(),
+                plaintext: b"data".to_vec(),
+            })
             .unwrap()
             .envelope;
         host.lock(&p.sealer_id);

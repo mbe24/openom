@@ -121,7 +121,7 @@ impl WasmSealer {
     /// # Errors
     /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
     #[wasm_bindgen(js_name = sealEntry)]
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
     pub fn seal_entry(
         &self,
         kind: &str,
@@ -394,8 +394,7 @@ pub fn unlock(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen]
-// A wasm-bindgen JS export; each parameter is a distinct required input to the recovery flow.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn recover(
     engine: &str,
     keyring: &[u8],
@@ -443,8 +442,7 @@ pub fn recover(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = changePassphrase)]
-// A wasm-bindgen JS export; each parameter is a distinct required input to the change-passphrase flow.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn change_passphrase(
     engine: &str,
     keyring: &[u8],
@@ -540,7 +538,7 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = addMember)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn add_member(
     keyring: &[u8],
     owner_passphrase: String,
@@ -584,7 +582,7 @@ pub fn add_member(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = unlockAsMember)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn unlock_as_member(
     keyring: &[u8],
     passphrase: String,
@@ -628,7 +626,6 @@ pub fn unlock_as_member(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeMember)]
-#[allow(clippy::too_many_arguments)]
 pub fn remove_member(
     keyring: &[u8],
     owner_passphrase: String,
@@ -722,7 +719,7 @@ impl ResealResult {
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = dagAddMember)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn dag_add_member(
     keyring: &[u8],
     owner_passphrase: String,
@@ -1188,7 +1185,7 @@ pub fn keyring_covers(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = addMemberAsCoOwner)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn add_member_as_co_owner(
     keyring: &[u8],
     passphrase: String,
@@ -1240,7 +1237,7 @@ pub fn add_member_as_co_owner(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeMemberAsCoOwner)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
 pub fn remove_member_as_co_owner(
     keyring: &[u8],
     passphrase: String,
@@ -1322,7 +1319,6 @@ pub fn add_co_owner(
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
 #[wasm_bindgen(js_name = removeCoOwner)]
-#[allow(clippy::too_many_arguments)]
 pub fn remove_co_owner(
     keyring: &[u8],
     founder_passphrase: String,
