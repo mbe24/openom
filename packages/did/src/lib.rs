@@ -34,6 +34,7 @@ pub enum DidError {
 }
 
 /// Encode a 32-byte Ed25519 public key as a `did:key` string (always `did:key:z6Mk…`).
+#[must_use]
 pub fn encode_ed25519(public_key: &[u8; 32]) -> String {
     let mut buf = Vec::with_capacity(2 + 32);
     buf.extend_from_slice(&ED25519_MULTICODEC);
@@ -45,6 +46,10 @@ pub fn encode_ed25519(public_key: &[u8; 32]) -> String {
 }
 
 /// Decode a `did:key` string back to the 32-byte Ed25519 public key, validating every layer.
+///
+/// # Errors
+/// Returns a [`DidError`] if any layer is malformed: not a `did:key`, not `z`-multibase, over-long,
+/// invalid base58, the wrong multicodec, or not exactly 32 key bytes.
 pub fn decode_ed25519(did: &str) -> Result<[u8; 32], DidError> {
     let method = did
         .strip_prefix(DID_KEY_PREFIX)
@@ -68,12 +73,15 @@ pub fn decode_ed25519(did: &str) -> Result<[u8; 32], DidError> {
 ///
 /// No `Serialize`/`Deserialize`: this crate stays dependency-free (only `thiserror`), so a
 /// serialization boundary converts explicitly via [`as_str`](DidKey::as_str) / [`into_string`]
-/// (DidKey::into_string) and [`TryFrom`], keeping validation an explicit, visible step.
+/// (`DidKey::into_string`) and [`TryFrom`], keeping validation an explicit, visible step.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DidKey(String);
 
 impl DidKey {
     /// Wrap a `did:key` string, validating that it decodes to an Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns a [`DidError`] if `s` is not a well-formed Ed25519 `did:key` (see [`decode_ed25519`]).
     pub fn parse(s: impl Into<String>) -> Result<Self, DidError> {
         let s = s.into();
         decode_ed25519(&s)?;
@@ -81,16 +89,22 @@ impl DidKey {
     }
 
     /// The `did:key` for an Ed25519 public key — always valid, never fails.
+    #[must_use]
     pub fn from_public_key(public_key: &[u8; 32]) -> Self {
         DidKey(encode_ed25519(public_key))
     }
 
     /// The `did:key` string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// The 32-byte Ed25519 public key this id encodes.
+    ///
+    /// # Panics
+    /// Never: a `DidKey` is validated to decode on construction and is immutable.
+    #[must_use]
     pub fn to_public_key(&self) -> [u8; 32] {
         // Infallible: a `DidKey` is validated on construction and is immutable.
         decode_ed25519(&self.0).expect("a DidKey is a validated did:key")
@@ -98,6 +112,7 @@ impl DidKey {
 
     /// Consume into the owned `did:key` string — for a boundary that needs a plain `String` (a
     /// wasm-bindgen getter, an IPC DTO).
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -180,9 +195,9 @@ fn b58_encode(input: &[u8]) -> String {
     let zeros = input.iter().take_while(|&&b| b == 0).count();
     let mut digits: Vec<u8> = Vec::new(); // little-endian base58 digits
     for &byte in &input[zeros..] {
-        let mut carry = byte as u32;
-        for d in digits.iter_mut() {
-            carry += (*d as u32) << 8;
+        let mut carry = u32::from(byte);
+        for d in &mut digits {
+            carry += u32::from(*d) << 8;
             *d = (carry % 58) as u8;
             carry /= 58;
         }
@@ -205,13 +220,11 @@ fn b58_decode(input: &str) -> Result<Vec<u8>, DidError> {
     let zeros = input.bytes().take_while(|&b| b == b'1').count();
     let mut bytes: Vec<u8> = Vec::new(); // little-endian byte accumulator
     for c in input.bytes().skip(zeros) {
-        let val = ALPHABET
-            .iter()
-            .position(|&a| a == c)
-            .ok_or(DidError::BadBase58)? as u32;
-        let mut carry = val;
-        for b in bytes.iter_mut() {
-            carry += (*b as u32) * 58;
+        let pos = ALPHABET.iter().position(|&a| a == c).ok_or(DidError::BadBase58)?;
+        // `pos` indexes ALPHABET (58 entries), so it always fits u32; the fallback is unreachable.
+        let mut carry = u32::try_from(pos).unwrap_or(0);
+        for b in &mut bytes {
+            carry += u32::from(*b) * 58;
             *b = (carry & 0xff) as u8;
             carry >>= 8;
         }
