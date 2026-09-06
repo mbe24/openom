@@ -132,7 +132,7 @@ pub struct GenericClaimView {
 /// `role == "portrait"` is the portrait selection (a disputable `preferred` portrait slot is later).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct MediaLink {
-    /// The media_link claim's id — the stable UI handle for this link.
+    /// The `media_link` claim's id — the stable UI handle for this link.
     pub claim_id: String,
     /// The linked blob's content hash — always present, fetched out-of-band from object storage.
     pub media_hash: String,
@@ -313,6 +313,11 @@ struct Collected {
     other_claims: Vec<(String, String, String, Value, String)>,
 }
 
+// One cohesive fold: ~30 per-kind accumulators built in a single match, then bundled into `Collected`.
+// Splitting the arms out would thread all of them across a call boundary (a 30-field `&mut`) for no
+// clarity gain — the AGENTS.md "irreducibly coupled shared mutable state" case; length tracks the field
+// count, not tangled logic.
+#[allow(clippy::too_many_lines)]
 fn collect(deduped: &[&Record]) -> Collected {
     // Anchors, and person-scoped claims. Deletion and edit-supersession are operations applied
     // upstream (the ops→snapshot layer, §8.2); the projection consumes the already-live claim set.
@@ -663,8 +668,12 @@ fn collect(deduped: &[&Record]) -> Collected {
 
 /// Project a record set into the read model. Pure: the result depends only on the set of records and
 /// the policy, never on their order. Three phases: **collect** (fold records into [`Collected`]),
-/// **resolve** identity (cluster same_as/different_from, reattribute, canonicalize), **assemble** the
+/// **resolve** identity (cluster `same_as/different_from`, reattribute, canonicalize), **assemble** the
 /// people / relationships / unions / events.
+// The three phases are named inline (collect is already its own fn); resolve + assemble share the ~30
+// destructured accumulators, so threading them through more call boundaries would mean passing a large
+// bundle for no readability gain — the AGENTS.md "irreducibly coupled" case. Kept as one pure function.
+#[allow(clippy::too_many_lines)]
 pub fn project(records: &[Record], policy: &Policy) -> Projection {
     // The store guarantees unique content-hash ids, but be robust to a duplicated slice: keep the
     // first record per id, so projecting `recs` and `recs ++ recs` give the same result (set input).
@@ -1137,8 +1146,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             let (date_min_year, date_max_year) = date_edtf
                 .as_deref()
                 .and_then(|s| edtf::parse(s).ok())
-                .map(|e| (e.min.map(|d| d.year), e.max.map(|d| d.year)))
-                .unwrap_or((None, None));
+                .map_or((None, None), |e| (e.min.map(|d| d.year), e.max.map(|d| d.year)));
             let place_id = event_place.get(eid).and_then(most_corroborated);
             let mut parts: Vec<Participant> = participants
                 .get(eid)
@@ -1199,7 +1207,7 @@ pub fn project(records: &[Record], policy: &Policy) -> Projection {
             let marriage_event = events
                 .iter()
                 .find(|e| {
-                    matches!(e.event_type.as_deref(), Some("marriage") | Some("divorce"))
+                    matches!(e.event_type.as_deref(), Some("marriage" | "divorce"))
                         && e.participants
                             .iter()
                             .map(|p| &p.person)
@@ -1285,7 +1293,7 @@ fn cluster(nodes: &BTreeSet<String>, mut edges: Vec<Edge>, cuts: &[[String; 2]])
         let root = uf.find(n);
         let entry = min_of.entry(root).or_insert_with(|| n.clone());
         if n < entry {
-            *entry = n.clone();
+            entry.clone_from(n);
         }
     }
     let rep = nodes
@@ -1315,7 +1323,7 @@ impl Uf {
             if p == &root {
                 break;
             }
-            root = p.clone();
+            root.clone_from(p);
         }
         // Path compression.
         let mut cur = x.to_string();
@@ -1413,11 +1421,14 @@ fn score(info: &PairInfo, attests: &BTreeMap<String, Votes>) -> i64 {
             reject.extend(v.reject.iter().map(String::as_str));
         }
     }
-    let indep_support = support
-        .into_iter()
-        .filter(|a| !info.authors.contains(*a))
-        .count() as i64;
-    info.authors.len() as i64 + indep_support - reject.len() as i64
+    // Counts are memory-bounded, so they always fit i64; saturate on the impossible overflow.
+    let indep_support = i64::try_from(
+        support.into_iter().filter(|a| !info.authors.contains(*a)).count(),
+    )
+    .unwrap_or(i64::MAX);
+    let authors = i64::try_from(info.authors.len()).unwrap_or(i64::MAX);
+    let rejects = i64::try_from(reject.len()).unwrap_or(i64::MAX);
+    authors + indep_support - rejects
 }
 
 /// The content reference of a name's intrinsic form — parts + script + culture (§4.1) — the target a
@@ -1461,7 +1472,7 @@ fn equiv_classes(names: &[NameView]) -> BTreeMap<String, String> {
         let root = uf.find(r);
         let entry = min_id.entry(root).or_insert_with(|| cid.clone());
         if cid < entry {
-            *entry = cid.clone();
+            entry.clone_from(cid);
         }
     }
     ref_to_id
