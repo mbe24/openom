@@ -4,7 +4,7 @@
 
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
-use openom_vault::vault::{recover, unlock};
+use openom_vault::vault::{recover, unlock, RecoverWatermark};
 use proptest::prelude::*;
 
 proptest! {
@@ -29,9 +29,7 @@ proptest! {
             &TreeId::new(b"tree-uuid-16byte".as_slice()),
             &MemberId::new("acct-1"),
             &ReplicaId::new(b"replica-0".as_slice()),
-            0,
-            &[],
-            &[],
+            &RecoverWatermark { min_revision: 0, write_key_id: &[], dek_hash: &[] },
         );
         prop_assert!(r.is_err());
     }

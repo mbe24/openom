@@ -26,8 +26,8 @@
 //! deps. So the trait's home is openom-vault: above both keyring engines and above the lean DEK-session
 //! sealer, which it uses only for [`SealerSet`] (OPE-279 extraction).
 
-use openom_crypto::{Passphrase, RecoveryCode};
 use did::DidKey;
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 
 use crate::vault;
@@ -191,7 +191,11 @@ impl ChainVault {
         }
         if bytes.len() == 4 + KEY_ID_LEN + DEK_HASH_LEN {
             let rev = u32::from_be_bytes(bytes[..4].try_into().expect("len checked"));
-            return Ok((rev, bytes[4..4 + KEY_ID_LEN].to_vec(), bytes[4 + KEY_ID_LEN..].to_vec()));
+            return Ok((
+                rev,
+                bytes[4..4 + KEY_ID_LEN].to_vec(),
+                bytes[4 + KEY_ID_LEN..].to_vec(),
+            ));
         }
         Err(VaultError::MalformedWatermark)
     }
@@ -219,7 +223,13 @@ impl KeyringLifecycle for ChainVault {
         anchor: &[u8],
         passphrase: &Passphrase,
     ) -> Result<Unlocked, VaultError> {
-        let u = vault::unlock(anchor, passphrase, ctx.tree_id, ctx.member_id, ctx.replica_id)?;
+        let u = vault::unlock(
+            anchor,
+            passphrase,
+            ctx.tree_id,
+            ctx.member_id,
+            ctx.replica_id,
+        )?;
         Ok(Unlocked {
             sealer: u.sealer,
             watermark: Self::watermark(u.revision, &u.write_key_id, &u.write_dek_hash),
@@ -245,9 +255,11 @@ impl KeyringLifecycle for ChainVault {
             ctx.tree_id,
             ctx.member_id,
             ctx.replica_id,
-            min_rev,
-            &expected_key_id,
-            &expected_dek_hash,
+            &vault::RecoverWatermark {
+                min_revision: min_rev,
+                write_key_id: &expected_key_id,
+                dek_hash: &expected_dek_hash,
+            },
         )?;
         Ok(Recovered {
             anchor: r.keyring,
@@ -313,7 +325,9 @@ mod tests {
         let pass = Passphrase::new(b"correct horse");
 
         // provision → the genesis anchor + a ready sealer.
-        let p = engine.provision(&ctx(&tree, &member, &replica), &pass).unwrap();
+        let p = engine
+            .provision(&ctx(&tree, &member, &replica), &pass)
+            .unwrap();
         assert!(!p.anchor.is_empty());
 
         // unlock the genesis anchor → an opaque watermark, not a bare revision.
@@ -325,15 +339,27 @@ mod tests {
             1,
             "chain watermark carries revision 1 (plus the write-epoch pin)",
         );
-        assert_eq!(u.did_key, p.did_key, "same identity across provision + unlock");
+        assert_eq!(
+            u.did_key, p.did_key,
+            "same identity across provision + unlock"
+        );
 
         // change_passphrase → a new anchor; the OLD passphrase must no longer unlock it. The floor is
         // passed as the opaque watermark from the unlock above.
         let new_pass = Passphrase::new(b"stronger horse battery");
         let re = engine
-            .change_passphrase(&ctx(&tree, &member, &replica), &p.anchor, &pass, &new_pass, &u.watermark)
+            .change_passphrase(
+                &ctx(&tree, &member, &replica),
+                &p.anchor,
+                &pass,
+                &new_pass,
+                &u.watermark,
+            )
             .unwrap();
-        assert_ne!(re.watermark, u.watermark, "a keyring change advances the watermark");
+        assert_ne!(
+            re.watermark, u.watermark,
+            "a keyring change advances the watermark"
+        );
         assert!(
             engine
                 .unlock(&ctx(&tree, &member, &replica), &re.anchor, &pass)
@@ -359,14 +385,21 @@ mod tests {
                 &re.watermark,
             )
             .unwrap();
-        assert_ne!(recovered.watermark, re.watermark, "recovery advances past the floor");
+        assert_ne!(
+            recovered.watermark, re.watermark,
+            "recovery advances past the floor"
+        );
     }
 
     /// A non-empty floor that isn't a 4-byte revision is refused, not silently treated as "no floor" —
     /// dropping a corrupt local cursor would drop rollback protection.
     #[test]
     fn a_malformed_floor_is_refused_not_dropped() {
-        assert_eq!(ChainVault::floor(&[]).unwrap().0, 0, "empty floor = no floor");
+        assert_eq!(
+            ChainVault::floor(&[]).unwrap().0,
+            0,
+            "empty floor = no floor"
+        );
         assert_eq!(ChainVault::floor(&7u32.to_be_bytes()).unwrap().0, 7);
         assert!(matches!(
             ChainVault::floor(&[1, 2, 3]),
@@ -386,21 +419,36 @@ mod tests {
         let p = engine
             .provision(&ctx(&tree, &member, &ReplicaId::new(b"rA")), &pass)
             .unwrap();
-        assert!(!p.watermark.is_empty(), "provision reports a genesis watermark, not a stub");
+        assert!(
+            !p.watermark.is_empty(),
+            "provision reports a genesis watermark, not a stub"
+        );
         let sealed = p
             .sealer
-            .seal_entry(&openom_sealer::SealContext::snapshot(0, Vec::new(), 0), b"parity data")
+            .seal_entry(
+                &openom_sealer::SealContext::snapshot(0, Vec::new(), 0),
+                b"parity data",
+            )
             .unwrap()
             .envelope;
 
         // unlock from the anchor alone opens the data, same owner identity.
         let u = engine
-            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rB")), &p.anchor, &pass)
+            .unlock(
+                &ctx(&tree, &member, &ReplicaId::new(b"rB")),
+                &p.anchor,
+                &pass,
+            )
             .unwrap();
         assert_eq!(u.did_key, p.did_key);
-        assert!(!u.watermark.is_empty(), "unlock reports an anti-rollback watermark, not a stub");
+        assert!(
+            !u.watermark.is_empty(),
+            "unlock reports an anti-rollback watermark, not a stub"
+        );
         assert_eq!(
-            u.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
+            u.sealer
+                .open_entry(openom_sealer::EntryKind::Snapshot, &sealed)
+                .unwrap(),
             b"parity data"
         );
 
@@ -416,12 +464,21 @@ mod tests {
                 &u.watermark,
             )
             .unwrap();
-        assert_ne!(re.watermark, u.watermark, "a keyring change advances the watermark");
+        assert_ne!(
+            re.watermark, u.watermark,
+            "a keyring change advances the watermark"
+        );
         let u2 = engine
-            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"rC")), &re.anchor, &new_pass)
+            .unlock(
+                &ctx(&tree, &member, &ReplicaId::new(b"rC")),
+                &re.anchor,
+                &new_pass,
+            )
             .unwrap();
         assert_eq!(
-            u2.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
+            u2.sealer
+                .open_entry(openom_sealer::EntryKind::Snapshot, &sealed)
+                .unwrap(),
             b"parity data"
         );
 
@@ -436,9 +493,14 @@ mod tests {
                 &u.watermark,
             )
             .unwrap();
-        assert!(!r.watermark.is_empty(), "recovery reports an advanced watermark");
+        assert!(
+            !r.watermark.is_empty(),
+            "recovery reports an advanced watermark"
+        );
         assert_eq!(
-            r.sealer.open_entry(openom_sealer::EntryKind::Snapshot, &sealed).unwrap(),
+            r.sealer
+                .open_entry(openom_sealer::EntryKind::Snapshot, &sealed)
+                .unwrap(),
             b"parity data"
         );
     }

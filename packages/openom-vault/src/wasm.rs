@@ -13,13 +13,13 @@
 
 use wasm_bindgen::prelude::*;
 
+use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_crypto::{Key32, Passphrase, RecoveryCode, KEY_LEN};
+use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
 use openom_keyring_chain::{
     bootstrap_from_genesis, decode_governing_ref, encode_governing_ref, keyring_hash, verify_reset,
     verify_walk, KeyringAnchor, VerifyingKey,
 };
-use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
-use crate::attribution::{epoch_is_attributed, verify_entry};
 use openom_keyring_dag::client as dag_client;
 use openom_protocol::ids::{KeyId, MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, KeyringUpdate, MemberRole};
@@ -27,8 +27,8 @@ use openom_protocol::{Message, ENVELOPE_VERSION};
 
 use crate::lifecycle::{KeyringLifecycle, VaultContext};
 use crate::{vault, AppVault, DagVault, KeyringRole};
-use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
 use openom_keyring_api::{EngineKind, MembershipEnvelope};
+use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
 
 /// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
@@ -227,7 +227,8 @@ fn to_js(e: impl std::fmt::Display) -> JsError {
 /// Parse the deployment's configured engine tag (a backend preset, never a per-tree user choice — OPE-278).
 /// The tag mapping is [`EngineKind`]'s own `FromStr`, so this host and the Tauri host can't drift apart.
 fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
-    s.parse().map_err(|e: openom_keyring_api::UnknownEngine| JsError::new(&e.to_string()))
+    s.parse()
+        .map_err(|e: openom_keyring_api::UnknownEngine| JsError::new(&e.to_string()))
 }
 
 // ---- the keyring vault (passphrase lifecycle) ----
@@ -557,10 +558,12 @@ pub fn add_member(
         &TreeId::new(tree_id),
         &MemberId::new(owner_member_id),
         min_revision,
-        &MemberId::new(new_member_id),
-        parse_member_role(role)?,
-        member_hpke_public,
-        member_author_public,
+        &vault::NewMemberSpec {
+            member_id: &MemberId::new(new_member_id),
+            role: parse_member_role(role)?,
+            hpke_public: member_hpke_public,
+            author_public: member_author_public,
+        },
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -597,11 +600,13 @@ pub fn unlock_as_member(
     let trusted = parse_trusted_signers(trusted_signers)?;
     let u = vault::unlock_as_member(
         keyring,
-        &Passphrase::new(passphrase.into_bytes()),
-        &kdf,
+        &vault::MemberAuth {
+            passphrase: &Passphrase::new(passphrase.into_bytes()),
+            kdf: &kdf,
+            member_id: &MemberId::new(member_id),
+            trusted_signers: &trusted,
+        },
         &TreeId::new(tree_id),
-        &MemberId::new(member_id),
-        &trusted,
         &ReplicaId::new(replica_id),
         min_revision,
     )
@@ -744,10 +749,12 @@ pub fn dag_add_member(
             &ctx,
             keyring,
             &Passphrase::new(owner_passphrase.into_bytes()),
-            new_member_id,
-            parse_keyring_role(role)?,
-            key32(member_author_public, "member author key")?,
-            key32(member_hpke_public, "member hpke key")?,
+            &openom_keyring_dag::KeyringMemberInit {
+                id: new_member_id.to_string(),
+                role: parse_keyring_role(role)?,
+                author_public_key: key32(member_author_public, "member author key")?,
+                hpke_public_key: key32(member_hpke_public, "member hpke key")?,
+            },
         )
         .map_err(to_js)?;
     let watermark = DagVault.watermark(&new_anchor).map_err(to_js)?;
@@ -832,7 +839,12 @@ pub fn dag_unlock_as_member(
         replica_id: &rep,
     };
     let u = DagVault
-        .unlock_as_member(&ctx, keyring, &Passphrase::new(passphrase.into_bytes()), &kdf)
+        .unlock_as_member(
+            &ctx,
+            keyring,
+            &Passphrase::new(passphrase.into_bytes()),
+            &kdf,
+        )
         .map_err(to_js)?;
     Ok(VaultResult {
         keyring: Vec::new(),
@@ -892,7 +904,12 @@ pub fn dag_reseal(
         replica_id: &rep,
     };
     let r = DagVault
-        .reseal(&ctx, keyring, &Passphrase::new(owner_passphrase.into_bytes()), floor)
+        .reseal(
+            &ctx,
+            keyring,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            floor,
+        )
         .map_err(to_js)?;
     Ok(ResealResult {
         keyring: r.anchor,
@@ -931,7 +948,13 @@ pub fn dag_reseal_as_member(
         replica_id: &rep,
     };
     let r = DagVault
-        .reseal_as_member(&ctx, keyring, &Passphrase::new(passphrase.into_bytes()), &kdf, floor)
+        .reseal_as_member(
+            &ctx,
+            keyring,
+            &Passphrase::new(passphrase.into_bytes()),
+            &kdf,
+            floor,
+        )
         .map_err(to_js)?;
     Ok(ResealResult {
         keyring: r.anchor,
@@ -998,7 +1021,12 @@ pub fn dag_backfill(
         replica_id: &rep,
     };
     let r = DagVault
-        .backfill(&ctx, keyring, &Passphrase::new(owner_passphrase.into_bytes()), floor)
+        .backfill(
+            &ctx,
+            keyring,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            floor,
+        )
         .map_err(to_js)?;
     Ok(BackfillResult {
         keyring: r.anchor,
@@ -1041,9 +1069,14 @@ fn hex(b: &[u8]) -> String {
 fn dag_basis_tokens(anchor: &[u8]) -> Result<Vec<String>, JsError> {
     let wm = dag_client::watermark(anchor).map_err(|e| JsError::new(&e.to_string()))?;
     if wm.len() % 32 != 0 {
-        return Err(JsError::new("dag watermark is not a whole number of op-ids"));
+        return Err(JsError::new(
+            "dag watermark is not a whole number of op-ids",
+        ));
     }
-    Ok(wm.chunks_exact(32).map(|c| format!("op:{}", hex(c))).collect())
+    Ok(wm
+        .chunks_exact(32)
+        .map(|c| format!("op:{}", hex(c)))
+        .collect())
 }
 
 /// Decode `["op:<hex>", ...]` back to the concatenated 32-byte floor for `check_floor`. `None` if any token
@@ -1071,7 +1104,8 @@ fn dag_floor_from_tokens(tokens: &[String]) -> Option<Vec<u8>> {
 pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> {
     let dto = match parse_engine(engine)? {
         EngineKind::Dag => {
-            let resolved = dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
+            let resolved =
+                dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
             KeyringSummaryDto {
                 members: resolved
                     .members
@@ -1086,7 +1120,8 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
             }
         }
         EngineKind::Chain => {
-            let k = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            let k =
+                Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
             KeyringSummaryDto {
                 members: k
                     .members
@@ -1096,7 +1131,11 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
                         role: i16::try_from(m.role).unwrap_or(i16::MAX),
                     })
                     .collect(),
-                basis: vec![format!("rev:{}:{}", k.revision, hex(keyring_hash(&k).as_slice()))],
+                basis: vec![format!(
+                    "rev:{}:{}",
+                    k.revision,
+                    hex(keyring_hash(&k).as_slice())
+                )],
             }
         }
     };
@@ -1113,7 +1152,11 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
 #[wasm_bindgen(js_name = keyringCovers)]
 // `stored_basis` is an owned `Vec<String>` because wasm-bindgen marshals a JS string array as owned.
 #[allow(clippy::needless_pass_by_value)]
-pub fn keyring_covers(engine: &str, keyring: &[u8], stored_basis: Vec<String>) -> Result<bool, JsError> {
+pub fn keyring_covers(
+    engine: &str,
+    keyring: &[u8],
+    stored_basis: Vec<String>,
+) -> Result<bool, JsError> {
     if stored_basis.is_empty() {
         return Ok(true);
     }
@@ -1123,7 +1166,8 @@ pub fn keyring_covers(engine: &str, keyring: &[u8], stored_basis: Vec<String>) -
             None => false,
         },
         EngineKind::Chain => {
-            let k = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            let k =
+                Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
             match stored_basis
                 .first()
                 .and_then(|t| t.strip_prefix("rev:"))
@@ -1163,16 +1207,20 @@ pub fn add_member_as_co_owner(
     let trusted = parse_trusted_signers(trusted_signers)?;
     let added = vault::add_member_as_co_owner(
         keyring,
-        &Passphrase::new(passphrase.into_bytes()),
-        &kdf,
+        &vault::MemberAuth {
+            passphrase: &Passphrase::new(passphrase.into_bytes()),
+            kdf: &kdf,
+            member_id: &MemberId::new(co_owner_member_id),
+            trusted_signers: &trusted,
+        },
         &TreeId::new(tree_id),
-        &MemberId::new(co_owner_member_id),
-        &trusted,
         min_revision,
-        &MemberId::new(new_member_id),
-        parse_member_role(role)?,
-        member_hpke_public,
-        member_author_public,
+        &vault::NewMemberSpec {
+            member_id: &MemberId::new(new_member_id),
+            role: parse_member_role(role)?,
+            hpke_public: member_hpke_public,
+            author_public: member_author_public,
+        },
     )
     .map_err(to_js)?;
     Ok(VaultResult {
@@ -1209,11 +1257,13 @@ pub fn remove_member_as_co_owner(
     let trusted = parse_trusted_signers(trusted_signers)?;
     let r = vault::remove_member_as_co_owner(
         keyring,
-        &Passphrase::new(passphrase.into_bytes()),
-        &kdf,
+        &vault::MemberAuth {
+            passphrase: &Passphrase::new(passphrase.into_bytes()),
+            kdf: &kdf,
+            member_id: &MemberId::new(co_owner_member_id),
+            trusted_signers: &trusted,
+        },
         &TreeId::new(tree_id),
-        &MemberId::new(co_owner_member_id),
-        &trusted,
         min_revision,
         &MemberId::new(remove_member_id),
         &ReplicaId::new(replica_id),
@@ -1313,7 +1363,9 @@ fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     let env = MembershipEnvelope::decode(bytes)
         .map_err(|_| JsError::new("served keyring is not a valid membership envelope"))?;
     if env.engine_kind() != Ok(EngineKind::Chain) {
-        return Err(JsError::new("served keyring envelope is not a chain keyring"));
+        return Err(JsError::new(
+            "served keyring envelope is not a chain keyring",
+        ));
     }
     Ok(env.body)
 }
@@ -1375,7 +1427,10 @@ pub fn accept_remote_keyring(
         .collect::<Result<Vec<Vec<u8>>, _>>()?;
     let decoded = bodies
         .iter()
-        .map(|b| Keyring::decode(b.as_slice()).map_err(|e| JsError::new(&format!("bad served keyring: {e}"))))
+        .map(|b| {
+            Keyring::decode(b.as_slice())
+                .map_err(|e| JsError::new(&format!("bad served keyring: {e}")))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let new_anchor = verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
         .map_err(|e| JsError::new(&e.to_string()))?;
@@ -1476,7 +1531,9 @@ pub fn verify_keyring_walk(
     }
     let raw = split_length_prefixed(hops)?;
     if raw.is_empty() {
-        return Err(JsError::new("empty keyring history (need at least the genesis)"));
+        return Err(JsError::new(
+            "empty keyring history (need at least the genesis)",
+        ));
     }
     // Unwrap each served MembershipEnvelope to its RAW chain Keyring body, then decode — the client
     // retains and verifies the raw bodies (the format §B3 verify consumes).
@@ -1487,7 +1544,8 @@ pub fn verify_keyring_walk(
     let decoded = bodies
         .iter()
         .map(|b| {
-            Keyring::decode(b.as_slice()).map_err(|e| JsError::new(&format!("bad served keyring: {e}")))
+            Keyring::decode(b.as_slice())
+                .map_err(|e| JsError::new(&format!("bad served keyring: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let genesis = &decoded[0];
@@ -1731,11 +1789,13 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsError> {
     match parse_engine(engine)? {
         EngineKind::Chain => {
-            let kr = Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
+            let kr =
+                Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;
             Ok(crate::has_been_shared(&kr))
         }
         EngineKind::Dag => {
-            let resolved = dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
+            let resolved =
+                dag_client::resolve(keyring).map_err(|e| JsError::new(&e.to_string()))?;
             Ok(resolved.has_been_shared)
         }
     }
