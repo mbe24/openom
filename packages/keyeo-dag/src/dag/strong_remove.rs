@@ -1,4 +1,4 @@
-//! StrongRemove resolver — a fixpoint over the op DAG that decides which ops to ignore.
+//! `StrongRemove` resolver — a fixpoint over the op DAG that decides which ops to ignore.
 //!
 //! Three interacting rules, iterated to a fixpoint (the ignore set only grows, so it converges):
 //!
@@ -92,6 +92,9 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         state
     }
 
+    // One cohesive causal replay over shared `state`; splitting it would thread the replay state across a
+    // call boundary for no clarity gain (the AGENTS.md coupled-state case).
+    #[allow(clippy::too_many_lines)]
     fn process(
         mut state: Self::State,
         graph: &Graph<OId>,
@@ -375,7 +378,7 @@ where
     state
 }
 
-/// Whether `op_id`'s author was authorized at the op's CAUSAL POSITION (AccessControl + key identity),
+/// Whether `op_id`'s author was authorized at the op's CAUSAL POSITION (`AccessControl` + key identity),
 /// independent of any concurrent strong-remove invalidation.
 ///
 /// - `Some(false)` ⇒ the op is unauthorized on every branch, forever — **permanently ineffective**. Its

@@ -1,4 +1,4 @@
-//! Core types: Resolver trait, GroupState, MembershipAction, MemberState.
+//! Core types: Resolver trait, `GroupState`, `MembershipAction`, `MemberState`.
 
 use crate::Role;
 use crate::SignatureScheme;
@@ -26,7 +26,7 @@ impl MemberId for u64 {}
 impl MemberId for u32 {}
 
 /// An opaque group identifier — the group (openom: the tree) an op belongs to. Bound into every op's signed
-/// + content-addressed bytes and enforced by the engine (an op whose group id differs from the group being
+/// and content-addressed bytes and enforced by the engine (an op whose group id differs from the group being
 /// resolved is refused), and bound into the wrap AAD so a wrap can't be transplanted across groups. It is
 /// the keyeo-family foundation type, defined once in keyeo-crypto and re-exported here so the resolver, the
 /// crypto layer, and every consumer name the same `GroupId` (its `unscoped()` marker keeps an EMPTY group
@@ -193,6 +193,7 @@ pub struct GroupState<Id: MemberId, R: Role, S: SignatureScheme = crate::Ed25519
 }
 
 impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             members: HashMap::new(),
@@ -228,6 +229,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     /// Pin the group's [`group_id`](Self::group_id) — the opaque identifier every op in this group must
     /// carry. openom sets this on the engine's construction base (the genesis) to the tree id, so the engine
     /// refuses any op minted for a different tree from first sight, exactly as it trusts the genesis members.
+    #[must_use]
     pub fn with_group_id(mut self, group_id: GroupId) -> Self {
         self.group_id = group_id;
         self
@@ -236,6 +238,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     /// Pin the group's [`recovery authority`](Self::reset_authority) — the only key that may authorize a
     /// `ReFound`. openom sets this on the engine's construction base (the out-of-band-seeded genesis) so
     /// the RVK is trusted from first sight, exactly as the genesis membership is.
+    #[must_use]
     pub fn with_reset_authority(mut self, reset_authority: Option<<S as SignatureScheme>::PublicKey>) -> Self {
         self.reset_authority = reset_authority;
         self
@@ -255,8 +258,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> GroupState<Id, R, S> {
     pub fn has_access(&self, member: &Id, min_role: &R) -> bool {
         self.members
             .get(member)
-            .map(|s| s.is_active() && s.role.grants_at_least(min_role))
-            .unwrap_or(false)
+            .is_some_and(|s| s.is_active() && s.role.grants_at_least(min_role))
     }
 }
 
@@ -297,8 +299,7 @@ where
         _ => state
             .members
             .get(op.author())
-            .map(|m| &m.author_public_key == op.author_public_key())
-            .unwrap_or(false),
+            .is_some_and(|m| &m.author_public_key == op.author_public_key()),
     }
 }
 
@@ -308,6 +309,11 @@ pub trait Resolver<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureS
     type State: Default;
     type Error: Debug;
     fn rebuild_required(state: &Self::State, op: &Op, frontier: &HashSet<OId>) -> bool;
+
+    /// Replay the causal `graph` of `ops` into resolved state, starting from `genesis`.
+    ///
+    /// # Errors
+    /// Returns `Self::Error` if the replay fails — e.g. an invalid or unauthorized op for its position.
     fn process(
         state: Self::State,
         graph: &Graph<OId>,
@@ -367,12 +373,12 @@ impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::BadSignature => write!(f, "bad signature"),
-            Error::UnknownAuthor { author } => write!(f, "unknown author: {:?}", author),
-            Error::Unauthorized { author } => write!(f, "unauthorized: {:?}", author),
-            Error::InvalidAction(msg) => write!(f, "invalid action: {}", msg),
-            Error::MissingParents(ids) => write!(f, "missing parents: {:?}", ids),
+            Error::UnknownAuthor { author } => write!(f, "unknown author: {author:?}"),
+            Error::Unauthorized { author } => write!(f, "unauthorized: {author:?}"),
+            Error::InvalidAction(msg) => write!(f, "invalid action: {msg}"),
+            Error::MissingParents(ids) => write!(f, "missing parents: {ids:?}"),
             Error::DagCycle => write!(f, "DAG cycle detected"),
-            Error::Crypto(msg) => write!(f, "crypto: {}", msg),
+            Error::Crypto(msg) => write!(f, "crypto: {msg}"),
             Error::StaleFork => write!(f, "op branches from before the merge horizon"),
             Error::WrongGroup => write!(f, "op belongs to a different group"),
         }

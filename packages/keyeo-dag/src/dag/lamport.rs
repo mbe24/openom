@@ -1,4 +1,4 @@
-//! LamportTiebreak resolver — simple deterministic ordering.
+//! `LamportTiebreak` resolver — simple deterministic ordering.
 
 use crate::access::AccessControl;
 use crate::blocklace::Graph;
@@ -39,6 +39,14 @@ impl<OId: OpId, R: Role, Op: SignedOp<R = R, S = S>, S: SignatureScheme> Resolve
 
 type ApplyResult<Id, R, S> = Result<(GroupState<Id, R, S>, Vec<MembershipEvent<Id>>), String>;
 
+/// Fold one membership action into `state`, returning the new state and any [`MembershipEvent`]s.
+///
+/// # Errors
+/// Returns `Err(String)` if the action is invalid for the current state (e.g. an operation on an absent
+/// member or an otherwise illegal membership transition).
+// One cohesive dispatch: each arm folds one action variant into the shared `state` + `events`. Splitting
+// arms out would thread both across a call boundary for no clarity gain (the AGENTS.md coupled-state case).
+#[allow(clippy::too_many_lines)]
 pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
     mut state: GroupState<Id, R, S>,
     action: &MembershipAction<Id, R, S>,
@@ -52,7 +60,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             // RESOLVED state's group_id empty after any folded Create — and that resolved value is exactly
             // what the seam exports as the verified `Admitted.tree_id`, so it must survive the fold.
             let mut created = GroupState::create(state.group_id.clone(), initial_members);
-            created.reset_authority = state.reset_authority.clone();
+            created.reset_authority.clone_from(&state.reset_authority);
             Ok((created, events))
         }
         MembershipAction::Add {
@@ -72,7 +80,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
                     s.author_public_key = author_public_key.clone();
                     s.hpke_public_key = *hpke_public_key;
                 }
-                Some(_) => return Err(format!("{:?} is already an active member", member)),
+                Some(_) => return Err(format!("{member:?} is already an active member")),
                 None => {
                     state.members.insert(
                         member.clone(),
@@ -88,21 +96,21 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
         MembershipAction::Remove { member } => {
             if let Some(s) = state.members.get_mut(member) {
                 if !s.is_active() {
-                    return Err(format!("{:?} is already removed", member));
+                    return Err(format!("{member:?} is already removed"));
                 }
                 s.member_counter += 1;
                 events.push(MembershipEvent::MemberRemoved {
                     member: member.clone(),
                 });
             } else {
-                return Err(format!("{:?} is not a member", member));
+                return Err(format!("{member:?} is not a member"));
             }
             Ok((state, events))
         }
         MembershipAction::ChangeRole { member, new_role } => {
             if let Some(s) = state.members.get_mut(member) {
                 if !s.is_active() {
-                    return Err(format!("{:?} is not an active member", member));
+                    return Err(format!("{member:?} is not an active member"));
                 }
                 s.role = new_role.clone();
                 s.access_counter += 1;
@@ -110,7 +118,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
                     member: member.clone(),
                 });
             } else {
-                return Err(format!("{:?} is not a member", member));
+                return Err(format!("{member:?} is not a member"));
             }
             Ok((state, events))
         }
@@ -131,7 +139,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
                     s.hpke_public_key = *new_hpke_public_key;
                     s.access_counter += 1;
                 }
-                _ => return Err(format!("{:?} is not an active member to re-found", member)),
+                _ => return Err(format!("{member:?} is not an active member to re-found")),
             }
             Ok((state, events))
         }
@@ -153,7 +161,7 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
                     s.hpke_public_key = *new_hpke_public_key;
                     s.access_counter += 1;
                 }
-                _ => return Err(format!("{:?} is not an active member to retarget", member)),
+                _ => return Err(format!("{member:?} is not an active member to retarget")),
             }
             Ok((state, events))
         }
@@ -161,13 +169,13 @@ pub fn apply_action<Id: MemberId, R: Role, S: SignatureScheme>(
             state.reset_authority = Some(new_reset_authority.clone());
             Ok((state, events))
         }
-        // A forward-secrecy reseal (OPE-282): membership-inert — the fresh epoch rides the op's `sealing`,
-        // and the sealer validates its coverage. There is nothing to apply to the membership graph.
-        MembershipAction::Reseal => Ok((state, events)),
-        // Quorum-protocol ops (v2) don't directly mutate membership: a Propose/Approve records intent,
-        // and a Commit's *target* is applied by the quorum resolver at the Commit's position, not here.
-        // Folding one of these is a no-op; the effect enters via the resolver, not `apply_action`.
-        MembershipAction::Propose { .. }
+        // All membership-inert no-ops, for different reasons:
+        //  - Reseal (OPE-282): a forward-secrecy reseal rides the op's `sealing` and the sealer validates its
+        //    coverage — nothing to apply to the membership graph.
+        //  - Propose / Approve / Commit (v2 quorum): a Propose/Approve records intent; a Commit's target is
+        //    applied by the quorum resolver at the Commit's position, not here.
+        MembershipAction::Reseal
+        | MembershipAction::Propose { .. }
         | MembershipAction::Approve { .. }
         | MembershipAction::Commit { .. } => Ok((state, events)),
     }

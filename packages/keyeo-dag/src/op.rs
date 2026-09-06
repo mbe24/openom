@@ -76,6 +76,7 @@ impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
     /// Requires `S: SignatureScheme<PublicKey = [u8; 32], Signature = [u8; 64]>`
     /// which is true for `Ed25519` (the default scheme) and any compatible
     /// scheme. For exotic schemes, construct the op manually via `Op::new()`.
+    #[must_use]
     pub fn sign(self, signing_key: &ed25519_dalek::SigningKey) -> Self
     where
         OId: std::fmt::Debug,

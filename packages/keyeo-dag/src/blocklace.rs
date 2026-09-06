@@ -57,6 +57,7 @@ pub struct Graph<Op: Ord + std::hash::Hash> {
 }
 
 impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: DiGraphMap::new(),
@@ -75,6 +76,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
     }
 
     /// Get all nodes.
+    #[must_use]
     pub fn nodes(&self) -> Vec<Op> {
         self.inner.nodes().collect()
     }
@@ -82,6 +84,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
     /// The **frontier** — the current maximal blocks, with no successor (nothing else observes them).
     /// The paper calls these *tips*; we use *frontier* (the CRDT term, cf. Loro `Frontiers`) to avoid the
     /// blockDAG tip-selection connotation.
+    #[must_use]
     pub fn frontier(&self) -> HashSet<Op> {
         let mut frontier: HashSet<Op> = self.inner.nodes().collect();
         for edge in self.inner.all_edges() {
@@ -108,6 +111,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
     ///
     /// A bubble is a set of operations that share some concurrency relationship.
     /// Multiple bubbles can exist in the same graph.
+    #[must_use]
     pub fn concurrent_bubbles(&self) -> Vec<HashSet<Op>> {
         fn concurrent_bubble<Op: Ord + std::hash::Hash + Copy>(
             graph: &Graph<Op>,
@@ -157,7 +161,7 @@ impl<Op: Ord + std::hash::Hash + Copy> Graph<Op> {
             predecessors.insert(nx);
         }
 
-        let relatives: HashSet<_> = successors.union(&predecessors).cloned().collect();
+        let relatives: HashSet<_> = successors.union(&predecessors).copied().collect();
         self.inner
             .nodes()
             .filter(|n| !relatives.contains(n))

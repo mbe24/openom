@@ -217,6 +217,11 @@ where
             .map_err(|_| Error::BadSignature)
     }
 
+    /// Apply one op: verify it, bind its group, and fold it (buffering it if its causal parents are absent).
+    ///
+    /// # Errors
+    /// Returns [`Error`] if the op is bound to a different group, has a bad signature, or is otherwise
+    /// invalid or unauthorized for its causal position.
     pub fn apply(&mut self, op: Op) -> ApplyResult<Op> {
         // 0. Group binding (first-class, resolver-enforced): refuse an op minted for a different group
         //    OUTRIGHT — never buffer or store it. The `group_id` is bound into the op's signed +
@@ -290,7 +295,7 @@ where
             &self.access,
             &self.genesis,
         )
-        .map_err(|e| Error::InvalidAction(format!("resolver: {:?}", e)))?;
+        .map_err(|e| Error::InvalidAction(format!("resolver: {e:?}")))?;
         self.rebuild_state()?;
         let after = self.state.active_members();
 
@@ -300,6 +305,9 @@ where
     }
 
     /// Flush pending ops — repeatedly try until no more can be applied.
+    ///
+    /// # Errors
+    /// Returns [`Error`] if applying a now-eligible pending op fails.
     pub fn flush(&mut self) -> Result<Vec<MembershipEvent<Op::MemberId>>, Error<Op::MemberId>> {
         let mut all_events = Vec::new();
         loop {
@@ -335,8 +343,8 @@ where
     /// that were **effective** (applied with effect), in topo order. Shared by [`Self::rebuild_state`] and
     /// [`Self::effective_ops`] so the resolution and the effectiveness report can never diverge.
     ///
-    /// Ordering is a real topological sort over the op DAG (Kahn's algorithm), with OpId as a deterministic
-    /// tiebreak among concurrent ops — NOT a plain OpId sort, which would misorder ops whenever OpIds
+    /// Ordering is a real topological sort over the op DAG (Kahn's algorithm), with `OpId` as a deterministic
+    /// tiebreak among concurrent ops — NOT a plain `OpId` sort, which would misorder ops whenever `OpIds`
     /// aren't causally monotonic (e.g. content-hash or (peer,counter) ids). Authority is checked against
     /// the state built so far (the resolved state the op depends on), not only at local apply time where a
     /// concurrently-invalidated grant could still be seen. An op the resolver dropped can leave a later op
@@ -429,12 +437,12 @@ where
         // cut, so the effective-Add scan over `ops` alone would wrongly regress a shared group to `false`.
         self.base_has_been_shared
             || self.effective_ops().iter().any(|id| {
-                matches!(self.ops.get(id).map(|o| o.action()), Some(MembershipAction::Add { .. }))
+                matches!(self.ops.get(id).map(super::dag::resolver::SignedOp::action), Some(MembershipAction::Add { .. }))
             })
     }
 
     /// Kahn's topological sort over all admitted ops, with `OpId` as a deterministic tiebreak among
-    /// concurrent ops — a real topo sort, NOT a plain OpId sort (which misorders whenever OpIds aren't
+    /// concurrent ops — a real topo sort, NOT a plain `OpId` sort (which misorders whenever `OpIds` aren't
     /// causally monotonic, e.g. content-hash ids). Errors as `DagCycle` if the ops don't form a DAG.
     fn topo_order(&self) -> Result<Vec<Op::OpId>, Error<Op::MemberId>> {
         let mut indegree: HashMap<Op::OpId, usize> = HashMap::new();
@@ -618,7 +626,7 @@ fn diff_events<Id: MemberId, R: Role>(
         match bmap.get(id) {
             None => events.push(MembershipEvent::MemberAdded { member: id.clone() }),
             Some(prev) if *prev != role => {
-                events.push(MembershipEvent::RoleChanged { member: id.clone() })
+                events.push(MembershipEvent::RoleChanged { member: id.clone() });
             }
             _ => {}
         }
@@ -632,7 +640,7 @@ fn diff_events<Id: MemberId, R: Role>(
 }
 
 /// A zero-cost borrowing VIEW of a `Keyeo`'s retained state — EXACTLY the inputs compaction reads (the op set,
-/// the causal graph, the resolved state, and the has_been_shared marker) and nothing else (not the
+/// the causal graph, the resolved state, and the `has_been_shared` marker) and nothing else (not the
 /// access-control / quorum / resolver the engine also carries). [`Keyeo::retained`] produces it and the
 /// [`keyeo_core::Compaction`] impl operates on it, so the `State` type is precisely the mechanism's inputs —
 /// the op-DAG is borrowed, never duplicated, and compaction can't reach engine machinery it has no business in.
