@@ -172,6 +172,7 @@ impl Tree {
     }
 
     /// The author this replica stamps on its ops.
+    #[must_use]
     pub fn author(&self) -> &str {
         &self.created_by
     }
@@ -187,6 +188,9 @@ impl Tree {
 
     /// Assert a new claim about `target`, authored by this replica. `now_millis` is a physical
     /// wall-clock reading (epoch ms); the engine-owned clock turns it into the monotonic `createdAt`.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the claim can't be canonicalized to compute its id.
     pub fn assert_claim(
         &mut self,
         target: &str,
@@ -212,6 +216,9 @@ impl Tree {
     /// always advances, so calling `assert_anchor` again would mint a *different* `createdAt` (hence a
     /// different existence-claim id). A retry instead replays the persisted op-batch bytes through
     /// [`merge`](Tree::merge), which re-inserts by id — idempotent by construction.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the anchor's existence claim can't be canonicalized.
     pub fn assert_anchor(
         &mut self,
         id: &str,
@@ -243,6 +250,9 @@ impl Tree {
     /// [`revoke`](Tree::revoke) up to the compaction (GC) horizon. Returns the Remove op's own id so
     /// the caller can later revoke it — the minted op only reaches the store on the next [`flush`], but
     /// its content id is known now.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the Remove op can't be canonicalized.
     pub fn remove(&mut self, target: &str, now_millis: i64) -> Result<String, TreeError> {
         let op = Op::new(
             self.clock.next(now_millis),
@@ -259,6 +269,9 @@ impl Tree {
 
     /// Edit: atomically supersede the `prior` record with a fresh claim value, authored by this
     /// replica.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the replacement claim or the enclosing op can't be canonicalized.
     pub fn supersede_claim(
         &mut self,
         prior: &str,
@@ -284,6 +297,9 @@ impl Tree {
 
     /// Undo a same-author `Remove` by its operation id — restores the original record (before the GC
     /// horizon).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the Revoke op can't be canonicalized.
     pub fn revoke(&mut self, removal_op_id: &str, now_millis: i64) -> Result<Vec<u8>, TreeError> {
         let op = Op::new(
             self.clock.next(now_millis),
@@ -301,6 +317,9 @@ impl Tree {
     /// one sealed entry rather than a train of single-op entries a peer could observe half-formed.
     /// Returns no bytes (an empty vec, so the mint methods keep their signature) — [`flush`](Tree::flush)
     /// is the sole producer of the encoded batch.
+    // Returns `Result` deliberately so the mint methods can tail-call `self.emit(..)` with a matching
+    // signature (documented above); a future size/policy check here may error, so the wrap is not dead.
+    #[allow(clippy::unnecessary_wraps)]
     fn emit(&mut self, items: Vec<ChannelItem>) -> Result<Vec<u8>, TreeError> {
         for item in items {
             self.pending.push(item.clone());
@@ -311,6 +330,9 @@ impl Tree {
 
     /// Encode everything minted since the last flush as ONE op-batch and clear the buffer (empty bytes
     /// if nothing was minted). The single emit point: the caller flushes once per settled intention.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the pending batch can't be encoded.
     pub fn flush(&mut self) -> Result<Vec<u8>, TreeError> {
         if self.pending.is_empty() {
             return Ok(Vec::new());
@@ -324,6 +346,9 @@ impl Tree {
 
     /// Merge a peer's (or our own replayed) op batch into the set. Returns how many items were
     /// ingested. Idempotent — re-ingesting the same items re-inserts by id.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if `bytes` is not a valid op batch.
     pub fn merge(&mut self, bytes: &[u8]) -> Result<usize, TreeError> {
         let items = codec::decode(bytes)?;
         let n = items.len();
@@ -337,6 +362,9 @@ impl Tree {
     /// The live record set as a snapshot batch (the fold's output, emitted as `Assert`s — removed and
     /// superseded records fold out). A fresh engine can [`load_snapshot`](Tree::load_snapshot) it and
     /// then `merge` only the tail.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the live set can't be encoded.
     pub fn snapshot(&self) -> Result<Vec<u8>, TreeError> {
         let live: Vec<ChannelItem> = self
             .materialized()
@@ -347,6 +375,9 @@ impl Tree {
     }
 
     /// Load a snapshot batch into the set (idempotent; combine with further `merge`d tail ops).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if `bytes` is not a valid snapshot batch.
     pub fn load_snapshot(&mut self, bytes: &[u8]) -> Result<(), TreeError> {
         for item in codec::decode(bytes)? {
             self.clock.observe(item.created_at());
@@ -358,17 +389,22 @@ impl Tree {
     // --- read -----------------------------------------------------------------------------------
 
     /// The materialized read model (people, unions, events, …) over the live record set.
+    #[must_use]
     pub fn project(&self) -> Projection {
         project(&self.materialized(), &Policy::default())
     }
 
     /// The read model as a JSON string — for the wasm boundary and any JSON consumer.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the projection can't be serialized to JSON.
     pub fn project_json(&self) -> Result<String, TreeError> {
         Ok(serde_json::to_string(&self.project())?)
     }
 
     /// The live claims about `target` under `predicate` (after the fold), each as its JSON record — a
     /// granular reader for the editor (e.g. which name claims exist on a person, to supersede one).
+    #[must_use]
     pub fn live_claims_of(&self, target: &str, predicate: &str) -> Vec<Value> {
         self.materialized()
             .iter()
@@ -387,6 +423,7 @@ impl Tree {
     /// reader a generic renderer uses to enumerate a subject's claims, **including** ones under
     /// predicates this build doesn't recognize (whose projection counterpart is `Person.other` /
     /// `Projection.unclassified`). So a newer app version's data is editable here with no code change.
+    #[must_use]
     pub fn live_claims_of_any(&self, target: &str) -> Vec<Value> {
         self.materialized()
             .iter()
@@ -399,6 +436,9 @@ impl Tree {
 
     /// Every live record (anchors + claims), each as its JSON — the granular set the app's undo/redo
     /// diff reads to compute what a commit added vs. removed (keyed by content-hash id).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if a record can't be serialized to JSON.
     pub fn live_records(&self) -> Result<Vec<Value>, TreeError> {
         Ok(self
             .materialized()
@@ -409,6 +449,7 @@ impl Tree {
 
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
+    #[must_use]
     pub fn resolve_id(&self, anchor: &str) -> Option<String> {
         self.project().people.into_iter().find_map(|p| {
             let hit = p.id.as_str() == anchor || p.also.iter().any(|a| a.as_str() == anchor);
