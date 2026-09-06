@@ -1,23 +1,19 @@
 //! The engine-neutral **sealing core** — the DEK / epoch / recovery-root-key / KDF / recovery-code /
-//! SealerSet machinery, extracted from `vault.rs` so BOTH keyring engines (the chain today, the dag under
-//! OPE-273) share one implementation of the security-critical crypto path instead of duplicating it.
-//! (OPE-273 gate decision, plan/keyring-dag/design.dag-vault.md.)
+//! SealerSet machinery, extracted from `vault.rs` so BOTH keyring engines (chain + dag) share one
+//! implementation of the security-critical crypto path instead of duplicating it.
 //!
-//! **This module knows nothing about a keyring's membership, signing, or wire container.** It operates on
-//! its OWN plain record types ([`SealedEpoch`] / [`CoreWrap`] / [`RecoveryEscrow`] / [`CoreKdf`]) — a
-//! proto-free, releasable-ready API boundary that also serves as the DAG's op-payload record shape. Each
-//! engine marshals these to its own persisted form: the chain via the `From` impls below (proto
-//! `KeyEpoch`/`KeyWrap`/`RecoveryKey`), the dag by serializing them into ops (OPE-273).
+//! **This module knows nothing about a keyring's membership, signing, or wire container.** The DEK epochs
+//! and per-recipient wraps ARE keyeo's shared key-material types (`keyeo_crypto::{Epoch, Wrap}`); the vault
+//! adds only the recovery escrow ([`RecoveryEscrow`], which holds keyeo `Wrap`s) plus the owner-secrets /
+//! derive glue. Each engine persists the same key material as keyeo's canonical `codec` bytes: the dag inside
+//! its op sealing payloads, the chain inside its keyring wire (with the recovery key's identity fields
+//! marshaled via [`From<&RecoveryEscrow>`](RecoveryKey) below).
 //!
-//! It stays the engine-neutral (as to *keyring engine*) sealing core BOTH engines' vaults share (a
-//! discipline kept by review). It DOES marshal its records to the CHAIN keyring's proto shapes
-//! (`openom_keyring_chain::wire::KeyEpoch`/`KeyWrap`/`RecoveryKey`, moved out of `openom-protocol` in
-//! OPE-300) via the `From` impls below, and touches `openom_protocol` for the wrap AAD + sealer id types +
-//! the crypto-path `KdfParams`, and `openom_crypto` for the KDF/AEAD. That is deliberate: OPE-283 scoped this
-//! coupling as load-bearing, not incidental — the wrap AAD binds the proto `Envelope` (a compile-time
-//! security control) and the KDF params are the proto's, so decoupling would re-derive the wire format and
-//! scatter the crypto. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and keep the
-//! `openom-` prefix; only the engine layer below them (keyeo / openom-keyring-api / openom-keyring-dag) is openom-free.
+//! It touches `openom_protocol` for the sealer id types + the crypto-path (derive) `KdfParams` — converted
+//! to/from keyeo's `KdfParams` via [`kdf_proto_to_keyeo`] / [`kdf_keyeo_to_proto`] — and `openom_crypto` for
+//! the KDF / AEAD / derive primitives. `openom-vault` (and `openom-crypto`) are openom-coupled BY DESIGN and
+//! keep the `openom-` prefix; only the engine layer below (keyeo / openom-keyring-api /
+//! openom-keyring-{chain,dag}) is openom-free.
 
 use openom_crypto::{
     default_kdf_params, derive_kek, derive_root, generate_recovery_code, generate_salt,
@@ -60,15 +56,6 @@ const MAX_PARALLELISM: u32 = 8;
 
 // ---- the core's own record types (proto-free API boundary; also the dag's op-payload shape) ----
 
-/// Argon2id parameters for a passphrase/recovery-code wrap.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CoreKdf {
-    pub salt: Vec<u8>,
-    pub memory_kib: u32,
-    pub iterations: u32,
-    pub parallelism: u32,
-}
-
 /// The founder's recovery escrow: the RRK public key, the two KEK wraps of the RRK secret (under the
 /// passphrase KEK and the recovery-code KEK — keyeo's native [`KeyeoWrap`], the shape the dag persists), and
 /// the pinned Ed25519 recovery verifying key (RVK).
@@ -80,26 +67,24 @@ pub(crate) struct RecoveryEscrow {
     pub recovery_verifying_key: Vec<u8>,
 }
 
-// ---- KDF marshaling to the crypto/derive path's proto `KdfParams` (the member-KDF paths) ----
+// ---- KDF marshaling between the proto wire `KdfParams` (the account/member KDF record + openom-crypto's
+// derive path) and keyeo's neutral `KdfParams` (what the vault holds everywhere else). Free fns, not `From`:
+// both types are foreign here, so the orphan rule blocks an impl. ----
 
-impl From<&KdfParams> for CoreKdf {
-    fn from(p: &KdfParams) -> Self {
-        Self {
-            salt: p.salt.clone(),
-            memory_kib: p.memory_kib,
-            iterations: p.iterations,
-            parallelism: p.parallelism,
-        }
+pub(crate) fn kdf_proto_to_keyeo(p: &KdfParams) -> KeyeoKdfParams {
+    KeyeoKdfParams {
+        salt: p.salt.clone(),
+        memory_kib: p.memory_kib,
+        iterations: p.iterations,
+        parallelism: p.parallelism,
     }
 }
-impl From<&CoreKdf> for KdfParams {
-    fn from(k: &CoreKdf) -> Self {
-        Self {
-            salt: k.salt.clone(),
-            memory_kib: k.memory_kib,
-            iterations: k.iterations,
-            parallelism: k.parallelism,
-        }
+pub(crate) fn kdf_keyeo_to_proto(k: &KeyeoKdfParams) -> KdfParams {
+    KdfParams {
+        salt: k.salt.clone(),
+        memory_kib: k.memory_kib,
+        iterations: k.iterations,
+        parallelism: k.parallelism,
     }
 }
 impl From<&RecoveryEscrow> for RecoveryKey {
@@ -122,10 +107,10 @@ impl From<&RecoveryEscrow> for RecoveryKey {
 /// KEK/KDF. Used to (re)wrap the recovery root key under the owner's two credentials.
 pub(crate) struct NewOwnerSecrets {
     pub(crate) root: RootKeys,
-    pub(crate) pass_kdf: CoreKdf,
+    pub(crate) pass_kdf: KeyeoKdfParams,
     pub(crate) recovery_code: RecoveryCode,
     pub(crate) recovery_kek: Kek,
-    pub(crate) recovery_kdf: CoreKdf,
+    pub(crate) recovery_kdf: KeyeoKdfParams,
 }
 
 pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets, VaultError> {
@@ -137,10 +122,10 @@ pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets
     let recovery_kek = derive_kek(entropy.as_slice(), &recovery_kdf)?;
     Ok(NewOwnerSecrets {
         root,
-        pass_kdf: CoreKdf::from(&pass_kdf),
+        pass_kdf: kdf_proto_to_keyeo(&pass_kdf),
         recovery_code,
         recovery_kek,
-        recovery_kdf: CoreKdf::from(&recovery_kdf),
+        recovery_kdf: kdf_proto_to_keyeo(&recovery_kdf),
     })
 }
 
@@ -150,9 +135,9 @@ pub(crate) fn new_owner_secrets(new_passphrase: &[u8]) -> Result<NewOwnerSecrets
 /// root, so it must not re-found the founder identity the way a passphrase change does.
 pub(crate) fn owner_secrets_reusing_pass_kdf(
     passphrase: &[u8],
-    pass_kdf: CoreKdf,
+    pass_kdf: KeyeoKdfParams,
 ) -> Result<NewOwnerSecrets, VaultError> {
-    let root = derive_root(passphrase, &KdfParams::from(&pass_kdf))?;
+    let root = derive_root(passphrase, &kdf_keyeo_to_proto(&pass_kdf))?;
     let recovery_code = generate_recovery_code()?;
     let entropy = parse_recovery_code(&recovery_code)?;
     let recovery_kdf = recovery_kdf_params(generate_salt()?.to_vec());
@@ -162,7 +147,7 @@ pub(crate) fn owner_secrets_reusing_pass_kdf(
         pass_kdf,
         recovery_code,
         recovery_kek,
-        recovery_kdf: CoreKdf::from(&recovery_kdf),
+        recovery_kdf: kdf_proto_to_keyeo(&recovery_kdf),
     })
 }
 
@@ -182,7 +167,7 @@ pub(crate) fn build_recovery_escrow(
         member_id.to_string(),
         KekKind::Passphrase,
         &s.root.kek,
-        keyeo_kdf(&s.pass_kdf),
+        s.pass_kdf.clone(),
         &group_id,
     )?;
     let rec = keyeo_kek_wrap(
@@ -190,7 +175,7 @@ pub(crate) fn build_recovery_escrow(
         member_id.to_string(),
         KekKind::RecoveryCode,
         &s.recovery_kek,
-        keyeo_kdf(&s.recovery_kdf),
+        s.recovery_kdf.clone(),
         &group_id,
     )?;
     Ok(RecoveryEscrow {
@@ -210,15 +195,6 @@ pub(crate) fn build_recovery_escrow(
 }
 
 // ---- epoch DEK wrap / unwrap (lifted onto keyeo's key-material layer) ----
-
-fn keyeo_kdf(p: &CoreKdf) -> KeyeoKdfParams {
-    KeyeoKdfParams {
-        salt: p.salt.clone(),
-        memory_kib: p.memory_kib,
-        iterations: p.iterations,
-        parallelism: p.parallelism,
-    }
-}
 
 /// Open a recovery-escrow KEK wrap of the RRK secret via keyeo (tree-scoped rrk AAD; the derived `kek` is
 /// supplied by the caller, so the wrap's `kdf` is irrelevant here).
@@ -438,9 +414,10 @@ fn kdf_bounds() -> KdfBounds {
     }
 }
 
-/// Reject an out-of-window `CoreKdf` (a member's own passphrase KDF, proto-sourced).
-pub(crate) fn validate_kdf(p: &CoreKdf) -> Result<(), VaultError> {
-    if keyeo_kdf(p).validate(&kdf_bounds()) {
+/// Reject an out-of-window keyeo KDF. The member-KDF paths (whose KDF arrives as the proto wire `KdfParams`)
+/// convert via [`kdf_proto_to_keyeo`] first.
+pub(crate) fn validate_kdf(p: &KeyeoKdfParams) -> Result<(), VaultError> {
+    if p.validate(&kdf_bounds()) {
         Ok(())
     } else {
         Err(VaultError::BadKdfParams)

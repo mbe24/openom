@@ -29,8 +29,8 @@ use crate::lifecycle::{
 };
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
-    new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf,
-    validated_proto_kdf, CoreKdf, RecoveryEscrow, PASSPHRASE, RECOVERY,
+    kdf_proto_to_keyeo, new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks,
+    validate_kdf, validated_proto_kdf, RecoveryEscrow, PASSPHRASE, RECOVERY,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
@@ -737,7 +737,7 @@ impl DagVault {
             .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
         let FoldedSealing { epochs, write_key_id, needs_reseal, needs_backfill, .. } = fold_resolved(&resolved)?;
 
-        validate_kdf(&CoreKdf::from(member_kdf))?;
+        validate_kdf(&kdf_proto_to_keyeo(member_kdf))?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -993,7 +993,7 @@ impl DagVault {
 
         // The member authorizes via their passphrase + account kdf-derived identity (anti-substitution vs
         // their resolved key). No RRK secret is needed — the fresh DEK is wrapped to the RRK PUBLIC.
-        validate_kdf(&CoreKdf::from(member_kdf))?;
+        validate_kdf(&kdf_proto_to_keyeo(member_kdf))?;
         let root = derive_root(passphrase.expose(), member_kdf)?;
         if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
             return Err(CryptoError::Signature.into());
@@ -1963,7 +1963,7 @@ mod tests {
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                 &new_anchor,
                 &bob_pass,
-                &KdfParams::from(&bob.pass_kdf),
+                &crate::vault_core::kdf_keyeo_to_proto(&bob.pass_kdf),
             )
             .unwrap();
         let member_h = seal_header(&u_member.sealer, b"member edit");
@@ -2012,7 +2012,7 @@ mod tests {
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                 &new_anchor,
                 &bob_pass,
-                &KdfParams::from(&bob.pass_kdf),
+                &crate::vault_core::kdf_keyeo_to_proto(&bob.pass_kdf),
             )
             .unwrap();
         assert_eq!(
@@ -2029,7 +2029,7 @@ mod tests {
                     &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                     &new_anchor,
                     &Passphrase::new(b"not bobs passphrase"),
-                    &KdfParams::from(&bob.pass_kdf),
+                    &crate::vault_core::kdf_keyeo_to_proto(&bob.pass_kdf),
                 )
                 .is_err()
         );
@@ -2063,7 +2063,7 @@ mod tests {
             .unwrap();
         assert!(
             DagVault
-                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a1, &bob_pass, &KdfParams::from(&bob.pass_kdf))
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a1, &bob_pass, &crate::vault_core::kdf_keyeo_to_proto(&bob.pass_kdf))
                 .is_ok(),
             "bob can read before removal"
         );
@@ -2079,7 +2079,7 @@ mod tests {
 
         assert!(
             DagVault
-                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a2, &bob_pass, &KdfParams::from(&bob.pass_kdf))
+                .unlock_as_member(&ctx(&tree, &bob_id, &ReplicaId::new(b"rb")), &a2, &bob_pass, &crate::vault_core::kdf_keyeo_to_proto(&bob.pass_kdf))
                 .is_err(),
             "a removed member can no longer unlock"
         );
