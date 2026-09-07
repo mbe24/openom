@@ -178,7 +178,7 @@ fn jwks_to_keys(set: &JwkSet) -> HashMap<String, (Arc<DecodingKey>, Algorithm)> 
 
 /// The signing algorithm for a JWK: its explicit `alg` when present + supported, else the family
 /// default from the key type (RSA → RS256, EC → ES256 — the overwhelmingly common choices).
-fn alg_of(jwk: &Jwk) -> Option<Algorithm> {
+const fn alg_of(jwk: &Jwk) -> Option<Algorithm> {
     match jwk.common.key_algorithm {
         Some(KeyAlgorithm::RS256) => return Some(Algorithm::RS256),
         Some(KeyAlgorithm::RS384) => return Some(Algorithm::RS384),

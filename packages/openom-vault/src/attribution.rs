@@ -123,7 +123,7 @@ pub fn verify_entry(
 /// re-key resets to founder-only — this never regresses, so a tree un-shared back to solo keeps signing +
 /// requiring signatures (ex-members still hold old-epoch DEKs, so its writes must stay attributed).
 #[must_use]
-pub fn has_been_shared(keyring: &Keyring) -> bool {
+pub const fn has_been_shared(keyring: &Keyring) -> bool {
     keyring.first_shared_revision != 0
 }
 

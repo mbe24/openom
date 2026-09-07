@@ -21,7 +21,7 @@ pub fn derive_kek(passphrase: &[u8], params: &KdfParams) -> Result<Kek, CryptoEr
 
 /// `KdfParams` with the default Argon2id costs and the given `salt`.
 #[must_use]
-pub fn default_kdf_params(salt: Vec<u8>) -> KdfParams {
+pub const fn default_kdf_params(salt: Vec<u8>) -> KdfParams {
     KdfParams {
         salt,
         memory_kib: DEFAULT_ARGON2_MEMORY_KIB,

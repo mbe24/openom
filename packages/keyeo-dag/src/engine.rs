@@ -330,7 +330,7 @@ where
         Ok(all_events)
     }
 
-    pub fn state(&self) -> &GroupState<Op::MemberId, Op::R, Op::S> {
+    pub const fn state(&self) -> &GroupState<Op::MemberId, Op::R, Op::S> {
         &self.state
     }
     pub fn events(&mut self) -> Vec<MembershipEvent<Op::MemberId>> {
@@ -592,7 +592,7 @@ where
         requirement.satisfied_by(&approvers).then_some(target)
     }
 
-    pub fn pending_count(&self) -> usize {
+    pub const fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
@@ -673,8 +673,8 @@ where
 /// checkpoint + the prunable op set. This is the DECISION only — pure, no signing (the trait carries no key)
 /// and no mutation. The caller authors its own signed checkpoint from the returned
 /// `(frontier, state, has_been_shared)` and drops the returned `prune` ops from its store.
-impl<'a, Op: SignedOp> keyeo_core::Compaction for Retained<'a, Op> {
-    type State = Retained<'a, Op>;
+impl<Op: SignedOp> keyeo_core::Compaction for Retained<'_, Op> {
+    type State = Self;
     type Cut = crate::gc::Frontier<Op::OpId>;
     type Output = Option<crate::gc::Compacted<Op::OpId, Op::MemberId, Op::R, Op::S>>;
 

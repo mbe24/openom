@@ -37,7 +37,7 @@ pub struct SeededIdSource {
 impl SeededIdSource {
     /// Seed the stream. A zero seed is remapped so the generator never gets stuck at 0.
     #[must_use]
-    pub fn new(seed: u64) -> Self {
+    pub const fn new(seed: u64) -> Self {
         Self {
             state: if seed == 0 {
                 0x9E37_79B9_7F4A_7C15
@@ -47,7 +47,7 @@ impl SeededIdSource {
         }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         let mut x = self.state;
         x ^= x >> 12;
         x ^= x << 25;

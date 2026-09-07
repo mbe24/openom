@@ -28,7 +28,7 @@ pub fn dev_dek() -> Key32 {
 
 /// Human-readable cipher-suite name, for logs and diagnostics.
 #[must_use]
-pub fn cipher_suite() -> &'static str {
+pub const fn cipher_suite() -> &'static str {
     "XChaCha20-Poly1305 (default) / AES-256-GCM (disciplined); Argon2id KDF"
 }
 

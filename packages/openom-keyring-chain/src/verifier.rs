@@ -68,7 +68,7 @@ fn prior_rvk(anchor: &KeyringAnchor) -> Option<&[u8]> {
 /// Class the chain's error taxonomy into the neutral seam vocabulary.
 // A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
 #[allow(clippy::needless_pass_by_value)]
-fn classify(e: KeyringError) -> VerifyError {
+const fn classify(e: KeyringError) -> VerifyError {
     match e {
         KeyringError::Fork => VerifyError::Rollback,
         KeyringError::NonSequential => VerifyError::Stale,

@@ -112,10 +112,10 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientError::Malformed(m) => write!(f, "malformed dag anchor: {m}"),
-            ClientError::Engine(m) => write!(f, "dag anchor replay rejected: {m}"),
-            ClientError::RolledBack(m) => write!(f, "dag anchor rolled back below watermark: {m}"),
-            ClientError::BadWatermark(m) => write!(f, "malformed anti-rollback watermark: {m}"),
+            Self::Malformed(m) => write!(f, "malformed dag anchor: {m}"),
+            Self::Engine(m) => write!(f, "dag anchor replay rejected: {m}"),
+            Self::RolledBack(m) => write!(f, "dag anchor rolled back below watermark: {m}"),
+            Self::BadWatermark(m) => write!(f, "malformed anti-rollback watermark: {m}"),
         }
     }
 }
@@ -417,7 +417,7 @@ pub fn compact(
 /// Only Remove (and, once it lands, Reseal) legitimately mints a forward-secret epoch outside genesis; the
 /// genesis Create is tagged [`SealingOrigin::Genesis`] at its own (pinned) call site, so a Create here is an
 /// (inert) non-genesis op and counts as `Other`.
-fn origin_of(action: &KeyringAction) -> SealingOrigin {
+const fn origin_of(action: &KeyringAction) -> SealingOrigin {
     match action {
         MembershipAction::Remove { .. } => SealingOrigin::Remove,
         MembershipAction::Reseal => SealingOrigin::Reseal,

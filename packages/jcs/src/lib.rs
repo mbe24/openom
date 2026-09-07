@@ -47,6 +47,7 @@ pub fn to_canonical_value(value: &Value) -> Result<Vec<u8>, JcsError> {
 }
 
 /// Canonicalize **only** the named top-level fields (order-independent; absent keys are skipped).
+///
 /// This is the fingerprint primitive: `canonical_subset(claim, &["targetId","predicate","value"])`.
 /// `value` must be a JSON object.
 ///
@@ -197,7 +198,7 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
 }
 
-fn hex_lower(nibble: u8) -> u8 {
+const fn hex_lower(nibble: u8) -> u8 {
     match nibble {
         0..=9 => b'0' + nibble,
         _ => b'a' + (nibble - 10),

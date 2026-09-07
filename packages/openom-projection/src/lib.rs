@@ -50,7 +50,7 @@ pub struct Policy {
 
 impl Default for Policy {
     fn default() -> Self {
-        Policy {
+        Self {
             same_as_threshold: 1,
             different_from_threshold: 1,
             reattribute_threshold: 1,
@@ -1316,7 +1316,7 @@ struct Uf {
 
 impl Uf {
     fn new(nodes: &BTreeSet<String>) -> Self {
-        Uf {
+        Self {
             parent: nodes.iter().map(|n| (n.clone(), n.clone())).collect(),
         }
     }

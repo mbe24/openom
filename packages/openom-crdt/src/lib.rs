@@ -35,7 +35,7 @@ impl<'de> Deserialize<'de> for ChannelItem {
     /// verify the op's / embedded record's content hash).
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;
-        ChannelItem::try_from(v).map_err(serde::de::Error::custom)
+        Self::try_from(v).map_err(serde::de::Error::custom)
     }
 }
 
@@ -48,9 +48,9 @@ impl TryFrom<Value> for ChannelItem {
             .and_then(Value::as_str)
             .ok_or(CrdtError::MissingType)?;
         if type_uri == OP_TYPE {
-            Ok(ChannelItem::Op(Op::try_from(v)?))
+            Ok(Self::Op(Op::try_from(v)?))
         } else {
-            Ok(ChannelItem::Assert(Record::try_from(v)?))
+            Ok(Self::Assert(Record::try_from(v)?))
         }
     }
 }
@@ -60,8 +60,8 @@ impl ChannelItem {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            ChannelItem::Assert(r) => r.id(),
-            ChannelItem::Op(op) => &op.id,
+            Self::Assert(r) => r.id(),
+            Self::Op(op) => &op.id,
         }
     }
 
@@ -69,8 +69,8 @@ impl ChannelItem {
     #[must_use]
     pub fn created_by(&self) -> &str {
         match self {
-            ChannelItem::Assert(r) => r.created_by(),
-            ChannelItem::Op(op) => &op.created_by,
+            Self::Assert(r) => r.created_by(),
+            Self::Op(op) => &op.created_by,
         }
     }
 
@@ -80,8 +80,8 @@ impl ChannelItem {
     #[must_use]
     pub fn created_at(&self) -> Hlc {
         match self {
-            ChannelItem::Assert(r) => r.created_at(),
-            ChannelItem::Op(op) => op.created_at,
+            Self::Assert(r) => r.created_at(),
+            Self::Op(op) => op.created_at,
         }
     }
 }
@@ -155,7 +155,7 @@ impl Op {
         created_by: impl Into<String>,
         kind: OpKind,
     ) -> Result<Self, CrdtError> {
-        let mut op = Op {
+        let mut op = Self {
             id: String::new(),
             type_uri: OP_TYPE.to_owned(),
             created_at,
@@ -187,7 +187,7 @@ impl<'de> Deserialize<'de> for Op {
     /// verified on deserialize — there is no id-skipping structural path.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;
-        Op::try_from(v).map_err(serde::de::Error::custom)
+        Self::try_from(v).map_err(serde::de::Error::custom)
     }
 }
 
@@ -216,7 +216,7 @@ impl TryFrom<Value> for Op {
         if raw.type_uri != OP_TYPE {
             return Err(CrdtError::WrongType(raw.type_uri));
         }
-        let op = Op {
+        let op = Self {
             id: raw.id,
             type_uri: raw.type_uri,
             created_at: raw.created_at,

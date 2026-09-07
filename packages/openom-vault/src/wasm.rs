@@ -68,8 +68,8 @@ impl WasmSealer {
     /// A local-development sealer (§16 reserved dev key): the full seal/open path with no
     /// server and no unlock flow, for fast UI iteration. Production refuses its `key_id`.
     #[must_use]
-    pub fn dev(tree_id: &[u8], replica_id: &[u8]) -> WasmSealer {
-        WasmSealer {
+    pub fn dev(tree_id: &[u8], replica_id: &[u8]) -> Self {
+        Self {
             inner: SealerSet::single(Sealer::dev(
                 TreeId::new(tree_id),
                 ReplicaId::new(replica_id),
@@ -91,7 +91,7 @@ impl WasmSealer {
         key_id: &[u8],
         replica_id: &[u8],
         aead: Option<String>,
-    ) -> Result<WasmSealer, JsError> {
+    ) -> Result<Self, JsError> {
         if dek.len() != KEY_LEN {
             return Err(JsError::new("dek must be exactly 32 bytes"));
         }
@@ -109,7 +109,7 @@ impl WasmSealer {
         if let Some(name) = aead {
             sealer = sealer.with_aead(parse_aead(&name)?);
         }
-        Ok(WasmSealer {
+        Ok(Self {
             inner: SealerSet::single(sealer),
         })
     }
@@ -1154,10 +1154,8 @@ pub fn keyring_covers(
         return Ok(true);
     }
     Ok(match parse_engine(engine)? {
-        EngineKind::Dag => match dag_floor_from_tokens(&stored_basis) {
-            Some(floor) => dag_client::check_floor(keyring, &floor).is_ok(),
-            None => false,
-        },
+        EngineKind::Dag => dag_floor_from_tokens(&stored_basis)
+            .is_some_and(|floor| dag_client::check_floor(keyring, &floor).is_ok()),
         EngineKind::Chain => {
             let k =
                 Keyring::decode(keyring).map_err(|e| JsError::new(&format!("bad keyring: {e}")))?;

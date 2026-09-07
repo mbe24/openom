@@ -113,7 +113,7 @@ impl KeyringVerifier for DagVerifier {
         match (prior_state, upd) {
             // First sight: seed the pinned config + the (inert, per OPE-271) genesis op as the root.
             (None, UpdateDto::Bootstrap { pinned, genesis_op }) => {
-                let mut engine = DagVerifier::build(&pinned);
+                let mut engine = Self::build(&pinned);
                 let op = decode_op(&genesis_op).map_err(|_| VerifyError::Malformed)?;
                 let update_ref = op.id().to_vec();
                 classify(engine.apply(op))?;
@@ -129,8 +129,8 @@ impl KeyringVerifier for DagVerifier {
             (Some(prior), UpdateDto::Op { op: op_bytes }) => {
                 let st: DagTrustState =
                     postcard::from_bytes(prior).map_err(|_| VerifyError::Malformed)?;
-                let mut engine = DagVerifier::build(&st.pinned);
-                DagVerifier::replay(&mut engine, &st.ops)?;
+                let mut engine = Self::build(&st.pinned);
+                Self::replay(&mut engine, &st.ops)?;
                 let before = view_of(engine.state(), false).members;
 
                 let op = decode_op(&op_bytes).map_err(|_| VerifyError::Malformed)?;

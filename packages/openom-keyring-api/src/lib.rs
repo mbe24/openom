@@ -15,10 +15,10 @@ impl EngineKind {
     /// through (the wasm veneer's `engine` argument, the Tauri `OPENOM_KEYRING_ENGINE` override, the web
     /// `KEYRING_ENGINE` constant), so the tag strings can't drift apart. Paired with [`std::str::FromStr`].
     #[must_use]
-    pub fn as_tag(self) -> &'static str {
+    pub const fn as_tag(self) -> &'static str {
         match self {
-            EngineKind::Chain => "chain",
-            EngineKind::Dag => "dag",
+            Self::Chain => "chain",
+            Self::Dag => "dag",
         }
     }
 }
@@ -27,8 +27,8 @@ impl std::str::FromStr for EngineKind {
     type Err = UnknownEngine;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "chain" => Ok(EngineKind::Chain),
-            "dag" => Ok(EngineKind::Dag),
+            "chain" => Ok(Self::Chain),
+            "dag" => Ok(Self::Dag),
             other => Err(UnknownEngine(other.to_string())),
         }
     }
@@ -55,7 +55,7 @@ pub const MEMBERSHIP_ENVELOPE_VERSION: u32 = 1;
 /// openom proto). It is a thin frame: a `version`, the producing `engine` tag ([`EngineKind::as_tag`]), and
 /// an OPAQUE `body` — the chain's signed `Keyring`, or a dag op — that only that engine parses. The op/
 /// keyring content id is computed over the inner `body`, BEFORE this framing, so wrapping never changes it.
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
 pub struct MembershipEnvelope {
     #[prost(uint32, tag = "1")]
     pub version: u32,
@@ -118,8 +118,8 @@ pub enum EnvelopeError {
 impl std::fmt::Display for EnvelopeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EnvelopeError::Malformed => write!(f, "malformed membership envelope"),
-            EnvelopeError::UnsupportedVersion(v) => write!(f, "unsupported membership envelope version: {v}"),
+            Self::Malformed => write!(f, "malformed membership envelope"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported membership envelope version: {v}"),
         }
     }
 }
@@ -154,12 +154,12 @@ impl MemberView {
     /// A **signer** (keyring-write authority) is a `CoOwner` or stronger — the single-axis mapping both
     /// engines use.
     #[must_use]
-    pub fn is_signer(&self) -> bool {
+    pub const fn is_signer(&self) -> bool {
         self.role <= ROLE_CO_OWNER
     }
     /// The unique Owner / founder.
     #[must_use]
-    pub fn is_owner(&self) -> bool {
+    pub const fn is_owner(&self) -> bool {
         self.role == ROLE_OWNER
     }
 }

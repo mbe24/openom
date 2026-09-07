@@ -18,8 +18,8 @@ pub struct WasmTree {
 impl WasmTree {
     /// A fresh engine for author `created_by` (the vault-derived `did:key`).
     #[wasm_bindgen(constructor)]
-    pub fn new(created_by: String) -> WasmTree {
-        WasmTree {
+    pub fn new(created_by: String) -> Self {
+        Self {
             inner: Tree::new(created_by),
         }
     }

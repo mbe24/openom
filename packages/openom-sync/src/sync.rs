@@ -48,8 +48,8 @@ pub struct ClaimEngine {
 }
 
 impl ClaimEngine {
-    fn new() -> Self {
-        ClaimEngine {
+    const fn new() -> Self {
+        Self {
             items: BTreeMap::new(),
             moderators: BTreeSet::new(),
         }
@@ -157,7 +157,7 @@ pub struct SyncClient<S: DocStore> {
 impl<S: DocStore> SyncClient<S> {
     /// Wrap a freshly-unlocked claim tree. `doc` is the store key for this tree's log.
     pub fn new(sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
-        SyncClient {
+        Self {
             inner: docsync::SyncClient::new(ClaimEngine::new(), SealerAdapter(sealer), store, doc),
         }
     }
@@ -199,7 +199,7 @@ impl<S: DocStore> SyncClient<S> {
     }
 
     /// How many sealed batches are queued but not yet confirmed appended (0 == fully synced up).
-    pub fn pending_count(&self) -> usize {
+    pub const fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
 

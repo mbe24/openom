@@ -20,7 +20,7 @@ pub enum Requirement<Id> {
     /// At least `m` distinct members of the set.
     Threshold(usize, HashSet<Id>),
     /// Either sub-requirement — e.g. founder OR unanimity-of-co-owners.
-    Either(Box<Requirement<Id>>, Box<Requirement<Id>>),
+    Either(Box<Self>, Box<Self>),
 }
 
 impl<Id: Eq + Hash> Requirement<Id> {
@@ -29,13 +29,13 @@ impl<Id: Eq + Hash> Requirement<Id> {
     /// throughout: `All` of nobody and an unmet `Threshold` are both false.
     pub fn satisfied_by(&self, approvers: &HashSet<Id>) -> bool {
         match self {
-            Requirement::Sole(id) => approvers.contains(id),
-            Requirement::Any(set) => set.iter().any(|m| approvers.contains(m)),
-            Requirement::All(set) => !set.is_empty() && set.iter().all(|m| approvers.contains(m)),
-            Requirement::Threshold(m, set) => {
+            Self::Sole(id) => approvers.contains(id),
+            Self::Any(set) => set.iter().any(|m| approvers.contains(m)),
+            Self::All(set) => !set.is_empty() && set.iter().all(|m| approvers.contains(m)),
+            Self::Threshold(m, set) => {
                 set.iter().filter(|x| approvers.contains(x)).count() >= *m
             }
-            Requirement::Either(a, b) => a.satisfied_by(approvers) || b.satisfied_by(approvers),
+            Self::Either(a, b) => a.satisfied_by(approvers) || b.satisfied_by(approvers),
         }
     }
 }

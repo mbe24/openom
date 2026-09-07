@@ -41,6 +41,7 @@ pub enum AuthMode {
 }
 
 /// The JWT verifier algorithm (when `AUTH=jwt`). `Hs256` = a shared secret (Supabase / dev).
+///
 /// `Rs256` = asymmetric keys (RS256/ES256) fetched from a JWKS URL (Clerk / Auth0 / OIDC /
 /// self-hosted). The issuer is never baked in — it's a deployment config choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

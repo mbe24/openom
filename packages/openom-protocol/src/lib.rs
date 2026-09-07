@@ -4,8 +4,8 @@
 /// `Kind` / `Format` / `Aead` / `Compression` / `MemberRole` enums. (The keyring wire moved to
 /// `openom-keyring-chain` in OPE-300; the keyring KEY MATERIAL — `KdfParams` / `WrapMethod` / epochs /
 /// wraps — moved to `keyeo-crypto` + `keyeo_crypto::codec`, OPE-377.)
-// prost-generated code — not ours to hand-lint, so pedantic is off for the generated module only.
-#[allow(clippy::pedantic)]
+// prost-generated code — not ours to hand-lint, so pedantic + nursery are off for the generated module only.
+#[allow(clippy::pedantic, clippy::nursery)]
 pub mod v1 {
     include!("generated/openom/v1/openom.v1.rs");
 }

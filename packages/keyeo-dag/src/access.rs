@@ -40,7 +40,7 @@ pub struct DefaultAccessControl<R: Role> {
 }
 
 impl<R: Role> DefaultAccessControl<R> {
-    pub fn new(min_role: R) -> Self {
+    pub const fn new(min_role: R) -> Self {
         Self { min_role }
     }
 }

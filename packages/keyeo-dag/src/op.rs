@@ -45,7 +45,7 @@ pub struct Op<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme = Ed25519> {
 impl<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme> Op<OId, MId, R, S> {
     /// Assemble an op from its parts. Fields are public too — this is just the
     /// positional convenience constructor.
-    pub fn new(
+    pub const fn new(
         id: OId,
         group_id: GroupId,
         parents: Vec<OId>,

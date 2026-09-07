@@ -29,12 +29,12 @@ impl EncappedKey {
     pub const LEN: usize = 32;
     /// Wrap a known-length array (no validation needed — the length is in the type).
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
     #[must_use]
-    pub fn to_bytes(self) -> [u8; 32] {
+    pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }
 }
@@ -66,12 +66,12 @@ impl X25519PublicKey {
     pub const LEN: usize = 32;
     /// Wrap a known-length array (no validation needed — the length is in the type).
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
     #[must_use]
-    pub fn to_bytes(self) -> [u8; 32] {
+    pub const fn to_bytes(self) -> [u8; 32] {
         self.0
     }
 }
@@ -102,12 +102,12 @@ impl Nonce {
     pub const LEN: usize = 24;
     /// Wrap a known-length array (no validation needed — the length is in the type).
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 24]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 24]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
     #[must_use]
-    pub fn to_bytes(self) -> [u8; 24] {
+    pub const fn to_bytes(self) -> [u8; 24] {
         self.0
     }
 }
@@ -137,12 +137,12 @@ impl WrappedDek {
     pub const LEN: usize = 48;
     /// Wrap a known-length array (no validation needed — the length is in the type).
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 48]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 48]) -> Self {
         Self(bytes)
     }
     /// The raw bytes, by value.
     #[must_use]
-    pub fn to_bytes(self) -> [u8; 48] {
+    pub const fn to_bytes(self) -> [u8; 48] {
         self.0
     }
 }

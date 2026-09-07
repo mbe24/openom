@@ -203,7 +203,7 @@ pub(crate) fn open_rrk_secret(
 }
 
 /// The group-at-an-epoch binding context for the vault's `(tree_id, key_id)` pair.
-fn epoch_ctx<'a>(group_id: &'a KeyeoGroupId, key_id: &'a KeyeoKeyId) -> GroupContext<'a> {
+const fn epoch_ctx<'a>(group_id: &'a KeyeoGroupId, key_id: &'a KeyeoKeyId) -> GroupContext<'a> {
     GroupContext { group_id, key_id }
 }
 
@@ -405,7 +405,7 @@ pub(crate) fn write_epoch_by_ordinal(deks: &[(Vec<u8>, u64, Dek)]) -> Result<Vec
 /// The Argon2id window this build will run — anything outside it (a hostile keyring) could OOM/CPU-burn the
 /// client before any verification, so both KDF validators reject rather than clamp (clamping could silently
 /// weaken).
-fn kdf_bounds() -> KdfBounds {
+const fn kdf_bounds() -> KdfBounds {
     KdfBounds {
         memory_kib: MIN_MEMORY_KIB..=MAX_MEMORY_KIB,
         iterations: 1..=MAX_ITERATIONS,

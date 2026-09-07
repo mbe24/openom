@@ -85,13 +85,13 @@ impl DidKey {
     pub fn parse(s: impl Into<String>) -> Result<Self, DidError> {
         let s = s.into();
         decode_ed25519(&s)?;
-        Ok(DidKey(s))
+        Ok(Self(s))
     }
 
     /// The `did:key` for an Ed25519 public key — always valid, never fails.
     #[must_use]
     pub fn from_public_key(public_key: &[u8; 32]) -> Self {
-        DidKey(encode_ed25519(public_key))
+        Self(encode_ed25519(public_key))
     }
 
     /// The `did:key` string.
@@ -127,19 +127,19 @@ impl std::fmt::Display for DidKey {
 impl TryFrom<String> for DidKey {
     type Error = DidError;
     fn try_from(s: String) -> Result<Self, DidError> {
-        DidKey::parse(s)
+        Self::parse(s)
     }
 }
 
 impl TryFrom<&str> for DidKey {
     type Error = DidError;
     fn try_from(s: &str) -> Result<Self, DidError> {
-        DidKey::parse(s)
+        Self::parse(s)
     }
 }
 
 impl From<DidKey> for String {
-    fn from(d: DidKey) -> String {
+    fn from(d: DidKey) -> Self {
         d.0
     }
 }
@@ -170,7 +170,7 @@ impl MemberDirectory {
     where
         I: IntoIterator<Item = (String, [u8; 32])>,
     {
-        let mut dir = MemberDirectory::default();
+        let mut dir = Self::default();
         for (member_id, pk) in members {
             let did = encode_ed25519(&pk);
             dir.did_to_member.insert(did.clone(), member_id.clone());

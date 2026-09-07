@@ -92,7 +92,7 @@ pub enum MembershipAction<Id: MemberId, R: Role, S: SignatureScheme> {
     /// is met. Structurally generic — the quorum machinery never inspects the target's contents.
     Propose {
         proposal_id: [u8; 32],
-        target: Box<MembershipAction<Id, R, S>>,
+        target: Box<Self>,
     },
     /// A single signer's approval of a proposal — one op per approver (single-author, so strong-remove's
     /// per-author rules apply to it unchanged).
@@ -158,10 +158,10 @@ pub struct MemberState<R: Role, S: SignatureScheme = crate::Ed25519> {
 }
 
 impl<R: Role, S: SignatureScheme> MemberState<R, S> {
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         self.member_counter.is_multiple_of(2)
     }
-    pub fn new(
+    pub const fn new(
         role: R,
         author_public_key: <S as SignatureScheme>::PublicKey,
         hpke_public_key: [u8; 32],
@@ -372,15 +372,15 @@ pub enum Error<Id: Debug + Clone> {
 impl<Id: Debug + Clone> std::fmt::Display for Error<Id> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::BadSignature => write!(f, "bad signature"),
-            Error::UnknownAuthor { author } => write!(f, "unknown author: {author:?}"),
-            Error::Unauthorized { author } => write!(f, "unauthorized: {author:?}"),
-            Error::InvalidAction(msg) => write!(f, "invalid action: {msg}"),
-            Error::MissingParents(ids) => write!(f, "missing parents: {ids:?}"),
-            Error::DagCycle => write!(f, "DAG cycle detected"),
-            Error::Crypto(msg) => write!(f, "crypto: {msg}"),
-            Error::StaleFork => write!(f, "op branches from before the merge horizon"),
-            Error::WrongGroup => write!(f, "op belongs to a different group"),
+            Self::BadSignature => write!(f, "bad signature"),
+            Self::UnknownAuthor { author } => write!(f, "unknown author: {author:?}"),
+            Self::Unauthorized { author } => write!(f, "unauthorized: {author:?}"),
+            Self::InvalidAction(msg) => write!(f, "invalid action: {msg}"),
+            Self::MissingParents(ids) => write!(f, "missing parents: {ids:?}"),
+            Self::DagCycle => write!(f, "DAG cycle detected"),
+            Self::Crypto(msg) => write!(f, "crypto: {msg}"),
+            Self::StaleFork => write!(f, "op branches from before the merge horizon"),
+            Self::WrongGroup => write!(f, "op belongs to a different group"),
         }
     }
 }

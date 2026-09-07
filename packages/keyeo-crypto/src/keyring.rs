@@ -87,18 +87,18 @@ impl WrapMethod {
 
     /// The discriminant fed into the wrap AAD (and used as a lookup key).
     #[must_use]
-    pub fn tag(&self) -> i32 {
+    pub const fn tag(&self) -> i32 {
         match self {
-            WrapMethod::Kek {
+            Self::Kek {
                 kind: KekKind::Passphrase,
                 ..
             } => Self::TAG_PASSPHRASE_KEK,
-            WrapMethod::MemberHpke { .. } => Self::TAG_MEMBER_HPKE,
-            WrapMethod::Kek {
+            Self::MemberHpke { .. } => Self::TAG_MEMBER_HPKE,
+            Self::Kek {
                 kind: KekKind::RecoveryCode,
                 ..
             } => Self::TAG_RECOVERY_KEK,
-            WrapMethod::RrkHpke { .. } => Self::TAG_RRK_HPKE,
+            Self::RrkHpke { .. } => Self::TAG_RRK_HPKE,
         }
     }
 }

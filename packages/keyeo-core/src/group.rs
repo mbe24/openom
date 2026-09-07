@@ -21,7 +21,7 @@ impl GroupId {
     /// The explicit "no group scope" marker — a single-group or test context. Distinct in intent from a
     /// forgotten binding: a caller writes `GroupId::unscoped()` on purpose.
     #[must_use]
-    pub fn unscoped() -> Self {
+    pub const fn unscoped() -> Self {
         Self(Vec::new())
     }
     #[must_use]

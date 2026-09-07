@@ -101,7 +101,7 @@ impl Part {
 
 // serde's `skip_serializing_if` hands the field by reference, so this must take `&bool` by contract.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_false(b: &bool) -> bool {
+const fn is_false(b: &bool) -> bool {
     !*b
 }
 

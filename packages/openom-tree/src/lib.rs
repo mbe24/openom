@@ -162,7 +162,7 @@ impl Tree {
     /// A fresh engine for author `created_by` (the vault-derived `did:key`).
     pub fn new(created_by: impl Into<String>) -> Self {
         let created_by = created_by.into();
-        Tree {
+        Self {
             moderators: BTreeSet::from([created_by.clone()]),
             created_by,
             items: BTreeMap::new(),

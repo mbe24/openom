@@ -79,6 +79,7 @@ pub struct CompactionState {
 }
 
 /// The compaction-trigger seam: given the current [`CompactionState`], should the client compact now?
+///
 /// Different channels plug in different cadences — a data channel compacts aggressively (short window),
 /// an auth channel conservatively (long window, and eventually a %-seen safety gate).
 pub trait SnapshotPolicy {
@@ -135,7 +136,7 @@ pub struct SyncClient<E: Engine, K: Sealer, S: DocStore> {
 
 impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     pub fn new(engine: E, sealer: K, store: S, doc: impl Into<String>) -> Self {
-        SyncClient {
+        Self {
             engine,
             sealer,
             store,
@@ -149,13 +150,13 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         }
     }
 
-    pub fn engine(&self) -> &E {
+    pub const fn engine(&self) -> &E {
         &self.engine
     }
 
     /// Mutable access to the engine — for caller-specific operations docsync doesn't generalize (e.g. a
     /// domain version cursor, or a workflow-specific commit).
-    pub fn engine_mut(&mut self) -> &mut E {
+    pub const fn engine_mut(&mut self) -> &mut E {
         &mut self.engine
     }
 
@@ -201,7 +202,7 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         Ok(())
     }
 
-    pub fn pending_count(&self) -> usize {
+    pub const fn pending_count(&self) -> usize {
         self.pending.len()
     }
 

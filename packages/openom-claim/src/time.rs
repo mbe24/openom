@@ -50,7 +50,7 @@ impl Hlc {
     /// content-hash-canonicalization requirement (else the same instant could hash two ways).
     #[must_use]
     pub fn new(millis: i64, logical: u32) -> Self {
-        Hlc {
+        Self {
             millis: millis + i64::from(logical / LOGICAL_PER_MILLI),
             logical: logical % LOGICAL_PER_MILLI,
         }
@@ -58,13 +58,13 @@ impl Hlc {
 
     /// The physical component: epoch milliseconds.
     #[must_use]
-    pub fn millis(&self) -> i64 {
+    pub const fn millis(&self) -> i64 {
         self.millis
     }
 
     /// The logical component: `0`–`999`.
     #[must_use]
-    pub fn logical(&self) -> u32 {
+    pub const fn logical(&self) -> u32 {
         self.logical
     }
 }
@@ -131,7 +131,7 @@ impl FromStr for Hlc {
         }
         let millis = ((days * 86_400 + h * 3600 + mi * 60 + sec) * 1000) + ms;
         // `logical` is exactly three digits → already < LOGICAL_PER_MILLI, so no carry is possible.
-        Ok(Hlc {
+        Ok(Self {
             millis,
             logical: logical as u32,
         })
@@ -154,7 +154,7 @@ impl<'de> Deserialize<'de> for Hlc {
 // --- civil-date conversion (Howard Hinnant's algorithms, proleptic Gregorian, UTC) -----------------
 
 /// Split epoch-milliseconds into `(year, month, day, hour, minute, second, millisecond)` (UTC).
-fn civil_from_millis(millis: i64) -> (i64, u32, u32, u32, u32, u32, u32) {
+const fn civil_from_millis(millis: i64) -> (i64, u32, u32, u32, u32, u32, u32) {
     let ms = millis.rem_euclid(1000) as u32;
     let secs = millis.div_euclid(1000);
     let days = secs.div_euclid(86_400);
@@ -169,7 +169,7 @@ fn civil_from_millis(millis: i64) -> (i64, u32, u32, u32, u32, u32, u32) {
 }
 
 /// Days since the Unix epoch → `(year, month [1..12], day [1..31])`.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+const fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097; // [0, 146096]

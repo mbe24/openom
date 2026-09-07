@@ -6,7 +6,7 @@
 //! The engine is a **deployment/backend preset** (owner decision 2026-09-03): the managed Lambda backend is
 //! fixed to one engine, a BYO backend (Google Drive) to one — never a per-tree user choice. The choice is
 //! resolved at RUNTIME, not a compile-time feature (revised 2026-09-02), so one binary can map different
-//! backends to different engines: the host builds the right `AppVault` from config via [`AppVault::from_kind`]
+//! backends to different engines: the host builds the right `AppVault` from config via [`Self::from_kind`]
 //! and records the tag in its local head record; there is no per-tree engine discovery.
 //!
 //! Engine-SPECIFIC membership authoring (add/remove member, member-unlock, reseal) is deliberately NOT on
@@ -30,19 +30,19 @@ pub enum AppVault {
 impl AppVault {
     /// Build the vault for the deployment's configured engine.
     #[must_use]
-    pub fn from_kind(kind: EngineKind) -> Self {
+    pub const fn from_kind(kind: EngineKind) -> Self {
         match kind {
-            EngineKind::Chain => AppVault::Chain(ChainVault),
-            EngineKind::Dag => AppVault::Dag(DagVault),
+            EngineKind::Chain => Self::Chain(ChainVault),
+            EngineKind::Dag => Self::Dag(DagVault),
         }
     }
 
     /// Which engine this is — for recording the tag in the host's local head record.
     #[must_use]
-    pub fn kind(&self) -> EngineKind {
+    pub const fn kind(&self) -> EngineKind {
         match self {
-            AppVault::Chain(_) => EngineKind::Chain,
-            AppVault::Dag(_) => EngineKind::Dag,
+            Self::Chain(_) => EngineKind::Chain,
+            Self::Dag(_) => EngineKind::Dag,
         }
     }
 
@@ -51,10 +51,10 @@ impl AppVault {
     /// trait (the chain and dag signatures differ). `None` on a chain deployment. `DagVault` is a zero-sized
     /// selector, so this hands back a value, not a borrow.
     #[must_use]
-    pub fn as_dag(&self) -> Option<DagVault> {
+    pub const fn as_dag(&self) -> Option<DagVault> {
         match self {
-            AppVault::Dag(_) => Some(DagVault),
-            AppVault::Chain(_) => None,
+            Self::Dag(_) => Some(DagVault),
+            Self::Chain(_) => None,
         }
     }
 }
@@ -66,8 +66,8 @@ impl KeyringLifecycle for AppVault {
         passphrase: &Passphrase,
     ) -> Result<Provisioned, VaultError> {
         match self {
-            AppVault::Chain(v) => v.provision(ctx, passphrase),
-            AppVault::Dag(v) => v.provision(ctx, passphrase),
+            Self::Chain(v) => v.provision(ctx, passphrase),
+            Self::Dag(v) => v.provision(ctx, passphrase),
         }
     }
 
@@ -78,8 +78,8 @@ impl KeyringLifecycle for AppVault {
         passphrase: &Passphrase,
     ) -> Result<Unlocked, VaultError> {
         match self {
-            AppVault::Chain(v) => v.unlock(ctx, anchor, passphrase),
-            AppVault::Dag(v) => v.unlock(ctx, anchor, passphrase),
+            Self::Chain(v) => v.unlock(ctx, anchor, passphrase),
+            Self::Dag(v) => v.unlock(ctx, anchor, passphrase),
         }
     }
 
@@ -92,8 +92,8 @@ impl KeyringLifecycle for AppVault {
         floor: &[u8],
     ) -> Result<Recovered, VaultError> {
         match self {
-            AppVault::Chain(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
-            AppVault::Dag(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
+            Self::Chain(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
+            Self::Dag(v) => v.recover(ctx, anchor, recovery_code, new_passphrase, floor),
         }
     }
 
@@ -106,10 +106,10 @@ impl KeyringLifecycle for AppVault {
         floor: &[u8],
     ) -> Result<Rekeyed, VaultError> {
         match self {
-            AppVault::Chain(v) => {
+            Self::Chain(v) => {
                 v.change_passphrase(ctx, anchor, old_passphrase, new_passphrase, floor)
             }
-            AppVault::Dag(v) => {
+            Self::Dag(v) => {
                 v.change_passphrase(ctx, anchor, old_passphrase, new_passphrase, floor)
             }
         }

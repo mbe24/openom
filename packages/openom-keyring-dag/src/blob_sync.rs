@@ -33,17 +33,17 @@ pub enum BlobSyncError {
 
 impl From<BlobError> for BlobSyncError {
     fn from(e: BlobError) -> Self {
-        BlobSyncError::Store(e)
+        Self::Store(e)
     }
 }
 
 impl std::fmt::Display for BlobSyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlobSyncError::Store(e) => write!(f, "blob store: {e}"),
-            BlobSyncError::Decode(e) => write!(f, "op decode: {e}"),
-            BlobSyncError::Malformed(m) => write!(f, "malformed op blob: {m}"),
-            BlobSyncError::Engine(m) => write!(f, "engine rejected op: {m}"),
+            Self::Store(e) => write!(f, "blob store: {e}"),
+            Self::Decode(e) => write!(f, "op decode: {e}"),
+            Self::Malformed(m) => write!(f, "malformed op blob: {m}"),
+            Self::Engine(m) => write!(f, "engine rejected op: {m}"),
         }
     }
 }
@@ -84,7 +84,7 @@ impl<S: BlobStore> KeyringBlobSync<S> {
         }
     }
 
-    pub fn store(&self) -> &S {
+    pub const fn store(&self) -> &S {
         &self.store
     }
 
@@ -200,7 +200,7 @@ enum ActionDto {
     },
     Propose {
         proposal_id: [u8; 32],
-        target: Box<ActionDto>,
+        target: Box<Self>,
     },
     Approve {
         proposal_id: [u8; 32],

@@ -49,7 +49,7 @@ impl GroupStateView {
             })
             .collect();
         members.sort_by(|a, b| a.id.cmp(&b.id));
-        GroupStateView { members }
+        Self { members }
     }
 
     /// Rebuild a resolved `GroupState`, restoring the anchor-level `group_id` + `reset_authority` around the
@@ -81,7 +81,7 @@ impl CanonicalBytes for MemberStateDto {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new member field is a compile error until it is in the signed
         // bytes. All fields are length-bounded scalars/keys, so this is a plain, deterministic encoding.
-        let MemberStateDto { id, role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
+        let Self { id, role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
         let idb = id.as_bytes();
         out.extend_from_slice(&(idb.len() as u64).to_le_bytes());
         out.extend_from_slice(idb);
@@ -97,7 +97,7 @@ impl CanonicalBytes for GroupStateView {
     #[deny(unused_variables)]
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // `members` is sorted by id in `of`, so the length-prefixed run is deterministic across replicas.
-        let GroupStateView { members } = self;
+        let Self { members } = self;
         out.extend_from_slice(&(members.len() as u64).to_le_bytes());
         for m in members {
             m.write_canonical(out);
@@ -148,7 +148,7 @@ impl CanonicalBytes for Checkpoint {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded here,
         // so nothing trust-relevant can slip out of the signed bytes.
-        let Checkpoint { frontier_depths, state, prev_snapshot, has_been_shared, sealing, minting_ops_baseline, author } = self;
+        let Self { frontier_depths, state, prev_snapshot, has_been_shared, sealing, minting_ops_baseline, author } = self;
         out.extend_from_slice(b"openom:checkpoint:v1");
         // frontier_depths — sorted, length-prefixed. The (op-id) keys ARE the dominating cut; the paired depths
         // seed the strong-remove tiebreak across the prune.

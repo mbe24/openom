@@ -91,7 +91,7 @@ pub fn aesgcm_open(
 ///
 /// # Errors
 /// Returns [`CryptoError::NonceLength`] if the length differs.
-pub fn check_nonce(nonce: &[u8], want: usize) -> Result<(), CryptoError> {
+pub const fn check_nonce(nonce: &[u8], want: usize) -> Result<(), CryptoError> {
     if nonce.len() == want {
         Ok(())
     } else {

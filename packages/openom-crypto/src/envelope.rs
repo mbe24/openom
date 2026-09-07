@@ -48,7 +48,7 @@ pub struct SealParams<'a> {
     pub author: Option<&'a AuthorIdentity>,
 }
 
-fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
+const fn nonce_len(aead: Aead) -> Result<usize, CryptoError> {
     match aead {
         Aead::Xchacha20Poly1305 => Ok(24),
         Aead::Aes256Gcm => Ok(12),

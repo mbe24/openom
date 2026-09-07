@@ -26,21 +26,21 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
-    fn to_proto(self) -> Kind {
+    const fn to_proto(self) -> Kind {
         match self {
-            EntryKind::Snapshot => Kind::Snapshot,
-            EntryKind::Delta => Kind::Delta,
-            EntryKind::Media => Kind::Media,
-            EntryKind::Proposal => Kind::Proposal,
+            Self::Snapshot => Kind::Snapshot,
+            Self::Delta => Kind::Delta,
+            Self::Media => Kind::Media,
+            Self::Proposal => Kind::Proposal,
         }
     }
 
     fn from_proto(k: i32) -> Option<Self> {
         match Kind::try_from(k).ok()? {
-            Kind::Snapshot => Some(EntryKind::Snapshot),
-            Kind::Delta => Some(EntryKind::Delta),
-            Kind::Media => Some(EntryKind::Media),
-            Kind::Proposal => Some(EntryKind::Proposal),
+            Kind::Snapshot => Some(Self::Snapshot),
+            Kind::Delta => Some(Self::Delta),
+            Kind::Media => Some(Self::Media),
+            Kind::Proposal => Some(Self::Proposal),
             Kind::Unspecified => None,
         }
     }
@@ -71,12 +71,12 @@ impl SealContext {
     /// A snapshot at the chain head — the common case. `format` defaults to openom-json,
     /// uncompressed; adjust the fields for compressed payloads or media.
     #[must_use]
-    pub fn snapshot(
+    pub const fn snapshot(
         replica_counter: u64,
         prev_ciphertext_hash: Vec<u8>,
         covers_through_seq: u64,
     ) -> Self {
-        SealContext {
+        Self {
             kind: EntryKind::Snapshot,
             format: Format::OpenomJson,
             compression: Compression::None,
@@ -158,7 +158,7 @@ impl Sealer {
         key_id: KeyId,
         replica_id: ReplicaId,
     ) -> Self {
-        Sealer {
+        Self {
             version,
             dek,
             aead: Aead::Xchacha20Poly1305,
@@ -215,7 +215,7 @@ impl Sealer {
 
     /// Override the AEAD (default XChaCha20-Poly1305). Builder-style.
     #[must_use]
-    pub fn with_aead(mut self, aead: Aead) -> Self {
+    pub const fn with_aead(mut self, aead: Aead) -> Self {
         self.aead = aead;
         self
     }
@@ -343,7 +343,7 @@ impl SealerSet {
                 )
             })
             .collect();
-        SealerSet {
+        Self {
             tree_id,
             write_key_id,
             sealers,
@@ -370,7 +370,7 @@ impl SealerSet {
     /// A single-epoch set — the local-development / demo path (one dev sealer).
     #[must_use]
     pub fn single(sealer: Sealer) -> Self {
-        SealerSet {
+        Self {
             tree_id: sealer.tree_id.clone(),
             write_key_id: sealer.key_id.clone(),
             sealers: vec![sealer],

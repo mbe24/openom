@@ -66,8 +66,8 @@ pub(crate) struct AddedWrap {
 impl SealingPayload {
     /// A payload that only sets/re-sets the escrow (provision's is built inline; recover / `change_passphrase`
     /// re-escrow with no epoch change).
-    fn escrow_only(escrow: RecoveryEscrow) -> Self {
-        SealingPayload {
+    const fn escrow_only(escrow: RecoveryEscrow) -> Self {
+        Self {
             new_epochs: vec![],
             added_wraps: vec![],
             escrow: Some(escrow),

@@ -38,7 +38,7 @@ impl<T: CanonicalBytes, S: SignatureScheme> Signed<T, S> {
         body.write_canonical(&mut buf);
         let signature = signing_key.sign(&buf).to_bytes();
         let signer = signing_key.verifying_key().to_bytes();
-        Signed { body, signer, signature }
+        Self { body, signer, signature }
     }
 
     /// Verify the signature over the body's canonical bytes and, only if it holds, return the body. This is the
@@ -53,7 +53,7 @@ impl<T: CanonicalBytes, S: SignatureScheme> Signed<T, S> {
 
     /// The public key that produced the signature. An authenticity anchor and the input to a separate
     /// *authority* check (is this key an allowed signer?) — not proof of authority on its own.
-    pub fn signer(&self) -> &S::PublicKey {
+    pub const fn signer(&self) -> &S::PublicKey {
         &self.signer
     }
 }
@@ -89,7 +89,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Signed<T, crat
             .as_slice()
             .try_into()
             .map_err(|_| serde::de::Error::custom("Signed: signature must be 64 bytes"))?;
-        Ok(Signed {
+        Ok(Self {
             body: r.body,
             signer: r.signer,
             signature,

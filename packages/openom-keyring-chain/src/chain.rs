@@ -68,7 +68,7 @@ impl KeyringAnchor {
     /// Build an anchor from an **already-trusted** keyring (a locally stored, previously accepted one).
     /// Performs no policy check — the keyring is the trust root here.
     pub fn from_keyring(keyring: &Keyring) -> Self {
-        KeyringAnchor {
+        Self {
             tree_id: keyring.tree_id.clone(),
             revision: keyring.revision,
             keyring_hash: keyring_hash(keyring),
@@ -180,7 +180,7 @@ pub struct GoverningKeyring {
 impl GoverningKeyring {
     /// The revision this keyring governs.
     #[must_use]
-    pub fn revision(&self) -> u32 {
+    pub const fn revision(&self) -> u32 {
         self.keyring.revision
     }
 

@@ -105,13 +105,13 @@ pub struct VaultError {
 
 impl VaultError {
     pub fn new(code: VaultErrorCode, message: impl Into<String>) -> Self {
-        VaultError {
+        Self {
             code,
             message: message.into(),
         }
     }
     fn storage(e: impl std::fmt::Display) -> Self {
-        VaultError::new(VaultErrorCode::Storage, e.to_string())
+        Self::new(VaultErrorCode::Storage, e.to_string())
     }
 }
 
@@ -125,11 +125,11 @@ impl std::error::Error for VaultError {}
 /// The lean DEK-session (envelope) errors — from a running sealer's seal/open.
 impl From<SealerError> for VaultError {
     fn from(e: SealerError) -> Self {
-        VaultError::new(sealer_code(&e), e.to_string())
+        Self::new(sealer_code(&e), e.to_string())
     }
 }
 
-fn sealer_code(e: &SealerError) -> VaultErrorCode {
+const fn sealer_code(e: &SealerError) -> VaultErrorCode {
     use SealerError as E;
     use VaultErrorCode as C;
     match e {
@@ -162,7 +162,7 @@ impl From<openom_vault::VaultError> for VaultError {
             E::RevisionOverflow => C::RevisionOverflow,
             E::MalformedWatermark => C::MalformedWatermark,
         };
-        VaultError::new(code, e.to_string())
+        Self::new(code, e.to_string())
     }
 }
 
@@ -519,7 +519,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// A host with an injected entropy source — tests pass a seeded `SeededEntropy` (test-only) for a
     /// deterministic, replayable state machine; real callers use [`new`](VaultHost::new).
     pub fn with_entropy(store: S, entropy: E) -> Self {
-        VaultHost {
+        Self {
             store,
             registry: Registry::default(),
             entropy,
@@ -530,13 +530,13 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
     /// Set the deployment's keyring engine (default [`EngineKind::Chain`]). A backend preset — the managed
     /// backend is fixed to one engine, a BYO backend to one — never a per-tree choice.
     #[must_use]
-    pub fn with_engine(mut self, engine: EngineKind) -> Self {
+    pub const fn with_engine(mut self, engine: EngineKind) -> Self {
         self.engine = engine;
         self
     }
 
     /// Build the vault for this host's configured engine.
-    fn vault(&self) -> AppVault {
+    const fn vault(&self) -> AppVault {
         AppVault::from_kind(self.engine)
     }
 

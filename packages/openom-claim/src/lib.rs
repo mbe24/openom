@@ -143,7 +143,7 @@ pub enum Authorship {
 ///
 /// # Errors
 /// Returns a [`ClaimError`] if `createdBy` is missing or not a decodable `did:key`, or the content
-/// can't be canonicalized. (A signature that simply fails to verify is `Ok(`[`SigCheck::Bad`]`)`.)
+/// can't be canonicalized. (A signature that simply fails to verify is `Ok(SigCheck::Bad)`.)
 pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> {
     let did = envelope
         .get(F_CREATED_BY)

@@ -9,8 +9,8 @@ pub struct Date {
 }
 
 impl Date {
-    fn new(year: i32, month: u8, day: u8) -> Self {
-        Date { year, month, day }
+    const fn new(year: i32, month: u8, day: u8) -> Self {
+        Self { year, month, day }
     }
 }
 
@@ -141,10 +141,7 @@ fn parse_single(s: &str) -> Result<(Bounds, bool, bool), EdtfError> {
 
 fn parse_core(s: &str) -> Result<Bounds, EdtfError> {
     let malformed = || EdtfError::Malformed(s.to_string());
-    let (neg, rest) = match s.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, s),
-    };
+    let (neg, rest) = s.strip_prefix('-').map_or((false, s), |r| (true, r));
     let parts: Vec<&str> = rest.split('-').collect();
     if parts.is_empty() || parts.len() > 3 {
         return Err(malformed());
@@ -284,7 +281,7 @@ fn parse_digits_range(s: &str) -> Option<(u32, u32)> {
 }
 
 /// Season codes 21..24 → Spring/Summer/Autumn/Winter. Winter (24) spans into the following year.
-fn season_bounds(year_min: i32, year_max: i32, code: u8) -> Bounds {
+const fn season_bounds(year_min: i32, year_max: i32, code: u8) -> Bounds {
     let (min, max) = match code {
         21 => (Date::new(year_min, 3, 1), Date::new(year_max, 5, 31)),
         22 => (Date::new(year_min, 6, 1), Date::new(year_max, 8, 31)),
@@ -301,11 +298,11 @@ fn season_bounds(year_min: i32, year_max: i32, code: u8) -> Bounds {
     }
 }
 
-fn is_leap(year: i32) -> bool {
+const fn is_leap(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
-fn days_in_month(year: i32, month: u8) -> u8 {
+const fn days_in_month(year: i32, month: u8) -> u8 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         2 => {
@@ -321,7 +318,7 @@ fn days_in_month(year: i32, month: u8) -> u8 {
 }
 
 /// `(year, month, day)` for chronological comparison.
-fn tuple(d: Date) -> (i32, u8, u8) {
+const fn tuple(d: Date) -> (i32, u8, u8) {
     (d.year, d.month, d.day)
 }
 

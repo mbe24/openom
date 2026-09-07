@@ -36,11 +36,11 @@ pub enum Access {
 impl Access {
     /// The weakest (highest-numbered) role allowed to exercise this capability.
     #[must_use]
-    pub fn min_role(self) -> i16 {
+    pub const fn min_role(self) -> i16 {
         match self {
-            Access::Read => ROLE_VIEWER,
-            Access::Propose | Access::StageMedia => ROLE_EDITOR,
-            Access::Commit | Access::Administer => ROLE_MAINTAINER,
+            Self::Read => ROLE_VIEWER,
+            Self::Propose | Self::StageMedia => ROLE_EDITOR,
+            Self::Commit | Self::Administer => ROLE_MAINTAINER,
         }
     }
 }
@@ -49,7 +49,7 @@ impl Access {
 /// server's endpoint matrix. Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+.
 /// `None` for a kind that can't be role-gated (unspecified).
 #[must_use]
-pub fn required_role_for_kind(kind: Kind) -> Option<i16> {
+pub const fn required_role_for_kind(kind: Kind) -> Option<i16> {
     match kind {
         Kind::Snapshot | Kind::Delta => Some(ROLE_MAINTAINER),
         Kind::Proposal | Kind::Media => Some(ROLE_EDITOR),

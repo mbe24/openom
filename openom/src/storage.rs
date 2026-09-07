@@ -388,7 +388,7 @@ impl From<reqwest::Error> for StorageError {
         // string. `warn!(%err)` would then write an access grant into the logs (and
         // on to a third-party aggregator). `without_url()` strips it at the source,
         // so no caller can leak it by accident. See SERVER-DATA-FORMAT §7 discipline.
-        StorageError::Http(e.without_url().to_string())
+        Self::Http(e.without_url().to_string())
     }
 }
 

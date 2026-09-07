@@ -63,19 +63,19 @@ pub enum SyncError {
 
 impl From<BlobError> for SyncError {
     fn from(e: BlobError) -> Self {
-        SyncError::Store(e)
+        Self::Store(e)
     }
 }
 
 impl std::fmt::Display for SyncError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SyncError::Store(e) => write!(f, "blob store: {e}"),
-            SyncError::Decode(e) => write!(f, "keyring decode: {e}"),
-            SyncError::Chain(e) => write!(f, "chain rejected: {e}"),
-            SyncError::Malformed(m) => write!(f, "malformed keyring transport state: {m}"),
-            SyncError::Conflict => write!(f, "head advanced concurrently; retry"),
-            SyncError::DraftContentChanged => {
+            Self::Store(e) => write!(f, "blob store: {e}"),
+            Self::Decode(e) => write!(f, "keyring decode: {e}"),
+            Self::Chain(e) => write!(f, "chain rejected: {e}"),
+            Self::Malformed(m) => write!(f, "malformed keyring transport state: {m}"),
+            Self::Conflict => write!(f, "head advanced concurrently; retry"),
+            Self::DraftContentChanged => {
                 write!(f, "draft content changed since review; re-review before countersigning")
             }
         }
@@ -97,11 +97,11 @@ pub enum PullError {
 impl std::fmt::Display for PullError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PullError::Sync(e) => write!(f, "{e}"),
-            PullError::Rollback { have, served } => {
+            Self::Sync(e) => write!(f, "{e}"),
+            Self::Rollback { have, served } => {
                 write!(f, "rollback: have revision {have}, store served {served}")
             }
-            PullError::ResetPending => write!(f, "head is a recovery reset; awaiting out-of-band confirm"),
+            Self::ResetPending => write!(f, "head is a recovery reset; awaiting out-of-band confirm"),
         }
     }
 }
@@ -116,7 +116,7 @@ pub struct KeyringChainBlobSync<S: BlobStore> {
 }
 
 impl<S: BlobStore> KeyringChainBlobSync<S> {
-    pub fn new(store: S) -> Self {
+    pub const fn new(store: S) -> Self {
         Self {
             store,
             anchor: None,

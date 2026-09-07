@@ -73,7 +73,7 @@ impl core::fmt::Debug for SigningKey {
 // `where` bound checked at definition, so this fails to compile if ed25519-dalek's `zeroize` feature
 // ever stops providing ZeroizeOnDrop for its SigningKey (the seed our newtype holds).
 #[allow(dead_code)]
-fn _signing_key_zeroizes_on_drop()
+const fn _signing_key_zeroizes_on_drop()
 where
     ed25519_dalek::SigningKey: zeroize::ZeroizeOnDrop,
 {
@@ -125,13 +125,13 @@ pub struct Signature([u8; 64]);
 impl Signature {
     /// Wrap 64 signature bytes (infallible — validity is checked at verify time).
     #[must_use]
-    pub fn from_bytes(bytes: &[u8; 64]) -> Self {
+    pub const fn from_bytes(bytes: &[u8; 64]) -> Self {
         Self(*bytes)
     }
 
     /// The 64 signature bytes.
     #[must_use]
-    pub fn to_bytes(&self) -> [u8; 64] {
+    pub const fn to_bytes(&self) -> [u8; 64] {
         self.0
     }
 }

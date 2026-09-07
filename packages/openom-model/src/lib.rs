@@ -172,7 +172,7 @@ pub struct Model {
 impl Model {
     /// An empty tree.
     #[must_use]
-    pub fn new(tree: TreeId) -> Self {
+    pub const fn new(tree: TreeId) -> Self {
         Self {
             tree,
             nodes: BTreeMap::new(),

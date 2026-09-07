@@ -1,4 +1,5 @@
 //! The keyring vault — the passphrase lifecycle that turns a passphrase into a [`openom_sealer::Sealer`].
+//!
 //! Four flows: **provision** (first time), **unlock** (returning / new device), **recover**
 //! (forgot passphrase, via the recovery code), **`change_passphrase`**. All fit the frozen
 //! `Keyring` proto; none add a field.

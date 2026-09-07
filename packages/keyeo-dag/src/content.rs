@@ -67,7 +67,7 @@ impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
             &signature,
             &author_public_key,
         );
-        Op {
+        Self {
             id,
             group_id,
             parents,

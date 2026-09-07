@@ -42,6 +42,7 @@ pub struct Revision(pub u32);
 pub struct DocHash(pub [u8; 32]);
 
 /// The binding's commitment over its ENTIRE payload (computed, never wire-carried; opaque to the engine).
+///
 /// Bound into the signed bytes so the payload is tamper-evident even though its shape is the binding's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PayloadCommitment(pub [u8; 32]);
@@ -291,7 +292,7 @@ where
 /// governance forever. Founder-or-* kinds are always satisfiable (a founder exists per
 /// [`check_structure_generic`]); a pure threshold(m) needs at least m signers (generalizes
 /// chain.rs `rule_is_satisfiable`).
-fn rule_is_satisfiable(g: Governance, signer_count: usize) -> bool {
+const fn rule_is_satisfiable(g: Governance, signer_count: usize) -> bool {
     let m = g.threshold as usize;
     match g.kind {
         0..=2 => true,
@@ -305,7 +306,7 @@ fn rule_is_satisfiable(g: Governance, signer_count: usize) -> bool {
 /// other prior maps to `Some(prior + 1)`. Extracted so the arithmetic is provable in isolation and so
 /// [`verify_transition`] and the proof share one definition — behaviour is identical to the inline
 /// `checked_add(1)` it replaced.
-fn next_revision(prior: u32) -> Option<u32> {
+const fn next_revision(prior: u32) -> Option<u32> {
     prior.checked_add(1)
 }
 
@@ -567,7 +568,7 @@ pub struct Compacted {
 }
 
 impl keyeo_core::Compaction for Retained {
-    type State = Retained;
+    type State = Self;
     /// The stable revision every peer has synced past — `compact` never prunes above it (the data-loss guard),
     /// mirroring the dag's frontier cut.
     type Cut = Revision;

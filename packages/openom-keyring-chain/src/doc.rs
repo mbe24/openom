@@ -286,7 +286,7 @@ fn wrap_complete(epochs: &[Epoch<String>], members: &[Member]) -> bool {
 /// pointing whoever added the field at the guard tests (per-field mutation in `keyeo_crypto::codec`, the
 /// golden-bytes + per-field signature-fails tests here) they must extend.
 #[allow(dead_code)]
-fn _key_material_fields_are_exhaustively_accounted_for(epoch: &Epoch<String>, wrap: &Wrap<String>) {
+const fn _key_material_fields_are_exhaustively_accounted_for(epoch: &Epoch<String>, wrap: &Wrap<String>) {
     let Epoch { key_id, ordinal, wraps } = epoch;
     let _ = (key_id, ordinal, wraps);
     let Wrap { recipient, method, ciphertext } = wrap;

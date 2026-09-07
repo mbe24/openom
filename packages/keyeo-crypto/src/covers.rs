@@ -28,10 +28,7 @@ pub struct RecipientDescriptor<Id: RecipientId> {
 }
 
 fn key_ok(recipient_key: &X25519PublicKey, expected: Option<&X25519PublicKey>) -> bool {
-    match expected {
-        Some(k) => recipient_key == k,
-        None => true,
-    }
+    expected.is_none_or(|k| recipient_key == k)
 }
 
 /// A `MemberHpke` wrap addressed to this descriptor (a member's per-epoch DEK access).

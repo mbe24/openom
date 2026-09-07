@@ -31,12 +31,12 @@ impl KeyringRole {
     pub const VIEWER: Self = Self(openom_keyring_api::ROLE_VIEWER);
 
     /// A signer (keyring administrative authority) is a `CoOwner` or stronger (`Owner`).
-    fn is_signer(self) -> bool {
+    const fn is_signer(self) -> bool {
         self.0 <= openom_keyring_api::ROLE_CO_OWNER
     }
 
     /// The Owner (founder) — the unique keyring root.
-    fn is_owner(self) -> bool {
+    const fn is_owner(self) -> bool {
         self.0 == openom_keyring_api::ROLE_OWNER
     }
 }
@@ -102,7 +102,7 @@ pub struct KeyringAccess;
 impl KeyringAccess {
     /// The weakest role permitted to author a change **touching** a member whose role is `target`:
     /// touching a signer needs the Owner; touching an ordinary member needs any signer (`CoOwner`+).
-    fn required_for(target: KeyringRole) -> KeyringRole {
+    const fn required_for(target: KeyringRole) -> KeyringRole {
         if target.is_signer() {
             KeyringRole::OWNER
         } else {
@@ -236,7 +236,7 @@ impl AccessControl<String, KeyringRole, Ed25519> for KeyringAccess {
 /// The member a change *acts on* — the one whose consent shouldn't gate their own removal/demotion.
 /// Excluded from both the eligible set and the unanimity denominator (you don't need a member's
 /// approval to remove or demote them).
-fn target_member(action: &KeyringAction) -> Option<&String> {
+const fn target_member(action: &KeyringAction) -> Option<&String> {
     match action {
         MembershipAction::Remove { member } | MembershipAction::ChangeRole { member, .. } => {
             Some(member)
@@ -294,27 +294,27 @@ pub struct KeyringQuorum {
 
 impl KeyringQuorum {
     #[must_use]
-    pub fn new(rule: QuorumRule) -> Self {
+    pub const fn new(rule: QuorumRule) -> Self {
         Self { rule }
     }
     /// The founder alone governs (single-admin family).
     #[must_use]
-    pub fn founder_only() -> Self {
+    pub const fn founder_only() -> Self {
         Self::new(QuorumRule::FounderOnly)
     }
     /// The founder alone, OR every co-owner (the collective-when-offline default).
     #[must_use]
-    pub fn founder_or_unanimity() -> Self {
+    pub const fn founder_or_unanimity() -> Self {
         Self::new(QuorumRule::FounderOrUnanimity)
     }
     /// The founder alone, OR at least `m` co-owners.
     #[must_use]
-    pub fn founder_or_threshold(m: usize) -> Self {
+    pub const fn founder_or_threshold(m: usize) -> Self {
         Self::new(QuorumRule::FounderOrThreshold(m))
     }
     /// A flat `m`-of-N over the signers (Owner + co-owners), no special founder path.
     #[must_use]
-    pub fn threshold(m: usize) -> Self {
+    pub const fn threshold(m: usize) -> Self {
         Self::new(QuorumRule::Threshold(m))
     }
 }

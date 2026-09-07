@@ -59,15 +59,15 @@ pub enum Retention {
 impl RetentionPolicy for Retention {
     fn plan(&self, m: &RetentionMetrics) -> RetentionPlan {
         match *self {
-            Retention::Never => RetentionPlan::KeepAll,
-            Retention::AfterItems(n) => {
+            Self::Never => RetentionPlan::KeepAll,
+            Self::AfterItems(n) => {
                 if m.items > n as usize {
                     RetentionPlan::Snapshot { keep_last: n as usize }
                 } else {
                     RetentionPlan::KeepAll
                 }
             }
-            Retention::AfterBytes(b) => {
+            Self::AfterBytes(b) => {
                 if m.bytes > b {
                     // Keep roughly `b` bytes of the most recent items. A byte policy can only produce a COUNT
                     // horizon (that's the `RetentionPlan` contract), so it converts via the average item size

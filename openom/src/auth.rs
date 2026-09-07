@@ -47,7 +47,7 @@ impl FromRequestParts<AppState> for Identity {
                     "dev account provisioning failed",
                 )
             })?;
-            return Ok(Identity { member_id: id });
+            return Ok(Self { member_id: id });
         }
 
         let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token"))?;
@@ -59,6 +59,6 @@ impl FromRequestParts<AppState> for Identity {
             .verify(token)
             .await
             .map_err(|msg| (StatusCode::UNAUTHORIZED, msg))?;
-        Ok(Identity { member_id })
+        Ok(Self { member_id })
     }
 }

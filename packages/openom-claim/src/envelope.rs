@@ -92,7 +92,7 @@ impl AttestTarget {
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
-            AttestTarget::Claim(s) | AttestTarget::Fingerprint(s) => s,
+            Self::Claim(s) | Self::Fingerprint(s) => s,
         }
     }
 }
@@ -126,7 +126,7 @@ impl Claim {
         created_by: impl Into<String>,
         created_at: Hlc,
     ) -> Self {
-        Claim {
+        Self {
             id: String::new(),
             type_uri: TYPE_CLAIM.to_string(),
             target_id: target_id.into(),
@@ -160,7 +160,7 @@ impl Claim {
         if let Some(r) = reason {
             value.insert("reason".into(), Value::String(r));
         }
-        Claim::new(
+        Self::new(
             target.as_str(),
             PREDICATE_ATTEST,
             Value::Object(value),
@@ -271,7 +271,7 @@ impl<'de> Deserialize<'de> for Record {
     /// path. `Serialize` is a plain untagged serialization of the inner `Anchor`/`Claim`.
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;
-        Record::try_from(v).map_err(serde::de::Error::custom)
+        Self::try_from(v).map_err(serde::de::Error::custom)
     }
 }
 
@@ -279,18 +279,18 @@ impl Record {
     /// The record's id (`sha256:…` for a Claim, a UUID for an Anchor, the preserved `id` for an Unknown).
     pub fn id(&self) -> &str {
         match self {
-            Record::Anchor(a) => &a.id,
-            Record::Claim(c) => &c.id,
-            Record::Unknown(v) => v.get("id").and_then(Value::as_str).unwrap_or_default(),
+            Self::Anchor(a) => &a.id,
+            Self::Claim(c) => &c.id,
+            Self::Unknown(v) => v.get("id").and_then(Value::as_str).unwrap_or_default(),
         }
     }
 
     /// The record's envelope `type` URI.
     pub fn type_uri(&self) -> &str {
         match self {
-            Record::Anchor(a) => &a.type_uri,
-            Record::Claim(c) => &c.type_uri,
-            Record::Unknown(v) => v.get("type").and_then(Value::as_str).unwrap_or_default(),
+            Self::Anchor(a) => &a.type_uri,
+            Self::Claim(c) => &c.type_uri,
+            Self::Unknown(v) => v.get("type").and_then(Value::as_str).unwrap_or_default(),
         }
     }
 
@@ -302,18 +302,18 @@ impl Record {
     #[must_use]
     pub fn to_value(&self) -> Value {
         match self {
-            Record::Anchor(a) => serde_json::to_value(a).expect("Anchor serializes"),
-            Record::Claim(c) => c.to_value(),
-            Record::Unknown(v) => v.clone(),
+            Self::Anchor(a) => serde_json::to_value(a).expect("Anchor serializes"),
+            Self::Claim(c) => c.to_value(),
+            Self::Unknown(v) => v.clone(),
         }
     }
 
     /// The record's author (`createdBy`).
     pub fn created_by(&self) -> &str {
         match self {
-            Record::Anchor(a) => &a.created_by,
-            Record::Claim(c) => &c.created_by,
-            Record::Unknown(v) => v
+            Self::Anchor(a) => &a.created_by,
+            Self::Claim(c) => &c.created_by,
+            Self::Unknown(v) => v
                 .get("createdBy")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
@@ -325,9 +325,9 @@ impl Record {
     /// to the epoch if it is absent or in a form this build doesn't recognize.
     pub fn created_at(&self) -> Hlc {
         match self {
-            Record::Anchor(a) => a.created_at,
-            Record::Claim(c) => c.created_at,
-            Record::Unknown(v) => v
+            Self::Anchor(a) => a.created_at,
+            Self::Claim(c) => c.created_at,
+            Self::Unknown(v) => v
                 .get("createdAt")
                 .and_then(Value::as_str)
                 .and_then(|s| s.parse().ok())
@@ -358,12 +358,12 @@ impl TryFrom<Value> for Record {
                 if !c.id_is_current()? {
                     return Err(ClaimError::IdMismatch);
                 }
-                Ok(Record::Claim(c))
+                Ok(Self::Claim(c))
             }
             TYPE_PERSON | TYPE_EVENT | TYPE_PLACE | TYPE_TREE => {
                 let a: Anchor =
                     serde_json::from_value(v).map_err(|e| ClaimError::Malformed("anchor", e))?;
-                Ok(Record::Anchor(a))
+                Ok(Self::Anchor(a))
             }
             // Unknown type: preserve opaquely so newer-version data flows through an older client
             // untouched. Two guards keep the fold sound: the record must have a non-empty string `id`
@@ -379,7 +379,7 @@ impl TryFrom<Value> for Record {
                 if id.starts_with("sha256:") {
                     return Err(ClaimError::ReservedId(id.to_owned()));
                 }
-                Ok(Record::Unknown(v))
+                Ok(Self::Unknown(v))
             }
         }
     }

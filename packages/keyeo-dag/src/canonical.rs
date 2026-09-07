@@ -21,7 +21,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new MemberInit field is a compile error until it's encoded
         // into the signed/content-addressed bytes (OPE-277 crypto-review hardening). Byte order unchanged.
-        let MemberInit { id, role, author_public_key, hpke_public_key } = self;
+        let Self { id, role, author_public_key, hpke_public_key } = self;
         Postcard(id).write_canonical(out);
         Postcard(role).write_canonical(out);
         out.extend_from_slice(author_public_key.as_ref());
@@ -32,14 +32,14 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MemberInit<Id
 impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAction<Id, R, S> {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         match self {
-            MembershipAction::Create { initial_members } => {
+            Self::Create { initial_members } => {
                 out.push(0);
                 out.extend_from_slice(&(initial_members.len() as u64).to_le_bytes());
                 for m in initial_members {
                     m.write_canonical(out);
                 }
             }
-            MembershipAction::Add {
+            Self::Add {
                 member,
                 role,
                 author_public_key,
@@ -59,29 +59,29 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                     None => out.push(0),
                 }
             }
-            MembershipAction::Remove { member } => {
+            Self::Remove { member } => {
                 out.push(2);
                 Postcard(member).write_canonical(out);
             }
-            MembershipAction::ChangeRole { member, new_role } => {
+            Self::ChangeRole { member, new_role } => {
                 out.push(3);
                 Postcard(member).write_canonical(out);
                 Postcard(new_role).write_canonical(out);
             }
-            MembershipAction::Propose { proposal_id, target } => {
+            Self::Propose { proposal_id, target } => {
                 out.push(4);
                 out.extend_from_slice(proposal_id);
                 target.write_canonical(out); // binds the target into the proposal's signed bytes
             }
-            MembershipAction::Approve { proposal_id } => {
+            Self::Approve { proposal_id } => {
                 out.push(5);
                 out.extend_from_slice(proposal_id);
             }
-            MembershipAction::Commit { proposal_id } => {
+            Self::Commit { proposal_id } => {
                 out.push(6);
                 out.extend_from_slice(proposal_id);
             }
-            MembershipAction::ReFound {
+            Self::ReFound {
                 member,
                 new_author_public_key,
                 new_hpke_public_key,
@@ -93,13 +93,13 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 out.extend_from_slice(new_hpke_public_key);
                 out.extend_from_slice(&era.to_le_bytes());
             }
-            MembershipAction::RotateRecoveryAuthority {
+            Self::RotateRecoveryAuthority {
                 new_reset_authority,
             } => {
                 out.push(8);
                 out.extend_from_slice(new_reset_authority.as_ref());
             }
-            MembershipAction::Retarget {
+            Self::Retarget {
                 member,
                 new_author_public_key,
                 new_hpke_public_key,
@@ -110,7 +110,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
                 out.extend_from_slice(new_hpke_public_key);
             }
             // Membership-inert; the reseal delta rides the op's `sealing` envelope, not the action bytes.
-            MembershipAction::Reseal => {
+            Self::Reseal => {
                 out.push(10);
             }
         }
@@ -164,7 +164,7 @@ impl<R: Role, S: SignatureScheme> CanonicalBytes for MemberState<R, S> {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new MemberState field is a compile error until it's bound into
         // the signed snapshot bytes — the same crypto-review guard the op/epoch encoders carry.
-        let MemberState { role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
+        let Self { role, member_counter, access_counter, author_public_key, hpke_public_key } = self;
         Postcard(role).write_canonical(out);
         out.extend_from_slice(&member_counter.to_le_bytes());
         out.extend_from_slice(&access_counter.to_le_bytes());
@@ -179,7 +179,7 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for GroupState<Id
         // Exhaustive destructure: a snapshot's signature must cover EVERY trust-relevant field of the state it
         // checkpoints (membership + roles + keys, and the recovery authority), so a new field can't slip out of
         // the signed bytes and be tampered on a pruned root.
-        let GroupState {
+        let Self {
             members,
             reset_authority,
             group_id,

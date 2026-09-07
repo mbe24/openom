@@ -361,7 +361,7 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Rate limiting carries a header, so build its response directly.
-        if let ApiError::TooManyRequests(secs) = self {
+        if let Self::TooManyRequests(secs) = self {
             let mut resp = (
                 StatusCode::TOO_MANY_REQUESTS,
                 "append rate exceeded — retry after the indicated delay".to_string(),
@@ -373,25 +373,25 @@ impl IntoResponse for ApiError {
             return resp;
         }
         let (status, msg) = match self {
-            ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            ApiError::Conflict => (
+            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            Self::Conflict => (
                 StatusCode::CONFLICT,
                 "version conflict — pull the current snapshot and retry".to_string(),
             ),
             // 403 (not 402): entitlement is an authorization decision, not a payment
             // handshake. A distinct variant so it's a countable signal, not a generic
             // Forbidden (§9.9).
-            ApiError::QuotaExceeded => (
+            Self::QuotaExceeded => (
                 StatusCode::FORBIDDEN,
                 "account resource limit reached".to_string(),
             ),
-            ApiError::TooManyRequests(_) => {
+            Self::TooManyRequests(_) => {
                 unreachable!("handled before the match (carries a header)")
             }
-            ApiError::Gone(m) => (StatusCode::GONE, m),
-            ApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            ApiError::Internal(m) => {
+            Self::Gone(m) => (StatusCode::GONE, m),
+            Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            Self::Internal(m) => {
                 tracing::error!(error = %m, "tree handler internal error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

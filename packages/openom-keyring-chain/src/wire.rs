@@ -33,7 +33,7 @@ pub const WRAP_RRK_HPKE: i32 = 4;
 /// membership/role list — one signed, anti-rollback, hash-chained document. The authorized-signer set is
 /// DERIVED from members (a member at `CO_OWNER` or stronger is a signer). Field numbers match the former
 /// `openom.v1.Keyring` (reserved 4, 5, 8).
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
 pub struct Keyring {
     /// Opaque tree id.
     #[prost(bytes = "vec", tag = "1")]
@@ -109,7 +109,7 @@ pub struct KeyringSignature {
 }
 
 /// The founder's cross-epoch recovery root key (an X25519 keypair) + the RVK.
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
 pub struct RecoveryKey {
     /// X25519 public key. Every `KeyEpoch` carries one `WRAP_METHOD_RRK_HPKE` wrap of its DEK to this key.
     #[prost(bytes = "vec", tag = "1")]
