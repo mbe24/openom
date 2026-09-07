@@ -213,6 +213,12 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
 /// make the account's first `PUT /trees` a 403). Generous entitlements: a dev account is
 /// a convenience, not a free-tier user, so it grants media + streaming + big caps (§17)
 /// and shouldn't trip entitlement gates.
+///
+/// CREATE-ONLY (`ON CONFLICT DO NOTHING`): because this runs on EVERY dev request, it must
+/// only ever insert a missing row — never reset an existing account's tuned limits. A
+/// `DO UPDATE` here re-clobbered every account's rate/capacity caps back to the defaults on
+/// each request, which silently disabled the rate-limit / quota gates (a test that seeds a
+/// low cap then expects a 429/403 saw its cap wiped before the second request).
 /// NOTE: production (`AUTH=jwt`) has the same gap — nothing provisions an `accounts` row
 /// for a fresh Supabase/Clerk `sub`. That is a separate, deliberate decision (free-tier
 /// defaults + a self-serve provisioning policy), deferred; the columns all have defaults.
@@ -226,19 +232,7 @@ pub(crate) async fn provision_dev_account(db: &PgPool, member_id: Uuid) -> Resul
          VALUES ($1, 1000000, true, true, 5368709120, 1000000, 1099511627776, 10737418240,
                  100000, 100000, 100000,
                  1048576, 100000, 100000)
-         ON CONFLICT (id) DO UPDATE SET
-             max_trees = EXCLUDED.max_trees,
-             allow_media = EXCLUDED.allow_media,
-             allow_streaming_media = EXCLUDED.allow_streaming_media,
-             max_blob_bytes = EXCLUDED.max_blob_bytes,
-             max_blob_count = EXCLUDED.max_blob_count,
-             max_storage_bytes = EXCLUDED.max_storage_bytes,
-             max_tree_bytes = EXCLUDED.max_tree_bytes,
-             log_rate = EXCLUDED.log_rate,
-             log_burst = EXCLUDED.log_burst,
-             max_proposal_bytes = EXCLUDED.max_proposal_bytes,
-             max_open_proposals_per_tree = EXCLUDED.max_open_proposals_per_tree,
-             max_proposals_per_member_day = EXCLUDED.max_proposals_per_member_day",
+         ON CONFLICT (id) DO NOTHING",
     )
     .bind(member_id)
     .execute(db)

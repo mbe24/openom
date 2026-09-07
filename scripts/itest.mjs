@@ -56,7 +56,10 @@ const args = [
   '--add-host', `${HOST}:host-gateway`,
 ];
 for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
-args.push(IMAGE, 'cargo', 'test', '-p', 'openom', ...filter, '--', '--ignored', '--nocapture');
+// --test-threads=1: these integration tests share ONE Postgres + MinIO and use GLOBAL operations
+// (POST /dev/gc sweeps ALL expired proposals/blobs, not just the test's tree), so running them in
+// parallel makes the shared-state assertions non-deterministic (proposals_ttl_swept flaked). Serialize.
+args.push(IMAGE, 'cargo', 'test', '-p', 'openom', ...filter, '--', '--ignored', '--nocapture', '--test-threads=1');
 
 console.error(`[itest] cargo test -p openom ${filter.join(' ')} -- --ignored  (stack via ${HOST})`);
 const r = spawnSync('docker', args, { stdio: 'inherit' });
