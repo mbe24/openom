@@ -7,7 +7,7 @@ test('crypto worker: provision → seal → open, cross-device unlock, ciphertex
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
-  await page.goto('/e2e/worker-harness.html');
+  await page.goto('/e2e/sealer-worker-harness.html');
   await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
 
   const r = await page.evaluate(() => (window as any).__worker.roundTrip());

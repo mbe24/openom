@@ -16,8 +16,12 @@ pnpm test:e2e
 ## What it covers
 - `vault.e2e.ts` + `vault-harness.html` — the compiled WASM sealer/vault alone (no app boot):
   cross-device unlock, wrong-passphrase rejection, ciphertext-at-rest.
-- `worker.e2e.ts` + `worker-harness.html` — the same, through the real Web Worker + Comlink
-  boundary (provision/seal/open proxied to the worker; keys never leave it).
+- `sealer-worker.e2e.ts` + `sealer-worker-harness.html` — the same, through the real crypto Web
+  Worker + Comlink boundary (provision/seal/open proxied to the worker; keys never leave it).
+- `sync-worker.e2e.ts` + `sync-worker-harness.html` — the max-Rust app-core sync path in a real
+  browser: two Web Workers (two devices of one tree) running the wasm engine + sealer + docsync loop
+  + local store + replicator, meeting through an in-page transport. Asserts they converge and that an
+  un-pushed offline mint is still offered outbound once a transport attaches.
 - `sqlite.e2e.ts` + `sqlite-harness.html` / `sqlite-harness.worker.js` — WASM SQLite over the
   OPFS-SAHPool VFS, run in a module Worker; asserts data survives a page reload, header-free
   (no COOP/COEP).

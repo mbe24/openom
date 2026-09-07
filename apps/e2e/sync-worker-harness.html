@@ -1,0 +1,168 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>app-core sync harness</title>
+<!--
+  Loads the real app-core worker path (the wasm engine + sealer + docsync loop + local store +
+  replicator, in a real Web Worker) — no app UI. Two workers = two devices of ONE tree (same dev
+  DEK + treeId, distinct replicaIds), meeting only through an in-page fake transport (the server
+  seam). Proves the loop in a real browser: two devices converge, and an un-pushed offline mint is
+  still offered outbound once a transport is attached. Keys live only in the workers.
+-->
+<body>
+  <div id="status">loading…</div>
+  <script type="module">
+    import * as Comlink from '../app/src/vendor/comlink.js';
+
+    const enc = new TextEncoder();
+    const DID = 'did:key:z6MkHarness';
+    const NAME = 'openom.org/core/name/v1';
+    const PERSON = 'openom.org/core/person/v1';
+    const DOC = 'tree-e2e';
+
+    // A dumb in-page server: append-only log + `?since` paging, shared by both devices. It needs no
+    // replica-dot dedup — the Rust replicator filters its own entries on the way up and down.
+    function makeTransport() {
+      const log = [];
+      return {
+        async appendLog(_docId, env) {
+          log.push(env);
+          return { seq: log.length };
+        },
+        async readLog(_docId, since) {
+          const start = since == null ? 0 : since;
+          return { entries: log.slice(start), nextCursor: log.length };
+        },
+        _size() {
+          return log.length;
+        },
+      };
+    }
+
+    function spawnWorker() {
+      const w = new Worker(new URL('../app/src/core/appCore.worker.js', import.meta.url), { type: 'module' });
+      return Comlink.wrap(w);
+    }
+
+    async function openDevice(worker, replicaByte, transport) {
+      const treeId = new Uint8Array(16).fill(7);
+      const replica = new Uint8Array(8).fill(replicaByte);
+      await worker.warm();
+      await worker.openDev(treeId, replica, DID, DOC);
+      await worker.attachTransport(DOC, Comlink.proxy(transport));
+      return worker;
+    }
+
+    const nameJson = (given) => JSON.stringify({ parts: { given } });
+
+    window.__syncWorker = {
+      // Two devices converge: A mints + syncs up, B syncs down, B sees A's person.
+      async converge() {
+        const transport = makeTransport();
+        const a = await openDevice(spawnWorker(), 0xa1, transport);
+        const b = await openDevice(spawnWorker(), 0xb2, transport);
+
+        await a.assertAnchor(DOC, 'pA', PERSON);
+        await a.assertClaim(DOC, 'pA', NAME, nameJson('Ada'));
+        await a.commit(DOC);
+        const aPush = await a.syncNow(DOC); // push A's mint to the server
+        const bPull = await b.syncNow(DOC); // pull it into B
+
+        const aProj = JSON.parse(await a.project(DOC));
+        const bProj = JSON.parse(await b.project(DOC));
+        return { aPush, bPull, serverSize: transport._size(), aPeople: aProj.people, bPeople: bProj.people };
+      },
+
+      // An offline mint (committed with NO transport) is still offered outbound after a transport is
+      // attached — the outbound scan reads it back from the durable local log, not an in-memory queue.
+      async offlineThenSync() {
+        const transport = makeTransport();
+        const aWorker = spawnWorker();
+        const treeId = new Uint8Array(16).fill(7);
+        await aWorker.warm();
+        await aWorker.openDev(treeId, new Uint8Array(8).fill(0xa1), DID, DOC);
+        // No transport yet — mint + commit purely locally.
+        await aWorker.assertAnchor(DOC, 'pOff', PERSON);
+        await aWorker.commit(DOC);
+        const offlineResult = await aWorker.syncNow(DOC); // no transport → no-op
+
+        // Now the network comes back: attach + sync. The un-pushed mint must reach the server.
+        await aWorker.attachTransport(DOC, Comlink.proxy(transport));
+        await aWorker.syncNow(DOC);
+
+        const b = await openDevice(spawnWorker(), 0xb2, transport);
+        await b.syncNow(DOC);
+        const bProj = JSON.parse(await b.project(DOC));
+        return { offlineResult, serverSize: transport._size(), bPeople: bProj.people };
+      },
+
+      // Durable-outbox-across-reload with REAL IndexedDB: device A mints offline, commits (persisted),
+      // then a SECOND worker (a fresh core, no shared memory — a reload) hydrates from the same
+      // IndexedDB and still has the mint. No server involved.
+      async reloadSurvives() {
+        const RELOAD_DOC = 'reload-e2e';
+        const treeId = new Uint8Array(16).fill(7);
+        const replica = new Uint8Array(8).fill(0xa1);
+
+        const a = spawnWorker();
+        await a.warm();
+        await a.clearPersisted(RELOAD_DOC); // clean slate for re-runs
+        await a.openDev(treeId, replica, DID, RELOAD_DOC, true); // persist = true
+        await a.assertAnchor(RELOAD_DOC, 'pReload', PERSON);
+        await a.commit(RELOAD_DOC); // durably persisted to IndexedDB
+        const before = JSON.parse(await a.project(RELOAD_DOC));
+
+        // A brand-new worker = a reload: fresh wasm core, same page IndexedDB.
+        const a2 = spawnWorker();
+        await a2.warm();
+        await a2.openDev(treeId, replica, DID, RELOAD_DOC, true);
+        const after = JSON.parse(await a2.project(RELOAD_DOC));
+
+        return { beforePeople: before.people, afterPeople: after.people };
+      },
+
+      // The REAL keyring lifecycle through the worker: provision (persist keyring) → mint → reload →
+      // unlock (load keyring + hydrate). Wrong passphrase is rejected. The DEK never leaves the worker.
+      async provisionUnlockLifecycle() {
+        const doc = 'lifecycle-e2e';
+        const treeId = new Uint8Array(16).fill(9);
+        const memberId = crypto.randomUUID();
+        const pass = 'correct horse battery staple';
+
+        const w0 = spawnWorker();
+        await w0.warm();
+        await w0.clearPersisted(doc);
+        const prov = await w0.provisionCore({ passphrase: pass, treeId, memberId, docId: doc });
+        await w0.assertAnchor(doc, 'pLife', PERSON);
+        await w0.commit(doc);
+        const before = JSON.parse(await w0.project(doc));
+
+        // Reload: a fresh worker unlocks with the passphrase → loads the keyring → hydrates the log.
+        const w1 = spawnWorker();
+        await w1.warm();
+        const unlocked = await w1.unlockCore({ passphrase: pass, treeId, memberId, docId: doc });
+        const after = JSON.parse(await w1.project(doc));
+
+        // Wrong passphrase must fail.
+        let wrongRejected = false;
+        const w2 = spawnWorker();
+        await w2.warm();
+        try {
+          await w2.unlockCore({ passphrase: 'WRONG', treeId, memberId, docId: doc });
+        } catch {
+          wrongRejected = true;
+        }
+
+        return {
+          recoveryCodeLen: prov.recoveryCode.length,
+          sameDid: prov.didKey === unlocked.didKey && prov.didKey.length > 0,
+          beforePeople: before.people,
+          afterPeople: after.people,
+          wrongRejected,
+        };
+      },
+    };
+
+    document.getElementById('status').textContent = 'ready';
+    window.__ready = true;
+  </script>
+</body>
