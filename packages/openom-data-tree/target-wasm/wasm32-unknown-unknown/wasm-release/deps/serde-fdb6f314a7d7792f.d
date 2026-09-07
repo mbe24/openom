@@ -1,0 +1,14 @@
+/work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/deps/serde-fdb6f314a7d7792f.d: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/build/serde-784e6d42afe8eaf2/out/private.rs
+
+/work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/deps/libserde-fdb6f314a7d7792f.rlib: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/build/serde-784e6d42afe8eaf2/out/private.rs
+
+/work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/deps/libserde-fdb6f314a7d7792f.rmeta: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/build/serde-784e6d42afe8eaf2/out/private.rs
+
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/build/serde-784e6d42afe8eaf2/out/private.rs:
+
+# env-dep:OUT_DIR=/work/packages/openom-data-tree/target-wasm/wasm32-unknown-unknown/wasm-release/build/serde-784e6d42afe8eaf2/out

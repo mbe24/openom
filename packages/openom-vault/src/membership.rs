@@ -12,7 +12,7 @@ use openom_keyring_api::{MembershipView, ROLE_MAINTAINER, ROLE_OWNER};
 /// The `did:key`s of members whose CURRENT role grants direct cross-author edit authority — Maintainer
 /// or above (Owner, Co-owner, Maintainer).
 ///
-/// This is exactly the set `openom_crdt::materialize` treats as
+/// This is exactly the set `openom_data_crdt::materialize` treats as
 /// authorized to Remove / Supersede / Revoke any claim; feed it in on unlock and on every governing
 /// keyring change.
 ///

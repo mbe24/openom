@@ -1,0 +1,472 @@
+#![doc = include_str!("../README.md")]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use openom_data_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
+use openom_data_claim::Hlc;
+use openom_data_crdt::{codec, materialize, ChannelItem, Op, OpKind};
+use openom_data_projection::{project, Policy, Projection};
+use serde_json::Value;
+
+/// Logical ticks per physical millisecond before the counter carries into the next millisecond —
+/// matches the wire form's three-digit logical field (see [`Hlc`]).
+const LOGICAL_PER_MILLI: u32 = 1000;
+
+/// The engine-owned Hybrid Logical Clock. Every mint stamps `created_at` through [`next`](HlcClock::next),
+/// so no caller can supply a non-monotonic or colliding timestamp; every ingest advances it through
+/// [`observe`](HlcClock::observe) (the HLC receive rule), so after hydrating a set the next local mint is
+/// past every timestamp already present. Together these make the id-collision bug — where a fast
+/// create→undo→redo (even across a reload or a second device) reproduced a still-tombstoned id —
+/// structurally impossible: a re-assert always draws a fresh, unused `created_at`. The caller passes only
+/// a physical wall-clock reading (`Date::now()` on the web); the clock sanitizes it.
+#[derive(Default)]
+struct HlcClock {
+    last_millis: i64,
+    logical: u32,
+}
+
+impl HlcClock {
+    /// The next strictly-greater timestamp given a physical reading. If the wall clock advanced, take it
+    /// with a reset logical counter; otherwise (a tie or a backwards reading) bump the logical counter,
+    /// carrying into `millis` if it would exceed the three-digit field — so the result is always both
+    /// strictly monotonic and canonically representable.
+    fn next(&mut self, now_millis: i64) -> Hlc {
+        if now_millis > self.last_millis {
+            self.last_millis = now_millis;
+            self.logical = 0;
+        } else {
+            self.logical += 1;
+            while self.logical >= LOGICAL_PER_MILLI {
+                self.last_millis += 1;
+                self.logical -= LOGICAL_PER_MILLI;
+            }
+        }
+        Hlc::new(self.last_millis, self.logical)
+    }
+
+    /// The receive rule: advance so the clock is at least as high as a timestamp just ingested (from a
+    /// peer's op or a snapshot). A subsequent [`next`](HlcClock::next) is then strictly greater than
+    /// everything seen, so a re-mint can never collide with an existing id.
+    fn observe(&mut self, at: Hlc) {
+        if (at.millis(), at.logical()) > (self.last_millis, self.logical) {
+            self.last_millis = at.millis();
+            self.logical = at.logical();
+        }
+    }
+}
+
+/// Kani proof harnesses for the engine clock — compiled only under `cargo kani` (`--cfg kani`), never
+/// in the normal build. Run: `node scripts/kani.mjs -p openom-data-tree`. The clock's guarantee (a re-mint
+/// can never reproduce an already-used id) reduces to two properties proven here over ALL inputs: `next`
+/// is strictly monotonic and `observe` never regresses. Both take primitive inputs; `next`'s only loop
+/// is the logical carry, bounded to one iteration by the maintained `logical < 1000` invariant.
+#[cfg(kani)]
+mod clock_verification {
+    use super::*;
+
+    /// A realistic epoch-ms magnitude — keeps `millis` and the carry well inside `i64` (no overflow).
+    const MAX_MILLIS: i64 = 300_000_000_000_000;
+
+    /// For any prior state (holding the clock's own `logical < 1000` invariant) and ANY physical
+    /// reading, `next` returns a timestamp strictly greater than the prior state and preserves the
+    /// invariant — so a subsequent mint can never collide with an id already drawn.
+    #[kani::proof]
+    #[kani::unwind(2)] // the carry loop runs at most once when logical < 1000 (999 + 1 = 1000 → one carry)
+    fn next_is_strictly_monotonic() {
+        let last_millis: i64 = kani::any();
+        let logical: u32 = kani::any();
+        kani::assume(logical < LOGICAL_PER_MILLI); // the invariant next/observe maintain
+        kani::assume((0..MAX_MILLIS).contains(&last_millis));
+        // ANY physical reading — including a backwards or garbage value from the JS boundary; the clock
+        // must sanitize it. (No upper bound needed: the advance branch only assigns it, and the else
+        // branch ignores it, so no arithmetic on now_millis can overflow.)
+        let now_millis: i64 = kani::any();
+
+        let mut clock = HlcClock { last_millis, logical };
+        let before = (last_millis, logical);
+        let out = clock.next(now_millis);
+
+        assert_eq!((out.millis(), out.logical()), (clock.last_millis, clock.logical));
+        assert!((clock.last_millis, clock.logical) > before, "strictly increasing");
+        assert!(clock.logical < LOGICAL_PER_MILLI, "invariant preserved");
+        if now_millis > last_millis {
+            // Fidelity on the advance branch: a forward wall reading is taken verbatim (a `next` that
+            // ignored it and only bumped logical would still be monotonic but would fail this).
+            assert_eq!((out.millis(), out.logical()), (now_millis, 0));
+        }
+    }
+
+    /// `observe` never regresses: after observing any timestamp the clock is at least as high as both
+    /// its prior state and the observed one (the HLC receive rule). Loop-free.
+    #[kani::proof]
+    fn observe_never_regresses() {
+        let last_millis: i64 = kani::any();
+        let logical: u32 = kani::any();
+        kani::assume(logical < LOGICAL_PER_MILLI);
+        kani::assume((0..MAX_MILLIS).contains(&last_millis));
+        let at_millis: i64 = kani::any();
+        let at_logical: u32 = kani::any();
+        kani::assume(at_logical < LOGICAL_PER_MILLI);
+        kani::assume((0..MAX_MILLIS).contains(&at_millis));
+
+        let mut clock = HlcClock { last_millis, logical };
+        let before = (last_millis, logical);
+        let at = Hlc::new(at_millis, at_logical);
+        clock.observe(at);
+
+        // observe advances to EXACTLY the max of its prior state and the observed timestamp — never
+        // more (a jump-ahead bug would slip past a bare `>=`), never less (a regression).
+        let expected = before.max((at.millis(), at.logical()));
+        assert_eq!((clock.last_millis, clock.logical), expected);
+    }
+}
+
+/// An edit or ingest failed.
+#[derive(Debug, thiserror::Error)]
+pub enum TreeError {
+    /// Building or hashing a claim/record failed.
+    #[error(transparent)]
+    Claim(#[from] openom_data_claim::ClaimError),
+    /// Minting or ingesting an operation failed.
+    #[error(transparent)]
+    Crdt(#[from] openom_data_crdt::CrdtError),
+    /// Encoding/decoding an op batch failed.
+    #[error("codec: {0}")]
+    Codec(#[from] serde_json::Error),
+}
+
+/// The app-facing family-tree engine: the in-memory record set + the local author id.
+///
+/// It composes the
+/// `openom-data-crdt` fold and the `openom-data-projection` read model. Edits mint an operation, apply it to the
+/// local set optimistically, and **return the encoded op-batch bytes** for the transport to seal +
+/// append. It is **key-less** — it never touches the DEK.
+pub struct Tree {
+    /// The author stamped on every op this replica mints (a `did:key`; OPE-191 supplies it).
+    created_by: String,
+    /// The accumulated op set, keyed by content id (idempotent under re-delivery). The durable log
+    /// lives in the transport; this is rebuilt by [`merge`](Tree::merge)-ing it back.
+    items: BTreeMap<String, ChannelItem>,
+    /// The `did:key`s CURRENTLY authorized to moderate (Maintainer or above) — the only authors whose
+    /// Remove/Supersede/Revoke ops the fold honors. Defaults to `{ created_by }`: a solo tree's owner
+    /// moderates their own tree. A shared tree calls [`set_moderators`](Tree::set_moderators) with the
+    /// keyring's Maintainer+ set on unlock and on every keyring-head change (so a role change re-folds).
+    moderators: BTreeSet<String>,
+    /// Items minted in the current intention, accumulated by [`emit`](Tree::emit) and encoded into one
+    /// op-batch by [`flush`](Tree::flush): one settled edit = one sealed entry, so a peer never sees a
+    /// half-formed record set (e.g. an event anchor with no type). Applied to `items` immediately.
+    pending: Vec<ChannelItem>,
+    /// The engine-owned monotonic clock that stamps `created_at` on every mint (see [`HlcClock`]).
+    clock: HlcClock,
+}
+
+impl Tree {
+    /// A fresh engine for author `created_by` (the vault-derived `did:key`).
+    pub fn new(created_by: impl Into<String>) -> Self {
+        let created_by = created_by.into();
+        Self {
+            moderators: BTreeSet::from([created_by.clone()]),
+            created_by,
+            items: BTreeMap::new(),
+            pending: Vec::new(),
+            clock: HlcClock::default(),
+        }
+    }
+
+    /// The author this replica stamps on its ops.
+    #[must_use]
+    pub fn author(&self) -> &str {
+        &self.created_by
+    }
+
+    /// Replace the moderator set (the `did:key`s currently at Maintainer+). Call on unlock and whenever
+    /// the governing keyring changes — the very next read re-folds against the new roles, so a demotion
+    /// resurfaces what the demoted member's ops had hidden and a promotion applies their authority.
+    pub fn set_moderators(&mut self, moderators: BTreeSet<String>) {
+        self.moderators = moderators;
+    }
+
+    // --- edits: mint an op and apply it optimistically; `flush` produces the bytes to seal ----------
+
+    /// Assert a new claim about `target`, authored by this replica. `now_millis` is a physical
+    /// wall-clock reading (epoch ms); the engine-owned clock turns it into the monotonic `createdAt`.
+    /// The minted op is buffered; call [`flush`](Tree::flush) once per settled edit to get the bytes.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the claim can't be canonicalized to compute its id.
+    pub fn assert_claim(
+        &mut self,
+        target: &str,
+        predicate: &str,
+        value: Value,
+        now_millis: i64,
+    ) -> Result<(), TreeError> {
+        let at = self.clock.next(now_millis);
+        let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
+        c.compute_id()?;
+        self.emit(vec![ChannelItem::Assert(Record::Claim(c))]);
+        Ok(())
+    }
+
+    /// Assert an identity anchor (Person / Event / Place / Tree) with the given id, authored by this
+    /// replica. Anchor ids are opaque (a caller-minted UUID) — the engine does not generate them.
+    ///
+    /// The anchor is born with its **existence claim** (`PREDICATE_EXISTENCE`, value `{}`) in the same
+    /// batch — the single root proposition "this individual is real". It is the citation host for
+    /// evidence of existence and the target other authors `attest`/refute; they never mint a second
+    /// existence claim. The anchor and its existence claim share this call's one clock tick.
+    ///
+    /// Crash-retry idempotency is a **byte-replay** property, not a re-mint one: the engine's clock
+    /// always advances, so calling `assert_anchor` again would mint a *different* `createdAt` (hence a
+    /// different existence-claim id). A retry instead replays the persisted op-batch bytes through
+    /// [`merge`](Tree::merge), which re-inserts by id — idempotent by construction.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the anchor's existence claim can't be canonicalized.
+    pub fn assert_anchor(
+        &mut self,
+        id: &str,
+        type_uri: &str,
+        now_millis: i64,
+    ) -> Result<(), TreeError> {
+        let at = self.clock.next(now_millis);
+        let anchor = Anchor {
+            id: id.to_owned(),
+            type_uri: type_uri.to_owned(),
+            created_at: at,
+            created_by: self.created_by.clone(),
+        };
+        let mut existence = Claim::new(
+            id,
+            PREDICATE_EXISTENCE,
+            Value::Object(serde_json::Map::new()),
+            self.created_by.as_str(),
+            at,
+        );
+        existence.compute_id()?;
+        self.emit(vec![
+            ChannelItem::Assert(Record::Anchor(anchor)),
+            ChannelItem::Assert(Record::Claim(existence)),
+        ]);
+        Ok(())
+    }
+
+    /// Remove one of this author's own records by id (same-author observed-remove). Undoable by
+    /// [`revoke`](Tree::revoke) up to the compaction (GC) horizon. Returns the Remove op's own id so
+    /// the caller can later revoke it — the minted op only reaches the store on the next [`flush`], but
+    /// its content id is known now.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the Remove op can't be canonicalized.
+    pub fn remove(&mut self, target: &str, now_millis: i64) -> Result<String, TreeError> {
+        let op = Op::new(
+            self.clock.next(now_millis),
+            self.created_by.as_str(),
+            OpKind::Remove {
+                target: target.to_owned(),
+            },
+        )?;
+        let item = ChannelItem::Op(op);
+        let id = item.id().to_owned();
+        self.emit(vec![item]);
+        Ok(id)
+    }
+
+    /// Edit: atomically supersede the `prior` record with a fresh claim value, authored by this
+    /// replica.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the replacement claim or the enclosing op can't be canonicalized.
+    pub fn supersede_claim(
+        &mut self,
+        prior: &str,
+        target: &str,
+        predicate: &str,
+        value: Value,
+        now_millis: i64,
+    ) -> Result<(), TreeError> {
+        // The replacement claim and the enclosing op are one atomic edit — they share one clock tick.
+        let at = self.clock.next(now_millis);
+        let mut c = Claim::new(target, predicate, value, self.created_by.as_str(), at);
+        c.compute_id()?;
+        let op = Op::new(
+            at,
+            self.created_by.as_str(),
+            OpKind::Supersede {
+                prior: prior.to_owned(),
+                replacement: Box::new(Record::Claim(c)),
+            },
+        )?;
+        self.emit(vec![ChannelItem::Op(op)]);
+        Ok(())
+    }
+
+    /// Undo a same-author `Remove` by its operation id — restores the original record (before the GC
+    /// horizon).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the Revoke op can't be canonicalized.
+    pub fn revoke(&mut self, removal_op_id: &str, now_millis: i64) -> Result<(), TreeError> {
+        let op = Op::new(
+            self.clock.next(now_millis),
+            self.created_by.as_str(),
+            OpKind::Revoke {
+                removal: removal_op_id.to_owned(),
+            },
+        )?;
+        self.emit(vec![ChannelItem::Op(op)]);
+        Ok(())
+    }
+
+    /// Accumulate the minted item(s) into the current intention's batch and apply them to the live set
+    /// immediately (so a later read in the same intention sees them). The encoded op-batch is produced
+    /// once by [`flush`](Tree::flush), not here — so a whole edit (e.g. `addMarriage` with its event) is
+    /// one sealed entry rather than a train of single-op entries a peer could observe half-formed.
+    fn emit(&mut self, items: Vec<ChannelItem>) {
+        for item in items {
+            self.pending.push(item.clone());
+            self.items.insert(item.id().to_owned(), item);
+        }
+    }
+
+    /// Encode everything minted since the last flush as ONE op-batch and clear the buffer (empty bytes
+    /// if nothing was minted). The single emit point: the caller flushes once per settled intention.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the pending batch can't be encoded.
+    pub fn flush(&mut self) -> Result<Vec<u8>, TreeError> {
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = codec::encode(&self.pending)?;
+        self.pending.clear();
+        Ok(batch)
+    }
+
+    // --- ingest / snapshot ----------------------------------------------------------------------
+
+    /// Merge a peer's (or our own replayed) op batch into the set. Returns how many items were
+    /// ingested. Idempotent — re-ingesting the same items re-inserts by id.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if `bytes` is not a valid op batch.
+    pub fn merge(&mut self, bytes: &[u8]) -> Result<usize, TreeError> {
+        let items = codec::decode(bytes)?;
+        let n = items.len();
+        for item in items {
+            self.clock.observe(item.created_at());
+            self.items.insert(item.id().to_owned(), item);
+        }
+        Ok(n)
+    }
+
+    /// The live record set as a snapshot batch (the fold's output, emitted as `Assert`s — removed and
+    /// superseded records fold out). A fresh engine can [`load_snapshot`](Tree::load_snapshot) it and
+    /// then `merge` only the tail.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the live set can't be encoded.
+    pub fn snapshot(&self) -> Result<Vec<u8>, TreeError> {
+        let live: Vec<ChannelItem> = self
+            .materialized()
+            .into_iter()
+            .map(ChannelItem::Assert)
+            .collect();
+        Ok(codec::encode(&live)?)
+    }
+
+    /// Load a snapshot batch into the set (idempotent; combine with further `merge`d tail ops).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if `bytes` is not a valid snapshot batch.
+    pub fn load_snapshot(&mut self, bytes: &[u8]) -> Result<(), TreeError> {
+        for item in codec::decode(bytes)? {
+            self.clock.observe(item.created_at());
+            self.items.insert(item.id().to_owned(), item);
+        }
+        Ok(())
+    }
+
+    // --- read -----------------------------------------------------------------------------------
+
+    /// The materialized read model (people, unions, events, …) over the live record set.
+    #[must_use]
+    pub fn project(&self) -> Projection {
+        project(&self.materialized(), &Policy::default())
+    }
+
+    /// The read model as a JSON string — for the wasm boundary and any JSON consumer.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the projection can't be serialized to JSON.
+    pub fn project_json(&self) -> Result<String, TreeError> {
+        Ok(serde_json::to_string(&self.project())?)
+    }
+
+    /// The live claims about `target` under `predicate` (after the fold), each as its JSON record — a
+    /// granular reader for the editor (e.g. which name claims exist on a person, to supersede one).
+    #[must_use]
+    pub fn live_claims_of(&self, target: &str, predicate: &str) -> Vec<Value> {
+        self.materialized()
+            .iter()
+            .filter_map(|r| match r {
+                Record::Claim(c)
+                    if c.target_id.as_str() == target && c.predicate.as_str() == predicate =>
+                {
+                    Some(c.to_value())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every live claim about `target`, whatever its predicate (after the fold) — the predicate-less
+    /// reader a generic renderer uses to enumerate a subject's claims, **including** ones under
+    /// predicates this build doesn't recognize (whose projection counterpart is `Person.other` /
+    /// `Projection.unclassified`). So a newer app version's data is editable here with no code change.
+    #[must_use]
+    pub fn live_claims_of_any(&self, target: &str) -> Vec<Value> {
+        self.materialized()
+            .iter()
+            .filter_map(|r| match r {
+                Record::Claim(c) if c.target_id.as_str() == target => Some(c.to_value()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every live record (anchors + claims), each as its JSON — the granular set the app's undo/redo
+    /// diff reads to compute what a commit added vs. removed (keyed by content-hash id).
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if a record can't be serialized to JSON.
+    pub fn live_records(&self) -> Result<Vec<Value>, TreeError> {
+        Ok(self
+            .materialized()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
+    /// the anchor is not part of any projected person.
+    #[must_use]
+    pub fn resolve_id(&self, anchor: &str) -> Option<String> {
+        self.project().people.into_iter().find_map(|p| {
+            let hit = p.id.as_str() == anchor || p.also.iter().any(|a| a.as_str() == anchor);
+            hit.then_some(p.id)
+        })
+    }
+
+    /// The live record set — the `openom-data-crdt` fold over the accumulated ops.
+    fn materialized(&self) -> Vec<Record> {
+        let items: Vec<ChannelItem> = self.items.values().cloned().collect();
+        materialize(&items, &self.moderators)
+    }
+}
+
+#[cfg(feature = "wasm")]
+mod wasm;
+
+#[cfg(test)]
+mod tests;

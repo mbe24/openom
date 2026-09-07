@@ -1,6 +1,6 @@
 #![doc = include_str!("../README.md")]
 
-use journal::{DocStore, StoreError};
+use store_log::{DocStore, StoreError};
 
 /// Kind of a sealed log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

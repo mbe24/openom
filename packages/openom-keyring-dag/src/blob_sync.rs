@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use blobstore::{BlobError, BlobStore, Precondition};
+use store_blob::{BlobError, BlobStore, Precondition};
 use keyeo_dag::MembershipAction;
 use serde::{Deserialize, Serialize};
 
@@ -417,7 +417,7 @@ pub(crate) fn dto_to_minit(d: &MemberInitDto) -> KeyringMemberInit {
 mod tests {
     use super::*;
     use crate::{sign_op, KeyringAccess, KeyringState};
-    use blobstore::{BlobStore, MemoryBlob, Precondition};
+    use store_blob::{BlobStore, MemoryBlob, Precondition};
     use keyeo_dag::{Keyeo, StrongRemove};
     use std::sync::Arc;
 
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn converges_over_the_local_fs_backend() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(blobstore::FsBlob::new(dir.path()));
+        let store = Arc::new(store_blob::FsBlob::new(dir.path()));
         let gm = vec![minit("founder", KeyringRole::OWNER, 1)];
         let (mut ea, mut eb) = (engine(&gm), engine(&gm));
         let mut sa = KeyringBlobSync::new(store.clone());

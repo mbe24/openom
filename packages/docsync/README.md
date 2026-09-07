@@ -1,6 +1,6 @@
 # docsync
 
-> A generic local-first client sync loop — push / pull / compact / bootstrap over a `journal::DocStore`,
+> A generic local-first client sync loop — push / pull / compact / bootstrap over a `store_log::DocStore`,
 > abstracted over a merge `Engine` and an envelope `Sealer`.
 
 **Status:** experimental · vendored sync-client skeleton · design docsync-sync-client-base (OPE-186 phase 3)
@@ -52,6 +52,6 @@ Entry points: `SyncClient` (`new` / `apply` / `flush` / `pull` / `compact` / `ma
 
 ## Position
 
-The transport layer: it sits over `journal::DocStore` and under a caller's CRDT + crypto (which it never
+The transport layer: it sits over `store_log::DocStore` and under a caller's CRDT + crypto (which it never
 names). Its only openom-relevant dependency is `journal`; the concrete `Engine`/`Sealer` impls live in the
 consumer. Full dependency graph: see `packages/README.md`.

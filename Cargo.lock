@@ -399,16 +399,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blobstore"
-version = "0.1.0"
-dependencies = [
- "data-encoding",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1235,7 +1225,7 @@ dependencies = [
 name = "docsync"
 version = "0.1.0"
 dependencies = [
- "journal",
+ "store-log",
  "thiserror 2.0.20",
 ]
 
@@ -1359,14 +1349,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "zeroize",
-]
-
-[[package]]
-name = "edtf"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1656,6 +1638,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "format-edtf"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "format-jcs"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2629,17 +2630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jcs"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "jiff"
 version = "0.2.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2774,16 +2764,6 @@ checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
-]
-
-[[package]]
-name = "journal"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3643,32 +3623,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-claim"
-version = "0.1.0"
-dependencies = [
- "did",
- "edsign",
- "jcs",
- "jsonschema",
- "proptest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-crdt"
-version = "0.1.0"
-dependencies = [
- "openom-claim",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [
@@ -3686,18 +3640,81 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-data-claim"
+version = "0.1.0"
+dependencies = [
+ "did",
+ "edsign",
+ "format-jcs",
+ "jsonschema",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-data-crdt"
+version = "0.1.0"
+dependencies = [
+ "openom-data-claim",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-data-model"
+version = "0.1.0"
+dependencies = [
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
+name = "openom-data-projection"
+version = "0.1.0"
+dependencies = [
+ "format-edtf",
+ "format-jcs",
+ "openom-data-claim",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "openom-data-tree"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "openom-data-claim",
+ "openom-data-crdt",
+ "openom-data-projection",
+ "serde_json",
+ "thiserror 2.0.20",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "openom-docsync"
 version = "0.1.0"
 dependencies = [
  "docsync",
- "journal",
- "openom-claim",
- "openom-crdt",
  "openom-crypto",
+ "openom-data-claim",
+ "openom-data-crdt",
+ "openom-data-tree",
  "openom-protocol",
  "openom-sealer",
- "openom-tree",
  "serde_json",
+ "store-log",
 ]
 
 [[package]]
@@ -3713,7 +3730,6 @@ dependencies = [
 name = "openom-keyring-chain"
 version = "0.1.0"
 dependencies = [
- "blobstore",
  "edsign",
  "getrandom 0.3.4",
  "keyeo-chain",
@@ -3723,6 +3739,7 @@ dependencies = [
  "prost",
  "serde",
  "sha2 0.10.9",
+ "store-blob",
  "thiserror 2.0.20",
 ]
 
@@ -3730,7 +3747,6 @@ dependencies = [
 name = "openom-keyring-dag"
 version = "0.1.0"
 dependencies = [
- "blobstore",
  "edsign",
  "keyeo-crypto",
  "keyeo-dag",
@@ -3743,31 +3759,8 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "store-blob",
  "tempfile",
-]
-
-[[package]]
-name = "openom-model"
-version = "0.1.0"
-dependencies = [
- "jsonschema",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "uuid",
-]
-
-[[package]]
-name = "openom-projection"
-version = "0.1.0"
-dependencies = [
- "edtf",
- "jcs",
- "openom-claim",
- "proptest",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3801,32 +3794,18 @@ dependencies = [
 name = "openom-tauri"
 version = "0.1.0"
 dependencies = [
- "journal",
  "openom-vault-host",
  "serde",
  "serde_json",
+ "store-log",
  "tauri",
  "tauri-build",
-]
-
-[[package]]
-name = "openom-tree"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "openom-claim",
- "openom-crdt",
- "openom-projection",
- "serde_json",
- "thiserror 2.0.20",
- "wasm-bindgen",
 ]
 
 [[package]]
 name = "openom-vault"
 version = "0.1.0"
 dependencies = [
- "blobstore",
  "did",
  "edsign",
  "keyeo-crypto",
@@ -3841,6 +3820,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "store-blob",
  "tempfile",
  "thiserror 2.0.20",
  "wasm-bindgen",
@@ -5652,6 +5632,26 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "store-blob"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "store-log"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "string_cache"

@@ -2,16 +2,16 @@
 //!
 //! A claim update **is** a delta — an op-based change — so it seals as a `Kind::Delta` entry with
 //! `Format::OpenomOps`, appends to the tree's one log, and is deduped by the replica dot like any other
-//! delta. The payload is a batch of [`ChannelItem`]s (from `openom-crdt`); inbound, they accumulate into
+//! delta. The payload is a batch of [`ChannelItem`]s (from `openom-data-crdt`); inbound, they accumulate into
 //! the engine's set and its `materialize` fold produces the live record set the projection reads.
 //!
 //! The push / pull / compact / bootstrap loop itself lives in [`docsync`]; openom supplies two seams:
-//!  - [`SyncTree`] — `impl docsync::Engine`, a THIN newtype that **delegates to [`openom_tree::Tree`]**,
+//!  - [`SyncTree`] — `impl docsync::Engine`, a THIN newtype that **delegates to [`openom_data_tree::Tree`]**,
 //!    the one claim engine (mint + set + fold + read model). No second op-set, no second fold: `Tree` owns
 //!    the HLC clock and observes it on `merge`, so the receive rule holds — which is exactly why the engine
 //!    lives in `Tree` and not here.
 //!  - [`SealerAdapter`] — `impl docsync::Sealer` over `openom-sealer`, mapping the generic entry kind to
-//!    openom's `Format` and reading `covers_through_seq` back out of a snapshot header (openom-tree is
+//!    openom's `Format` and reading `covers_through_seq` back out of a snapshot header (openom-data-tree is
 //!    keyless, so this bridge has no equivalent there — it is genuinely this crate's job).
 //!
 //! **Single-engine-per-app-instance:** the whole app runs the claim engine, so this client's log carries
@@ -19,28 +19,28 @@
 
 use std::collections::BTreeSet;
 
-use journal::DocStore;
-use openom_crdt::ChannelItem;
+use store_log::DocStore;
+use openom_data_crdt::ChannelItem;
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
-use openom_tree::{Tree, TreeError};
+use openom_data_tree::{Tree, TreeError};
 use serde_json::Value;
 
 use crate::Result;
 
 /// Transport-side codec bits: the wire [`FORMAT`](codec::FORMAT) tag, plus the batch `encode` re-exported
-/// from [`openom_crdt::codec`] — the one place the op-batch codec lives, shared with the `openom-tree`
+/// from [`openom_data_crdt::codec`] — the one place the op-batch codec lives, shared with the `openom-data-tree`
 /// engine so both emit byte-identical bytes (and a CBOR swap, OPE-199, touches it once). Decoding is the
 /// engine's job now (Tree's clock-observing `merge`), so only the local-encode + the tag live here.
 pub mod codec {
     /// The wire `Format` tag for claim entries (`FORMAT_OPENOM_OPS` = "JSON op-log entries").
     pub const FORMAT: openom_protocol::v1::Format = openom_protocol::v1::Format::OpenomOps;
 
-    pub use openom_crdt::codec::encode;
+    pub use openom_data_crdt::codec::encode;
 }
 
-/// The [`docsync::Engine`] seam for the claim model — a thin newtype over [`openom_tree::Tree`] that the
+/// The [`docsync::Engine`] seam for the claim model — a thin newtype over [`openom_data_tree::Tree`] that the
 /// generic loop drives. It holds NO state of its own: the op-set, the moderator-honoring `materialize`
 /// fold, the byte-preserving snapshot, and — crucially — the HLC clock (observed on every `merge`) all
 /// live in `Tree`.
@@ -134,7 +134,7 @@ impl docsync::Sealer for SealerAdapter {
 }
 
 /// One device's view of a claim-model tree — a facade over [`docsync::SyncClient`] wired with a
-/// [`SyncTree`] (delegating to [`openom_tree::Tree`]) and openom's sealer.
+/// [`SyncTree`] (delegating to [`openom_data_tree::Tree`]) and openom's sealer.
 ///
 /// Preserves the claim-model API (`push_claims` / `pull_claims` / `compact_claims` / `bootstrap_claims` /
 /// `set_moderators`), and exposes the wrapped [`Tree`] for the app's mint + projection paths.
@@ -245,11 +245,11 @@ impl<S: DocStore> std::fmt::Debug for SyncClient<S> {
 #[cfg(test)]
 mod tests {
     use super::SyncClient;
-    use journal::memory::MemoryStore;
-    use journal::DocStore;
-    use openom_claim::envelope::{Claim, Record};
-    use openom_claim::Hlc;
-    use openom_crdt::{ChannelItem, Op, OpKind};
+    use store_log::memory::MemoryStore;
+    use store_log::DocStore;
+    use openom_data_claim::envelope::{Claim, Record};
+    use openom_data_claim::Hlc;
+    use openom_data_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::{generate_dek, Dek};
     use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
     use openom_sealer::Sealer;

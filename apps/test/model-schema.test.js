@@ -7,8 +7,8 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
 const loadSchema = (rel) => JSON.parse(readFileSync(new URL(rel, import.meta.url), 'utf8'));
-const modelSchema = loadSchema('../../packages/openom-model/schema/model.schema.json');
-const nameSchema = loadSchema('../../packages/openom-model/schema/name.schema.json');
+const modelSchema = loadSchema('../../packages/openom-data-model/schema/model.schema.json');
+const nameSchema = loadSchema('../../packages/openom-data-model/schema/name.schema.json');
 
 // strict:false = spec behaviour (ignore unknown keywords like x-openom-bounds-version); ajv-formats
 // supplies the `uuid` format assertion.

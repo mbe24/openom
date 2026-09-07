@@ -1,0 +1,206 @@
+use super::Tree;
+use openom_data_crdt::codec;
+use serde_json::{json, Value};
+
+const DID: &str = "did:key:z6MkA";
+const PERSON: &str = "openom.org/core/person/v1";
+const NAME: &str = "openom.org/core/name/v1";
+const SAME_AS: &str = "openom.org/core/same_as/v1";
+
+fn name_value(given: &str) -> Value {
+    json!({ "parts": { "given": given } })
+}
+
+/// The content id of the single item a mint returned — for targeting a later remove/supersede/revoke.
+fn only_id(batch: &[u8]) -> String {
+    codec::decode(batch).unwrap()[0].id().to_owned()
+}
+
+#[test]
+fn two_engines_converge_over_the_same_ops() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    let pa = a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+
+    let mut b = Tree::new("did:key:z6MkB"); // a different replica...
+    b.merge(&pa).unwrap();
+    b.merge(&na).unwrap(); // ...that has seen the same ops
+
+    assert_eq!(a.project(), b.project(), "same op set → same read model");
+    assert_eq!(a.project().people.len(), 1);
+    assert_eq!(a.project().people[0].id, "pA");
+    assert_eq!(a.project().people[0].names.len(), 1);
+}
+
+#[test]
+fn a_same_author_remove_drops_the_claim() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+    assert_eq!(a.project().people[0].names.len(), 1);
+
+    a.remove(&only_id(&na), 2).unwrap();
+    assert!(
+        a.project().people[0].names.is_empty(),
+        "the removed name is folded out"
+    );
+}
+
+#[test]
+fn supersede_replaces_a_claim() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+    a.supersede_claim(&only_id(&na), "pA", NAME, name_value("Ada Lovelace"), 2)
+        .unwrap();
+
+    // Exactly one name survives — the prior folded out, the replacement is in (not 0, not 2).
+    assert_eq!(a.project().people[0].names.len(), 1);
+}
+
+#[test]
+fn revoke_restores_a_removed_claim() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+    let rm_id = a.remove(&only_id(&na), 2).unwrap(); // remove hands back the Remove op's own id
+    a.flush().unwrap();
+    assert!(a.project().people[0].names.is_empty());
+
+    a.revoke(&rm_id, 3).unwrap();
+    assert_eq!(
+        a.project().people[0].names.len(),
+        1,
+        "the revoke restored the removed name"
+    );
+}
+
+#[test]
+fn ingesting_advances_the_clock_so_a_rebuild_cannot_reuse_a_tombstoned_id() {
+    // The HLC receive rule. A creates a claim and removes it (tombstone by id).
+    let mut a = Tree::new(DID);
+    a.assert_claim("pA", NAME, name_value("Ada"), 100).unwrap();
+    let created = a.flush().unwrap();
+    let claim_id = only_id(&created);
+    a.remove(&claim_id, 101).unwrap();
+    let removed = a.flush().unwrap();
+
+    // B is a rebuild — a reload, or the SAME user's second device (createdBy is the vault's stable
+    // did:key, so ids collide across a user's replicas). It merges A's log, which tombstones that id.
+    let mut b = Tree::new(DID);
+    b.merge(&created).unwrap();
+    b.merge(&removed).unwrap();
+    assert!(
+        b.live_claims_of("pA", NAME).is_empty(),
+        "the claim is tombstoned in the rebuilt engine"
+    );
+
+    // B re-creates the identical content while its wall clock reads BEFORE A's timestamps (skew /
+    // NTP step-back). Because merge advanced B's clock past 101, the re-assert draws a fresh createdAt
+    // → a new id → it lives, instead of reproducing the still-tombstoned id and folding back to dead.
+    b.assert_claim("pA", NAME, name_value("Ada"), 50).unwrap();
+    b.flush().unwrap();
+    assert_eq!(
+        b.live_claims_of("pA", NAME).len(),
+        1,
+        "the re-created claim is live — the clock never reused the dead id"
+    );
+}
+
+#[test]
+fn snapshot_load_roundtrips() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let snap = a.snapshot().unwrap();
+
+    let mut b = Tree::new(DID);
+    b.load_snapshot(&snap).unwrap();
+    assert_eq!(a.project(), b.project());
+}
+
+#[test]
+fn resolve_id_returns_the_canonical_person() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pB", PERSON, 1).unwrap();
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", SAME_AS, json!({ "pair": ["pA", "pB"] }), 1)
+        .unwrap();
+
+    // pA + pB merge into one person; canonical id = the minimum anchor id ("pA").
+    assert_eq!(a.resolve_id("pB").as_deref(), Some("pA"));
+    assert_eq!(a.resolve_id("pA").as_deref(), Some("pA"));
+    assert_eq!(a.resolve_id("nope"), None);
+}
+
+#[test]
+fn live_claims_of_returns_matching_records() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim("pA", "openom.org/core/sex/v1", json!({ "sex": "F" }), 1)
+        .unwrap();
+
+    let names = a.live_claims_of("pA", NAME);
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0]["value"], name_value("Ada"));
+    assert!(a.live_claims_of("pA", "openom.org/core/date/v1").is_empty());
+}
+
+#[test]
+fn live_claims_of_any_returns_every_predicate_including_unrecognized() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim(
+        "pA",
+        "openom.org/x/occupation/v1", // a predicate this build doesn't recognize
+        json!({ "title": "mathematician" }),
+        1,
+    )
+    .unwrap();
+
+    // The known name claim, the unrecognized-predicate claim, AND the existence claim auto-minted with
+    // the anchor all come back — a generic renderer can enumerate the whole subject regardless of what
+    // the projection understands.
+    let all = a.live_claims_of_any("pA");
+    assert_eq!(all.len(), 3);
+    let preds: std::collections::BTreeSet<&str> =
+        all.iter().filter_map(|c| c["predicate"].as_str()).collect();
+    assert!(preds.contains(NAME));
+    assert!(preds.contains("openom.org/x/occupation/v1"));
+    assert!(preds.contains(openom_data_claim::envelope::PREDICATE_EXISTENCE));
+
+    assert!(a.live_claims_of_any("nope").is_empty());
+}
+
+#[test]
+fn one_settled_intention_flushes_as_a_single_batch() {
+    // The mints of one intention accumulate; flush emits ONE batch carrying all of them, so a peer sees
+    // the whole edit atomically (never, e.g., an anchor with no claims). A second flush is empty.
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap(); // anchor + existence claim
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    a.assert_claim("pA", "openom.org/core/sex/v1", json!({ "sex": "F" }), 1)
+        .unwrap();
+    let batch = a.flush().unwrap();
+    assert_eq!(
+        codec::decode(&batch).unwrap().len(),
+        4,
+        "anchor + existence + name + sex in one batch, not four"
+    );
+    assert!(
+        a.flush().unwrap().is_empty(),
+        "nothing minted since → empty flush"
+    );
+    // The optimistic apply is immediate (independent of flush): the read model already reflects it.
+    assert_eq!(a.project().people[0].names.len(), 1);
+}

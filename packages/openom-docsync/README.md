@@ -9,7 +9,7 @@
 
 It ties three layers that each deliberately know nothing of the others: `openom-crdt` produces and
 consumes op batches (`ChannelItem`s); `openom-sealer` seals those bytes into E2EE envelopes; a
-`journal::DocStore` persists opaque envelopes as an append log. `SyncClient::push_claims` seals a
+`store_log::DocStore` persists opaque envelopes as an append log. `SyncClient::push_claims` seals a
 local batch and pushes it; `pull_claims` opens and merges every new log entry into the accumulated op
 set; the engine's fold produces the live record set the projection reads; `compact_claims` /
 `bootstrap_claims` publish a snapshot of the live set and load from one instead of replaying the whole
@@ -44,9 +44,9 @@ WSL2/Docker).
 ## Usage
 
 ```rust
-use journal::memory::MemoryStore;
-use openom_claim::envelope::Record;
-use openom_crdt::ChannelItem;
+use store_log::memory::MemoryStore;
+use openom_data_claim::envelope::Record;
+use openom_data_crdt::ChannelItem;
 use openom_crypto::generate_dek;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::Sealer;

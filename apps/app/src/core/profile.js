@@ -7,15 +7,19 @@
 // Engine (wasm) cost is captured from here by wrapping the shim calls, rather than adding a timing
 // dependency into the zero-dep commute/treelog crates.
 
-let ENABLED = false;
-try { ENABLED = globalThis.localStorage?.getItem('openom.profile') === '1'; } catch { /* no storage */ }
-if (globalThis.__OPENOM_PROFILE__) ENABLED = true;
+// localStorage is read once at load (it rarely changes mid-session); the `globalThis` switch is read PER
+// CALL so it stays a LIVE dev toggle — setting it after import now takes effect — and isn't frozen by
+// module caching (which kept profile.test flaky under vitest's parallel file runs). The off-path stays a
+// cached boolean OR one fast property read.
+let ENABLED_LS = false;
+try { ENABLED_LS = globalThis.localStorage?.getItem('openom.profile') === '1'; } catch { /* no storage */ }
+const enabled = () => ENABLED_LS || globalThis.__OPENOM_PROFILE__ === true;
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 const totals = new Map(); // label -> { calls, ms }
 
 /** Whether profiling is on (so a caller can skip building a label it won't use). */
-export const profiling = () => ENABLED;
+export const profiling = () => enabled();
 
 function record(label, ms) {
   const t = totals.get(label) ?? { calls: 0, ms: 0 };
@@ -29,7 +33,7 @@ function record(label, ms) {
  * result (or promise). The off-path is a single boolean check, so it's safe to leave in hot code.
  */
 export function profile(label, fn) {
-  if (!ENABLED) return fn();
+  if (!enabled()) return fn();
   const t0 = now();
   const done = () => record(label, now() - t0);
   let r;
@@ -55,8 +59,8 @@ export function resetProfile() {
   totals.clear();
 }
 
-// Convenience: reachable from the console when profiling is on.
-if (ENABLED && typeof globalThis !== 'undefined') {
+// Convenience: reachable from the console (inert until profiling records something).
+if (typeof globalThis !== 'undefined') {
   globalThis.openomProfile = profileSummary;
   globalThis.openomProfileReset = resetProfile;
 }

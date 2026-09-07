@@ -13,7 +13,7 @@
 //! [`PullError::ResetPending`] (the client's out-of-band re-verify ceremony) and is adopted via
 //! [`KeyringChainBlobSync::accept_reset`], never silently walked.
 
-use blobstore::{BlobError, BlobStore, Etag, Precondition};
+use store_blob::{BlobError, BlobStore, Etag, Precondition};
 use prost::Message;
 
 use crate::keyring::signing_bytes as keyring_signing_bytes;

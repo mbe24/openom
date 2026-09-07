@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn draft_exchange_collects_signatures_then_promotes() {
         use crate::blob_sync::{KeyringChainBlobSync, Promotion};
-        use blobstore::MemoryBlob;
+        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
 
@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn countersign_refuses_a_draft_swapped_since_review() {
         use crate::blob_sync::{KeyringChainBlobSync, SyncError};
-        use blobstore::MemoryBlob;
+        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
 
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn a_stale_draft_is_detected_not_corrupting() {
         use crate::blob_sync::{KeyringChainBlobSync, Promotion};
-        use blobstore::MemoryBlob;
+        use store_blob::MemoryBlob;
         use prost::Message;
         use std::sync::Arc;
 

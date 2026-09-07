@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use journal::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
+use store_log::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::{
     AcceptedKeyring, AddMemberAsCoOwnerRequest, AddMemberRequest, CoOwnerChanged, EngineKind,

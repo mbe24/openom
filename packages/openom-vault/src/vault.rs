@@ -2062,7 +2062,7 @@ mod tests {
         // The full chain-keyring lifecycle over the Blob seam (OPE-265): the vault is a pure
         // bytes -> bytes lifecycle, so every op's output publishes through keyring/head. Two replicas,
         // one dumb local-FS backend.
-        use blobstore::{BlobStore, FsBlob, Precondition};
+        use store_blob::{BlobStore, FsBlob, Precondition};
         use openom_keyring_chain::blob_sync::{KeyringChainBlobSync, PullError};
         use std::sync::Arc;
 

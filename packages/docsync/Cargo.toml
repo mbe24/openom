@@ -1,16 +1,16 @@
 # A generic local-first client sync loop (push / pull / compact / bootstrap) over
-# journal::DocStore, generic over a merge `Engine` + an envelope `Sealer`. Depends
-# only on `journal` — a caller re-imports it by impl'ing Engine for its CRDT and
+# store-log::DocStore, generic over a merge `Engine` + an envelope `Sealer`. Depends
+# only on `store-log` — a caller re-imports it by impl'ing Engine for its CRDT and
 # Sealer for its envelope format; no domain deps live here.
 [package]
 name = "docsync"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Generic local-first client sync loop (push/pull/compact/bootstrap) over journal::DocStore, generic over a merge Engine and an envelope Sealer."
+description = "Generic local-first client sync loop (push/pull/compact/bootstrap) over store-log::DocStore, generic over a merge Engine and an envelope Sealer."
 
 [dependencies]
-journal = { path = "../journal" }
+store-log = { path = "../store-log" }
 thiserror = "2"
 
 [lints]

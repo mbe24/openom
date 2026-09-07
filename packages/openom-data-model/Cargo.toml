@@ -1,0 +1,29 @@
+# The canonical, flat, id-keyed data model (nodes/edges/events/sources/media/custom-fields) with
+# opaque, random, stable ids. See plan/design.data-model.md. Canonicalization (JCS-equivalent) and a
+# JSON Schema (Draft 2020-12) validator live here; the embedded name model lands in a later task.
+[package]
+name = "openom-data-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+# Canonicalization (JCS-equivalent for our float-free / ASCII-keyed data) + (de)serialization.
+serde_json.workspace = true
+# UUIDv4 (v4 feature) with serde support — the opaque, high-entropy id primitive.
+uuid.workspace = true
+thiserror.workspace = true
+# SHA-256 for the per-entity canonical content hash (attestation binding).
+sha2.workspace = true
+# JSON Schema (Draft 2020-12) validator — optional, off the default/wasm build.
+jsonschema = { workspace = true, optional = true }
+
+[features]
+# Validate a serialized model against model.schema.json. Off by default so the wasm bundle stays
+# lean; enabled in tests and any native import path.
+validation = ["dep:jsonschema"]
+
+[lints]
+workspace = true

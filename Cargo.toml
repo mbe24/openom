@@ -13,26 +13,26 @@ members = [
     "packages/openom-roles",
     "packages/openom-keyring-chain",
     "packages/openom-keyring-api",
-    "packages/openom-model",
-    "packages/jcs",
+    "packages/openom-data-model",
+    "packages/format-jcs",
     "packages/did",
     "packages/edsign",
-    "packages/edtf",
-    "packages/openom-claim",
-    "packages/openom-projection",
-    "packages/openom-crdt",
-    "packages/openom-tree",
+    "packages/format-edtf",
+    "packages/openom-data-claim",
+    "packages/openom-data-projection",
+    "packages/openom-data-crdt",
+    "packages/openom-data-tree",
     "packages/openom-sealer",
     "packages/openom-vault",
     "packages/openom-vault-host",
-    "packages/journal",
+    "packages/store-log",
     "packages/openom-docsync",
     "packages/keyeo-core",
     "packages/keyeo-chain",
     "packages/keyeo-dag",
     "packages/openom-keyring-dag",
     "packages/docsync",
-    "packages/blobstore",
+    "packages/store-blob",
     "openom",
     "apps/src-tauri",
 ]
@@ -76,16 +76,16 @@ openom-roles = { path = "packages/openom-roles" }
 openom-keyring-chain = { path = "packages/openom-keyring-chain" }
 openom-keyring-dag = { path = "packages/openom-keyring-dag" }
 openom-keyring-api = { path = "packages/openom-keyring-api" }
-jcs = { path = "packages/jcs" }
+format-jcs = { path = "packages/format-jcs" }
 did = { path = "packages/did" }
 edsign = { path = "packages/edsign" }
-edtf = { path = "packages/edtf" }
-openom-claim = { path = "packages/openom-claim" }
-openom-projection = { path = "packages/openom-projection" }
-openom-crdt = { path = "packages/openom-crdt" }
-openom-tree = { path = "packages/openom-tree" }
-journal = { path = "packages/journal" }
-blobstore = { path = "packages/blobstore" }
+format-edtf = { path = "packages/format-edtf" }
+openom-data-claim = { path = "packages/openom-data-claim" }
+openom-data-projection = { path = "packages/openom-data-projection" }
+openom-data-crdt = { path = "packages/openom-data-crdt" }
+openom-data-tree = { path = "packages/openom-data-tree" }
+store-log = { path = "packages/store-log" }
+store-blob = { path = "packages/store-blob" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
 # roles/signing/keys onto keyeo-dag's seams in openom-keyring-dag; keyeo-dag itself never gains an openom dep.
 keyeo-dag = { path = "packages/keyeo-dag" }

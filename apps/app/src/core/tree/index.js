@@ -7,7 +7,7 @@
 // (JSON strings from wasm) back into objects. Claim values cross as JS objects here and are JSON-encoded
 // at the boundary. Ids (anchor/claim ids) are opaque strings the caller mints; the author `created_by`
 // is the vault-derived did:key (OPE-191), stamped on every op this replica emits.
-import init, { WasmTree } from '../../vendor/tree/openom_tree.js';
+import init, { WasmTree } from '../../vendor/tree/openom_data_tree.js';
 
 let ready;
 // In the browser, init() fetches the .wasm next to the module; in node/tests, pass the bytes as

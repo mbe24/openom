@@ -2,7 +2,7 @@
 //! keyring (openom-keyring-dag / keyeo), across both backend classes (OPE-267).
 //!
 //! The honest answer to "what does each version actually offer" is a MATRIX, not prose. Both keyrings
-//! ride the same `blobstore::Blob` seam, so the backend axis is {managed-CAS, BYO-dumb} — and because
+//! ride the same `store_blob::Blob` seam, so the backend axis is {managed-CAS, BYO-dumb} — and because
 //! the seam is the weakest-common-denominator (per-object CAS + list), every capability below behaves
 //! IDENTICALLY on both backend classes for a given keyring; a managed backend only *prevents* below the
 //! seam what a BYO backend can merely *detect* (the anti-rollback row). So the matrix's live axis is the

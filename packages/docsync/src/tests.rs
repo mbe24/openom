@@ -2,7 +2,7 @@
 //! Convergence + compaction + bootstrap, no domain types.
 
 use super::*;
-use journal::memory::MemoryStore;
+use store_log::memory::MemoryStore;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::sync::Arc;

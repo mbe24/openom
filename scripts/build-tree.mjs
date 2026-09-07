@@ -1,4 +1,4 @@
-// Build openom-tree to WebAssembly — the claim-model family-tree engine for the web app. Same
+// Build openom-data-tree to WebAssembly — the claim-model family-tree engine for the web app. Same
 // two-stage flow as build-vault.mjs (Rust→wasm in Docker because the host can't run cargo build
 // scripts; wasm-bindgen glue on the host), just for this crate. Output: apps/app/src/vendor/tree/
 // (gitignored).
@@ -10,17 +10,17 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CRATE = path.join(REPO, 'packages', 'openom-tree');
+const CRATE = path.join(REPO, 'packages', 'openom-data-tree');
 const IMAGE = process.env.OPENOM_CARGO_IMAGE || 'rust:1-bookworm';
 const REGISTRY_VOLUME = 'openom-cargo-registry';
 
 const TRIPLE = 'x86_64-pc-windows-msvc';
 const TARGET_SUBDIR = 'target-wasm';
-const CONTAINER_TARGET = `/work/packages/openom-tree/${TARGET_SUBDIR}`;
+const CONTAINER_TARGET = `/work/packages/openom-data-tree/${TARGET_SUBDIR}`;
 const PROFILE = process.env.WASM_PROFILE || 'wasm-release';
 const RUSTFLAGS = process.env.WASM_RUSTFLAGS || '';
 
-const WASM = path.join(CRATE, TARGET_SUBDIR, 'wasm32-unknown-unknown', PROFILE, 'openom_tree.wasm');
+const WASM = path.join(CRATE, TARGET_SUBDIR, 'wasm32-unknown-unknown', PROFILE, 'openom_data_tree.wasm');
 // Reuse the sealer's downloaded wasm-bindgen CLI (same version, pinned to Cargo.lock).
 const TOOLS_DIR = path.join(REPO, 'packages', 'openom-sealer', 'tools');
 const PKG_DIR = path.join(REPO, 'apps', 'app', 'src', 'vendor', 'tree');
@@ -39,7 +39,7 @@ function dockerAvailable() {
 if (!dockerAvailable()) {
   throw new Error('Docker is required for the wasm build (host cannot run cargo build scripts). Start Docker Desktop.');
 }
-console.log(`[·] Building openom-tree → wasm in Docker (wasm32, --features wasm · profile=${PROFILE})…`);
+console.log(`[·] Building openom-data-tree → wasm in Docker (wasm32, --features wasm · profile=${PROFILE})…`);
 run('docker', [
   'run', '--rm', '--init',
   '-v', `${REPO}:/work`,
@@ -51,7 +51,7 @@ run('docker', [
   'bash', '-c',
   'rustup target add wasm32-unknown-unknown >/dev/null 2>&1 || true; ' +
     `cargo build --profile ${PROFILE} --target wasm32-unknown-unknown ` +
-    '-p openom-tree --no-default-features --features wasm',
+    '-p openom-data-tree --no-default-features --features wasm',
 ]);
 if (!fs.existsSync(WASM)) throw new Error(`expected wasm at ${WASM} after the Docker build; not found`);
 console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).size / 1024).toFixed(0)} kb)`);

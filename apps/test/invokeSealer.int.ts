@@ -35,8 +35,9 @@ function fakeInvoke() {
       case 'vault_change_passphrase':
         return { revision: 2, recoveryCode: 'CODE-3' };
       case 'sealer_seal_entry': {
-        if (!sealers.has(args.sealerId)) throw { code: 'unknown_sealer', message: 'gone' };
-        return { envelope: [0xee, ...args.plaintext], ciphertextHash: [1, 2, 3] };
+        // The seal payload nests under `req` (one SealEntryRequest struct) — see invokeSealer.js.
+        if (!sealers.has(args.req.sealerId)) throw { code: 'unknown_sealer', message: 'gone' };
+        return { envelope: [0xee, ...args.req.plaintext], ciphertextHash: [1, 2, 3] };
       }
       case 'sealer_open_entry': {
         if (!sealers.has(args.sealerId)) throw { code: 'unknown_sealer', message: 'gone' };
