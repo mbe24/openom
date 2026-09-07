@@ -96,6 +96,8 @@ describe('SyncSession', () => {
       makeDeltaSync: () => controller,
       syncKeyring: async (_uuid, _treeId, fetch) => { calls.push('kpull'); await fetch(0); return { revision: 0, changed: false }; },
       reconcileKeyring: async (_uuid, { getServerHead }) => { calls.push('kpub'); await getServerHead(0); return { head: 0 }; },
+      // No keyring loaded in this mock → the advisory membership channel is a clean no-op (tested on its own).
+      membershipSummary: async () => null,
     };
     const sync = buildSyncSession({
       tree, uuid: 'u', treeId: new Uint8Array(16), session: sealer, vault, remote,

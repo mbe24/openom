@@ -13,7 +13,8 @@
 // these, one alive at a time.
 
 import { SyncDriver } from './syncDriver.js';
-import { reconcileTree, reconcileSnapshot, reconcileDeltas } from './syncReconcilers.js';
+import { reconcileTree, reconcileSnapshot, reconcileDeltas, reconcileMembership } from './syncReconcilers.js';
+import { MembershipAsserts } from './membershipAsserts.js';
 
 export class SyncSession {
   #driver;
@@ -93,7 +94,7 @@ export class SyncSession {
  * @param {object} [o.driverOptions]  timer/tuning injection (tests)
  * @returns {SyncSession}
  */
-export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, memberId = null, callbacks = {}, driverOptions = {} }) {
+export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, memberId = null, asserts = new MembershipAsserts(), callbacks = {}, driverOptions = {} }) {
   const controller = vault.makeDeltaSync({ tree, remote, docId: uuid, session });
   // A snapshot may DECLARE the server log head it subsumes (covers_through_seq): a first-share / re-key base
   // passes the freshly-read head so readers adopt it and skip the pre-coverage deltas. Defaults to 0 (a plain
@@ -133,7 +134,20 @@ export function buildSyncSession({ tree, uuid, treeId, session, vault, remote, m
 
   const snapshot = () => reconcileSnapshot({ tree, uuid, remote, sealSnapshot, adopt: () => controller.adopt(), selfHealBase });
   const deltas = () => reconcileDeltas({ controller });
-  const reconcile = (signal) => reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, signal });
+
+  // Advisory membership summary: recompute {view, basis} from the (durable) head keyring and assert it to the
+  // server. The recompute-each-tick is the crash-safe re-assert backstop (the keyring is durable, so any
+  // change eventually re-asserts); `asserts` de-dups the steady state and persists the intent before the push.
+  const membership = () => reconcileMembership({
+    uuid,
+    remote,
+    summary: () => vault.membershipSummary(uuid),
+    coversBasis: (basis) => vault.coversBasis(uuid, basis),
+    refresh: async () => { await pullKeyring(); return vault.membershipSummary(uuid); },
+    asserts,
+  });
+
+  const reconcile = (signal) => reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, membership, signal });
 
   return new SyncSession({
     reconcile,

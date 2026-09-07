@@ -13,6 +13,7 @@
 // blocking Outcome is reported, so the driver retries — no ordering cursor, no persisted phase.
 
 import { Ok, Rejected, Deferred, classifyError, isOk, worst } from './syncOutcome.js';
+import { pushMembershipSummary } from './membershipSummary.js';
 
 /**
  * Run a channel op that THROWS on failure (the vault keyring methods, RemoteStore calls) and translate a
@@ -96,6 +97,38 @@ export async function reconcileDeltas({ controller }) {
 }
 
 /**
+ * Membership channel (advisory, OPE-293/296): assert this device's resolved {view, basis} to the server so
+ * the managed backend knows who is in the tree (notifications / server-side revocation / proposal routing) —
+ * NEVER the security boundary; the crypto is, client-side. Idempotent + de-duped: recompute from the current
+ * (durable) keyring, skip when the server already has it, else persist the intent BEFORE the push (so a crash
+ * between the keyring write and the push self-heals) and push with the CAS generation + staleness guard.
+ * A missing keyring (nothing to assert) is a no-op.
+ * @param {object} o
+ * @param {string} o.uuid
+ * @param {{getAccess:Function, putAccess:Function}} o.remote
+ * @param {() => Promise<{view:Array,basis:string[]}|null>} o.summary   vault.membershipSummary (null ⇒ skip)
+ * @param {(basis: string[]) => Promise<boolean>} o.coversBasis         vault.coversBasis (staleness guard)
+ * @param {() => Promise<{view:Array,basis:string[]}>} o.refresh        pull keyring + recompute (≤1×, when behind)
+ * @param {import('./membershipAsserts.js').MembershipAsserts} o.asserts  the durable pending-assert store
+ */
+export async function reconcileMembership({ uuid, remote, summary, coversBasis, refresh, asserts }) {
+  // Advisory summary is a MANAGED-server feature ("managed only", OPE-295): a remote without the /access
+  // endpoint — a BYO dumb-blob backend (OPE-136/138), or a minimal test remote — simply skips it.
+  if (typeof remote?.getAccess !== 'function' || typeof remote?.putAccess !== 'function') return Ok('no-access');
+  try {
+    const current = await summary();
+    if (!current) return Ok('no-keyring'); // no keyring loaded yet — nothing to assert
+    if (asserts.isConfirmed(uuid, current)) return Ok('unchanged'); // server already has this view
+    asserts.mark(uuid, current); // persist the intent BEFORE the network push (crash-safety)
+    await pushMembershipSummary(remote, uuid, current, { coversBasis, refresh });
+    asserts.confirm(uuid, current);
+    return Ok('asserted');
+  } catch (e) {
+    return classifyError(e); // offline/deferred → retried next tick; the recompute makes it self-healing
+  }
+}
+
+/**
  * One full reconcile in dependency order. Callbacks are thunks the SyncSession binds to its channel
  * objects; the `signal` aborts cooperatively (a torn-down session stops touching anything). Returns the
  * worst channel Outcome, which the driver dispatches.
@@ -104,9 +137,11 @@ export async function reconcileDeltas({ controller }) {
  * @param {() => Promise<import('./syncOutcome.js')>} o.snapshot   reconcileSnapshot — already an Outcome
  * @param {() => Promise<any>} o.publishKeyring publish the keyring tail (vault.reconcileKeyring) — throws
  * @param {() => Promise<import('./syncOutcome.js')>} o.deltas     reconcileDeltas — already an Outcome
+ * @param {(() => Promise<import('./syncOutcome.js')>)|undefined} [o.membership]  reconcileMembership — already
+ *        an Outcome; advisory, runs last (needs the row + current keyring). Omitted ⇒ skipped (solo/tests).
  * @param {AbortSignal} [o.signal]
  */
-export async function reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, signal }) {
+export async function reconcileTree({ pullKeyring, snapshot, publishKeyring, deltas, membership, signal }) {
   const aborted = () => signal?.aborted;
 
   const a = await attempt(pullKeyring); // retain the governing keyring revisions
@@ -123,5 +158,10 @@ export async function reconcileTree({ pullKeyring, snapshot, publishKeyring, del
   if (aborted()) return Ok();
 
   const d = await deltas(); // push/pull deltas (need the row)
-  return worst(a, b, c, d);
+  if (aborted()) return Ok();
+
+  // Advisory membership summary LAST (needs the row + the pulled keyring): assert who-is-in-the-tree to the
+  // managed backend. Idempotent + de-duped, so a steady-state tick is a cheap no-op.
+  const e = membership ? await membership() : Ok();
+  return worst(a, b, c, d, e);
 }

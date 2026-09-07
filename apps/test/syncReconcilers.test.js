@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  attempt, reconcileSnapshot, reconcileDeltas, reconcileTree,
+  attempt, reconcileSnapshot, reconcileDeltas, reconcileTree, reconcileMembership,
 } from '../app/src/core/syncReconcilers.js';
+import { MembershipAsserts } from '../app/src/core/membershipAsserts.js';
 import { Ok, Offline, isOk, OK, OFFLINE, REJECTED, DEFERRED } from '../app/src/core/syncOutcome.js';
 
 const forkError = () => { const e = new Error('fork'); e.name = 'KeyringForkError'; e.revision = 2; return e; };
@@ -122,5 +123,50 @@ describe('syncReconcilers — reconcileTree (dependency order + short-circuits)'
     });
     expect(order).toEqual(['pull']); // aborted right after the pull
     expect(isOk(r)).toBe(true); // abort is a no-op, not an error
+  });
+});
+
+describe('syncReconcilers — reconcileMembership (advisory summary push)', () => {
+  const summary = { view: [{ memberId: 'owner', role: 1 }], basis: ['op:aa'] };
+  const mkRemote = () => {
+    const puts = [];
+    return { puts, getAccess: async () => null, putAccess: async (_id, a) => { puts.push(a); return { generation: 1, unchanged: false }; } };
+  };
+  const seams = (over = {}) => ({ summary: async () => summary, coversBasis: async () => true, refresh: async () => summary, ...over });
+
+  it('no keyring loaded → no-op, nothing pushed', async () => {
+    const remote = mkRemote();
+    const r = await reconcileMembership({ uuid: 't', remote, asserts: new MembershipAsserts(), ...seams({ summary: async () => null }) });
+    expect(isOk(r)).toBe(true);
+    expect(remote.puts).toHaveLength(0);
+  });
+
+  it('first assert persists the intent, pushes, and confirms', async () => {
+    const remote = mkRemote();
+    const asserts = new MembershipAsserts();
+    const r = await reconcileMembership({ uuid: 't', remote, asserts, ...seams() });
+    expect(isOk(r)).toBe(true);
+    expect(remote.puts).toHaveLength(1);
+    expect(remote.puts[0].members).toEqual(summary.view);
+    expect(remote.puts[0].basis).toEqual(summary.basis);
+    expect(asserts.isConfirmed('t', summary)).toBe(true);
+  });
+
+  it('de-dups: a summary already confirmed does not push again (cheap steady-state tick)', async () => {
+    const remote = mkRemote();
+    const asserts = new MembershipAsserts();
+    asserts.confirm('t', summary);
+    const r = await reconcileMembership({ uuid: 't', remote, asserts, ...seams() });
+    expect(isOk(r)).toBe(true);
+    expect(remote.puts).toHaveLength(0);
+  });
+
+  it('a network failure is classified Offline and left unconfirmed for the next tick', async () => {
+    const remote = { getAccess: async () => null, putAccess: async () => { throw new TypeError('fetch failed'); } };
+    const asserts = new MembershipAsserts();
+    const r = await reconcileMembership({ uuid: 't', remote, asserts, ...seams() });
+    expect(r.tag).toBe(OFFLINE);
+    expect(asserts.isConfirmed('t', summary)).toBe(false); // retried next tick
+    expect(asserts.desired('t')).toEqual(summary); // but the intent was persisted before the push
   });
 });

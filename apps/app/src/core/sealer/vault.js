@@ -215,6 +215,26 @@ export function createVault({ worker, keyringStore, watermarks, engine = 'chain'
       return !!me && me.role >= 1 && me.role <= 3;
     },
 
+    // The advisory membership summary this device would assert to the server (OPE-293): the resolved
+    // {view, basis} read from the verified head keyring. `view` is [{memberId, role}]; `basis` is the
+    // engine-opaque frontier the view was computed from (the /access push's staleness coordinate). Null if
+    // no keyring is loaded (nothing to assert yet).
+    async membershipSummary(treeKey) {
+      const k = await keyringStore.load(treeKey);
+      if (!k) return null;
+      const s = JSON.parse(await worker.keyringSummary(engine, k));
+      return { view: s.members, basis: s.basis };
+    },
+
+    // Does this device's head keyring COVER `storedBasis` (the frontier a prior /access push used)? The
+    // staleness guard for the membership assert — false ⇒ we are causally behind (pull + recompute before
+    // overwriting a newer view). No keyring loaded ⇒ false (we can't vouch for coverage).
+    async coversBasis(treeKey, storedBasis) {
+      const k = await keyringStore.load(treeKey);
+      if (!k) return false;
+      return worker.keyringCovers(engine, k, storedBasis);
+    },
+
     async provision(treeKey, treeId, passphrase, memberId) {
       const r = await worker.provision(engine, passphrase, treeId, memberId, makeReplicaId());
       await persist(treeKey, treeId, r.keyring, r.watermark);

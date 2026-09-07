@@ -23,6 +23,7 @@ import init, {
   epochIsAttributed as wasmEpochIsAttributed,
   keyringHasBeenShared as wasmKeyringHasBeenShared,
   keyringSummary as wasmKeyringSummary,
+  keyringCovers as wasmKeyringCovers,
   entryAttribution as wasmEntryAttribution,
   WasmSealer,
 } from '../../vendor/vault/openom_vault.js';
@@ -151,6 +152,14 @@ const api = {
   async keyringSummary(engine, keyring) {
     await ensureInit();
     return wasmKeyringSummary(engine, keyring);
+  },
+
+  // Does THIS keyring's trust state COVER `basis` (the engine-opaque frontier a prior /access membership
+  // push was computed from)? The staleness guard for pushMembershipSummary — dag = check_floor on the
+  // frontier, chain = a revision compare. `basis` is the string[] a keyringSummary returned.
+  async keyringCovers(engine, keyring, basis) {
+    await ensureInit();
+    return wasmKeyringCovers(engine, keyring, basis);
   },
 
   // An entry's attribution coordinates from its (AAD-bound) header: which keyring revision governs it and
