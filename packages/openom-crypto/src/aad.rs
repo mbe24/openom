@@ -75,7 +75,9 @@ pub(crate) fn header_aad(version: u32, header: &Header) -> Vec<u8> {
 }
 
 /// The canonical, domain-separated byte string a member's Ed25519 **author** key signs to attribute an
-/// entry on a shared tree (§B3 launch gate; pins `design.sharing.md` §3.3). Covers every header field
+/// entry on a shared tree (§B3 launch gate; pins `design.sharing.md` §3.3).
+///
+/// Covers every header field
 /// that exists **before sealing** — so it is computable pre-seal — plus `SHA-256(plaintext)` to bind the
 /// actual content. Deliberately EXCLUDES: `nonce` (minted inside seal, unknown at sign time; the AEAD tag
 /// binds it anyway), `ciphertext_hash` (derives from the ciphertext this ultimately produces — circular),

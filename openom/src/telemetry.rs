@@ -15,7 +15,9 @@ use opentelemetry_sdk::Resource;
 use crate::config::Config;
 
 /// Build a batch-exporting tracer provider, or `None` when telemetry is off (or the
-/// exporter can't be constructed — telemetry must never take the server down). The
+/// exporter can't be constructed — telemetry must never take the server down).
+///
+/// The
 /// caller attaches it as a `tracing` layer and holds it to `force_flush` on Lambda.
 #[must_use]
 pub fn build_tracer_provider(config: &Config) -> Option<SdkTracerProvider> {

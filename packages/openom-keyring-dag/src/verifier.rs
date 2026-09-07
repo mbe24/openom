@@ -166,7 +166,9 @@ impl KeyringVerifier for DagVerifier {
 }
 
 /// Build a `Bootstrap` update from the pinned genesis + the signed genesis op — the first-sight input a
-/// server (or client adoption path) admits. (Helper for callers/tests; the seam itself never constructs
+/// server (or client adoption path) admits.
+///
+/// (Helper for callers/tests; the seam itself never constructs
 /// updates.)
 ///
 /// # Panics

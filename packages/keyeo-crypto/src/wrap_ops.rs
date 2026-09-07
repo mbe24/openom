@@ -67,7 +67,9 @@ pub fn rrk_wrap<Id: RecipientId>(
     })
 }
 
-/// Open the epoch DEK from an HPKE wrap (member or recovery-root) with the recipient's X25519 secret. The
+/// Open the epoch DEK from an HPKE wrap (member or recovery-root) with the recipient's X25519 secret.
+///
+/// The
 /// AAD is rebuilt from the wrap's own recipient + method + the context, so a wrap tampered onto another
 /// recipient/epoch/group fails the AEAD tag. A KEK escrow wrap is not a DEK wrap — it is opened elsewhere —
 /// so it is rejected here.

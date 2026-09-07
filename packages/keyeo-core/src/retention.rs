@@ -25,7 +25,9 @@ pub struct RetentionMetrics {
     pub bytes: u64,
 }
 
-/// The policy's decision — pure data, no engine types. `keep_last` is a COUNT of the most-recent items to
+/// The policy's decision — pure data, no engine types.
+///
+/// `keep_last` is a COUNT of the most-recent items to
 /// retain past a checkpoint; the engine's `compact` converts it to its own horizon (a revision, a frontier),
 /// clamped to the host `stable` cut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,14 +38,18 @@ pub enum RetentionPlan {
     Snapshot { keep_last: usize },
 }
 
-/// The pluggable retention POLICY: metrics in → a plan out. Shared by every engine (and a keyeo library user
+/// The pluggable retention POLICY: metrics in → a plan out.
+///
+/// Shared by every engine (and a keyeo library user
 /// may write a bespoke impl). Because it names no position type, it moves cleanly to this crate and both
 /// engines' `compact` translate its `keep_last` into their own horizon.
 pub trait RetentionPolicy: Send + Sync {
     fn plan(&self, metrics: &RetentionMetrics) -> RetentionPlan;
 }
 
-/// The closed retention config a deployment selects at runtime — a zero-cost `enum` (no `dyn`). `Never` is
+/// The closed retention config a deployment selects at runtime — a zero-cost `enum` (no `dyn`).
+///
+/// `Never` is
 /// the full-retention library opt-out (unbounded, auditable); the others bound the history by item count or
 /// serialized byte size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,9 +95,13 @@ impl RetentionPolicy for Retention {
 #[error("compaction failed: {0}")]
 pub struct CompactionError(pub String);
 
-/// The engine-neutral COMPACTION mechanism — a FUNCTIONAL contract (no `&mut self`): read the caller-held
+/// The engine-neutral COMPACTION mechanism — a FUNCTIONAL contract (no `&mut self`).
+///
+/// read the caller-held
 /// serialized `state`, and return the compaction (a checkpoint + a prune marker) for the caller to store and
-/// apply, never pruning above the host-supplied `stable` cut. Both engines implement this same shape; the
+/// apply, never pruning above the host-supplied `stable` cut.
+///
+/// Both engines implement this same shape; the
 /// CRDT-vs-linear difference lives inside each impl. Adding a 3rd engine is one more impl and nothing else.
 ///
 /// The IMPLEMENTATIONS are where the pruning SECURITY lives (an authenticated, pin-adopted checkpoint; a

@@ -98,7 +98,9 @@ pub struct SealOutcome {
     pub ciphertext_hash: Vec<u8>,
 }
 
-/// A crypto/format failure. The `Crypto(Open)` case is intentionally opaque (bad key,
+/// A crypto/format failure.
+///
+/// The `Crypto(Open)` case is intentionally opaque (bad key,
 /// tag, nonce, or tampered header all look alike); the scope/kind cases fail *before*
 /// the AEAD so a misrouted blob gets a precise error instead of a generic auth failure.
 // The keyring / membership / anti-rollback error variants were moved to `openom_vault::VaultError`
@@ -129,7 +131,9 @@ pub enum SealerError {
 }
 
 /// A stateful sealing session bound to one `(tree_id, key_id, replica_id)` scope, holding
-/// the unlocked DEK. Constructed from an already-unwrapped DEK (unlock/provision, which
+/// the unlocked DEK.
+///
+/// Constructed from an already-unwrapped DEK (unlock/provision, which
 /// perform the Argon2id KEK derivation + keyring verification, build this).
 pub struct Sealer {
     version: u32,
@@ -303,9 +307,12 @@ impl Sealer {
     }
 }
 
-/// A reader/writer over **all epochs** a caller can reach: one [`Sealer`] per epoch (they
+/// A reader/writer over **all epochs** a caller can reach.
+///
+/// one [`Sealer`] per epoch (they
 /// share `tree_id`/`replica_id`), routing an open to the sealer whose `key_id` matches the
 /// envelope, and always sealing new entries under the single **write epoch** (the latest).
+///
 ///
 /// This is what lets a client read content sealed before a key rotation (old-epoch
 /// snapshots and, under leave-and-lazy media, old photos) while writing only under the

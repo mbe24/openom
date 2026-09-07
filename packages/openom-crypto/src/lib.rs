@@ -8,7 +8,9 @@
 /// Argon2id key-derivation function type alias (kept in the public surface).
 pub type Kdf<'a> = argon2::Argon2<'a>;
 
-/// The reserved `Header.key_id` for local development (§16). Local dev / demo seal with
+/// The reserved `Header.key_id` for local development (§16).
+///
+/// Local dev / demo seal with
 /// a well-known fixed DEK ([`dev_dek`]) so a developer can inspect payloads — but the
 /// bytes on disk / in `MinIO` are still real ciphertext, sealed and AAD-bound exactly
 /// like production. **Production MUST refuse any envelope carrying this `key_id`**, so a

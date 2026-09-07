@@ -15,10 +15,14 @@ pub mod verifier;
 // byte-identical duplicate of the same edsign verify that was deduplicated into keyeo-core (OPE-306).
 pub use keyeo_dag::Ed25519;
 
-/// A keyring role, power-descending (**lower is stronger**): `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
+/// A keyring role, power-descending (**lower is stronger**).
+///
+/// `ROLE_OWNER = 1` … `ROLE_VIEWER = 5`,
 /// bound to openom-keyring-api's engine-neutral role convention ([`openom_keyring_api::ROLE_OWNER`] …) — which openom's
 /// `openom-keyring::roles` drift-guard pins to the proto `MemberRole` values, so the engine never has to
-/// depend on openom-roles (and stays openom-free). Wraps the `i16` so a role can be a signed,
+/// depend on openom-roles (and stays openom-free).
+///
+/// Wraps the `i16` so a role can be a signed,
 /// content-addressed op field (keyeo requires `Role: Serialize`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct KeyringRole(pub i16);
@@ -48,15 +52,19 @@ impl Role for KeyringRole {
     }
 }
 
-/// The concrete keyeo instantiation for the openom keyring: op ids are 32-byte content hashes, member
-/// ids are openom member-id strings, roles are [`KeyringRole`], signatures are keyeo's unified [`Ed25519`].
+/// The concrete keyeo instantiation for the openom keyring.
+///
+/// Op ids are 32-byte content hashes, member ids are openom member-id strings, roles are
+/// [`KeyringRole`], signatures are keyeo's unified [`Ed25519`].
 pub type KeyringAction = MembershipAction<String, KeyringRole, Ed25519>;
 pub type KeyringOp = keyeo_dag::Op<[u8; 32], String, KeyringRole, Ed25519>;
 pub type KeyringState = GroupState<String, KeyringRole, Ed25519>;
 pub type KeyringMemberInit = keyeo_dag::MemberInit<String, KeyringRole, Ed25519>;
 pub type KeyringEngine = keyeo_dag::Keyeo<KeyringOp, KeyringAccess, keyeo_dag::StrongRemove>;
 /// The v2 keyring engine — same authority + strong-remove, plus a [`KeyringQuorum`] multi-signer policy
-/// for privileged changes. Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
+/// for privileged changes.
+///
+/// Construct with `Keyeo::with_quorum(state, KeyringAccess, StrongRemove,
 /// KeyringQuorum::founder_or_unanimity())` (or any other [`QuorumRule`]).
 pub type KeyringQuorumEngine =
     keyeo_dag::Keyeo<KeyringOp, KeyringAccess, keyeo_dag::StrongRemove, KeyringQuorum>;
@@ -256,7 +264,9 @@ fn active_owner(state: &KeyringState) -> Option<String> {
 }
 
 /// The per-keyring governance rule — so one family tree can be founder-only, another 3-of-4, another
-/// founder-or-unanimity, all from the same [`KeyringQuorum`] policy. The founder (Owner) is always
+/// founder-or-unanimity, all from the same [`KeyringQuorum`] policy.
+///
+/// The founder (Owner) is always
 /// eligible to propose/approve; the co-owners are the collective body. Every rule is still bounded by
 /// founder-equivalent authority (see [`KeyringQuorum::requirement`]).
 ///
@@ -277,7 +287,9 @@ pub enum QuorumRule {
     Threshold(usize),
 }
 
-/// openom's v2 multi-signer quorum, parameterised by a per-keyring [`QuorumRule`]. A privileged change
+/// openom's v2 multi-signer quorum, parameterised by a per-keyring [`QuorumRule`].
+///
+/// A privileged change
 /// takes effect when the rule's requirement is met by the distinct eligible approvers — e.g. the founder
 /// alone, or unanimity of co-owners, or M of N.
 ///

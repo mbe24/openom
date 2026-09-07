@@ -3,7 +3,9 @@
 use serde_json::Value;
 
 /// A compiled validator for the canonical model against **JSON Schema — Draft 2020-12**
-/// (<https://json-schema.org/draft/2020-12/schema>). This type is the single place that dialect is
+/// (<https://json-schema.org/draft/2020-12/schema>).
+///
+/// This type is the single place that dialect is
 /// pinned in Rust; the schema documents declare the same dialect through their `$schema` keyword. It
 /// sits behind the `validation` feature and off the default/wasm build so `jsonschema` never bloats
 /// the browser bundle.

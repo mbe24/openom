@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-/// Default AEAD cipher — **XChaCha20-Poly1305** (frozen §6). Its 192-bit nonce makes
+/// Default AEAD cipher — **XChaCha20-Poly1305** (frozen §6).
+///
+/// Its 192-bit nonce makes
 /// random nonces collision-free in practice, so a long delta log under one DEK never
 /// hits AES-GCM's nonce-reuse footgun. Matches `Aead::Xchacha20Poly1305`.
 pub type Cipher = chacha20poly1305::XChaCha20Poly1305;
@@ -15,7 +17,9 @@ pub const KEY_LEN: usize = 32;
 /// Argon2id salt length in bytes.
 pub const SALT_LEN: usize = 16;
 
-/// 256-bit key material (a DEK or KEK) that **zeroizes on drop**. Derefs to
+/// 256-bit key material (a DEK or KEK) that **zeroizes on drop**.
+///
+/// Derefs to
 /// `[u8; KEY_LEN]`. The role-typed [`Dek`]/[`Kek`] newtypes (no `Deref`, one `.expose()`)
 /// are the guarded surface; this bare alias is the escape hatch used at the sealer boundary.
 pub type Key32 = zeroize::Zeroizing<[u8; KEY_LEN]>;

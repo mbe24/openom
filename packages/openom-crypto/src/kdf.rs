@@ -9,7 +9,9 @@ use keyeo_crypto::{
 
 use crate::CryptoError;
 
-/// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt + costs). Deterministic
+/// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt + costs).
+///
+/// Deterministic
 /// in its inputs — the same passphrase + params yield the same KEK, which is what lets a second device join
 /// from the passphrase alone (§4).
 ///

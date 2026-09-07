@@ -1,6 +1,10 @@
-//! The engine selector (OPE-278): ONE enum both host consumers (the web-worker RPC in the `wasm` module and
+//! The engine selector (OPE-278).
+//!
+//! ONE enum both host consumers (the web-worker RPC in the `wasm` module and
 //! the Tauri invoke host in `openom-vault-host`) dispatch through, so the chain-vs-dag choice is made once
-//! here rather than hand-wired at 2 hosts × 2 engines — OPE-276's "write once". It implements the shared
+//! here rather than hand-wired at 2 hosts × 2 engines — OPE-276's "write once".
+//!
+//! It implements the shared
 //! client lifecycle [`KeyringLifecycle`] by delegating to the selected engine.
 //!
 //! The engine is a **deployment/backend preset** (owner decision 2026-09-03): the managed Lambda backend is

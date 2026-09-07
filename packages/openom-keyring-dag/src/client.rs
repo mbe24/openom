@@ -1,6 +1,10 @@
-//! The DAG keyring's **client facade** (OPE-273) — the secret-adjacent surface the vault (`openom-sealer`'s
+//! The DAG keyring's **client facade** (OPE-273).
+//!
+//! the secret-adjacent surface the vault (`openom-sealer`'s
 //! `dag_vault.rs`) drives, so the vault never touches `keyeo` or this crate's op types directly (a
-//! one-line import grep keeps `dag_vault.rs` free of `keyeo`). It mints content-addressed ops carrying an
+//! one-line import grep keeps `dag_vault.rs` free of `keyeo`).
+//!
+//! It mints content-addressed ops carrying an
 //! opaque `sealing` payload, packages the trust anchor, and resolves an anchor to a [`MembershipView`] plus
 //! the effective ops' sealing payloads for the vault's sealing fold.
 //!
@@ -54,7 +58,9 @@ fn append(
 }
 
 /// Append an **Add** op — an authorized signer (`author`) adds `member` (id + role + carried signing/HPKE
-/// keys) carrying the joiner's per-epoch DEK wraps in `sealing`. Signed by the author's current key.
+/// keys) carrying the joiner's per-epoch DEK wraps in `sealing`.
+///
+/// Signed by the author's current key.
 ///
 /// # Errors
 /// Returns [`ClientError`] if `anchor_bytes` is malformed.
@@ -76,7 +82,9 @@ pub fn append_add(
 }
 
 /// Append a **Remove** op — an authorized signer (`author`) removes `member_id`, carrying the
-/// forward-secret re-epoch (a fresh DEK wrapped only to the remaining members) in `sealing`. Signed by the
+/// forward-secret re-epoch (a fresh DEK wrapped only to the remaining members) in `sealing`.
+///
+/// Signed by the
 /// author's current key.
 ///
 /// # Errors
@@ -178,9 +186,13 @@ fn mint(
     op
 }
 
-/// Create a brand-new dag keyring anchor: a content-addressed genesis `Create` op naming `founder_id` as
+/// Create a brand-new dag keyring anchor.
+///
+/// a content-addressed genesis `Create` op naming `founder_id` as
 /// the sole Owner, carrying the opaque `sealing` payload (the vault's epoch-0 + recovery escrow), with the
-/// recovery authority (RVK) pinned. Returns the serialized anchor bytes.
+/// recovery authority (RVK) pinned.
+///
+/// Returns the serialized anchor bytes.
 ///
 /// # Panics
 /// Never in practice: a freshly-built `DagAnchor` always serializes.
@@ -245,7 +257,9 @@ pub struct Resolved {
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
-/// it and the coarse kind of that op. The op-id is the deterministic winner tiebreak for concurrent
+/// it and the coarse kind of that op.
+///
+/// The op-id is the deterministic winner tiebreak for concurrent
 /// same-ordinal epochs; it is attached here, at resolve time, because it cannot live inside the sealing —
 /// the op-id is a hash *of* the sealing. The origin lets the sealer's fold decide which epochs may win the
 /// write epoch WITHOUT keyeo ever interpreting the sealing.
@@ -256,7 +270,9 @@ pub struct SealingEntry {
     pub bytes: Vec<u8>,
 }
 
-/// The coarse kind of the op that minted a sealing payload. Only Genesis, Remove, and Reseal ops
+/// The coarse kind of the op that minted a sealing payload.
+///
+/// Only Genesis, Remove, and Reseal ops
 /// legitimately mint a NEW epoch (Genesis: epoch 0; Remove / Reseal: a forward-secret re-epoch); an epoch
 /// carried by any `Other` op (e.g. an Add's joiner wraps, or a Retarget's re-escrow) is anomalous and the
 /// sealer's fold refuses to let it win the write epoch. The facade maps the keyeo action to this — keyeo
@@ -378,9 +394,13 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
 /// dropped. See [`keyeo_dag::Compacted`].
 pub type KeyringCompacted = Compacted<[u8; 32], String, KeyringRole, Ed25519>;
 
-/// Compute a compaction DECISION for `anchor_bytes`: rebuild the engine (exactly as [`resolve`] does), then ask
+/// Compute a compaction DECISION for `anchor_bytes`.
+///
+/// rebuild the engine (exactly as [`resolve`] does), then ask
 /// keyeo-dag which checkpoint to author and which ops may be pruned, given the host's `stable` frontier + the
-/// retention `plan`. This is the DECISION ONLY — no signing, no anchor mutation: the caller (the vault) authors
+/// retention `plan`.
+///
+/// This is the DECISION ONLY — no signing, no anchor mutation: the caller (the vault) authors
 /// the signed `Snapshot` from the returned resolved state and applies the prune to its stored anchor.
 ///
 /// `stable` is the frontier every peer has synced past — the data-loss guard `compact` never prunes above.
@@ -425,9 +445,13 @@ const fn origin_of(action: &KeyringAction) -> SealingOrigin {
     }
 }
 
-/// Author a CHECKPOINT-ROOTED anchor (OPE-348 step 2a): given a supplied DOMINATING `frontier`, prune the ops
+/// Author a CHECKPOINT-ROOTED anchor (OPE-348 step 2a).
+///
+/// given a supplied DOMINATING `frontier`, prune the ops
 /// at/below it and replace them with a signed [`Checkpoint`](crate::checkpoint::Checkpoint) carrying the
-/// resolved membership at the cut, the frontier depths, and the preserved sealing. The sealing preservation
+/// resolved membership at the cut, the frontier depths, and the preserved sealing.
+///
+/// The sealing preservation
 /// rides in as the `author_sealing` callback — the vault supplies it, so keyring-dag never interprets sealing.
 /// Un-compacted base only for now (chained checkpointing is a follow-up).
 ///
@@ -578,7 +602,9 @@ fn anchor_ops(anchor_bytes: &[u8]) -> Result<Vec<KeyringOp>, ClientError> {
 }
 
 /// The anchor's opaque anti-rollback **watermark**: its frontier (sorted tip op-ids) concatenated as raw
-/// 32-byte ids. Deterministic — equal frontiers give equal bytes — so the caller persists it and passes it
+/// 32-byte ids.
+///
+/// Deterministic — equal frontiers give equal bytes — so the caller persists it and passes it
 /// back as the `floor` on the next mutating flow. The sealer treats these bytes as opaque (guardrail #1).
 ///
 /// # Errors
@@ -589,8 +615,12 @@ pub fn watermark(anchor_bytes: &[u8]) -> Result<Vec<u8>, ClientError> {
 }
 
 /// Enforce the caller's anti-rollback `floor` (a watermark previously emitted by [`watermark`]) against a
-/// served anchor: every frontier op-id it names must still be present in the anchor's (append-only,
-/// causally-closed) op set. A missing one means the anchor dropped history — [`ClientError::RolledBack`].
+/// served anchor.
+///
+/// every frontier op-id it names must still be present in the anchor's (append-only,
+/// causally-closed) op set.
+///
+/// A missing one means the anchor dropped history — [`ClientError::RolledBack`].
 /// An empty floor is "no floor" (Ok); a floor whose length isn't a multiple of 32 is a corrupt watermark
 /// and is refused ([`ClientError::Malformed`]) rather than silently ignored — dropping it would drop
 /// rollback protection.
@@ -637,7 +667,9 @@ fn hex32(id: &[u8; 32]) -> String {
 }
 
 /// Merge two anchors of the same tree into their causal union — the op closures unioned, deduplicated by
-/// op-id, keeping `a`'s pinned genesis config. Concurrent branches both survive and resolve deterministically
+/// op-id, keeping `a`'s pinned genesis config.
+///
+/// Concurrent branches both survive and resolve deterministically
 /// (the op-DAG is a set-union CRDT). A direct convenience over the store-based anti-entropy in `blob_sync`.
 ///
 /// # Errors
@@ -660,7 +692,9 @@ pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
 }
 
 /// Append a recovery **`ReFound`** op — retarget the Owner to new keys, signed by the recovery authority
-/// (RVK), carrying the re-escrow in its opaque `sealing` envelope. Parents = the current frontier. Returns
+/// (RVK), carrying the re-escrow in its opaque `sealing` envelope.
+///
+/// Parents = the current frontier. Returns
 /// the new anchor bytes.
 ///
 /// # Errors
@@ -684,7 +718,9 @@ pub fn append_refound(
 }
 
 /// Append a voluntary **Retarget** op — `member` rotates their OWN keys, signed by their CURRENT key
-/// (change-passphrase), carrying the re-escrow in its opaque `sealing`. Parents = the current frontier.
+/// (change-passphrase), carrying the re-escrow in its opaque `sealing`.
+///
+/// Parents = the current frontier.
 /// Returns the new anchor bytes.
 ///
 /// # Errors
@@ -713,6 +749,7 @@ pub fn append_retarget(
 
 /// Append a **Reseal** op (OPE-282) — a membership-inert forward-secrecy repair authored by active
 /// `member_id`, carrying a fresh DEK epoch (wrapped to the resolved membership) in its opaque `sealing`.
+///
 /// Parents = the current frontier. Signed by the author's current key. Returns the new anchor bytes.
 ///
 /// # Errors
@@ -732,9 +769,13 @@ pub fn append_reseal(
     )
 }
 
-/// Append a **Backfill** op (OPE-288) — a membership-inert HISTORICAL-READ repair authored by `member_id`,
+/// Append a **Backfill** op (OPE-288).
+///
+/// a membership-inert HISTORICAL-READ repair authored by `member_id`,
 /// carrying ONLY `added_wraps` (the missing member wraps for existing epochs) in its opaque `sealing`, no new
-/// epoch. It reuses the inert `Reseal` keyeo action: keyeo sees only an authored, membership-inert op, and
+/// epoch.
+///
+/// It reuses the inert `Reseal` keyeo action: keyeo sees only an authored, membership-inert op, and
 /// what the sealing actually does — add wraps vs mint an epoch — is the sealer's concern, invisible to keyeo
 /// (the sealing invariant). Parents = the current frontier. Returns the new anchor bytes.
 ///

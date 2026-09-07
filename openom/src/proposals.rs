@@ -297,7 +297,9 @@ pub async fn list_proposals(
 }
 
 /// `DELETE /trees/{tree_id}/proposals/{proposal_id}` — resolve (accepted/rejected) or withdraw a
-/// proposal. Idempotent: deleting an already-gone proposal is a success (the client accepts then
+/// proposal.
+///
+/// Idempotent: deleting an already-gone proposal is a success (the client accepts then
 /// deletes, and may retry). Does not decrement the day ledger — the daily cap counts submissions.
 ///
 /// # Errors

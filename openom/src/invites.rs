@@ -91,7 +91,9 @@ pub struct ClaimBody {
     tag: String,
 }
 
-/// `PUT /invites/{invite_id}/claim` — the invitee (signed in) submits its MAC'd public keys. The server
+/// `PUT /invites/{invite_id}/claim` — the invitee (signed in) submits its MAC'd public keys.
+///
+/// The server
 /// enforces `member_id == the JWT sub`, the invite is OPEN + unexpired, and ONE live claim. It does NOT
 /// verify the MAC (only the owner, holding the link secret, can) — this is the honest-server gate; the
 /// real defense is the owner's tag check at admit.

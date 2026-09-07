@@ -117,9 +117,13 @@ impl<Id: MemberId, R: Role, S: SignatureScheme> CanonicalBytes for MembershipAct
     }
 }
 
-/// Deterministically encode the **signed content** of a block: a version tag followed by the postcard
+/// Deterministically encode the **signed content** of a block.
+///
+/// a version tag followed by the postcard
 /// encoding of `parents` and `author`, then the action's own canonical bytes, then the opaque `sealing`
-/// payload. Excludes the op id (see module docs). Both the signer ([`crate::op::Op::sign`]) and the
+/// payload.
+///
+/// Excludes the op id (see module docs). Both the signer ([`crate::op::Op::sign`]) and the
 /// verifier (the engine) call this over the block's own fields.
 ///
 /// `sealing` is an OPAQUE application payload the engine signs + content-addresses but never interprets —

@@ -29,7 +29,9 @@ fn put_u32(out: &mut Vec<u8>, v: u32) {
 }
 
 /// AAD binding an epoch-DEK wrap to its context: `(group_id, key_id, member_id, wrap_method)`, so a wrap
-/// can't be transplanted between members, epochs, or trees. `key_id` is a fresh per-epoch salt, so it
+/// can't be transplanted between members, epochs, or trees.
+///
+/// `key_id` is a fresh per-epoch salt, so it
 /// already identifies the epoch. The leading domain tag makes it byte-disjoint from [`rrk_wrap_aad`] and
 /// from any content AAD.
 #[must_use]
@@ -44,7 +46,9 @@ pub fn wrap_aad(group_id: &[u8], key_id: &[u8], member_id: &[u8], wrap_method: i
     out
 }
 
-/// AAD for a **recovery-root-key private-key wrap**. Unlike a per-epoch DEK wrap, the recovery root key is
+/// AAD for a **recovery-root-key private-key wrap**.
+///
+/// Unlike a per-epoch DEK wrap, the recovery root key is
 /// tree-scoped, not epoch-scoped, so it binds only `(group_id, member_id, wrap_method)` under its own
 /// `keyeo:rrk:v1` tag — byte-disjoint from [`wrap_aad`], so an RRK wrap can never be reinterpreted as an
 /// epoch-DEK wrap even when it reuses the passphrase/recovery `wrap_method` values.

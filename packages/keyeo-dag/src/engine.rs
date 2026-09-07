@@ -638,9 +638,13 @@ fn diff_events<Id: MemberId, R: Role>(
     events
 }
 
-/// A zero-cost borrowing VIEW of a `Keyeo`'s retained state — EXACTLY the inputs compaction reads (the op set,
+/// A zero-cost borrowing VIEW of a `Keyeo`'s retained state.
+///
+/// EXACTLY the inputs compaction reads (the op set,
 /// the causal graph, the resolved state, and the `has_been_shared` marker) and nothing else (not the
-/// access-control / quorum / resolver the engine also carries). [`Keyeo::retained`] produces it and the
+/// access-control / quorum / resolver the engine also carries).
+///
+/// [`Keyeo::retained`] produces it and the
 /// [`keyeo_core::Compaction`] impl operates on it, so the `State` type is precisely the mechanism's inputs —
 /// the op-DAG is borrowed, never duplicated, and compaction can't reach engine machinery it has no business in.
 pub struct Retained<'a, Op: SignedOp> {

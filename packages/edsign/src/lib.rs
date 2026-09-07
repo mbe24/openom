@@ -16,7 +16,9 @@ pub enum SignError {
     BadSignature,
 }
 
-/// An Ed25519 signing key. The seed is **not** readable — there is no accessor, no `Deref`, no serde —
+/// An Ed25519 signing key.
+///
+/// The seed is **not** readable — there is no accessor, no `Deref`, no serde —
 /// so it can only sign, never be exfiltrated by safe code; it scrubs on drop (the inner dalek key's
 /// `zeroize` feature, proven below). Mint one from a caller-supplied 32-byte seed via [`Self::from_seed`].
 pub struct SigningKey(ed25519_dalek::SigningKey);
@@ -43,7 +45,10 @@ impl SigningKey {
 }
 
 /// Derive a [`SigningKey`] deterministically from 32 bytes of input key material via HKDF-SHA256 (empty
-/// extract salt) under a caller-supplied domain-separation `info` label, then [`SigningKey::from_seed`].
+/// extract salt) under a caller-supplied domain-separation `info` label.
+///
+/// Then [`SigningKey::from_seed`].
+///
 /// The label domain-separates: the same `ikm` yields UNRELATED keys under different labels, so a signing
 /// capability derived here can never be confused with an encryption/identity key from the same secret —
 /// never reuse a scalar across roles. Generic: the `info` is the caller's, so this crate stays domain-free
@@ -79,7 +84,9 @@ where
 {
 }
 
-/// An Ed25519 verifying (public) key. Its **only** verify is [`Self::verify`] = `verify_strict`; it does
+/// An Ed25519 verifying (public) key.
+///
+/// Its **only** verify is [`Self::verify`] = `verify_strict`; it does
 /// not implement or expose the `Verifier` trait, so the weak plain-`verify` path is uncallable. Public
 /// material, so `Copy`/`Debug`/`Eq` are fine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

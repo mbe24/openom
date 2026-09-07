@@ -23,7 +23,9 @@ pub enum JcsError {
     Serialize(#[from] serde_json::Error),
 }
 
-/// Maximum array/object nesting depth. Claim values are shallow; this is far above any legitimate
+/// Maximum array/object nesting depth.
+///
+/// Claim values are shallow; this is far above any legitimate
 /// structure and exists only so a maliciously deep synced record fails with [`JcsError::TooDeep`]
 /// instead of aborting the process with a stack overflow.
 pub const MAX_DEPTH: usize = 128;

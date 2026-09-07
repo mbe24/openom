@@ -66,14 +66,18 @@ impl rand_core::RngCore for OsCsprng {
 impl rand_core::CryptoRng for OsCsprng {}
 
 /// An HPKE-wrapped DEK: the encapsulated key (the ephemeral X25519 public) and the sealed DEK, each a
-/// fixed-size [material newtype](keyeo_wrap) so a wrong-length half is unconstructable. HPKE carries
+/// fixed-size [material newtype](keyeo_wrap) so a wrong-length half is unconstructable.
+///
+/// HPKE carries
 /// its own nonce internally, so there is no separate nonce for this method.
 pub struct HpkeWrap {
     pub encapped_key: EncappedKey,
     pub ciphertext: WrappedDek,
 }
 
-/// A member's X25519 HPKE keypair. Named fields — **not** a positional `(secret, public)` tuple — so
+/// A member's X25519 HPKE keypair.
+///
+/// Named fields — **not** a positional `(secret, public)` tuple — so
 /// the two halves can never be bound in the wrong order: an inverted destructure that would publish the
 /// private key (e.g. stored as `RecoveryKey.public_key` in the plaintext keyring) is now a compile-time
 /// impossibility, not a one-character slip. The secret zeroizes on drop.
@@ -108,7 +112,9 @@ pub fn generate_hpke_keypair() -> Result<HpkeKeypair, CryptoError> {
 }
 
 /// Seal `dek` to a member's X25519 public key, binding `info` (the wrap context tuple) so
-/// the wrap can't be replayed for another member/epoch/tree. Draws HPKE's ephemeral key from the
+/// the wrap can't be replayed for another member/epoch/tree.
+///
+/// Draws HPKE's ephemeral key from the
 /// OS/browser CSPRNG; delegates to [`hpke_wrap_dek_with_rng`].
 ///
 /// # Errors
@@ -123,6 +129,7 @@ pub fn hpke_wrap_dek(
 
 /// The RNG-parameterized core of [`hpke_wrap_dek`]: with a seeded `rng` the wrap is reproducible, so
 /// the context-binding + round-trip properties are testable/fuzzable without touching OS entropy.
+///
 /// (HPKE's KEM/AEAD internals stay external-crate logic; this seam is for deterministic testing, not
 /// for Kani reaching inside the cipher.)
 ///
@@ -154,7 +161,9 @@ pub fn hpke_wrap_dek_with_rng<R: rand_core::RngCore + rand_core::CryptoRng>(
     })
 }
 
-/// Open an HPKE-wrapped DEK with the member's X25519 secret key. `recipient_secret` stays raw
+/// Open an HPKE-wrapped DEK with the member's X25519 secret key.
+///
+/// `recipient_secret` stays raw
 /// `&[u8]` on purpose: this is the shared crypto primitive that opens *either* a member wrap or an
 /// RRK wrap, so it is generic over "any 32-byte X25519 scalar" — the caller (`RrkSecret` vs
 /// `HpkePrivate`) is role-typed one layer up, and `.expose()`s here. `info` must be the exact context

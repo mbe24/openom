@@ -376,7 +376,9 @@ struct LogTail {
 }
 
 /// `GET /trees/{tree_id}/log?since=N` — the ordered tail after `since`, byte-budgeted, with the cursor
-/// to continue and the retained-window bounds. A cursor below the retained window is a `410` telling the
+/// to continue and the retained-window bounds.
+///
+/// A cursor below the retained window is a `410` telling the
 /// client to bootstrap from a snapshot (never a silently truncated tail).
 ///
 /// # Errors

@@ -144,10 +144,14 @@ pub struct Rekeyed {
     pub write_dek_hash: Vec<u8>,
 }
 
-/// Create a brand-new encrypted tree: a fresh DEK under epoch 0, a fresh **recovery root
+/// Create a brand-new encrypted tree.
+///
+/// a fresh DEK under epoch 0, a fresh **recovery root
 /// key** (RRK) escrowing that epoch (and every future one), the RRK private key wrapped
 /// under the owner's passphrase and a fresh recovery code, all in a keyring signed by the
-/// passphrase-derived identity (revision 1). The owner reaches epochs via the RRK, so the
+/// passphrase-derived identity (revision 1).
+///
+/// The owner reaches epochs via the RRK, so the
 /// keyring holds no per-epoch owner passphrase/recovery wrap.
 ///
 /// # Errors
@@ -234,7 +238,9 @@ pub fn provision(
 }
 
 /// Open an existing keyring with a passphrase and build a sealer set spanning every epoch
-/// the owner can reach (via the recovery root key). Verifies the keyring with the caller's
+/// the owner can reach (via the recovery root key).
+///
+/// Verifies the keyring with the caller's
 /// own derived identity (§4a V1).
 ///
 /// # Errors
@@ -341,7 +347,9 @@ fn authenticate_write_epoch(
 }
 
 /// Recover with the recovery code and re-establish owner access under `new_passphrase`,
-/// **preserving** every member, epoch, and the signer set. The code unwraps the recovery
+/// **preserving** every member, epoch, and the signer set.
+///
+/// The code unwraps the recovery
 /// root key, which reaches every epoch — so this is a single O(1) re-wrap of the RRK under
 /// the new passphrase + a fresh recovery code, not a per-epoch walk. Verification is skipped
 /// (the old identity is unrecoverable) — the recovery wrap's AEAD tag, bound to the trusted
@@ -454,7 +462,9 @@ pub fn recover(
 
 /// Change the passphrase: re-wrap the recovery root key under a new passphrase and a fresh
 /// recovery code — a single O(1) operation, since the owner reaches every epoch through the
-/// RRK. Members' wraps and every epoch are untouched; the DEKs are unchanged.
+/// RRK.
+///
+/// Members' wraps and every epoch are untouched; the DEKs are unchanged.
 ///
 /// On a **shared** tree the owner's identity changes (new passphrase → new key), so the new
 /// keyring is signed by **both** the old and new identity: a member who pinned the old
@@ -524,7 +534,10 @@ pub fn change_passphrase(
 }
 
 /// Rotate the recovery root: mint a FRESH RRK (hence a fresh RVK), re-wrap every epoch's DEK onto it,
-/// and re-issue the recovery code — the new revision authorized by the OLD recovery authority signing it.
+/// and re-issue the recovery code.
+///
+/// the new revision authorized by the OLD recovery authority signing it.
+///
 /// This is the only genuine way to revoke a prior recovery-key holder: re-wrapping alone leaves the RRK
 /// keypair, so anyone who ever unwrapped it keeps recovery power. The founder identity is unchanged (the
 /// passphrase doesn't change), so it's an ordinary transition that `verify_transition` accepts because the
@@ -618,9 +631,12 @@ pub fn rotate_recovery(
     })
 }
 
-/// What a joining member provisions from their own passphrase: the KDF params they store
+/// What a joining member provisions from their own passphrase.
+///
+/// the KDF params they store
 /// in their account record (to re-derive on any device) and the two **public** keys they
 /// hand a tree owner out-of-band (§4a) — the Ed25519 author key and the X25519 HPKE key.
+///
 pub struct MemberProvision {
     pub kdf_params: KeyeoKdfParams,
     pub author_public_key: Vec<u8>,
@@ -629,6 +645,7 @@ pub struct MemberProvision {
 
 /// Provision a member identity from a passphrase: derive the account's signing + HPKE
 /// keypairs and return the public keys (to share OOB) plus the KDF params (to persist).
+///
 /// The secrets are never returned — they re-derive from the passphrase on unlock.
 ///
 /// # Errors
@@ -657,7 +674,9 @@ pub struct MemberAdded {
 }
 
 /// The member being admitted to a tree ("the joiner"): their assigned id + role and the OOB-verified
-/// public keys they provided (§4a). The openom analog of keyeo's `MemberInit`, generic over the engine's
+/// public keys they provided (§4a).
+///
+/// The openom analog of keyeo's `MemberInit`, generic over the engine's
 /// role type so the chain (`MemberRole`) and dag (`KeyringRole`) add paths — and the shared `do_add_member`
 /// core — all speak one type. The two keys are DISTINCT types (`VerifyingKey` vs `X25519PublicKey`), so a
 /// transposition is a *compile error*, not a convention; construct via [`Joiner::from_bytes`], which is the
@@ -700,9 +719,13 @@ impl<R> Joiner<R> {
     }
 }
 
-/// A non-owner caller's credentials for a shared tree: their `passphrase` + account `kdf` (to re-derive
+/// A non-owner caller's credentials for a shared tree.
+///
+/// their `passphrase` + account `kdf` (to re-derive
 /// their identity), their `member_id`, and the `trusted_signers` they pinned out-of-band (§4a) as the
-/// keyring's trust anchor. Used by the member-unlock and co-owner administration paths.
+/// keyring's trust anchor.
+///
+/// Used by the member-unlock and co-owner administration paths.
 pub struct MemberAuth<'a> {
     pub passphrase: &'a Passphrase,
     pub kdf: &'a KeyeoKdfParams,
@@ -711,7 +734,9 @@ pub struct MemberAuth<'a> {
 }
 
 /// The caller's anti-rollback watermark floor for a recovery (OPE-286): the minimum acceptable `revision`
-/// plus the write epoch's `key_id` + `H(DEK)` from a prior VERIFIED unlock. Recovery skips signature
+/// plus the write epoch's `key_id` + `H(DEK)` from a prior VERIFIED unlock.
+///
+/// Recovery skips signature
 /// verification, so this pin is the sole authentication of the served epoch set (both key fields empty ⇒ a
 /// stateless device with no watermark).
 pub struct RecoverWatermark<'a> {
@@ -720,7 +745,9 @@ pub struct RecoverWatermark<'a> {
     pub dek_hash: &'a [u8],
 }
 
-/// Add a member to a shared tree. An authorized signer (V1: the owner) re-opens the
+/// Add a member to a shared tree.
+///
+/// An authorized signer (V1: the owner) re-opens the
 /// keyring with their passphrase to reach the DEK and their signing identity, HPKE-wraps
 /// the DEK to the member's public key, records them in the signed member list, and
 /// re-signs at the next revision (chained onto the prior one). The member's public keys
@@ -779,7 +806,9 @@ pub fn add_member(
     )
 }
 
-/// Add a member to a shared tree **as a co-owner** (any-of administration). Reaches the epoch
+/// Add a member to a shared tree **as a co-owner** (any-of administration).
+///
+/// Reaches the epoch
 /// DEKs through the co-owner's own member wraps (not the RRK), verifies the keyring against a
 /// pinned signer set, checks the caller is an authorized co-owner, and signs with the
 /// co-owner's identity. The new member's public keys must have been OOB-verified.
@@ -835,10 +864,14 @@ pub fn add_member_as_co_owner(
     )
 }
 
-/// Unlock a shared tree **as a member** (not the owner): verify the keyring against the
+/// Unlock a shared tree **as a member** (not the owner).
+///
+/// Verify the keyring against the
 /// caller's **pinned** signer set (learned out-of-band, §4a — never the member's own key
 /// and never the document's signer hints), then HPKE-unwrap the DEK with the member's
-/// passphrase-derived secret. `member_kdf` is the member's own account KDF params.
+/// passphrase-derived secret.
+///
+/// `member_kdf` is the member's own account KDF params.
 ///
 /// # Errors
 /// Returns [`VaultError`] if the member reaches no epoch or the keyring is malformed.
@@ -906,7 +939,9 @@ pub fn unlock_as_member(
 
 /// Result of [`remove_member`]: the re-keyed keyring to publish, the new revision, and a
 /// sealer scoped to the **new** epoch so the caller re-seals the tree snapshot under the new
-/// key. No recovery code — the RRK escrows the new epoch, so the code never rotates on a
+/// key.
+///
+/// No recovery code — the RRK escrows the new epoch, so the code never rotates on a
 /// removal.
 pub struct MemberRemoved {
     pub keyring: Vec<u8>,
@@ -918,10 +953,14 @@ pub struct MemberRemoved {
 }
 
 /// Remove a member with **forward-secure revocation**: mint a fresh DEK under a new epoch,
-/// wrap it only for those who remain — the founder via the recovery root key (HPKE to the
+/// wrap it only for those who remain.
+///
+/// the founder via the recovery root key (HPKE to the
 /// RRK **public** key, which needs no secret and so also works for a co-owner-initiated
 /// removal) and each other member via HPKE to their pinned key — drop the removed member
-/// from the member list and signer set, and re-sign at the next chained revision. Old epochs
+/// from the member list and signer set, and re-sign at the next chained revision.
+///
+/// Old epochs
 /// stay so remaining members still read pre-removal content; the removed member — who never
 /// receives a new-epoch wrap — cannot read anything sealed after removal.
 ///
@@ -997,7 +1036,9 @@ pub fn remove_member(
 
 /// Remove an ordinary member **as a co-owner** (any-of administration): reaches the epoch
 /// DEKs through the co-owner's own wraps, mints the new epoch, and signs with the co-owner's
-/// identity. A co-owner may only remove an *ordinary* member — removing a signer (co-owner or
+/// identity.
+///
+/// A co-owner may only remove an *ordinary* member — removing a signer (co-owner or
 /// founder) is a signer-set change, which is founder-only.
 ///
 /// # Errors
@@ -1081,7 +1122,9 @@ pub struct CoOwnerChanged {
 }
 
 /// Promote an existing member to **co-owner** — add them to the authorized-signer set so
-/// they can administer the tree (rotate keys, add/remove ordinary members). Changing the
+/// they can administer the tree (rotate keys, add/remove ordinary members).
+///
+/// Changing the
 /// signer set is founder-authorized ("founder-or-unanimity"): the new keyring is signed by
 /// the founder's identity. The member's own author key — pinned and OOB-verified when they
 /// were added — becomes their signer key, so no new key exchange is needed.
@@ -1160,7 +1203,9 @@ pub fn add_co_owner(
 }
 
 /// Demote a co-owner to an ordinary role, removing them from the authorized-signer set
-/// (founder-authorized). This revokes their signing/administration authority but NOT their
+/// (founder-authorized).
+///
+/// This revokes their signing/administration authority but NOT their
 /// read access — they keep their per-epoch member wraps (forward-secrecy bound). To also
 /// revoke read, remove them entirely with [`remove_member`]. `new_role` must be a non-signer
 /// role (admin/editor/viewer).

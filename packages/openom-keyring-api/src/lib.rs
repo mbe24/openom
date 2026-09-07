@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Which keyring engine backs a tree. Bound immutably at provision and recorded in signed/pinned material
+/// Which keyring engine backs a tree.
+///
+/// Bound immutably at provision and recorded in signed/pinned material
 /// (so a hostile store can't flip a tree's interpretation); the app selects the concrete engine on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EngineKind {
@@ -50,9 +52,13 @@ impl std::error::Error for UnknownEngine {}
 /// version it doesn't understand refuses rather than misparsing.
 pub const MEMBERSHIP_ENVELOPE_VERSION: u32 = 1;
 
-/// The **generic membership-update envelope** — the single wire both keyring engines emit, owned by
+/// The **generic membership-update envelope**.
+///
+/// The single wire both keyring engines emit, owned by
 /// openom-keyring-api (a real protobuf message via `prost`, so it is efficient AND self-owned — the crate borrows no
-/// openom proto). It is a thin frame: a `version`, the producing `engine` tag ([`EngineKind::as_tag`]), and
+/// openom proto).
+///
+/// It is a thin frame: a `version`, the producing `engine` tag ([`EngineKind::as_tag`]), and
 /// an OPAQUE `body` — the chain's signed `Keyring`, or a dag op — that only that engine parses. The op/
 /// keyring content id is computed over the inner `body`, BEFORE this framing, so wrapping never changes it.
 #[derive(Clone, PartialEq, Eq, ::prost::Message)]
@@ -127,7 +133,9 @@ impl std::fmt::Display for EnvelopeError {
 impl std::error::Error for EnvelopeError {}
 
 /// openom-keyring-api's own generic role convention (`i16`, **lower is stronger**): the Owner is the single
-/// strongest role and a signer is CoOwner-or-stronger. A consumer maps its own role enum onto these — for
+/// strongest role and a signer is CoOwner-or-stronger.
+///
+/// A consumer maps its own role enum onto these — for
 /// openom that's `openom-roles` (derived from the proto `MemberRole`), whose values MUST match. Defining
 /// them here, rather than depending on `openom-roles`, keeps this seam openom-free (openom-roles pulls in
 /// `openom-protocol`) so the crate — and every engine that binds its roles to these instead of to
@@ -245,7 +253,9 @@ pub enum VerifyError {
     Rollback,
 }
 
-/// The **keyless** server-side verifier seam. Admit an update against prior trust state — no secrets, no
+/// The **keyless** server-side verifier seam.
+///
+/// Admit an update against prior trust state — no secrets, no
 /// mutable state beyond what it is handed — and report the new opaque state + resolved view + whether it
 /// changed. Chain and dag each implement it; the server (and the client's adoption path) bind only to
 /// this. `admit` is the neutral "admit an update against prior state" verb — not chain's "accept/reject a

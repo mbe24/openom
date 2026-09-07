@@ -56,7 +56,9 @@ fn internal(e: sqlx::Error) -> ApiError {
 }
 
 /// `POST /trees/{tree_id}/media/intent` — check the owner's entitlements, atomically
-/// reserve quota, and return a presigned staging upload. Owner-pays: quota is the
+/// reserve quota, and return a presigned staging upload.
+///
+/// Owner-pays: quota is the
 /// tree owner's, resolved from `trees.owner_id` (§17).
 ///
 /// # Errors
@@ -152,7 +154,9 @@ pub async fn intent(
 }
 
 /// `POST /trees/{tree_id}/media/{blob_id}/confirm` — validate the staged upload and
-/// promote it. HEAD checks the observed size ≤ what was declared/reserved (no
+/// promote it.
+///
+/// HEAD checks the observed size ≤ what was declared/reserved (no
 /// under-declaring past the reserve), reconciles the meter to the observed size,
 /// then `CopyObject` staging → the canonical key and flips the row to `live`.
 ///
@@ -370,7 +374,9 @@ async fn load_for_ref(
 }
 
 /// `POST /trees/{id}/media/{blob}/attach` — the client references this blob from its
-/// tree doc: bump refcount, and **revive** it if it was tombstoned (§12). Meter is
+/// tree doc: bump refcount, and **revive** it if it was tombstoned (§12).
+///
+/// Meter is
 /// unchanged (a tombstoned blob still occupied its bytes).
 ///
 /// # Errors
@@ -397,7 +403,9 @@ pub async fn attach(
 
 /// `POST /trees/{id}/media/{blob}/detach` — drop a reference: decrement, and when it
 /// hits zero move to **tombstoned** (revivable) with a timestamp — never a physical
-/// delete (§9.11). Meter unchanged until the sweeper physically deletes.
+/// delete (§9.11).
+///
+/// Meter unchanged until the sweeper physically deletes.
 ///
 /// # Errors
 /// Returns [`ApiError`] if the caller isn't authorized or the store access fails.

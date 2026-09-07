@@ -6,7 +6,9 @@ use openom_crypto::CryptoError;
 use openom_sealer::SealerError;
 
 /// A keyring-vault failure: verifying/opening an untrusted keyring, membership administration, or the
-/// anti-rollback floor. A crypto failure (`Crypto`) or a lean DEK-session failure (`Sealer`) that surfaces
+/// anti-rollback floor.
+///
+/// A crypto failure (`Crypto`) or a lean DEK-session failure (`Sealer`) that surfaces
 /// through a vault flow is wrapped transparently.
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {

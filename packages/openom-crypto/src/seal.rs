@@ -15,7 +15,9 @@ use openom_protocol::v1::{Aead as AeadAlg, Header};
 use crate::{CryptoError, KEY_LEN};
 
 /// Seal `plaintext` under the DEK `key` for `header`, binding the whole header as AAD
-/// (§5). The AEAD and nonce come from `header` (`aead` + `nonce`). Returns the
+/// (§5).
+///
+/// The AEAD and nonce come from `header` (`aead` + `nonce`). Returns the
 /// ciphertext with the AEAD tag appended; the caller then sets `header.ciphertext_hash
 /// = sha256(ciphertext)` (excluded from the AAD — see [`crate::aad`]).
 ///

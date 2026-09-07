@@ -16,7 +16,9 @@ use crate::doc::{reset_rvk, to_pk32, KeyringDoc, KeyringRole, S_LAYOUT_AHEAD, S_
 use crate::keyring::{keyring_hash, VerifyingKey};
 use crate::wire::Keyring;
 
-/// An authorized signer — a founder or co-owner who may author keyring revisions. **Not a wire message**:
+/// An authorized signer — a founder or co-owner who may author keyring revisions.
+///
+/// **Not a wire message**:
 /// the signer set is DERIVED from `members` (a member at `CO_OWNER` or stronger IS a signer), so signer
 /// authority and member role can never drift apart (OPE-309). This is the in-memory shape the persisted
 /// anchor's trust set works over; `role` carries the member's role value (Owner==Founder==1, CoOwner==2).
@@ -42,7 +44,9 @@ fn derived_signers(k: &Keyring) -> Vec<AuthorizedSigner> {
         .collect()
 }
 
-/// The client's trusted keyring state for one tree — the last keyring it accepted. Everything here is
+/// The client's trusted keyring state for one tree — the last keyring it accepted.
+///
+/// Everything here is
 /// derivable from that keyring, so the store persists the keyring itself and rebuilds the anchor with
 /// [`KeyringAnchor::from_keyring`]; there is no separate on-disk anchor blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,7 +161,9 @@ fn map_linear_err(e: Error) -> KeyringError {
 }
 
 /// Chain engine: encode a governing keyring's **revision** as the entry's opaque `governing_ref` — 4
-/// big-endian bytes. Opaque to every layer but this adapter (the verifier decodes it back to a revision,
+/// big-endian bytes.
+///
+/// Opaque to every layer but this adapter (the verifier decodes it back to a revision,
 /// then walks the chain to that revision). Intentionally minimal to preserve V1 resolution semantics.
 #[must_use]
 pub fn encode_governing_ref(revision: u32) -> Vec<u8> {
@@ -295,7 +301,9 @@ pub fn verify_transition(
     Ok(new_anchor)
 }
 
-/// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
+/// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …).
+///
+/// Hop-by-hop is
 /// mandatory. `hops` must be in ascending revision order with no gaps; a gap surfaces as `NonSequential`.
 ///
 /// # Errors
@@ -348,7 +356,9 @@ pub fn bootstrap_from_oob(
 }
 
 /// Validate a keyring that establishes a **new anchor on its own terms** — a genesis, or a recovery /
-/// succession reset. Delegates to [`keyeo_chain::verify_reset`]; when `prior_rvk` is present the reset
+/// succession reset.
+///
+/// Delegates to [`keyeo_chain::verify_reset`]; when `prior_rvk` is present the reset
 /// must carry the SAME authority AND be signed by it (continuity + authorization).
 ///
 /// # Errors

@@ -52,7 +52,9 @@ fn rrk_covers<Id: RecipientId>(wrap: &Wrap<Id>, d: &RecipientDescriptor<Id>) -> 
 }
 
 /// The required recipients an epoch does NOT cover — the `required` members lacking a member wrap, plus the
-/// recovery root (`rrk`) if its RRK wrap is absent. Subset semantics: a wrap to a recipient outside
+/// recovery root (`rrk`) if its RRK wrap is absent.
+///
+/// Subset semantics: a wrap to a recipient outside
 /// `required` is ignored (that is [`covers_exact`]'s concern). The lockout gate is `missing(..).is_empty()`;
 /// a backfill re-wraps exactly the returned ids.
 pub fn missing<Id: RecipientId>(
@@ -73,7 +75,9 @@ pub fn missing<Id: RecipientId>(
 }
 
 /// Set-equality coverage: every `required` member and the `rrk` are covered (no lockout) AND no member wrap
-/// addresses a recipient outside `required` (no leak — a since-removed member still wrapped). This is the
+/// addresses a recipient outside `required` (no leak — a since-removed member still wrapped).
+///
+/// This is the
 /// reseal trigger: `!covers_exact(..)` means the epoch must be resealed to the resolved membership.
 pub fn covers_exact<Id: RecipientId>(
     epoch: &Epoch<Id>,

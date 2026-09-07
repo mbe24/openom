@@ -42,7 +42,9 @@ pub enum EntryError {
 }
 
 /// Verify a landed entry's author attribution against `governing` — the keyring the caller resolved from
-/// `header.governing_ref` (for the chain, the revision it decodes to). The caller is responsible for
+/// `header.governing_ref` (for the chain, the revision it decodes to).
+///
+/// The caller is responsible for
 /// having chain-verified that keyring (the wasm boundary does the chain-walk before calling this; a
 /// JS-side verified-handle is the documented future improvement). `plaintext` is the AEAD-opened payload
 /// (verification runs after open — the AEAD tag has already authenticated the header, including
@@ -110,7 +112,9 @@ pub fn verify_entry(
 }
 
 /// Whether the epoch identified by `key_id` is **attributed** — its DEK was wrapped to someone besides
-/// the sole founder (a co-owner or an ordinary member), i.e. the tree is shared under this epoch. Entries
+/// the sole founder (a co-owner or an ordinary member), i.e. the tree is shared under this epoch.
+///
+/// Entries
 /// under an attributed epoch MUST carry a valid `author_signature` (see [`verify_entry`]); entries under
 /// an unattributed epoch — a solo owner's own epoch, wrapped only to the founder — may be unattributed
 /// (V1's communal-DEK history stays valid). The decision is derived from the VERIFIED keyring, never from

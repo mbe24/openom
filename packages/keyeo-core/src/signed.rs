@@ -17,7 +17,9 @@
 
 use crate::{CanonicalBytes, SignatureScheme};
 
-/// A body `T` bound to the public key that signed its canonical bytes. Construct with [`Signed::sign`], read
+/// A body `T` bound to the public key that signed its canonical bytes.
+///
+/// Construct with [`Signed::sign`], read
 /// with [`Signed::verify`]. `body` is deliberately private: no consumer can read unauthenticated data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed<T, S: SignatureScheme> {

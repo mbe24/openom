@@ -16,7 +16,9 @@ use core::array::TryFromSliceError;
 use serde::{Deserialize, Serialize};
 
 /// The HPKE encapsulated key (`enc`) — the ephemeral X25519 public produced by a seal, replayed to the
-/// opener. A DISTINCT type from a recipient's static public key: both are 32-byte X25519 points, but one
+/// opener.
+///
+/// A DISTINCT type from a recipient's static public key: both are 32-byte X25519 points, but one
 /// is per-wrap ephemeral output and the other a stable identity, and keeping them non-swappable is the
 /// point.
 #[repr(transparent)]
@@ -53,7 +55,9 @@ impl TryFrom<&[u8]> for EncappedKey {
     }
 }
 
-/// A recipient's static X25519 public key — a member's or the recovery root's. Distinct from
+/// A recipient's static X25519 public key — a member's or the recovery root's.
+///
+/// Distinct from
 /// [`EncappedKey`] (both are 32-byte X25519 points, but this is a stable identity, that a per-wrap
 /// ephemeral) so the two can't be swapped in a wrap.
 #[repr(transparent)]

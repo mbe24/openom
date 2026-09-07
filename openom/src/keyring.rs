@@ -85,9 +85,13 @@ fn verify_err(e: VerifyError) -> ApiError {
     }
 }
 
-/// `PUT /trees/{tree_id}/keyring` — accept a new signed keyring revision: verify it against the stored
+/// `PUT /trees/{tree_id}/keyring` — accept a new signed keyring revision.
+///
+/// verify it against the stored
 /// head, persist it append-only (the `(tree_id, revision)` PK is the CAS), advance the head, and derive
-/// the `tree_access` ACL from its members. All in one tx under the tree row lock.
+/// the `tree_access` ACL from its members.
+///
+/// All in one tx under the tree row lock.
 ///
 /// # Errors
 /// Returns [`ApiError`] if the update is rejected (auth/rate/CAS) or the store write fails.

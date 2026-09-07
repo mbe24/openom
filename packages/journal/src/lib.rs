@@ -23,7 +23,9 @@ pub enum StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Ein Log-Eintrag ist ein OPAKER Blob — die versiegelte Envelope. Seit der
+/// Ein Log-Eintrag ist ein OPAKER Blob — die versiegelte Envelope.
+///
+/// Seit der
 /// Verschlüsselung liegt jede Metadatenspalte (`device_id`, lamport, …) INNEN im
 /// Chiffrat; der Store (und ein späterer Zero-Knowledge-Server) sieht nur Bytes
 /// plus die vergebene `seq`. Das JS-Modell ist identisch: `IndexedDbStore` und die

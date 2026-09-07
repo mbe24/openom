@@ -62,9 +62,10 @@ macro_rules! secret_key {
 }
 
 secret_key!(
-    /// A per-tree, per-epoch **data-encryption key**: the symmetric key that seals entries. Produced
-    /// by `generate_dek` / `unwrap_dek` / `hpke_unwrap_dek`; consumed by the wrap functions and (via
-    /// `into_inner`) the sealer.
+    /// A per-tree, per-epoch **data-encryption key**: the symmetric key that seals entries.
+    ///
+    /// Produced by `generate_dek` / `unwrap_dek` / `hpke_unwrap_dek`; consumed by the wrap functions
+    /// and (via `into_inner`) the sealer.
     Dek
 );
 secret_key!(
@@ -73,7 +74,9 @@ secret_key!(
     Kek
 );
 secret_key!(
-    /// The **recovery-root-key private scalar** (X25519). Unlike an [`HpkePrivate`] it is not derived
+    /// The **recovery-root-key private scalar** (X25519).
+    ///
+    /// Unlike an [`HpkePrivate`] it is not derived
     /// from a passphrase: it is escrow-wrapped at rest (`wrap_rrk_secret`) and, once recovered, opens
     /// the owner's epoch DEK wraps. Distinct from [`HpkePrivate`] so it can never be swapped in as a
     /// symmetric-wrap payload, nor a member secret be wrapped in its place.
@@ -81,6 +84,7 @@ secret_key!(
 );
 secret_key!(
     /// A **member's X25519 HPKE private scalar**, derived from their passphrase root (`derive_root`).
+    ///
     /// Opens a DEK wrapped to them when they are a member of another tree; never escrow-wrapped
     /// itself (it re-derives from the passphrase). Distinct from [`RrkSecret`].
     HpkePrivate
@@ -89,7 +93,9 @@ secret_key!(
 // The two variable-length secret inputs — hand-written since the fixed-32-byte macro above doesn't fit.
 // Same guard shape: no `Deref`, no `Serialize`, a `Debug` that hides the value, one `.expose()`.
 
-/// A user **passphrase** — the variable-length secret fed to the KDF. Zeroized on drop; its bytes are
+/// A user **passphrase** — the variable-length secret fed to the KDF.
+///
+/// Zeroized on drop; its bytes are
 /// reachable only via [`expose`](Passphrase::expose). Distinct from a keyring blob or any other `&[u8]`
 /// at a vault call site, so the two can't be swapped.
 #[derive(Clone)]
@@ -114,7 +120,9 @@ impl core::fmt::Debug for Passphrase {
 }
 
 /// A **recovery code** — the bearer secret shown to the user once (its entropy is a second door to the
-/// DEK). No `Debug` bytes and no `Serialize`, so it can't leak via `{:?}` or a stray serialize, and it
+/// DEK).
+///
+/// No `Debug` bytes and no `Serialize`, so it can't leak via `{:?}` or a stray serialize, and it
 /// is a distinct type from a `did:key` / member id it sits next to at a boundary. Read via
 /// [`expose`](RecoveryCode::expose); hand to a display boundary via [`into_string`](RecoveryCode::into_string).
 #[derive(Clone)]

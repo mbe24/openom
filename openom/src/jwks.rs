@@ -101,7 +101,9 @@ fn decode_sub(token: &str, key: &DecodingKey, validation: &Validation) -> Result
     Uuid::parse_str(&data.claims.sub).map_err(|_| "sub is not a uuid")
 }
 
-/// A JWKS key cache: `kid → (DecodingKey, Algorithm)`, populated by fetching the JWKS URL. A miss
+/// A JWKS key cache: `kid → (DecodingKey, Algorithm)`, populated by fetching the JWKS URL.
+///
+/// A miss
 /// triggers ONE refresh, single-flighted behind a mutex; a fetch failure is FAIL-CLOSED (the token is
 /// rejected, never accepted on an unresolved key).
 pub struct JwksCache {

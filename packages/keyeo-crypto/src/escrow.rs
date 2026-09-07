@@ -52,7 +52,9 @@ pub fn kek_wrap<Id: RecipientId>(
 }
 
 /// The deterministic core of [`kek_wrap`], with the `nonce` supplied by the caller — same inputs yield the
-/// same wrap, so the context-binding property is testable without the RNG. **Contract:** `nonce` must be a
+/// same wrap, so the context-binding property is testable without the RNG.
+///
+/// **Contract:** `nonce` must be a
 /// fresh, unique 24-byte value.
 ///
 /// # Errors
@@ -79,7 +81,9 @@ pub fn kek_wrap_with_nonce<Id: RecipientId>(
     })
 }
 
-/// Open a KEK escrow wrap under `kek`, returning the sealed 32-byte secret (zeroizing). Rebuilds the
+/// Open a KEK escrow wrap under `kek`, returning the sealed 32-byte secret (zeroizing).
+///
+/// Rebuilds the
 /// tree-scoped rrk AAD from the wrap's own recipient + method, so a wrong KEK / tampered wrap / mismatched
 /// group all fail as [`CryptoError::Open`]. A DEK (HPKE) wrap is not an escrow wrap and is rejected.
 ///

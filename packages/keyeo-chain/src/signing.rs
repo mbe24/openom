@@ -33,7 +33,9 @@ struct SignedFields<'a, Id, R, Pk> {
     payload_commitment: PayloadCommitment,
 }
 
-/// The canonical bytes an authorized signer signs over `doc`. Public because a binding that *authors*
+/// The canonical bytes an authorized signer signs over `doc`.
+///
+/// Public because a binding that *authors*
 /// revisions must sign these exact bytes (and hash them for the next revision's `prev_hash`, see
 /// [`doc_hash`]); the engine and the binding therefore agree by construction.
 pub fn signing_bytes<D: Doc>(doc: &D) -> Vec<u8> {
@@ -53,7 +55,9 @@ pub fn signing_bytes<D: Doc>(doc: &D) -> Vec<u8> {
 }
 
 /// SHA-256 of `doc`'s [`signing_bytes`] — the value the *next* revision records as its `prev_hash`, and the
-/// `doc_hash` a verified [`Anchor`](crate::Anchor) carries. Hashing the signing bytes (not any wire form)
+/// `doc_hash` a verified [`Anchor`](crate::Anchor) carries.
+///
+/// Hashing the signing bytes (not any wire form)
 /// keeps the chain reproducible across Rust/wasm.
 pub fn doc_hash<D: Doc>(doc: &D) -> DocHash {
     DocHash(sha256(&signing_bytes(doc)))

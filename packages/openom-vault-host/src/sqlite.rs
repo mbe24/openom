@@ -1,4 +1,6 @@
-//! A durable [`VaultStore`] on `SQLite`, for the Tauri host. Holds the keyring (a wrapped DEK —
+//! A durable [`VaultStore`] on `SQLite`, for the Tauri host.
+//!
+//! Holds the keyring (a wrapped DEK —
 //! not secret, needs only durability) and the keyring-revision watermark (anti-rollback state)
 //! in the app data dir. Fable's guidance: keep this in its OWN file (`vault.sqlite`), separate
 //! from the doc store's `tree.sqlite`, so copying/restoring the tree database can't drag the

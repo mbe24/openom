@@ -106,7 +106,9 @@ pub struct Person {
 }
 
 /// A live claim whose `predicate` this build doesn't recognize — the read-model counterpart of the
-/// mechanism's opaque [`Record::Unknown`](openom_claim::envelope::Record::Unknown) (OPE-212a). Carried
+/// mechanism's opaque [`Record::Unknown`](openom_claim::envelope::Record::Unknown) (OPE-212a).
+///
+/// Carried
 /// verbatim (an unknown predicate has no known semantics to corroborate) so new vocabulary shows up in
 /// the UI immediately; a generic renderer displays it as key/value. Attached to a [`Person`] when its
 /// (effective) target resolves to one, else carried in [`Projection::unclassified`].
@@ -124,7 +126,9 @@ pub struct GenericClaimView {
     pub created_by: String,
 }
 
-/// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2). The projection's
+/// A content-addressed blob linked to an anchor via a `media_link/v1` claim (§10.2).
+///
+/// The projection's
 /// job for media is *attach the link to the canonical person*. It breaks out the one guaranteed field
 /// — the blob's `media_hash` (the thing you fetch) — and carries the rest of the shape, which is open
 /// and varies by kind (an image has `width`/`height`, a document has a `coverage` locator, a future
@@ -169,7 +173,9 @@ pub struct Citation {
     pub source: SourceRef,
 }
 
-/// A resolved custom field on a person. `label`/`field_type` come from the field's `custom/field/v1`
+/// A resolved custom field on a person.
+///
+/// `label`/`field_type` come from the field's `custom/field/v1`
 /// definition (most-corroborated); a value whose `field_id` has no definition degrades to
 /// `label = field_id`, `field_type = "text"`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -247,7 +253,9 @@ pub struct PlaceView {
 }
 
 /// A family/union — a parent-set (the spouses) and the children sharing exactly that parent-set,
-/// with a stable id and its marriage event if one is recorded. Derived from the atomic parent-child +
+/// with a stable id and its marriage event if one is recorded.
+///
+/// Derived from the atomic parent-child +
 /// partnership edges so the GUI has an addressable "family": marriage facts attach here, and full vs.
 /// half siblings fall out of the parent-set grouping (a shared parent-set = full siblings; a partially
 /// shared one = a different union = half siblings). The id is stable across replicas (a function of
@@ -712,7 +720,9 @@ fn resolve(c: &Collected, policy: &Policy) -> Resolved {
     Resolved { rep, canonical, by_key, rehome, skipped }
 }
 
-/// Project a record set into the read model. Pure: the result depends only on the set of records and the
+/// Project a record set into the read model.
+///
+/// Pure: the result depends only on the set of records and the
 /// policy, never on their order. Four phases: **collect** (fold records into [`Collected`]), **resolve**
 /// identity (cluster `same_as`/`different_from`, reattribute, canonicalize), **`build_person_maps`**
 /// (per-person aggregation), and **assemble** the people / relationships / unions / events.

@@ -144,7 +144,9 @@ fn normalized(members: &[(Uuid, i16)], owner_id: Uuid) -> Vec<(Uuid, i16)> {
     v
 }
 
-/// `PUT /trees/{tree_id}/access` — accept a client-asserted advisory membership summary. The client has
+/// `PUT /trees/{tree_id}/access` — accept a client-asserted advisory membership summary.
+///
+/// The client has
 /// locally verified the keyring; the server stores the resolved `{member_id, role}` view as the advisory ACL
 /// WITHOUT parsing the keyring. Gated at SIGNER level (owner or co-owner): the summary has no crypto
 /// backstop, so this gate IS the authorization (deliberately tighter than `Administer` — a Maintainer can't
@@ -265,7 +267,9 @@ struct AccessMember {
 }
 
 /// `GET /trees/{tree_id}/access` — the current advisory member list + the summary's CAS `generation`, opaque
-/// `basis`, and last-asserted time. The client reads `{generation, basis}` before a push (to CAS + to check
+/// `basis`, and last-asserted time.
+///
+/// The client reads `{generation, basis}` before a push (to CAS + to check
 /// its trust state covers the stored basis); a sharing UI reads `members`. Read gate. `generation`/`basis`
 /// are absent (`null`/`[]`) for a tree whose ACL was derived in-tx by the chain keyring PUT and never
 /// summary-pushed.

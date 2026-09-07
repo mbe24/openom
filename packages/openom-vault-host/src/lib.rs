@@ -171,7 +171,9 @@ type Result<T> = std::result::Result<T, VaultError>;
 // ---------------------------------------------------------------- storage seam
 
 /// Persistence for the keyring (a wrapped DEK — not secret, needs durability) and the
-/// keyring-revision watermark (anti-rollback state). Injected so the host is testable with an
+/// keyring-revision watermark (anti-rollback state).
+///
+/// Injected so the host is testable with an
 /// in-memory fake and, on Tauri, backs onto durable `SQLite`. The snapshot-hash replay window
 /// (a separate, sync-layer concern) is intentionally NOT here — the vault flows only need the
 /// keyring-revision floor.
@@ -255,9 +257,12 @@ pub struct Sealed {
     pub ciphertext_hash: Vec<u8>,
 }
 
-/// What [`VaultHost::provision_member`] returns: the public keys a joining member shares
+/// What [`VaultHost::provision_member`] returns.
+///
+/// the public keys a joining member shares
 /// out-of-band with a tree owner, and the opaque KDF params they persist and pass back at
 /// unlock (an encoded `KdfParams` — the client treats it as a blob).
+///
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberProvisioned {
@@ -302,8 +307,11 @@ pub struct Resealed {
     pub resealed: bool,
 }
 
-/// Result of a dag [`VaultHost::dag_backfill`]: the (possibly unchanged) watermark now anchored locally, and
+/// Result of a dag [`VaultHost::dag_backfill`].
+///
+/// the (possibly unchanged) watermark now anchored locally, and
 /// whether historical-read wraps were actually added (`false` = nothing was missing, an idempotent no-op).
+///
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Backfilled {
@@ -318,7 +326,9 @@ pub struct Backfilled {
 // from the Tauri invoke payload and reused by the host method — instead of a long positional argument list.
 
 /// The member being admitted, as it crosses the IPC boundary: id + role + the OOB-received public key
-/// bytes. Nested inside every add request so the three share one shape (and one author-then-hpke order) by
+/// bytes.
+///
+/// Nested inside every add request so the three share one shape (and one author-then-hpke order) by
 /// construction; the host narrows it into a typed [`openom_vault::Joiner`] via `Joiner::from_bytes`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -428,7 +438,9 @@ impl Registry {
 // ---------------------------------------------------------------- entropy seam
 
 /// Source of the host's 128-bit random ids — the per-unlock replica id and the sealer-registry
-/// handle. [`OsEntropy`] (the OS/browser CSPRNG) is the source for real data in dev AND prod; tests
+/// handle.
+///
+/// [`OsEntropy`] (the OS/browser CSPRNG) is the source for real data in dev AND prod; tests
 /// inject a seeded `SeededEntropy` (test-only) for determinism. Entropy is a security property, not a
 /// dev/prod toggle — mirrors `openom_model::id::IdSource`. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
 /// interior mutability), so the host's methods stay `&self`.

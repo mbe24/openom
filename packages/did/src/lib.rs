@@ -65,7 +65,9 @@ pub fn decode_ed25519(did: &str) -> Result<[u8; 32], DidError> {
     rest.try_into().map_err(|_| DidError::BadLength)
 }
 
-/// A validated Ed25519 `did:key` identity (`did:key:z6Mk…`). A distinct type from a bare `String`, so
+/// A validated Ed25519 `did:key` identity (`did:key:z6Mk…`).
+///
+/// A distinct type from a bare `String`, so
 /// at a boundary it can't be swapped with a recovery code, a member id, or any other string — and it
 /// is guaranteed well-formed: every `DidKey` decodes to a 32-byte Ed25519 key. It is the stable author
 /// id stamped as a claim's `createdBy`; the envelope itself keeps `createdBy` as an opaque string, so
@@ -146,7 +148,9 @@ impl From<DidKey> for String {
 
 // ---- member-resolution seam ---------------------------------------------------------------------
 
-/// Resolve between an application `member_id` and its `did:key`. The keyring builds the concrete
+/// Resolve between an application `member_id` and its `did:key`.
+///
+/// The keyring builds the concrete
 /// directory from its members; consumers depend only on this trait, so the identity encoding stays
 /// swappable and this crate never depends on the protocol/keyring types.
 pub trait MemberResolver {

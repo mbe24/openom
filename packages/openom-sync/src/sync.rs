@@ -148,7 +148,9 @@ impl docsync::Sealer for SealerAdapter {
 }
 
 /// One device's view of a claim-model tree — a thin facade over [`docsync::SyncClient`] wired with a
-/// [`ClaimEngine`] and openom's sealer. Preserves the claim-model API (`push_claims` / `pull_claims` /
+/// [`ClaimEngine`] and openom's sealer.
+///
+/// Preserves the claim-model API (`push_claims` / `pull_claims` /
 /// `compact_claims` / `bootstrap_claims` / `materialize` / `set_moderators`).
 pub struct SyncClient<S: DocStore> {
     inner: docsync::SyncClient<ClaimEngine, SealerAdapter, S>,

@@ -100,7 +100,9 @@ pub struct Media {
     pub content_sha256: [u8; 32],
 }
 
-/// Merge class of a field's value. RESERVED SEAM (OPE-150). `Lww` (default) = whole-value
+/// Merge class of a field's value.
+///
+/// RESERVED SEAM (OPE-150). `Lww` (default) = whole-value
 /// last-writer-wins; `Text` marks a free-text field (e.g. a biography) for a future sequence/text
 /// CRDT — the algorithm behind it is deferred (OPE-151). Present now so marking a field text-merged
 /// later is not a schema break.
@@ -131,7 +133,9 @@ pub struct FieldValue {
 }
 
 /// A link from a node in this tree to a node in ANOTHER tree — RESERVED SEAM (OPE-99) for future
-/// tree federation. The record type exists so federation isn't a schema break; no federation
+/// tree federation.
+///
+/// The record type exists so federation isn't a schema break; no federation
 /// behaviour (unifying projection, cross-tree resolution) is built.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CrossTreeLink {
@@ -152,7 +156,9 @@ pub enum ModelError {
     NoSuchEvent(EventId),
 }
 
-/// The whole tree, as flat id-keyed tables. `BTreeMap` gives a deterministic iteration order
+/// The whole tree, as flat id-keyed tables.
+///
+/// `BTreeMap` gives a deterministic iteration order
 /// (a convenience for the future canonicalization step). Node ids are namespaced by `tree` for
 /// cross-tree references (`(tree, node)`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -325,7 +331,9 @@ impl Model {
     }
 }
 
-/// Canonical bytes of any serializable value — RFC 8785 (JCS)-equivalent for our data. Routing
+/// Canonical bytes of any serializable value — RFC 8785 (JCS)-equivalent for our data.
+///
+/// Routing
 /// through `serde_json::Value` (whose objects are a sorted `BTreeMap`) and serializing compactly
 /// yields sorted keys, no whitespace, and canonical integers. This equals JCS here because the model
 /// is float-free (JCS's ES6 number rule only bites on floats) and its keys are ASCII (byte order ==

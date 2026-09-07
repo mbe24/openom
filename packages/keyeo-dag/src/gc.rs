@@ -28,7 +28,10 @@ pub struct Frontier<OId: crate::dag::resolver::OpId> {
 }
 
 /// The (UNSIGNED) decision the dag's [`keyeo_core::Compaction`] impl returns: the checkpoint content to author
-/// (its frontier + resolved `state` + `has_been_shared`) and the `prune` set — the ops the caller may drop.
+/// (its frontier + resolved `state` + `has_been_shared`) and the `prune` set.
+///
+/// the ops the caller may drop.
+///
 /// `compact` takes no signing key and no `&mut`, so it never signs and never mutates: the CALLER (which holds
 /// the member's key) builds its own checkpoint body from `(frontier, state, has_been_shared)` and signs it via
 /// [`Signed::sign`](keyeo_core::Signed::sign), then applies `prune` to its store. Kept engine-native (the prune

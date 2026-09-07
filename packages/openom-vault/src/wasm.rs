@@ -1,5 +1,7 @@
 //! The **web binding** for the sealer — a thin `wasm-bindgen` veneer over the pure
-//! [`Sealer`](openom_sealer::Sealer) core. Only compiled with `--features wasm --target wasm32-*`;
+//! [`Sealer`](openom_sealer::Sealer) core.
+//!
+//! Only compiled with `--features wasm --target wasm32-*`;
 //! native (Tauri) callers use the core directly, so this file is the *only* web-specific
 //! code and the crypto path stays identical across web and native.
 //!
@@ -30,7 +32,9 @@ use crate::{vault, AppVault, DagVault, KeyringRole};
 use openom_keyring_api::{EngineKind, MembershipEnvelope};
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerSet};
 
-/// A sealing session, exported to JS. Wraps the core [`Sealer`]; the unlocked DEK lives
+/// A sealing session, exported to JS.
+///
+/// Wraps the core [`Sealer`]; the unlocked DEK lives
 /// inside WASM linear memory for the session's lifetime (the web tier's documented
 /// weaker-isolation trade-off vs. native — see the threat model / SERVER-DATA-FORMAT §16).
 #[wasm_bindgen]
@@ -233,7 +237,9 @@ fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
 
 // ---- the keyring vault (passphrase lifecycle) ----
 
-/// The result of a vault flow. Carries only non-secret outputs — the keyring (to store), the
+/// The result of a vault flow.
+///
+/// Carries only non-secret outputs — the keyring (to store), the
 /// recovery code (to show ONCE), the revision (to watermark), the author `didKey` (a `did:key` over
 /// the member's PUBLIC identity key — the claim `createdBy`), and the sealer HANDLE. No raw SECRET
 /// key material (DEK/KEK/private identity key) ever crosses to JS; the DEK lives inside the sealer.
@@ -532,7 +538,9 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
 }
 
 /// Add a member (owner action): HPKE-wrap the DEK to their OOB-verified public key and
-/// record them in the signed member list. Returns the new keyring to persist and the new
+/// record them in the signed member list.
+///
+/// Returns the new keyring to persist and the new
 /// revision (no sealer — the owner's session is unchanged).
 ///
 /// # Errors
@@ -578,7 +586,9 @@ pub fn add_member(
 
 /// Unlock a shared tree as a member: verify against the caller's pinned signer keys
 /// (`trusted_signers` = concatenated 32-byte Ed25519 verify-keys), then HPKE-unwrap with
-/// the member's passphrase. `member_kdf_params` is the blob from [`provision_member`].
+/// the member's passphrase.
+///
+/// `member_kdf_params` is the blob from [`provision_member`].
 ///
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
@@ -709,7 +719,9 @@ impl ResealResult {
 }
 
 /// Add a member to a dag tree (owner action): wrap the DEK to the joiner's OOB-verified keys and append a
-/// signed Add op. Returns the new anchor + watermark; no sealer (Add mints no epoch, the owner's is intact).
+/// signed Add op.
+///
+/// Returns the new anchor + watermark; no sealer (Add mints no epoch, the owner's is intact).
 ///
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
@@ -763,8 +775,11 @@ pub fn dag_add_member(
 }
 
 /// Remove a member from a dag tree (owner action) with forward secrecy: append a Remove op minting a fresh
-/// epoch the removed member can't reach, then re-unlock under it — returns the new anchor + watermark + a
+/// epoch the removed member can't reach, then re-unlock under it.
+///
+/// returns the new anchor + watermark + a
 /// sealer scoped to the new epoch.
+///
 ///
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
@@ -805,7 +820,9 @@ pub fn dag_remove_member(
 }
 
 /// Unlock a dag tree AS AN ORDINARY member: reach the DEKs via the member's own per-epoch HPKE wraps (not
-/// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key. No trusted-signer
+/// the owner RRK), verifying their passphrase-derived identity against their RESOLVED key.
+///
+/// No trusted-signer
 /// set (dag membership resolves from the op-DAG). Returns a sealer + watermark + `needsReseal`.
 ///
 /// # Errors
@@ -851,7 +868,9 @@ pub fn dag_unlock_as_member(
 }
 
 /// Merge a peer's dag anchor of the SAME tree into the local one (the causal set-union of their op closures)
-/// and return the merged anchor + advanced watermark. Merge only ADDS ops, so it can't roll back — no floor.
+/// and return the merged anchor + advanced watermark.
+///
+/// Merge only ADDS ops, so it can't roll back — no floor.
 /// Unlock the result to learn whether the merged write epoch needs a reseal.
 ///
 /// # Errors
@@ -872,7 +891,9 @@ pub fn dag_merge(local: &[u8], remote: &[u8]) -> Result<VaultResult, JsError> {
 }
 
 /// Repair a stale write epoch (OPE-282) after a concurrent membership merge: if the resolved keyring needs
-/// it, append a covering Reseal op. Idempotent — `resealed=false` (anchor unchanged) when nothing is stale.
+/// it, append a covering Reseal op.
+///
+/// Idempotent — `resealed=false` (anchor unchanged) when nothing is stale.
 /// `floor` is the caller's stored watermark (the anti-rollback floor).
 ///
 /// # Errors
@@ -911,9 +932,12 @@ pub fn dag_reseal(
     })
 }
 
-/// Member-authored self-heal of a stale write epoch (OPE-290): the same repair as [`dag_reseal`], but any
+/// Member-authored self-heal of a stale write epoch (OPE-290).
+///
+/// the same repair as [`dag_reseal`], but any
 /// ACTIVE member can drive it, authorizing with their own `passphrase` + account `member_kdf_params` instead
 /// of the owner passphrase — so a member locked out by a concurrent merge doesn't wait for the owner.
+///
 /// Idempotent; `floor` is the anti-rollback watermark.
 ///
 /// # Errors
@@ -987,8 +1011,11 @@ impl BackfillResult {
     }
 }
 
-/// Backfill historical READ access (OPE-288) after a concurrent membership merge: if some retained epoch is
+/// Backfill historical READ access (OPE-288) after a concurrent membership merge.
+///
+/// if some retained epoch is
 /// missing a resolved member's wrap, the owner re-wraps it for them and appends an `added_wraps` op.
+///
 /// Idempotent — `backfilled=false` (anchor unchanged) when nothing is missing. `floor` is the anti-rollback
 /// watermark. Owner-authored: only the RRK opens the old DEKs.
 ///
@@ -1136,8 +1163,12 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
 }
 
 /// Whether this keyring's trust state COVERS `stored_basis` (the frontier a prior /access push was computed
-/// from) — the client's pre-push staleness guard. dag: every stored tip op-id is in our op closure
-/// (`check_floor`); chain: our revision ≥ the stored revision. An empty basis is trivially covered; a
+/// from) — the client's pre-push staleness guard.
+///
+/// dag: every stored tip op-id is in our op closure
+/// (`check_floor`); chain: our revision ≥ the stored revision.
+///
+/// An empty basis is trivially covered; a
 /// malformed stored basis is treated as NOT covered (safe default — the caller then refreshes).
 ///
 /// # Errors
@@ -1172,9 +1203,12 @@ pub fn keyring_covers(
     })
 }
 
-/// Add a member **as a co-owner** (any-of): reaches keys via the co-owner's own wraps,
+/// Add a member **as a co-owner** (any-of).
+///
+/// reaches keys via the co-owner's own wraps,
 /// verifies against their pinned signer set (`trusted_signers` = concatenated 32-byte keys),
 /// and signs with the co-owner's identity.
+///
 ///
 /// # Errors
 /// Returns a [`JsError`] wrapping the underlying failure — invalid input, a wrong passphrase, a malformed keyring/anchor, or a failed crypto step.
@@ -1362,7 +1396,9 @@ fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
 }
 
 /// Unwrap a served `MembershipEnvelope` to its RAW chain `Keyring` body bytes — the format the client
-/// must retain per revision and feed §B3 verify. `verifyEntry`/`epochIsAttributed`/`wrapChainKeyringUpdate`
+/// must retain per revision and feed §B3 verify.
+///
+/// `verifyEntry`/`epochIsAttributed`/`wrapChainKeyringUpdate`
 /// all `Keyring::decode` their input, so a stored WRAPPED body fails to decode (a wire-type mismatch on
 /// field 1); the sync path must unwrap before persisting. Exposed for exactly that.
 ///
@@ -1374,7 +1410,9 @@ pub fn unwrap_chain_keyring_wasm(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
 }
 
 /// `hops` is the concatenation of the successor revisions, each framed as a 4-byte big-endian
-/// length followed by its bytes, in ascending revision order with no gaps. Each is validated as
+/// length followed by its bytes, in ascending revision order with no gaps.
+///
+/// Each is validated as
 /// a legitimate successor of the last ([`verify_walk`]); a fork, rollback, withheld hop,
 /// rogue-signer injection, or unendorsed change throws and the caller persists nothing. On
 /// success returns the validated head keyring to store + its revision (no sealer — keyring state
@@ -1436,9 +1474,13 @@ pub fn accept_remote_keyring(
     })
 }
 
-/// A joining member's verified view of a tree's WHOLE keyring history (`verifyKeyringWalk`): the head
+/// A joining member's verified view of a tree's WHOLE keyring history (`verifyKeyringWalk`).
+///
+/// the head
 /// revision + RAW head body, the head's signer set (for the JS fingerprint cross-check), and every RAW
-/// per-revision body so the member retains the full history for §B3 attributed-entry verification. No
+/// per-revision body so the member retains the full history for §B3 attributed-entry verification.
+///
+/// No
 /// sealer — keyring state only (re-unlock to read).
 #[wasm_bindgen]
 pub struct WalkResult {
@@ -1490,7 +1532,9 @@ struct WalkSignerDto {
     author_public: String,
 }
 
-/// Verify a tree's WHOLE keyring history from GENESIS — a joining member's read-side bootstrap. Where
+/// Verify a tree's WHOLE keyring history from GENESIS — a joining member's read-side bootstrap.
+///
+/// Where
 /// [`accept_remote_keyring`] walks forward from an already-trusted stored anchor, this trusts the genesis
 /// founder on first use (TOFU: the sole owner-role member's author key) and then PINS the verified history
 /// to the `(revision, keyring_hash)` the owner published out-of-band in the invite link. The pin closes the
@@ -1609,7 +1653,9 @@ pub fn verify_keyring_walk(
 }
 
 /// Frame a raw signed chain `Keyring` revision as the wire `KeyringUpdate` the server's `PUT
-/// /trees/{id}/keyring` accepts — the OUTBOUND mirror of [`accept_remote_keyring`]'s unwrap. The client
+/// /trees/{id}/keyring` accepts — the OUTBOUND mirror of [`accept_remote_keyring`]'s unwrap.
+///
+/// The client
 /// produces + locally persists a new keyring revision (add/remove member, rotate, refounder), then calls
 /// this and PUTs the bytes so peers can pull it.
 ///
@@ -1639,7 +1685,9 @@ pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(update.encode_to_vec())
 }
 
-/// Verify a landed entry's author attribution (§B3 launch gate). `envelope` is the sealed entry (its
+/// Verify a landed entry's author attribution (§B3 launch gate).
+///
+/// `envelope` is the sealed entry (its
 /// header carries the attribution fields), `plaintext` its AEAD-opened payload, `governing` the keyring
 /// bytes the caller resolved from `header.governing_ref` (for the chain, the revision it decodes to;
 /// fetched + chain-verified by the caller). Throws if the entry
@@ -1723,7 +1771,9 @@ impl EntryAttribution {
 }
 
 /// Read an entry's attribution coordinates (governing keyring revision + sealing `key_id`) from its header,
-/// so the client can pick the governing keyring + check whether the epoch is attributed. Both fields are
+/// so the client can pick the governing keyring + check whether the epoch is attributed.
+///
+/// Both fields are
 /// AAD-bound (a keyless server can't rewrite them without failing the AEAD open), so they're trustworthy.
 ///
 /// The header stores the opaque `governing_ref`; this chain-side veneer decodes it to a revision for the
@@ -1754,7 +1804,9 @@ pub fn entry_attribution(envelope: &[u8]) -> Result<EntryAttribution, JsError> {
 }
 
 /// Whether the epoch `key_id` is attributed in `keyring` — i.e. its DEK was wrapped beyond the sole
-/// founder (the tree is shared under it), so entries under it MUST be signed. The client uses this,
+/// founder (the tree is shared under it), so entries under it MUST be signed.
+///
+/// The client uses this,
 /// derived from the VERIFIED keyring (never an entry's own emptiness), to decide whether an unattributed
 /// entry is acceptable — closing the downgrade attack.
 ///
@@ -1767,8 +1819,12 @@ pub fn epoch_is_attributed_wasm(keyring: &[u8], key_id: &[u8]) -> Result<bool, J
 }
 
 /// Whether this tree HAS BEEN SHARED — a non-founder member was ever admitted — the MONOTONIC signal that
-/// gates attributed writes (§B3 slice 2): once true, the reader requires every authoritative entry to be
-/// signed and the writer attaches a signature. Unlike `epoch_is_attributed` (a per-epoch, per-revision
+/// gates attributed writes (§B3 slice 2).
+///
+/// once true, the reader requires every authoritative entry to be
+/// signed and the writer attaches a signature.
+///
+/// Unlike `epoch_is_attributed` (a per-epoch, per-revision
 /// property that removal can reset), this never regresses — it survives an un-share back to solo. Read from
 /// the VERIFIED keyring the caller supplies (walked/synced). Chain arm: `first_shared_revision != 0`. Dag arm
 /// (Phase C, OPE-351): the resolved anchor's `has_been_shared` — a monotonic scan for any effective `Add`, so an
@@ -1793,7 +1849,9 @@ pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsE
 }
 
 /// The moderator `did:key`s (members currently at Maintainer or above) from a keyring — the set the
-/// claim engine's fold treats as authorized to remove/supersede/revoke any claim. Returns a JS
+/// claim engine's fold treats as authorized to remove/supersede/revoke any claim.
+///
+/// Returns a JS
 /// `string[]`. The caller MUST pass its VERIFIED, watermarked keyring head; feed the result to
 /// `FamilyTree.setModerators` on unlock and on every accepted keyring-head change.
 ///
@@ -1809,7 +1867,9 @@ pub fn moderators_from_keyring_wasm(keyring: &[u8]) -> Result<Vec<String>, JsErr
 }
 
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4) —
-/// the read-side counterpart to the server accepting one. A reset changes the authorized-signer set
+/// the read-side counterpart to the server accepting one.
+///
+/// A reset changes the authorized-signer set
 /// WITHOUT the old set's endorsement (the old key is lost), so `verify_walk`/`verify_transition` reject it
 /// as an unendorsed change; this instead accepts it, but ONLY if it can't roll back or fork: it must be a
 /// structurally valid, self-signed, wrap-complete keyring (`verify_reset`) that chains onto the anchor by

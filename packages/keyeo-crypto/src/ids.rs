@@ -4,7 +4,9 @@
 use serde::{Deserialize, Serialize};
 
 /// An epoch DEK's identity — a fresh random salt minted per epoch, so it uniquely identifies the epoch and
-/// doubles as the per-epoch binding in the wrap AAD (no separate epoch scalar is needed). An opaque byte
+/// doubles as the per-epoch binding in the wrap AAD (no separate epoch scalar is needed).
+///
+/// An opaque byte
 /// string the caller assigns.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct KeyId(pub Vec<u8>);

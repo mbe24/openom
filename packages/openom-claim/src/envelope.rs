@@ -32,7 +32,9 @@ pub const TYPE_TREE: &str = "openom.org/core/tree/v1";
 
 pub const PREDICATE_ATTEST: &str = "openom.org/core/attest/v1";
 /// The predicate of the one **existence** claim minted alongside every anchor — the proposition "this
-/// individual is real", value `{}`. It is the single root a person's existence hangs on: it is the
+/// individual is real", value `{}`.
+///
+/// It is the single root a person's existence hangs on: it is the
 /// citation host for evidence of existence, and other authors support/refute it via `attest` rather
 /// than minting their own. Auto-minted by the engine (see `openom_tree::Tree::assert_anchor`).
 pub const PREDICATE_EXISTENCE: &str = "openom.org/core/existence/v1";
@@ -76,7 +78,9 @@ pub enum Verdict {
 }
 
 /// The target of an attestation: *either* a specific claim (by its content-hash `id`) *or* a fact (by
-/// its `fingerprint`, so the vote follows the fact across authors and re-imports — §4.1). Both are
+/// its `fingerprint`, so the vote follows the fact across authors and re-imports — §4.1).
+///
+/// Both are
 /// `sha256:…` strings; this enum forces the writer to declare which, so a claim id and a fingerprint
 /// can't be conflated at the one place attestations are built.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +246,9 @@ impl Claim {
 }
 
 /// A record the store syncs: a pure-identity [`Anchor`], a [`Claim`], or an [`Unknown`](Record::Unknown)
-/// record whose `type` this build doesn't recognize — the claim-model **data**. Operations (delete,
+/// record whose `type` this build doesn't recognize — the claim-model **data**.
+///
+/// Operations (delete,
 /// edit-supersession) are **not** records; they live in the operations channel as their own type, so an
 /// operation can never be passed where a `Record` is expected (the projection, the exporter). This is
 /// the coarse data-vs-operations boundary made a compile-time fact.

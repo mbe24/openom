@@ -15,7 +15,9 @@ use crate::kdf::KdfParams;
 use crate::keyring::{Epoch, RecipientId, Wrap};
 
 /// Decoding a stored key-material blob failed: malformed postcard, or trailing bytes after an otherwise
-/// valid value. Trailing bytes are rejected (not ignored) — a well-formed producer emits exactly the encoded
+/// valid value.
+///
+/// Trailing bytes are rejected (not ignored) — a well-formed producer emits exactly the encoded
 /// records, so extra bytes are a corrupt/hostile blob, and `postcard::from_bytes` would silently accept them.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CodecError {

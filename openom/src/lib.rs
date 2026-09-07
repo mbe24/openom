@@ -147,7 +147,9 @@ pub fn app(state: AppState) -> Router {
 }
 
 /// Wire up the shared state: a lazy Postgres pool, run migrations, seed the local
-/// dev account, and connect the blob store. Idempotent — safe to call at every
+/// dev account, and connect the blob store.
+///
+/// Idempotent — safe to call at every
 /// startup and at the top of each integration test.
 ///
 /// # Errors

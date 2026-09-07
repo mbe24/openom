@@ -13,7 +13,9 @@
 
 use serde::Serialize;
 
-/// The canonical-bytes seam. The default ("B") is a deterministic postcard encoding for anything
+/// The canonical-bytes seam.
+///
+/// The default ("B") is a deterministic postcard encoding for anything
 /// `Serialize` — used for primitive `Id`/`Role`/`OpId` values via [`Postcard`]. Types that embed non-serde
 /// crypto byte-arrays implement it by hand (in the engine crate).
 pub trait CanonicalBytes {

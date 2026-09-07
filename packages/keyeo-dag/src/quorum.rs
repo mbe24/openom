@@ -1,5 +1,7 @@
 //! Generic multi-signer quorum — the domain-free core of v2 governance (see
-//! `plan/design.keyring-quorum-v2.md`). A [`Requirement`] is a generic M-of-N over member ids; the
+//! `plan/design.keyring-quorum-v2.md`).
+//!
+//! A [`Requirement`] is a generic M-of-N over member ids; the
 //! resolver counts DISTINCT approvers and asks the requirement whether quorum is met. Fail-closed: an
 //! insufficient (or empty) approver set is never satisfied.
 //!
@@ -13,7 +15,9 @@ use keyeo_core::{Requirement, Role, SignatureScheme};
 
 use crate::dag::resolver::{GroupState, MemberId, MembershipAction};
 
-/// The domain seam for multi-signer quorum — parallel to `AccessControl`. Given the resolved state at a
+/// The domain seam for multi-signer quorum — parallel to `AccessControl`.
+///
+/// Given the resolved state at a
 /// proposal's causal position and the proposed `target`, it says **who may approve** and **what quorum is
 /// required**. The quorum resolver never reads roles itself; it asks the policy — so all membership
 /// coupling lives here, not in the engine (the property the unified `Engine<Op, State, Resolver>` needs).
@@ -28,7 +32,9 @@ pub trait QuorumPolicy<Id: MemberId, R: Role, S: SignatureScheme>: Send + Sync {
     ) -> Requirement<Id>;
 }
 
-/// **Individual** governance — a single authorized signer's action stands on its own. The positive dual
+/// **Individual** governance — a single authorized signer's action stands on its own.
+///
+/// The positive dual
 /// of a collective quorum, and the default: no change goes through Propose/Approve/Commit; each op's
 /// authority is decided by `AccessControl` alone. Under this policy a `Commit` never reaches quorum (the
 /// eligible set is empty and the requirement is fail-closed), so the quorum ops are inert — exactly the

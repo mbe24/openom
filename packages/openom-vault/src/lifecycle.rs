@@ -1,6 +1,10 @@
-//! The engine-agnostic client keyring **lifecycle** — the shared menu the two lockstep host consumers
+//! The engine-agnostic client keyring **lifecycle**.
+//!
+//! the shared menu the two lockstep host consumers
 //! (the web-worker RPC in the `wasm` module and the Tauri invoke host in `openom-vault-host`) dispatch over
-//! once, instead of hand-wiring 2 engines × 2 hosts. This is OPE-277 piece #1 of the swap seam
+//! once, instead of hand-wiring 2 engines × 2 hosts.
+//!
+//! This is OPE-277 piece #1 of the swap seam
 //! (plan/keyring-dag/design.swap-seam-decision.md).
 //!
 //! **Anchor-in / anchor-out + watermark, all engine-OPAQUE bytes.** A tree's trust state is an opaque
@@ -35,7 +39,9 @@ use crate::VaultError;
 use openom_sealer::SealerSet;
 
 /// The tree + member context every lifecycle call needs: which tree is being operated on and who is
-/// acting. These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
+/// acting.
+///
+/// These come from the caller's OWN expectation (the tree the app opened), NEVER the parsed,
 /// untrusted keyring — the trusted-context invariant the vault's "the AEAD binds `tree_id`" security rests
 /// on (see [`crate::vault`]).
 pub struct VaultContext<'a> {
@@ -151,7 +157,9 @@ pub trait KeyringLifecycle {
     ) -> Result<Rekeyed, VaultError>;
 }
 
-/// The linear-chain engine's lifecycle — openom's shipping keyring. Its anchor is the signed `Keyring`
+/// The linear-chain engine's lifecycle — openom's shipping keyring.
+///
+/// Its anchor is the signed `Keyring`
 /// bytes and its watermark is the keyring revision; each flow re-signs a new revision. Zero-sized: the
 /// [`crate::vault`] flows are stateless free functions, so the engine choice is carried by the type, not
 /// by held state. (The dag lifecycle impl is OPE-273.)

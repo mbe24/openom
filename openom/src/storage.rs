@@ -272,8 +272,9 @@ fn sha256_b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(Sha256::digest(bytes))
 }
 
-/// Object-key construction — the **one** place R2/S3 keys are built, so every caller
-/// (snapshots, spilled deltas, media) shards and namespaces identically instead of
+/// Object-key construction — the **one** place R2/S3 keys are built.
+///
+/// Every caller (snapshots, spilled deltas, media) shards and namespaces identically instead of
 /// re-`format!`ing the layout at each site.
 ///
 /// Every key is `{namespace}/{shard}/{tree}/…`: a readable resource namespace, then a

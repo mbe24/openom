@@ -135,7 +135,9 @@ pub enum TreeError {
     Codec(#[from] serde_json::Error),
 }
 
-/// The app-facing family-tree engine: the in-memory record set + the local author id. It composes the
+/// The app-facing family-tree engine: the in-memory record set + the local author id.
+///
+/// It composes the
 /// `openom-crdt` fold and the `openom-projection` read model. Edits mint an operation, apply it to the
 /// local set optimistically, and **return the encoded op-batch bytes** for the transport to seal +
 /// append. It is **key-less** — it never touches the DEK.

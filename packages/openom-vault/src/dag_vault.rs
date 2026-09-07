@@ -1,6 +1,9 @@
-//! The DAG keyring's vault (OPE-273) — the dag-engine counterpart to [`crate::vault`], producing the same
+//! The DAG keyring's vault (OPE-273).
+//!
+//! the dag-engine counterpart to [`crate::vault`], producing the same
 //! [`openom_sealer::SealerSet`] through the shared sealing core (`vault_core`) while resolving membership +
 //! recovery authority through the DAG keyring's client facade (`openom_keyring_dag::client`).
+//!
 //!
 //! The trust anchor is engine-opaque bytes: the dag's pinned genesis config + op closure, with the DEK
 //! epochs + recovery escrow riding the ops' `sealing` payloads (the design pass converged on this — one
@@ -419,7 +422,9 @@ fn map_floor_err(e: dag_client::ClientError) -> VaultError {
     }
 }
 
-/// The DAG engine's vault — a zero-sized selector, like [`crate::lifecycle::ChainVault`]. Its anchor is the
+/// The DAG engine's vault — a zero-sized selector, like [`crate::lifecycle::ChainVault`].
+///
+/// Its anchor is the
 /// dag keyring's pinned-config + op-closure bytes; each flow resolves membership through the facade and DEK
 /// material through the shared core.
 pub struct DagVault;

@@ -9,7 +9,9 @@ pub mod memory;
 pub use fs::FsBlob;
 pub use memory::MemoryBlob;
 
-/// An opaque per-object version token. A successful [`BlobStore::put`] returns the new one; a caller
+/// An opaque per-object version token.
+///
+/// A successful [`BlobStore::put`] returns the new one; a caller
 /// threads it into a later [`Precondition::IfMatch`] to compare-and-swap. The store defines its meaning
 /// (R2/Drive: the object etag; the reference impls here: the content hash) — treat it as opaque.
 pub type Etag = String;

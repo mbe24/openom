@@ -154,9 +154,13 @@ fn find(names: &[Name], id: NameId) -> Option<&Name> {
     names.iter().find(|n| n.id == id)
 }
 
-/// The effective parts of a name: its own parts, plus — if it states no `family` part but has a
+/// The effective parts of a name.
+///
+/// Its own parts, plus — if it states no `family` part but has a
 /// `borrows_from` — the `family` part(s) borrowed from the nearest ancestor up the composition chain
-/// that has them. Transitive (Bobby → Bob → Robert) and cycle-safe. Never follows `equivalent_to`
+/// that has them.
+///
+/// Transitive (Bobby → Bob → Robert) and cycle-safe. Never follows `equivalent_to`
 /// (borrowing across a rendering would splice scripts).
 ///
 /// # Errors
@@ -207,7 +211,9 @@ pub fn render(names: &[Name], id: NameId) -> Result<String, NameError> {
 }
 
 /// The equivalence class of `id`: every name reachable through `equivalent_to` edges treated as
-/// **undirected**, including `id` itself (a name with no edges is a class of one). Returned in
+/// **undirected**, including `id` itself (a name with no edges is a class of one).
+///
+/// Returned in
 /// names-list order. Errors on an edge pointing outside the list.
 ///
 /// # Errors
@@ -261,7 +267,11 @@ pub fn primary(names: &[Name]) -> Result<Option<&Name>, NameError> {
 
 /// Validate a person's whole name list against every invariant: at most one `primary`; every
 /// `borrows_from` chain resolvable and acyclic; every `equivalent_to` edge resolvable and not a
-/// self-loop; and `provenance` only where an `equivalent_to` edge exists. The two relations are
+/// self-loop.
+///
+/// and `provenance` only where an `equivalent_to` edge exists.
+///
+/// The two relations are
 /// independent — a name may set both.
 ///
 /// # Errors

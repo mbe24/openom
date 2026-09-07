@@ -19,7 +19,9 @@ pub const DEFAULT_ARGON2_ITERATIONS: u32 = 2;
 /// Argon2id parallelism (lanes).
 pub const DEFAULT_ARGON2_PARALLELISM: u32 = 1;
 
-/// The Argon2id inputs a KEK is derived under: a salt plus the three cost parameters. The single,
+/// The Argon2id inputs a KEK is derived under: a salt plus the three cost parameters.
+///
+/// The single,
 /// engine-neutral KDF-params type across the whole stack — serde-serialized (via `codec`) wherever it is
 /// persisted or transmitted, so the primitives here carry no proto dependency.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -31,8 +33,12 @@ pub struct KdfParams {
 }
 
 /// The window a consumer requires Argon2id params to fall in, checked before deriving a KEK from params
-/// read off an UNVERIFIED keyring — a hostile keyring could otherwise pick values that OOM or CPU-burn the
-/// client before any signature is checked. The window values are the CONSUMER's policy (what its platform
+/// read off an UNVERIFIED keyring.
+///
+/// a hostile keyring could otherwise pick values that OOM or CPU-burn the
+/// client before any signature is checked.
+///
+/// The window values are the CONSUMER's policy (what its platform
 /// will run); keyeo owns only the check.
 pub struct KdfBounds {
     pub memory_kib: std::ops::RangeInclusive<u32>,
@@ -54,7 +60,9 @@ impl KdfParams {
 }
 
 /// Derive a 256-bit KEK from `passphrase` under the given Argon2id `params` (salt +
-/// costs). Deterministic in its inputs — the same passphrase + params yield the same
+/// costs).
+///
+/// Deterministic in its inputs — the same passphrase + params yield the same
 /// KEK, which is what lets a second device join from the passphrase alone (§4).
 ///
 /// # Errors

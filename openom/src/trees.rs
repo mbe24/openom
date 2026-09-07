@@ -25,7 +25,9 @@ use crate::auth::Identity;
 use crate::authz::Access;
 use crate::AppState;
 
-/// Per-object ceiling. The Lambda proxy path tops out around 6 MB (§9.9); tree
+/// Per-object ceiling.
+///
+/// The Lambda proxy path tops out around 6 MB (§9.9); tree
 /// snapshots are far smaller, but the limit is enforced so a client can't wedge the
 /// proxy. Media (large) takes the presigned path instead, never this one.
 pub const MAX_OBJECT_BYTES: usize = 6 * 1024 * 1024;

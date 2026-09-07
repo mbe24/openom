@@ -1,5 +1,7 @@
 //! The chain keyring's **own** wire — hand-written `prost` messages the chain engine binds onto
-//! `keyeo-chain`. Moved out of `openom-protocol` in OPE-300 so the chain crate owns its keyring shape
+//! `keyeo-chain`.
+//!
+//! Moved out of `openom-protocol` in OPE-300 so the chain crate owns its keyring shape
 //! and depends on no openom proto crate (the same pattern `openom-keyring-api`'s `MembershipEnvelope`
 //! uses). The field numbers/shapes are byte-identical to the former `openom.v1.Keyring` and sub-messages,
 //! so semantics are unchanged.
@@ -12,7 +14,9 @@
 use keyeo_crypto::{codec, Epoch, Wrap};
 
 /// The `Keyring.layout_version` this build reads and writes (data-format spec §4) — the keyring's own
-/// version axis, independent of the envelope version. A keyring carrying a higher layout is opened
+/// version axis, independent of the envelope version.
+///
+/// A keyring carrying a higher layout is opened
 /// read-only rather than misread. Chain-owned (was `openom_protocol::KEYRING_LAYOUT_VERSION`).
 pub const KEYRING_LAYOUT_VERSION: u32 = 1;
 
@@ -30,7 +34,9 @@ pub const WRAP_X25519_HPKE: i32 = 2;
 pub const WRAP_RRK_HPKE: i32 = 4;
 
 /// Per-tree key material AND governance: the DEK wrapped for each member across epochs and the signed
-/// membership/role list — one signed, anti-rollback, hash-chained document. The authorized-signer set is
+/// membership/role list — one signed, anti-rollback, hash-chained document.
+///
+/// The authorized-signer set is
 /// DERIVED from members (a member at `CO_OWNER` or stronger is a signer). Field numbers match the former
 /// `openom.v1.Keyring` (reserved 4, 5, 8).
 #[derive(Clone, PartialEq, Eq, ::prost::Message)]
@@ -130,8 +136,12 @@ pub struct RecoveryKey {
 }
 
 /// The maximum size of a stored key-material blob, checked BEFORE decode (a raw byte cap, the decode-side
-/// analog of `MAX_MEMBERS`/`MAX_EPOCHS`): bounds the work a hostile keyring can impose before the count-based
-/// caps in `structure` apply. Generous — a large real keyring is well under this.
+/// analog of `MAX_MEMBERS`/`MAX_EPOCHS`).
+///
+/// bounds the work a hostile keyring can impose before the count-based
+/// caps in `structure` apply.
+///
+/// Generous — a large real keyring is well under this.
 pub const MAX_KEY_MATERIAL_BYTES: usize = 4 * 1024 * 1024;
 
 impl Keyring {
@@ -166,7 +176,9 @@ impl RecoveryKey {
 }
 
 /// A stored key-material blob (epochs or escrow wraps) was malformed, had trailing bytes, or exceeded
-/// [`MAX_KEY_MATERIAL_BYTES`]. Opaque on purpose — every case is "this keyring's key material is unusable",
+/// [`MAX_KEY_MATERIAL_BYTES`].
+///
+/// Opaque on purpose — every case is "this keyring's key material is unusable",
 /// which the structure gate turns into a rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyMaterialError;

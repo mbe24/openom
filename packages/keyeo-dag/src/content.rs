@@ -24,7 +24,9 @@ pub struct ContentId(pub [u8; 32]);
 impl OpId for ContentId {}
 
 /// Compute the content id from an op's fields: `H(canonical(parents, author, action, sealing) ‖ signature
-/// ‖ author_public_key)`. `sealing` is folded in via the canonical bytes, so tampering with it changes the
+/// ‖ author_public_key)`.
+///
+/// `sealing` is folded in via the canonical bytes, so tampering with it changes the
 /// id (the whole op — including its opaque payload — is content-addressed).
 pub fn content_id<OId: OpId, MId: MemberId, R: Role, S: SignatureScheme>(
     group_id: &GroupId,
@@ -80,7 +82,9 @@ impl<MId: MemberId, R: Role> Op<ContentId, MId, R, Ed25519> {
     }
 }
 
-/// Re-derive the content id from an op's fields and confirm it matches the claimed `id`. This is the
+/// Re-derive the content id from an op's fields and confirm it matches the claimed `id`.
+///
+/// This is the
 /// content-integrity check: a tampered `parents`/`author`/`action`/`signature` (with the id kept)
 /// fails here. Run it at **ingest**, before handing a content-addressed op to the engine (which
 /// separately verifies the signature). Together they give: the id names exactly this content, and

@@ -1,5 +1,7 @@
 //! The role feed the claim engine's fold consumes: the `did:key`s currently authorized to moderate
-//! (Maintainer or above) per a keyring. A pure function of a (verified, resolved) [`MembershipView`] —
+//! (Maintainer or above) per a keyring.
+//!
+//! A pure function of a (verified, resolved) [`MembershipView`] —
 //! engine-neutral (chain or dag), no I/O, no clock. Lives in the vault layer, above both engines, because
 //! it consumes a resolved membership — it is not the membership engine itself (OPE-308).
 
@@ -8,7 +10,9 @@ use std::collections::BTreeSet;
 use openom_keyring_api::{MembershipView, ROLE_MAINTAINER, ROLE_OWNER};
 
 /// The `did:key`s of members whose CURRENT role grants direct cross-author edit authority — Maintainer
-/// or above (Owner, Co-owner, Maintainer). This is exactly the set `openom_crdt::materialize` treats as
+/// or above (Owner, Co-owner, Maintainer).
+///
+/// This is exactly the set `openom_crdt::materialize` treats as
 /// authorized to Remove / Supersede / Revoke any claim; feed it in on unlock and on every governing
 /// keyring change.
 ///

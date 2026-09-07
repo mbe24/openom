@@ -35,7 +35,9 @@ fn unwrap_keyring(bytes: &[u8]) -> Result<Keyring, VerifyError> {
 }
 
 /// The engine-neutral [`MembershipView`] of a `Keyring` — the chain engine's public fold to the shared
-/// seam vocabulary. Consumers that want the resolved membership (e.g. `openom-vault`'s moderators feed)
+/// seam vocabulary.
+///
+/// Consumers that want the resolved membership (e.g. `openom-vault`'s moderators feed)
 /// go through this rather than reading `Keyring.members` directly, so they stay engine-agnostic. The
 /// caller MUST pass its VERIFIED, watermarked head; `reset_boundary` is `false` (this is the plain
 /// resolved view, not an admission outcome).

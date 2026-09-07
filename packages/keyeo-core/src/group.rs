@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// An opaque group identifier (openom: the tree id) — a byte string the caller assigns. The engine binds
+/// An opaque group identifier (openom: the tree id) — a byte string the caller assigns.
+///
+/// The engine binds
 /// every op to it, so an op minted for one group can never resolve into another; the wrap AAD binds it too,
 /// so a wrap can't be transplanted across groups. Lives in `keyeo-core` — the seam both engines and the
 /// crypto depend on — so every keyeo layer names the SAME type (previously it was defined twice, once per

@@ -49,7 +49,9 @@ pub struct PayloadCommitment(pub [u8; 32]);
 
 // ---- membership + governance ----
 
-/// A member of the group: an identity, its role, and its author public key. The engine derives the SIGNER
+/// A member of the group: an identity, its role, and its author public key.
+///
+/// The engine derives the SIGNER
 /// set from the full member set by [`SignerRole::is_signer`] — signer authority and member role can never
 /// drift apart (there is no separate signer roster).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,7 +61,9 @@ pub struct Signer<Id, R, PK> {
     pub public_key: PK,
 }
 
-/// The per-group governance rule pinned in a doc. `kind`: 0 = founder-or-unanimity (default), 1 =
+/// The per-group governance rule pinned in a doc.
+///
+/// `kind`: 0 = founder-or-unanimity (default), 1 =
 /// founder-only, 2 = founder-or-threshold(`threshold`), 3 = threshold(`threshold`) with no founder path.
 /// The PRIOR anchor's rule authorizes the NEXT privileged change (anti-downgrade).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,7 +73,9 @@ pub struct Governance {
 }
 
 /// A [`Role`](keyeo_core::Role) with the two predicates the linear engine needs, kept abstract so the
-/// engine never learns a domain's specific role ladder. `is_founder` marks the unique strongest role
+/// engine never learns a domain's specific role ladder.
+///
+/// `is_founder` marks the unique strongest role
 /// (exactly one member must hold it); `is_signer` marks founder-or-co-owner (who may author revisions).
 /// In openom's chain these are `role == 1` and `role in 1..=2`, but the engine only ever calls these.
 pub trait SignerRole: Role + Copy {
@@ -80,7 +86,9 @@ pub trait SignerRole: Role + Copy {
 }
 
 /// A **doc whose legitimacy the chain-walk has established** — the generalization of the chain's
-/// `KeyringAnchor`. It carries only the trust state a caller persists and passes back as `prior`: the
+/// `KeyringAnchor`.
+///
+/// It carries only the trust state a caller persists and passes back as `prior`: the
 /// group id, the accepted revision, its [`DocHash`], the DERIVED signer set, the governance rule, and the
 /// pinned recovery authority. A [`verify_transition`] (etc.) is the *only* way to obtain one over a
 /// candidate, so an unverified doc cannot be mistaken for a trusted anchor.
@@ -94,7 +102,9 @@ pub struct Anchor<Id, R, PK> {
     pub recovery_authority: Option<PK>,
 }
 
-/// A candidate membership doc the engine reasons over. The binding implements it; the engine builds its
+/// A candidate membership doc the engine reasons over.
+///
+/// The binding implements it; the engine builds its
 /// signed message from these SAME accessor values (see [`signing_bytes`]), so "what decides == what is
 /// signed". `structure_ok` is the binding's payload/structural gate (wrap-completeness, epoch ordinals,
 /// layout-version bound) and the engine invokes it at EVERY entry point.
@@ -126,7 +136,9 @@ pub trait Doc {
     fn structure_ok(&self) -> Result<(), &'static str>;
 }
 
-/// Why a candidate doc was refused. Distinct variants so a caller can react differently (a fork/rollback
+/// Why a candidate doc was refused.
+///
+/// Distinct variants so a caller can react differently (a fork/rollback
 /// is an attack; a gap is availability; an unendorsed change is tampering) and each guard gets a 1-to-1
 /// negative test. Generalizes openom-keyring-chain's `KeyringError`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -408,7 +420,9 @@ pub fn verify_transition<D: Doc>(
     })
 }
 
-/// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …). Hop-by-hop is
+/// Fold [`verify_transition`] over a contiguous run of candidates (revision N+1, N+2, …).
+///
+/// Hop-by-hop is
 /// mandatory — a signature at N+k proves authorship under the set at N+k−1 — so `structure_ok` runs each
 /// hop (via `verify_transition`). `hops` must be ascending with no gaps; a gap surfaces as `NonSequential`.
 ///
@@ -426,7 +440,9 @@ pub fn verify_walk<D: Doc>(
 }
 
 /// Validate a doc that establishes a NEW anchor on its own terms — a genesis, or a recovery / succession
-/// reset whose new founder identity deliberately carries no endorsement from the old one. Unlike
+/// reset whose new founder identity deliberately carries no endorsement from the old one.
+///
+/// Unlike
 /// [`verify_transition`] it does not chain onto a prior anchor: it checks the doc is structurally sound and
 /// self-signed by one of its own current signers. When `prior_rvk` is present (the PRIOR doc pinned a
 /// recovery authority) the reset must carry the SAME authority (continuity) AND be signed by it
@@ -467,7 +483,9 @@ pub fn verify_reset<D: Doc>(
 }
 
 /// Seed an anchor from a GENESIS doc (revision 1, all-zero `prev_hash`) as the founder: exactly one
-/// founder whose key is the caller's own, signed by it. Cryptographic first-sight for the founder path.
+/// founder whose key is the caller's own, signed by it.
+///
+/// Cryptographic first-sight for the founder path.
 /// Generalizes chain.rs `bootstrap_from_genesis`.
 ///
 /// # Errors
@@ -499,8 +517,12 @@ pub fn bootstrap_genesis<D: Doc>(
 }
 
 /// Seed an anchor from a head doc pinned OUT-OF-BAND: the caller supplies `(group_id, revision, doc_hash)`
-/// and the doc must match exactly — the OOB channel, not any signature, is the trust root for this first
-/// revision. A hygiene self-signature is still checked. Generalizes chain.rs `bootstrap_from_oob`.
+/// and the doc must match exactly.
+///
+/// the OOB channel, not any signature, is the trust root for this first
+/// revision.
+///
+/// A hygiene self-signature is still checked. Generalizes chain.rs `bootstrap_from_oob`.
 ///
 /// # Errors
 /// Returns an [`Error`] if the doc's group/revision/hash do not match the pinned values, it is
@@ -536,7 +558,9 @@ pub fn bootstrap_pinned<D: Doc>(
 // ---- compaction (retention) — the chain arm of `keyeo_core::Compaction`, symmetric with keyeo-dag ----
 
 /// The chain's Compaction STATE: the revisions a client currently retains (each has a stored, verified doc),
-/// deduped + sorted ascending. A chain "checkpoint" is simply the revision the client keeps as its new base —
+/// deduped + sorted ascending.
+///
+/// A chain "checkpoint" is simply the revision the client keeps as its new base —
 /// an ALREADY-SIGNED revision, so (unlike the dag's net-new signed `Snapshot`) nothing needs authoring: the
 /// client re-adopts it via [`bootstrap_pinned`] and drops the revisions below it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,7 +581,9 @@ impl Retained {
 }
 
 /// The chain's compaction DECISION: keep `checkpoint` as the base, drop every retained revision in `prune` (all
-/// strictly below it). The caller re-anchors on `checkpoint`'s retained doc and deletes the pruned revisions.
+/// strictly below it).
+///
+/// The caller re-anchors on `checkpoint`'s retained doc and deletes the pruned revisions.
 /// Contrast the dag's `keyeo_dag::Compacted`, which must ALSO carry a resolved state for the caller to sign into
 /// its checkpoint — the chain's checkpoint is a pre-existing signed revision, so its Output is lighter. Same
 /// trait, same shape.

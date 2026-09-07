@@ -13,6 +13,7 @@ pub const OP_TYPE: &str = "openom.org/core/op/v1";
 
 /// Domain-separation prefix for operation signatures, distinct from `openom-claim`'s
 /// `openom-claim-v1` so a claim signature and an op signature can never be mistaken for one another.
+///
 /// Reserved for the deferred op-signing step (see the module docs).
 pub const SIGN_DOMAIN: &[u8] = b"openom-op-v1";
 
@@ -330,10 +331,14 @@ pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<
         .collect()
 }
 
-/// Serialize a batch of [`ChannelItem`]s to / from the sealed payload bytes — the single op-batch
+/// Serialize a batch of [`ChannelItem`]s to / from the sealed payload bytes.
+///
+/// the single op-batch
 /// codec, shared by every transport (`openom-sync`'s `SyncClient`, the `openom-tree` engine) so
 /// they emit byte-identical bytes and a future CBOR swap (OPE-199, `ldclabs/cbor2`) touches exactly one
-/// place. V1 is plain `serde_json`; a decoded item's content-hash id is re-verified by `ChannelItem`'s
+/// place.
+///
+/// V1 is plain `serde_json`; a decoded item's content-hash id is re-verified by `ChannelItem`'s
 /// deserializer (the parse-don't-validate ingest boundary).
 pub mod codec {
     use crate::ChannelItem;

@@ -20,7 +20,9 @@ use keyeo_chain::{Ed25519, SigError, SignatureScheme};
 pub use edsign::{Signature, SigningKey, VerifyingKey};
 
 /// Generate a random signer identity (Ed25519) — a **test helper**, not a production path: real identities
-/// are passphrase-derived so they can be recovered. Gated behind `test-util` (and the crate's own tests).
+/// are passphrase-derived so they can be recovered.
+///
+/// Gated behind `test-util` (and the crate's own tests).
 /// `SigningKey` zeroizes on drop.
 ///
 /// # Errors
@@ -39,7 +41,9 @@ pub(crate) fn signing_bytes(keyring: &Keyring) -> Vec<u8> {
     keyeo_chain::signing_bytes(&KeyringDoc::new(keyring))
 }
 
-/// Append a signature from `signing_key` to the keyring (the any-of model). Set every keyring field first —
+/// Append a signature from `signing_key` to the keyring (the any-of model).
+///
+/// Set every keyring field first —
 /// all are covered (the signer set is derived from `members`). Multiple signers can each call this on the
 /// same keyring (order-independent, since signatures are excluded from the signed bytes).
 pub fn sign_keyring(keyring: &mut Keyring, signing_key: &SigningKey) {
@@ -52,7 +56,9 @@ pub fn sign_keyring(keyring: &mut Keyring, signing_key: &SigningKey) {
 }
 
 /// Verify the keyring carries **at least one** valid signature from the `trusted` set (§4a), returning the
-/// trusted key that verified. The signatures' `signer_public_key` hints are ignored — every trusted key is
+/// trusted key that verified.
+///
+/// The signatures' `signer_public_key` hints are ignored — every trusted key is
 /// tried against every present signature. Fails as [`SigError`] if none match.
 ///
 /// # Errors
@@ -86,7 +92,9 @@ pub fn verify_keyring(keyring: &Keyring, verifying_key: &VerifyingKey) -> Result
 }
 
 /// SHA-256 of a keyring's canonical signed bytes — the value the *next* revision records as its
-/// `prev_keyring_hash`, chaining the revision history (§4). Delegates to the engine's `doc_hash` so the
+/// `prev_keyring_hash`, chaining the revision history (§4).
+///
+/// Delegates to the engine's `doc_hash` so the
 /// chain hash is exactly what the engine chains on.
 #[must_use]
 pub fn keyring_hash(keyring: &Keyring) -> [u8; 32] {

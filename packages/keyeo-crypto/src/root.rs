@@ -35,8 +35,10 @@ use crate::{
 const HKDF_RVK_INFO: &[u8] = b"keyeo:rvk:v1";
 
 /// The three HKDF `info` labels [`derive_root`] expands the Argon2id master under — one each for the
-/// KEK, the Ed25519 owner identity seed, and the X25519 HPKE keypair IKM. openom-crypto pins these to
-/// the frozen `openom:kek:v1` / `openom:identity:v1` / `openom:hpke:v1` constants.
+/// KEK, the Ed25519 owner identity seed, and the X25519 HPKE keypair IKM.
+///
+/// openom-crypto pins these to the frozen `openom:kek:v1` / `openom:identity:v1` / `openom:hpke:v1`
+/// constants.
 pub struct RootLabels {
     pub kek: &'static [u8],
     pub identity: &'static [u8],
@@ -44,7 +46,9 @@ pub struct RootLabels {
 }
 
 /// Derive the **Recovery Verification Key** (RVK) — the Ed25519 key that authorizes a keyring
-/// reset/recovery — from the recovery-root (RRK) secret. BOTH keyring engines (chain + dag) call this, so
+/// reset/recovery — from the recovery-root (RRK) secret.
+///
+/// BOTH keyring engines (chain + dag) call this, so
 /// a recovery is verifiable identically whichever engine authored it. Deterministic and domain-separated:
 /// HKDF-SHA256(rrk_secret) under the frozen RVK label, then an Ed25519 key from the 32-byte output — via
 /// the shared [`edsign::derive_signing_key`], so this is byte-identical to `openom_keyring_dag::recovery::derive_rvk`
@@ -64,7 +68,9 @@ pub struct RootKeys {
 }
 
 /// Derive [`RootKeys`] from a passphrase under the caller-supplied `labels` (see the module docs for the
-/// frozen construction). The passphrase should already be a [`Zeroizing`] buffer at the call site; this
+/// frozen construction).
+///
+/// The passphrase should already be a [`Zeroizing`] buffer at the call site; this
 /// scrubs every intermediate (the master, the identity seed, and the HPKE IKM) on the way out.
 ///
 /// # Errors

@@ -14,7 +14,9 @@ use crate::KdfParams;
 use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
 
 /// The group-at-an-epoch binding context (the MLS `GroupContext` role): the two coordinates a DEK wrap is
-/// bound to, so a wrap can't be transplanted across groups or epochs. The other two AAD fields come from
+/// bound to, so a wrap can't be transplanted across groups or epochs.
+///
+/// The other two AAD fields come from
 /// elsewhere — the recipient supplies the member id, the wrap its method. Borrows, so a rewrap over many
 /// recipients builds each wrap against the same context with no clones.
 #[derive(Clone, Copy, Debug)]
@@ -23,7 +25,9 @@ pub struct GroupContext<'a> {
     pub key_id: &'a KeyId,
 }
 
-/// A recipient's identity — what a wrap is addressed to (a member, the recovery root). Generic, so a
+/// A recipient's identity — what a wrap is addressed to (a member, the recovery root).
+///
+/// Generic, so a
 /// consumer chooses its own id type (a string did:key, a number, a custom key), because a keyring library
 /// shouldn't dictate that. The bound is exactly what the records need: clone/order/hash for the set
 /// operations over recipients, serde for replication, and a deterministic byte view for the AAD binding.
@@ -40,7 +44,9 @@ impl RecipientId for String {
     }
 }
 
-/// The KEK-derivation kind — a distinct discriminant per KEK source. It is BOTH an AAD input (so a
+/// The KEK-derivation kind — a distinct discriminant per KEK source.
+///
+/// It is BOTH an AAD input (so a
 /// passphrase wrap can't be reinterpreted as a recovery-code wrap) AND a runtime lookup key (a consumer
 /// finds "the passphrase wrap" vs "the recovery-code wrap" by it), so the two never collapse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +58,9 @@ pub enum KekKind {
 }
 
 /// How a DEK wrap was sealed, carrying that method's public parameters (the sealed bytes are
-/// [`Wrap::ciphertext`]). `MemberHpke` and `RrkHpke` are the same HPKE primitive to different recipient
+/// [`Wrap::ciphertext`]).
+///
+/// `MemberHpke` and `RrkHpke` are the same HPKE primitive to different recipient
 /// classes but stay DISTINCT — the method is an AAD input, so collapsing them would erase an
 /// AEAD-enforced separator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,7 +121,9 @@ pub struct Wrap<Id: RecipientId> {
 }
 
 /// A rewrap generation: a keyed DEK (`key_id` — also the per-epoch AAD salt, so it identifies the epoch),
-/// a monotone `ordinal`, and the per-recipient wraps of that DEK. A payload — the consumer's carrier signs
+/// a monotone `ordinal`, and the per-recipient wraps of that DEK.
+///
+/// A payload — the consumer's carrier signs
 /// and positions it, so it carries no parents/author/signature of its own.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "Id: RecipientId")]

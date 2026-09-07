@@ -18,7 +18,9 @@ pub mod ids;
 /// envelope carrying a higher version is opened read-only rather than misread.
 pub const ENVELOPE_VERSION: u32 = 1;
 
-/// The `Keyring.layout_version` this build reads and writes (data-format spec §4). A
+/// The `Keyring.layout_version` this build reads and writes (data-format spec §4).
+///
+/// A
 /// keyring carrying a higher layout is opened read-only rather than misread — the
 /// keyring's own version axis, independent of `ENVELOPE_VERSION`.
 pub const KEYRING_LAYOUT_VERSION: u32 = 1;

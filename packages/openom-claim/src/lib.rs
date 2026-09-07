@@ -87,7 +87,9 @@ pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
     Ok(Sha256::digest(bytes).into())
 }
 
-/// A **content reference** to an intrinsic value: `"sha256:" + hex(sha256(JCS(intrinsic)))`. This is
+/// A **content reference** to an intrinsic value: `"sha256:" + hex(sha256(JCS(intrinsic)))`.
+///
+/// This is
 /// how `equivalent_to` / `derived_from` / `preferred.contentRef` point at *what a claim says* (§4.1)
 /// rather than at a minted id — a reference stable across authors and unaffected by unrelated fields.
 /// The caller supplies the intrinsic (for a name that is its parts+script+culture; otherwise the
@@ -168,7 +170,9 @@ fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
     [SIGN_DOMAIN, content_hash.as_slice()].concat()
 }
 
-/// A value whose `id` is the hash of its own content. Every enveloped record — [`envelope::Claim`] and
+/// A value whose `id` is the hash of its own content.
+///
+/// Every enveloped record — [`envelope::Claim`] and
 /// the operations channel's `Op` — derives its id through the one canonicalization path here (JCS,
 /// excluding the top-level `id` and `signature`), so there is never a second hashing implementation.
 ///
