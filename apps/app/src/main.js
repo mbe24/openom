@@ -347,9 +347,12 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      // TODO(OPE-383): recover on the app-core worker (solo keyring lifecycle). Not yet wired.
-      void recoveryCode; void newPassphrase;
-      throw new Error('recover is not yet available on the app-core');
+      const { recoveryCode: newCode, didKey } = await this.worker.recoverCore({
+        recoveryCode, newPassphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
+      });
+      this.pendingDid = didKey;
+      this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
+      this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
       this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-recover');
@@ -373,9 +376,11 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      // TODO(OPE-383): change-passphrase on the app-core worker (solo keyring lifecycle). Not yet wired.
-      void current; void next;
-      throw new Error('change-passphrase is not yet available on the app-core');
+      const { recoveryCode } = await this.worker.changePassphraseCore({
+        current, next, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
+      });
+      this.gateRecoveryCode = recoveryCode; // a fresh code — the old one no longer works
+      this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
       this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-change');

@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use openom_crypto::Passphrase;
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
@@ -488,6 +488,109 @@ pub fn unlock(
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
         needs_backfill: u.needs_backfill,
+    })
+}
+
+/// Recover owner access with the recovery code under a new passphrase, then wrap the fresh `SealerSet`
+/// in a ready core (recovery mints a new identity, so a new `didKey`). `anchor` is the stored keyring;
+/// `floor` is the persisted anti-rollback watermark. Returns the new keyring + a NEW recovery code.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, or recovery fails (wrong code / stale keyring).
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn recover(
+    engine: &str,
+    recovery_code: String,
+    new_passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+    doc: String,
+) -> Result<OpenResult, JsError> {
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let r = vault
+        .recover(
+            &ctx,
+            anchor,
+            &RecoveryCode::new(recovery_code),
+            &Passphrase::new(new_passphrase.into_bytes()),
+            floor,
+        )
+        .map_err(to_js)?;
+    let did = r.did_key.into_string();
+    let handle = AppCoreHandle {
+        inner: AppCore::new(did.clone(), r.sealer, Arc::new(MemoryStore::new()), doc, replica_id.to_vec()),
+    };
+    Ok(OpenResult {
+        handle: Some(handle),
+        keyring: r.anchor,
+        recovery_code: r.recovery_code.into_string(),
+        did_key: did,
+        watermark: r.watermark,
+        needs_reseal: r.needs_reseal,
+        needs_backfill: r.needs_backfill,
+    })
+}
+
+/// Change the passphrase (re-wrap the keyring under a new KEK, rotate the recovery code). The DEK is
+/// unchanged, so the RUNNING core keeps working — this returns NO handle, just the new keyring + code +
+/// watermark to persist. `anchor` is the stored keyring; `floor` is the persisted watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, or the change fails (wrong current passphrase).
+#[wasm_bindgen(js_name = changePassphrase)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn change_passphrase(
+    engine: &str,
+    old_passphrase: String,
+    new_passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+) -> Result<OpenResult, JsError> {
+    let vault = AppVault::from_kind(parse_engine(engine)?);
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let re = vault
+        .change_passphrase(
+            &ctx,
+            anchor,
+            &Passphrase::new(old_passphrase.into_bytes()),
+            &Passphrase::new(new_passphrase.into_bytes()),
+            floor,
+        )
+        .map_err(to_js)?;
+    Ok(OpenResult {
+        handle: None, // the DEK is unchanged — the running core keeps working
+        keyring: re.anchor,
+        recovery_code: re.recovery_code.into_string(),
+        did_key: String::new(),
+        watermark: re.watermark,
+        needs_reseal: false,
+        needs_backfill: false,
     })
 }
 

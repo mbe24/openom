@@ -12,6 +12,8 @@ import init, {
   AppCoreHandle,
   provision as wasmProvision,
   unlock as wasmUnlock,
+  recover as wasmRecover,
+  changePassphrase as wasmChangePassphrase,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -34,6 +36,19 @@ function freshReplica() {
   const r = new Uint8Array(16);
   crypto.getRandomValues(r);
   return r;
+}
+
+// The engine-opaque anti-rollback watermark, persisted per doc (recover / change-passphrase pass it back
+// as the `floor`). Stored in the IndexedDbStore snapshot slot under a meta key — no localStorage in a
+// Worker. Overwrite-with-CAS on the current version.
+const WM_KEY = (docId) => `${docId}::watermark`;
+async function saveWatermark(docId, wm) {
+  const prev = await store().readSnapshot(WM_KEY(docId));
+  await store().putSnapshot(WM_KEY(docId), wm, prev?.version ?? null);
+}
+async function loadWatermark(docId) {
+  const s = await store().readSnapshot(WM_KEY(docId));
+  return s ? s.bytes : new Uint8Array(0);
 }
 
 // The durable mirror: a dumb async blob store (IndexedDB on web — also works in the Tauri webview).
@@ -119,6 +134,7 @@ const api = {
     const res = wasmProvision(engine, passphrase, treeId, memberId, freshReplica(), docId);
     try {
       await keyringStore().saveHead(docId, engine, res.keyring); // persist genesis for later unlock
+      await saveWatermark(docId, res.watermark); // the anti-rollback floor for recover / change-passphrase
       const core = new Core(res.takeHandle(), docId, true);
       await hydrate(core); // fresh store → a no-op bootstrap
       cores.set(docId, core);
@@ -144,10 +160,58 @@ const api = {
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const res = wasmUnlock(head.engine || engine, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
     try {
+      await saveWatermark(docId, res.watermark); // refresh the persisted floor
       const core = new Core(res.takeHandle(), docId, true);
       await hydrate(core); // load the persisted log + bootstrap
       cores.set(docId, core);
       return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
+    } finally {
+      res.free();
+    }
+  },
+
+  /**
+   * Recover owner access with the recovery code under a new passphrase: re-establishes the keyring, opens
+   * a durable core (recovery mints a fresh identity → a new `didKey`), and persists the new keyring +
+   * watermark + shows a NEW recovery code. `opts`: { recoveryCode, newPassphrase, treeId, memberId, docId, engine? }.
+   */
+  async recoverCore({ recoveryCode, newPassphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const floor = await loadWatermark(docId);
+    const res = wasmRecover(
+      head.engine || engine, recoveryCode, newPassphrase, treeId, memberId, freshReplica(), head.bytes, floor, docId,
+    );
+    try {
+      await keyringStore().saveHead(docId, head.engine || engine, res.keyring); // the recovered keyring
+      await saveWatermark(docId, res.watermark);
+      const core = new Core(res.takeHandle(), docId, true);
+      await hydrate(core);
+      cores.set(docId, core);
+      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
+    } finally {
+      res.free();
+    }
+  },
+
+  /**
+   * Change the passphrase: re-wrap the keyring under a new KEK + rotate the recovery code. The DEK is
+   * unchanged, so the RUNNING core keeps working (no new core). Returns the fresh recovery code to show.
+   * `opts`: { current, next, treeId, memberId, docId, engine? }.
+   */
+  async changePassphraseCore({ current, next, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const floor = await loadWatermark(docId);
+    const res = wasmChangePassphrase(
+      head.engine || engine, current, next, treeId, memberId, freshReplica(), head.bytes, floor,
+    );
+    try {
+      await keyringStore().saveHead(docId, head.engine || engine, res.keyring); // the re-wrapped keyring
+      await saveWatermark(docId, res.watermark);
+      return { recoveryCode: res.recoveryCode };
     } finally {
       res.free();
     }

@@ -186,7 +186,7 @@ export function settingsView(app) {
         value: app.autoLockMinutes, ariaLabel: t('security-autolock'), minWidth: 128,
         onPick: (v) => app.setAutoLock(v)
       }), t('security-autolock-hint')),
-      app.sealer
+      app.lockable
         ? h('button', { class: 'button-secondary', style: { alignSelf: 'flex-start' },
             onClick: () => app.lockNow('manual') }, t('security-lock-now'))
         : null,
