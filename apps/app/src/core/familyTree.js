@@ -845,11 +845,13 @@ export class FamilyTree {
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
   }
 
-  // NOTE: a true engine reset (clearing the worker core's claim set) needs a worker-side clear and is a
-  // demo-reseed concern (openom-app-core has no clear op yet — tracked as a follow-up). This clears the
-  // local view bookkeeping and re-reads the projection.
+  // Clear the worker core's claim set + durable store, then the local view bookkeeping — a demo reseed
+  // (library.reseed) resets before re-seeding, so the datasets replace rather than pile up.
   async reset() {
+    await this.#engine.reset();
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
+    this.#eventOf = new Map();
+    this.#marriageEventOf = new Map();
     await this.#materialize();
     this.#bump();
   }

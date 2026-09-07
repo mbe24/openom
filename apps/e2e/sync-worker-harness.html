@@ -160,6 +160,28 @@
           wrongRejected,
         };
       },
+
+      // reset() clears the tree + durable store, so a demo reseed replaces rather than piles up.
+      async reseedClears() {
+        const doc = 'reseed-e2e';
+        const w = spawnWorker();
+        await w.warm();
+        await w.clearPersisted(doc);
+        await w.openDev(new Uint8Array(16).fill(5), new Uint8Array(8).fill(0xc3), DID, doc, true);
+        await w.assertAnchor(doc, 'pOld', PERSON);
+        await w.commit(doc);
+        const before = JSON.parse(await w.project(doc));
+        await w.resetCore(doc);
+        const cleared = JSON.parse(await w.project(doc));
+        await w.assertAnchor(doc, 'pNew', PERSON);
+        await w.commit(doc);
+        const after = JSON.parse(await w.project(doc));
+        return {
+          beforeIds: before.people.map((p) => p.id),
+          clearedIds: cleared.people.map((p) => p.id),
+          afterIds: after.people.map((p) => p.id),
+        };
+      },
     };
 
     document.getElementById('status').textContent = 'ready';

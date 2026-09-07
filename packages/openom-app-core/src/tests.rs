@@ -273,6 +273,28 @@ fn a_poison_entry_is_quarantined_not_wedged() {
     );
 }
 
+#[test]
+fn reset_clears_the_tree_and_store_then_reseeds_cleanly() {
+    let dek = generate_dek().unwrap();
+    let store = Arc::new(MemoryStore::new());
+    let mut a = core(b"replica-a", dek, Arc::clone(&store));
+
+    a.tree_mut().assert_anchor("pOld", PERSON, 1).unwrap();
+    a.commit().unwrap();
+    assert!(live_ids(&a).contains("pOld"));
+    assert_eq!(store.read_updates("tree", None).unwrap().0.len(), 1);
+
+    a.reset().unwrap();
+    assert!(live_ids(&a).is_empty(), "the tree is empty after reset");
+    assert_eq!(store.read_updates("tree", None).unwrap().0.len(), 0, "the durable store is cleared");
+
+    // Re-seed cleanly — the new record is there, the old id is not resurrected.
+    a.tree_mut().assert_anchor("pNew", PERSON, 2).unwrap();
+    a.commit().unwrap();
+    assert!(live_ids(&a).contains("pNew"));
+    assert!(!live_ids(&a).contains("pOld"), "no resurrected old id after reset+reseed");
+}
+
 fn json_name(given: &str) -> serde_json::Value {
     serde_json::json!({ "parts": { "given": given } })
 }

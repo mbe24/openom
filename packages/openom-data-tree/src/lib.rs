@@ -187,6 +187,15 @@ impl Tree {
         self.moderators = moderators;
     }
 
+    /// Drop every accumulated op + any un-flushed pending batch, back to an empty tree — the engine side
+    /// of a demo reseed / hard local reset. The monotonic clock and the author are KEPT, so a subsequent
+    /// mint still draws a fresh, non-colliding `created_at` (a re-seed under the same author never reuses
+    /// a just-cleared id).
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.pending.clear();
+    }
+
     // --- edits: mint an op and apply it optimistically; `flush` produces the bytes to seal ----------
 
     /// Assert a new claim about `target`, authored by this replica. `now_millis` is a physical

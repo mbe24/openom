@@ -222,6 +222,12 @@ const api = {
     return runTick(core(docId));
   },
 
+  /** Clear a core's tree + its durable IndexedDB log (demo reseed / hard local reset). Keeps the DEK. */
+  async resetCore(docId) {
+    core(docId).handle.reset(); // clears the in-memory tree + the core's own store + persist cursor
+    await store().delete(docId); // also wipe the durable IndexedDB mirror, so nothing replays on reload
+  },
+
   /** Delete a doc's durably-persisted log (test cleanup / a hard local reset). */
   async clearPersisted(docId) {
     await store().delete(docId);

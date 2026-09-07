@@ -69,3 +69,19 @@ test('app-core: real keyring lifecycle — provision, mint, reload, unlock', asy
   expect(r.wrongRejected).toBe(true); // a wrong passphrase is refused
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
+
+test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.reseedClears());
+
+  expect(r.beforeIds).toContain('pOld'); // seeded
+  expect(r.clearedIds).toEqual([]); // reset emptied the tree
+  expect(r.afterIds).toContain('pNew'); // reseed works
+  expect(r.afterIds).not.toContain('pOld'); // the old data did not pile up
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});

@@ -150,6 +150,15 @@ impl AppCoreHandle {
         self.inner.commit().map_err(to_js)
     }
 
+    /// Clear the tree + the local durable store (demo reseed / hard local reset). Keeps the DEK.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if clearing the local store fails.
+    #[wasm_bindgen]
+    pub fn reset(&mut self) -> Result<(), JsError> {
+        self.inner.reset().map_err(to_js)
+    }
+
     // --- the replicator's synchronous steps (the worker driver does the `fetch` between them) --------
 
     /// This replica's own sealed deltas the server hasn't seen, as `{ entries: Uint8Array[], through:

@@ -134,6 +134,23 @@ impl<S: DocStore> AppCore<S> {
         Ok(())
     }
 
+    /// Clear the tree AND the local durable store — the engine side of a demo reseed / hard local reset.
+    /// Keeps the sealer (DEK) + author; a subsequent seed writes a fresh set. Demo/dev flow: a synced
+    /// tree never resets, so docsync's own read cursor is left as-is (a reload re-bootstraps it anyway).
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if clearing the local store fails.
+    pub fn reset(&mut self) -> Result<(), CoreError> {
+        self.client.tree_mut().clear();
+        self.store.delete(&self.doc)?;
+        self.push_scan = None;
+        self.server_cursor = None;
+        self.persisted = None;
+        self.seen.clear();
+        self.undecodable = 0;
+        Ok(())
+    }
+
     // --- the replicator: local log ⇄ server ----------------------------------------------------
 
     /// This replica's own sealed deltas the server hasn't seen yet (see [`Outbound`]). Peers' entries

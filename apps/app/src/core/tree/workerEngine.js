@@ -24,6 +24,9 @@ export function workerEngine(worker, docId) {
     // --- commit: seal everything minted since the last commit as ONE batch + persist it ---
     commit: () => worker.commit(docId),
 
+    // --- reset: clear the tree + durable store (demo reseed / hard local reset) ---
+    reset: () => worker.resetCore(docId),
+
     // --- roles ---
     setModerators: (dids) => worker.setModerators(docId, dids),
 
