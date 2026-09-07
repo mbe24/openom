@@ -49,7 +49,7 @@ use openom_data_claim::envelope::Record;
 use openom_data_crdt::ChannelItem;
 use openom_crypto::generate_dek;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
-use openom_sealer::Sealer;
+use openom_sealer::{Sealer, SealerSet};
 use openom_docsync::SyncClient;
 use serde_json::json;
 use std::sync::Arc;
@@ -61,13 +61,13 @@ let sealer_a = Sealer::from_unwrapped(
     1, dek.clone().into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-a".to_vec()),
 );
-let mut a = SyncClient::new("did:key:z6MkDevice", sealer_a, store.clone(), "tree");
+let mut a = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_a), store.clone(), "tree");
 
 let sealer_b = Sealer::from_unwrapped(
     1, dek.into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-b".to_vec()),
 );
-let mut b = SyncClient::new("did:key:z6MkDevice", sealer_b, store.clone(), "tree");
+let mut b = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_b), store.clone(), "tree");
 
 let person = ChannelItem::Assert(Record::try_from(json!({
     "id": "pA", "type": "openom.org/core/person/v1",

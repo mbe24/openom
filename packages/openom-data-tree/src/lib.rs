@@ -6,6 +6,7 @@ use openom_data_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
 use openom_data_claim::Hlc;
 use openom_data_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_data_projection::{project, Policy, Projection};
+use serde::Serialize;
 use serde_json::Value;
 
 /// Logical ticks per physical millisecond before the counter carries into the next millisecond —
@@ -448,6 +449,48 @@ impl Tree {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The operations log — every accumulated op as an [`OpView`], ordered as a timeline (by
+    /// `created_at`, then id). `effective` is the fold's verdict: an `Assert` is always effective
+    /// (adds are add-only, so anyone — including a below-Maintainer role — may contribute a claim); a
+    /// moderation op (remove / supersede / revoke) is effective only when its author currently holds
+    /// moderation authority (Maintainer+, i.e. in `moderators`). So the inert entries are exactly the
+    /// below-Maintainer moderation ops awaiting acceptance — the "see ops from below-maintainer roles"
+    /// substrate. Authority is judged against the *current* moderator set, so a promotion re-activates
+    /// that author's ops on the next read (no re-fold of the caller's own bookkeeping needed).
+    #[must_use]
+    pub fn oplog(&self) -> Vec<OpView> {
+        let mut views: Vec<OpView> = self
+            .items
+            .values()
+            .map(|item| {
+                let (kind, effective) = match item {
+                    ChannelItem::Assert(_) => ("assert", true),
+                    ChannelItem::Op(op) => {
+                        let authorized = self.moderators.contains(&op.created_by);
+                        (op_kind_label(&op.kind), authorized)
+                    }
+                };
+                OpView {
+                    id: item.id().to_owned(),
+                    author: item.created_by().to_owned(),
+                    created_at: item.created_at(),
+                    kind,
+                    effective,
+                }
+            })
+            .collect();
+        views.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+        views
+    }
+
+    /// The operations log as a JSON string — for the wasm boundary and any JSON consumer.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the log can't be serialized to JSON.
+    pub fn oplog_json(&self) -> Result<String, TreeError> {
+        Ok(serde_json::to_string(&self.oplog())?)
+    }
+
     /// The canonical person id an anchor resolves to (its cluster's minimum-anchor id), or `None` if
     /// the anchor is not part of any projected person.
     #[must_use]
@@ -462,6 +505,31 @@ impl Tree {
     fn materialized(&self) -> Vec<Record> {
         let items: Vec<ChannelItem> = self.items.values().cloned().collect();
         materialize(&items, &self.moderators)
+    }
+}
+
+/// One entry in the operations log for the UI's op-log view — see [`Tree::oplog`].
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpView {
+    /// The item's content-hash id.
+    pub id: String,
+    /// The item's author (`createdBy`).
+    pub author: String,
+    /// The item's timestamp.
+    pub created_at: Hlc,
+    /// `"assert"` | `"remove"` | `"supersede"` | `"revoke"`.
+    pub kind: &'static str,
+    /// Whether the fold currently honors this op — see [`Tree::oplog`].
+    pub effective: bool,
+}
+
+/// The stable label for an operation kind.
+const fn op_kind_label(kind: &OpKind) -> &'static str {
+    match kind {
+        OpKind::Remove { .. } => "remove",
+        OpKind::Supersede { .. } => "supersede",
+        OpKind::Revoke { .. } => "revoke",
     }
 }
 

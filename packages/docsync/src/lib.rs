@@ -132,6 +132,10 @@ pub struct SyncClient<E: Engine, K: Sealer, S: DocStore> {
     /// Sealed-but-not-yet-appended envelopes (write-ahead queue): sealed once, re-appended on retry
     /// (idempotent on peers).
     pending: Vec<Vec<u8>>,
+    /// Count of log entries [`pull`](Self::pull) skipped because they would not open or merge — a
+    /// corrupt / wrong-key / future-format envelope. Surfaced (not fatal) so one bad entry from an
+    /// untrusted server can't wedge sync for the whole tree.
+    quarantined: usize,
 }
 
 impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
@@ -146,6 +150,7 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
             pull_cursor: None,
             snapshot_version: None,
             snapshot_covered: None,
+            quarantined: 0,
             pending: Vec::new(),
         }
     }
@@ -167,6 +172,17 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     pub fn apply(&mut self, edit: E::Edit) -> Result<(), SyncError> {
         let delta = self.engine.apply_local(edit);
         self.push(EntryKind::Delta, &delta, 0)
+    }
+
+    /// Seal an already-encoded delta payload and append it — the same path as [`apply`](Self::apply)
+    /// minus `apply_local`. For an engine that mints the batch bytes itself (its own id/clock/author
+    /// logic) and has already folded them into its own state, so re-merging here would be redundant.
+    /// An empty payload is a no-op.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if sealing or the store append fails.
+    pub fn push_delta(&mut self, plaintext: &[u8]) -> Result<(), SyncError> {
+        self.push(EntryKind::Delta, plaintext, 0)
     }
 
     fn push(&mut self, kind: EntryKind, plaintext: &[u8], covers: u64) -> Result<(), SyncError> {
@@ -212,17 +228,28 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     /// Returns [`SyncError`] if the store read or a merge fails.
     pub fn pull(&mut self) -> Result<usize, SyncError> {
         let (updates, new_cursor) = self.store.read_updates(&self.doc, self.pull_cursor)?;
+        let mut merged = 0;
         for env in &updates {
-            let bytes = self
-                .sealer
-                .open(EntryKind::Delta, env)
-                .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-            self.engine
-                .merge(&bytes)
-                .map_err(|e| SyncError::Engine(Box::new(e)))?;
+            // Per-entry fault isolation: a single un-openable / un-mergeable entry (corrupt, wrong
+            // key, future format, or a malicious write to the untrusted log) is quarantined and the
+            // cursor still advances past it — one bad entry can't wedge sync for the whole tree. A
+            // *store* read failure above is still fatal (a broken local backend, not one bad entry).
+            match self.sealer.open(EntryKind::Delta, env) {
+                Ok(bytes) => match self.engine.merge(&bytes) {
+                    Ok(()) => merged += 1,
+                    Err(_) => self.quarantined += 1,
+                },
+                Err(_) => self.quarantined += 1,
+            }
         }
         self.pull_cursor = Some(new_cursor);
-        Ok(updates.len())
+        Ok(merged)
+    }
+
+    /// Total log entries [`pull`](Self::pull) has quarantined (skipped as un-openable / un-mergeable)
+    /// over this client's life — a caller surfaces a non-zero count as a data-integrity anomaly.
+    pub const fn quarantined_count(&self) -> usize {
+        self.quarantined
     }
 
     /// Fold state into a snapshot and CAS it, recording the seq it covers.

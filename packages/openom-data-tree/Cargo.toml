@@ -27,6 +27,7 @@ default = []
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 openom-data-claim.workspace = true

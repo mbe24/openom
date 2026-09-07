@@ -1,0 +1,78 @@
+# openom-app-core — THE web app's one Rust core, meant to run in a single Web Worker (wasm). It owns the
+# claim engine (openom-data-tree), the DEK sealer session (openom-vault / openom-sealer), the docsync sync
+# loop, and one LOCAL durable DocStore (store-log). A thin Rust `Replicator` bridges that local log to the
+# server; the only async is a ~1-screen JS worker-driver that does `fetch` around the core's synchronous
+# steps. JS shrinks to UI + one network transport. See plan/sync/design.max-rust-app-core.md.
+[package]
+name = "openom-app-core"
+description = "The web app's one Rust core (engine + sealer + docsync + local store + a local⇄server replicator), built for a single Web Worker. JS = UI + one fetch transport."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# rlib = cargo test (the core logic + the replicator); cdylib = the wasm-bindgen module for the web worker.
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# The wasm veneer (AppCoreHandle + provision/unlock + the docId registry) + its glue — off by default so
+# native test builds skip it. Pulls in openom-vault (the keyring lifecycle → SealerSet), openom-crypto
+# (Passphrase) + openom-keyring-api (EngineKind) for that, and js-sys/web-sys (wall clock + OPFS handles).
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:js-sys",
+    "dep:web-sys",
+    "dep:openom-vault",
+    "dep:openom-crypto",
+    "dep:openom-keyring-api",
+]
+
+[dependencies]
+docsync = { path = "../docsync" }
+openom-docsync = { path = "../openom-docsync" }
+openom-data-tree.workspace = true
+openom-data-crdt.workspace = true
+openom-sealer = { path = "../openom-sealer" }
+store-log.workspace = true
+openom-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Only the rlib lifecycle (AppVault / ChainVault) — NOT openom-vault's own #[wasm_bindgen] veneer.
+# Enabling its `wasm` feature would compile that veneer into this cdylib too and collide on the
+# `provision`/`unlock` export symbols. app-core exports its OWN provision/unlock (returning a core
+# handle); the DEK stays in this module's memory regardless. Crypto's wasm CSPRNG comes from the
+# getrandom_backend cfg in build-app-core.mjs, not this feature.
+[dependencies.openom-vault]
+path = "../openom-vault"
+optional = true
+
+[dependencies.openom-crypto]
+path = "../openom-crypto"
+optional = true
+
+[dependencies.openom-keyring-api]
+path = "../openom-keyring-api"
+optional = true
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dependencies.js-sys]
+version = "0.3"
+optional = true
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+
+[dev-dependencies]
+openom-crypto = { path = "../openom-crypto" }
+openom-data-claim = { path = "../openom-data-claim" }

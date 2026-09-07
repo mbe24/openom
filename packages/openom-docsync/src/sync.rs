@@ -23,7 +23,7 @@ use store_log::DocStore;
 use openom_data_crdt::ChannelItem;
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
-use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
+use openom_sealer::{EntryKind, SealContext, SealerError, SealerSet};
 use openom_data_tree::{Tree, TreeError};
 use serde_json::Value;
 
@@ -80,10 +80,12 @@ impl docsync::Engine for SyncTree {
     }
 }
 
-/// Adapts openom's DEK [`Sealer`] to the [`docsync::Sealer`] seam: maps the generic entry kind to openom's
-/// `Format` (op-log for deltas, JSON for snapshots), fills the openom-only `compression`/`blob_id` fields,
-/// and reads `covers_through_seq` back out of a snapshot envelope's header.
-struct SealerAdapter(Sealer);
+/// Adapts openom's DEK [`SealerSet`] to the [`docsync::Sealer`] seam: maps the generic entry kind to
+/// openom's `Format` (op-log for deltas, JSON for snapshots), fills the openom-only
+/// `compression`/`blob_id` fields, and reads `covers_through_seq` back out of a snapshot envelope's
+/// header. A `SealerSet` (not a single `Sealer`) so reads route across epochs after a key rotation while
+/// writes always target the latest epoch.
+struct SealerAdapter(SealerSet);
 
 impl docsync::Sealer for SealerAdapter {
     type Error = SealerError;
@@ -145,7 +147,12 @@ pub struct SyncClient<S: DocStore> {
 impl<S: DocStore> SyncClient<S> {
     /// Wrap a freshly-unlocked claim tree. `created_by` is this device's author `did:key` (the [`Tree`]'s
     /// mint author); `doc` is the store key for this tree's log.
-    pub fn new(created_by: impl Into<String>, sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
+    pub fn new(
+        created_by: impl Into<String>,
+        sealer: SealerSet,
+        store: S,
+        doc: impl Into<String>,
+    ) -> Self {
         Self {
             inner: docsync::SyncClient::new(
                 SyncTree(Tree::new(created_by)),
@@ -190,6 +197,17 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.apply(items.to_vec())
     }
 
+    /// Seal an already-encoded op-batch (from [`Tree::flush`](openom_data_tree::Tree::flush)) and append
+    /// it, without re-merging — the engine minted and folded the batch itself. This is the app's mint
+    /// path: mint through [`tree_mut`](Self::tree_mut), `flush` to bytes, then `push_delta`. An empty
+    /// batch (nothing minted) is a no-op.
+    ///
+    /// # Errors
+    /// Returns an error if sealing or the store append fails.
+    pub fn push_delta(&mut self, batch: &[u8]) -> Result<()> {
+        self.inner.push_delta(batch)
+    }
+
     /// Append every queued sealed envelope, oldest first. A failed append leaves it (and the rest) queued;
     /// call again to retry — a re-appended entry dedups on the dot and re-folds idempotently.
     ///
@@ -202,6 +220,12 @@ impl<S: DocStore> SyncClient<S> {
     /// How many sealed batches are queued but not yet confirmed appended (0 == fully synced up).
     pub const fn pending_count(&self) -> usize {
         self.inner.pending_count()
+    }
+
+    /// How many log entries have been quarantined (skipped as un-openable / un-mergeable) — a corrupt
+    /// or wrong-key entry that would otherwise wedge the pull. A caller surfaces a non-zero count.
+    pub const fn quarantined_count(&self) -> usize {
+        self.inner.quarantined_count()
     }
 
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
@@ -252,7 +276,7 @@ mod tests {
     use openom_data_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::{generate_dek, Dek};
     use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
-    use openom_sealer::Sealer;
+    use openom_sealer::{Sealer, SealerSet};
     use serde_json::json;
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -269,7 +293,7 @@ mod tests {
             KeyId::new(b"epoch-0".to_vec()),
             ReplicaId::new(replica.to_vec()),
         );
-        SyncClient::new(DEVICE, sealer, store, "tree")
+        SyncClient::new(DEVICE, SealerSet::single(sealer), store, "tree")
     }
 
     /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
@@ -418,18 +442,22 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_key_cannot_open_the_claim_log() {
+    fn a_wrong_key_quarantines_the_log_instead_of_wedging() {
         let store = Arc::new(MemoryStore::new());
         let dek = generate_dek().unwrap();
         let mut a = client(b"replica-a", dek, store.clone());
         a.push_claims(&[name_claim("pA", "Ada", "did:key:z6MkA", 1)])
             .unwrap();
 
+        // A wrong DEK reveals nothing — and, crucially, does not wedge the pull: the unopenable entry
+        // is quarantined and counted, not returned as a fatal error (one bad entry can't brick sync).
         let wrong = generate_dek().unwrap();
         let mut intruder = client(b"replica-x", wrong, store.clone());
+        assert_eq!(intruder.pull_claims().unwrap(), 0, "a wrong DEK merges nothing");
+        assert!(empty(&intruder), "the wrong key reveals no data");
         assert!(
-            intruder.pull_claims().is_err(),
-            "a wrong DEK must not decrypt the log"
+            intruder.quarantined_count() >= 1,
+            "the unopenable entry is quarantined, not fatal"
         );
     }
 

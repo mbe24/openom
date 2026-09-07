@@ -1,6 +1,7 @@
 use super::Tree;
 use openom_data_crdt::codec;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 const DID: &str = "did:key:z6MkA";
 const PERSON: &str = "openom.org/core/person/v1";
@@ -47,6 +48,47 @@ fn a_same_author_remove_drops_the_claim() {
     assert!(
         a.project().people[0].names.is_empty(),
         "the removed name is folded out"
+    );
+}
+
+#[test]
+fn oplog_marks_below_moderator_ops_ineffective() {
+    let mut a = Tree::new(DID);
+    a.assert_anchor("pA", PERSON, 1).unwrap();
+    a.flush().unwrap();
+    a.assert_claim("pA", NAME, name_value("Ada"), 1).unwrap();
+    let na = a.flush().unwrap();
+    let name_id = only_id(&na);
+
+    // A peer who is NOT a moderator on A mints a remove of the name and A merges it.
+    let peer_did = "did:key:z6MkPEER";
+    let mut peer = Tree::new(peer_did);
+    peer.remove(&name_id, 2).unwrap();
+    let peer_remove = peer.flush().unwrap();
+    a.merge(&peer_remove).unwrap();
+
+    // The name is still live — the below-moderator remove is a deterministic no-op...
+    assert_eq!(a.project().people[0].names.len(), 1);
+
+    // ...and the op-log shows exactly that: the asserts are effective, the peer's remove is not.
+    let log = a.oplog();
+    let remove = log.iter().find(|v| v.kind == "remove").expect("remove present");
+    assert!(!remove.effective, "a below-moderator remove is inert");
+    assert_eq!(remove.author, peer_did);
+    assert!(
+        log.iter().filter(|v| v.kind == "assert").all(|v| v.effective),
+        "asserts are always effective (adds are add-only)"
+    );
+
+    // Accept it by promoting the peer to Maintainer+ — the same op re-activates on the next read.
+    a.set_moderators(BTreeSet::from([DID.to_owned(), peer_did.to_owned()]));
+    assert!(
+        a.oplog().iter().find(|v| v.kind == "remove").unwrap().effective,
+        "promotion makes the carried op effective"
+    );
+    assert!(
+        a.project().people[0].names.is_empty(),
+        "and the removal now takes effect"
     );
 }
 

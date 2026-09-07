@@ -3623,6 +3623,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-app-core"
+version = "0.1.0"
+dependencies = [
+ "docsync",
+ "js-sys",
+ "openom-crypto",
+ "openom-data-claim",
+ "openom-data-crdt",
+ "openom-data-tree",
+ "openom-docsync",
+ "openom-keyring-api",
+ "openom-protocol",
+ "openom-sealer",
+ "openom-vault",
+ "serde",
+ "serde_json",
+ "store-log",
+ "thiserror 2.0.20",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "openom-crypto"
 version = "0.1.0"
 dependencies = [
@@ -3697,6 +3720,7 @@ dependencies = [
  "openom-data-claim",
  "openom-data-crdt",
  "openom-data-projection",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "wasm-bindgen",

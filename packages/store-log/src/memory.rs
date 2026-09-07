@@ -6,7 +6,9 @@ use std::sync::Mutex;
 struct Doc {
     snapshot: Option<Snapshot>,
     log: Vec<Update>,
-    counter: u64,
+    // The snapshot version counter is DISTINCT from the log seq: the log seq is `log.len()`, so bumping
+    // a shared counter on `put_snapshot` used to inflate the read cursor and skip the next append.
+    snapshot_version: u64,
 }
 
 #[derive(Default)]
@@ -51,15 +53,14 @@ impl DocStore for MemoryStore {
         };
         // On a 32-bit target a seq past usize::MAX skips the whole log (empty) — the safe direction.
         let from = usize::try_from(since.unwrap_or(0)).unwrap_or(usize::MAX);
-        Ok((d.log.iter().skip(from).cloned().collect(), d.counter))
+        Ok((d.log.iter().skip(from).cloned().collect(), d.log.len() as u64))
     }
 
     fn append(&self, doc: &str, updates: &[Update]) -> Result<u64> {
         let mut docs = self.docs.lock().unwrap();
         let d = docs.entry(doc.to_string()).or_default();
         d.log.extend_from_slice(updates);
-        d.counter = d.log.len() as u64;
-        Ok(d.counter)
+        Ok(d.log.len() as u64)
     }
 
     fn put_snapshot(&self, doc: &str, bytes: &[u8], expected: Option<&str>) -> Result<String> {
@@ -72,8 +73,8 @@ impl DocStore for MemoryStore {
                 found,
             });
         }
-        let version = format!("v{}", d.counter + 1);
-        d.counter += 1;
+        d.snapshot_version += 1;
+        let version = format!("v{}", d.snapshot_version);
         d.snapshot = Some(Snapshot {
             bytes: bytes.to_vec(),
             version: version.clone(),
