@@ -294,6 +294,8 @@ impl VaultResult {
     /// Whether the dag write epoch needs a reseal (always `false` for the chain).
     #[wasm_bindgen(getter, js_name = needsReseal)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn needs_reseal(&self) -> bool {
         self.needs_reseal
     }
@@ -301,12 +303,16 @@ impl VaultResult {
     /// Whether some retained epoch needs a historical-read backfill (always `false` for the chain).
     #[wasm_bindgen(getter, js_name = needsBackfill)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn needs_backfill(&self) -> bool {
         self.needs_backfill
     }
 
     /// Take the sealer out to JS (once). `undefined` for change-passphrase (no new sealer).
     #[wasm_bindgen(js_name = takeSealer)]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn take_sealer(&mut self) -> Option<WasmSealer> {
         self.sealer.take()
     }
@@ -713,6 +719,8 @@ impl ResealResult {
     /// Whether a covering reseal op was appended (false = nothing was stale).
     #[wasm_bindgen(getter)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn resealed(&self) -> bool {
         self.resealed
     }
@@ -1006,6 +1014,8 @@ impl BackfillResult {
     /// Whether a backfill op was appended (false = every epoch already wrapped every resolved member).
     #[wasm_bindgen(getter)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn backfilled(&self) -> bool {
         self.backfilled
     }
@@ -1495,6 +1505,8 @@ impl WalkResult {
     /// The verified head revision (equals the invite's pinned revision).
     #[wasm_bindgen(getter)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn revision(&self) -> u32 {
         self.revision
     }
@@ -1747,6 +1759,8 @@ impl EntryAttribution {
     /// The keyring revision that governed this entry when authored.
     #[wasm_bindgen(getter, js_name = keyringRevision)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn keyring_revision(&self) -> u32 {
         self.keyring_revision
     }
@@ -1762,6 +1776,8 @@ impl EntryAttribution {
     /// a log seq is always well within 2^53.
     #[wasm_bindgen(getter, js_name = coversThroughSeq)]
     #[must_use]
+    // A #[wasm_bindgen] export cannot be a `const fn` (the macro rejects it); missing_const_for_fn is a false positive here.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn covers_through_seq(&self) -> f64 {
         // JS numbers are f64; a seq past 2^53 loses precision, an accepted limit at the JS boundary.
         #[allow(clippy::cast_precision_loss)]

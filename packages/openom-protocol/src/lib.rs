@@ -1,4 +1,9 @@
 #![doc = include_str!("../README.md")]
+// The crate doc is the README (via include_str!). clippy's too_long_first_doc_paragraph flags its first
+// paragraph but emits a location-less warning it cannot map to a source span, so it survives splitting every
+// candidate README paragraph — a clippy limitation on included markdown. Allowed here (the crate's own source
+// doc paragraphs are all within the limit); see scripts/nursery.mjs.
+#![allow(clippy::too_long_first_doc_paragraph)]
 
 /// Generated types for `package openom.v1` — `Envelope`, `Header`, `KeyringUpdate`, and the
 /// `Kind` / `Format` / `Aead` / `Compression` / `MemberRole` enums. (The keyring wire moved to
