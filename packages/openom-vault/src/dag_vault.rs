@@ -295,6 +295,27 @@ fn fold_resolved(resolved: &dag_client::Resolved) -> Result<FoldedSealing, Vault
     }
 }
 
+/// Resolve + fold a dag anchor into the three inputs the §B3 verify seam ([`crate::verify::dag`]) needs: the
+/// CURRENT membership view, the sticky `has_been_shared` flag, and the FULL set of retained epoch `key_id`s.
+///
+/// The epoch set is the accept set for the epoch-consistency check — EVERY epoch the tree has folded, not just
+/// the write-winner. A legitimate entry sealed under a prior epoch (the norm after any `Remove`/`Reseal`
+/// rotation) must not be falsely `EpochMismatch`-rejected on a fresh replay; membership+role are still checked
+/// against the current view, so this widening never admits an unauthorised author.
+pub(crate) fn verify_inputs(
+    anchor: &[u8],
+) -> Result<(MembershipView, bool, Vec<Vec<u8>>), VaultError> {
+    let resolved =
+        dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+    let folded = fold_resolved(&resolved)?;
+    let epoch_ids = folded
+        .epochs
+        .iter()
+        .map(|e| e.key_id.as_bytes().to_vec())
+        .collect();
+    Ok((resolved.members, resolved.has_been_shared, epoch_ids))
+}
+
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
 /// (owner) + every resolved ordinary member. Minting needs only PUBLIC keys — the RRK public in the escrow
 /// and each member's HPKE key — so both the owner (passphrase) and any active member (`member_kdf`) can produce
@@ -2354,6 +2375,90 @@ mod tests {
             "shared dag: member signs"
         );
         assert_eq!(member_h.author_member_id, "acct-bob");
+    }
+
+    /// §B3 verify-on-ingest over the dag engine (OPE-382 / §8.2): a real shared-dag `DagMembership` accepts a
+    /// signed owner entry, rejects a forged unsigned one, and — the epoch-set fix — STILL accepts an entry
+    /// sealed under a PRIOR epoch after a forward-secret rotation, rather than `EpochMismatch`-rejecting it.
+    #[test]
+    fn dag_verify_ingest_accepts_signed_and_prior_epoch_entries_rejects_forgeries() {
+        use crate::verify::dag::DagMembership;
+        use crate::{verify_ingest, Disposition, Membership};
+        use openom_protocol::{v1::Envelope, Message};
+        use openom_sealer::SealContext;
+
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"owner passphrase");
+
+        // Provision, then SHARE (add bob) so the tree requires attribution and the owner signs.
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+        let bob_pass = Passphrase::new(b"bobs own passphrase");
+        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob_author = bob.root.identity.verifying_key().to_bytes();
+        let shared = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new("acct-bob"),
+                    KeyringRole::EDITOR,
+                    &bob_author,
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // The owner seals an entry under the CURRENT (first) epoch.
+        let u = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &shared, &owner_pass)
+            .unwrap();
+        let sealed = u
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"owner edit")
+            .unwrap()
+            .envelope;
+        let env = Envelope::decode(sealed.as_slice()).unwrap();
+        let header = env.header.clone().unwrap();
+        assert!(!header.author_signature.is_empty(), "the shared-tree owner signs");
+
+        let verify = |m: &DagMembership, h: &openom_protocol::v1::Header| {
+            verify_ingest(env.version, m, h, &h.governing_ref, &h.key_id, || {
+                Ok::<_, ()>(b"owner edit".to_vec())
+            })
+        };
+
+        // Verified against the shared anchor it was sealed under: ACCEPT.
+        let m0 = DagMembership::new(&shared).unwrap();
+        assert!(m0.shared());
+        assert_eq!(verify(&m0, &header), Disposition::Accept);
+
+        // A forged UNSIGNED entry on the shared tree is REJECTED.
+        let mut forged = header.clone();
+        forged.author_signature.clear();
+        assert_eq!(verify(&m0, &forged), Disposition::Reject);
+
+        // Remove bob → a forward-secret re-epoch rotates the write epoch, but the entry's PRIOR epoch stays
+        // retained. The old signed entry must STILL verify against the new anchor (accept any retained epoch),
+        // where a single-current-epoch resolver would wrongly EpochMismatch-reject it.
+        let rotated = DagVault
+            .remove_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r3")),
+                &shared,
+                &owner_pass,
+                "acct-bob",
+            )
+            .unwrap();
+        let m1 = DagMembership::new(&rotated).unwrap();
+        assert_eq!(
+            verify(&m1, &header),
+            Disposition::Accept,
+            "a prior-epoch entry is accepted after a rotation, not EpochMismatch-rejected"
+        );
     }
 
     /// The full shared-tree cycle: the owner adds bob, and bob unlocks with HIS OWN passphrase + account

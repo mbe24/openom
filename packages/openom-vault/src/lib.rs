@@ -24,6 +24,11 @@ pub use app_vault::AppVault;
 pub mod attribution;
 pub use attribution::{epoch_is_attributed, has_been_shared, verify_entry, EntryError};
 
+pub mod verify;
+pub use verify::chain::ChainMembership;
+pub use verify::dag::DagMembership;
+pub use verify::{verify_ingest, Disposition, Governing, Membership};
+
 // The moderator (Maintainer-or-above did:key) feed for the claim engine's authority — re-typed over the
 // engine-neutral MembershipView so it serves either keyring engine (OPE-308). Moved out of the chain
 // keyring engine: it consumes a resolved membership, it isn't the membership engine.

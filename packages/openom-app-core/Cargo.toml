@@ -21,13 +21,12 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = []
 # The wasm veneer (AppCoreHandle + provision/unlock + the docId registry) + its glue — off by default so
-# native test builds skip it. Pulls in openom-vault (the keyring lifecycle → SealerSet), openom-crypto
-# (Passphrase) + openom-keyring-api (EngineKind) for that, and js-sys/web-sys (wall clock + OPFS handles).
+# native test builds skip it. Pulls in openom-crypto (Passphrase) + openom-keyring-api (EngineKind) for the
+# keyring lifecycle, and js-sys/web-sys (wall clock + OPFS handles). openom-vault is a hard rlib dep (below).
 wasm = [
     "dep:wasm-bindgen",
     "dep:js-sys",
     "dep:web-sys",
-    "dep:openom-vault",
     "dep:openom-crypto",
     "dep:openom-keyring-api",
 ]
@@ -44,14 +43,14 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-# Only the rlib lifecycle (AppVault / ChainVault) — NOT openom-vault's own #[wasm_bindgen] veneer.
-# Enabling its `wasm` feature would compile that veneer into this cdylib too and collide on the
-# `provision`/`unlock` export symbols. app-core exports its OWN provision/unlock (returning a core
-# handle); the DEK stays in this module's memory regardless. Crypto's wasm CSPRNG comes from the
-# getrandom_backend cfg in build-app-core.mjs, not this feature.
+# A hard rlib dep: the §B3 verify-on-ingest seam (Membership / verify_ingest / Chain+DagMembership) lives
+# here and gates AppCore::ingest in the core (non-wasm) build + tests, plus the rlib keyring lifecycle
+# (AppVault / ChainVault) used by the wasm veneer. We take ONLY the rlib — NOT openom-vault's own
+# #[wasm_bindgen] veneer: its `wasm` feature stays off, so its provision/unlock export symbols never compile
+# into this cdylib to collide with app-core's own. Crypto's wasm CSPRNG comes from the getrandom_backend cfg
+# in build-app-core.mjs.
 [dependencies.openom-vault]
 path = "../openom-vault"
-optional = true
 
 [dependencies.openom-crypto]
 path = "../openom-crypto"

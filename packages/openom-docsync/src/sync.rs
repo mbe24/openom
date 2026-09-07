@@ -228,6 +228,15 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.quarantined_count()
     }
 
+    /// Open a `Delta` envelope to its plaintext without merging — for §B3 author verification before
+    /// the entry is accepted into the store.
+    ///
+    /// # Errors
+    /// Returns an error if the sealer can't open the envelope.
+    pub fn try_open_delta(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.inner.try_open_delta(envelope)
+    }
+
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
     /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate entry
     /// re-inserts by id. From a fresh client this replays the whole log (the journal is authority).

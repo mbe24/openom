@@ -8,6 +8,7 @@ use openom_docsync::SyncClient;
 use openom_protocol::v1::Envelope;
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
+use openom_vault::{Disposition, Membership};
 use serde_json::Value;
 use store_log::DocStore;
 
@@ -69,6 +70,21 @@ pub struct AppCore<S: DocStore> {
     persisted: Option<u64>,
     /// The server log `?since` cursor — the seq of the newest server entry already pulled.
     server_cursor: Option<i64>,
+    /// The §B3 governing membership for verify-on-ingest. `None` ⇒ a solo / never-shared tree (no keyring):
+    /// AEAD-only is safe there (only the DEK holder can write), so ingest accepts without attribution. The
+    /// worker installs `Some(..)` via [`set_membership`](Self::set_membership) once the tree is shared, after
+    /// which every peer entry is verified against the resolved roles before it is stored or folded.
+    membership: Option<Box<dyn Membership>>,
+    /// Peer entries HELD because their governing keyring/epoch isn't retained locally yet (the data channel
+    /// outran the keyring channel). Re-verified on the next [`set_membership`](Self::set_membership); never
+    /// folded until they verify. Bounded by [`HELD_CAP`](Self::HELD_CAP) — an overflow is dropped (counted in
+    /// [`anomalies`](Self::anomalies)) and recovered on a reload's full re-pull, since the server log is never
+    /// pruned below an un-subsumed entry.
+    held: Vec<Vec<u8>>,
+    /// Peer entries REJECTED by §B3 verification (forged / unattributed-on-shared / illegitimate), plus any
+    /// hold-buffer overflow — never stored, and the cursor still advances so a forgery can't stall the tail.
+    /// Surfaced via [`anomalies`](Self::anomalies), never silently swallowed.
+    rejected: usize,
 }
 
 impl<S: DocStore> AppCore<S> {
@@ -92,8 +108,16 @@ impl<S: DocStore> AppCore<S> {
             push_scan: None,
             persisted: None,
             server_cursor: None,
+            membership: None,
+            held: Vec::new(),
+            rejected: 0,
         }
     }
+
+    /// The hold buffer's cap — entries awaiting a not-yet-synced governing keyring. Beyond this an overflow is
+    /// dropped (recovered on a reload's full re-pull), so a peer withholding a keyring can't grow memory
+    /// without bound.
+    const HELD_CAP: usize = 1024;
 
     /// Rebuild the engine from the local durable log (snapshot + tail) — call once on open, after a
     /// reload. This is what makes an offline mint survive a reload: the mint is durable in the local
@@ -148,6 +172,8 @@ impl<S: DocStore> AppCore<S> {
         self.persisted = None;
         self.seen.clear();
         self.undecodable = 0;
+        self.held.clear();
+        self.rejected = 0;
         Ok(())
     }
 
@@ -230,12 +256,28 @@ impl<S: DocStore> AppCore<S> {
         self.persisted = Some(through);
     }
 
-    /// Data-integrity anomalies observed so far: server entries whose header wouldn't decode plus the
-    /// pull's quarantined (un-openable / un-mergeable) entries. A caller surfaces a non-zero count as a
-    /// warning — these are never silently swallowed.
+    /// Data-integrity anomalies observed so far: server entries whose header wouldn't decode, the pull's
+    /// quarantined (un-openable / un-mergeable) entries, and the §B3-rejected forgeries (+ hold overflow). A
+    /// caller surfaces a non-zero count as a warning — these are never silently swallowed.
     #[must_use]
     pub fn anomalies(&self) -> usize {
-        self.undecodable + self.client.quarantined_count()
+        self.undecodable + self.client.quarantined_count() + self.rejected
+    }
+
+    /// Install (or refresh) the §B3 governing membership. The worker calls this on unlock and after every
+    /// keyring sync, passing a resolver ([`openom_vault::ChainMembership`] / [`openom_vault::DagMembership`])
+    /// built from the freshly-verified keyring. Once set, every peer entry [`ingest`](Self::ingest) sees is
+    /// verified against the resolved roles before it is stored or folded.
+    ///
+    /// Re-runs verification on the Held buffer: entries whose governing keyring/epoch is now retained are
+    /// stored + folded; the rest stay held (up to the cap) or are rejected. Returns how many newly-released
+    /// held entries the fold took in.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if releasing a now-valid held entry fails to append to the local store or fold.
+    pub fn set_membership(&mut self, membership: Box<dyn Membership>) -> Result<usize, CoreError> {
+        self.membership = Some(membership);
+        self.drain_held()
     }
 
     /// The server log `?since` cursor for the next pull (`None` ⇒ from the beginning).
@@ -258,16 +300,79 @@ impl<S: DocStore> AppCore<S> {
             match envelope_dot(env) {
                 None => self.undecodable += 1, // can't attribute or dedup — skip, surface via anomalies
                 Some((replica, _)) if replica == self.replica => {} // our own, echoed back
-                Some(dot) => {
-                    if self.seen.insert(dot) {
-                        self.store.append(&self.doc, std::slice::from_ref(env))?;
-                    }
-                }
+                Some(dot) if self.seen.contains(&dot) => {} // already stored (a re-pulled tail)
+                Some(dot) => self.admit(env, dot)?,
             }
         }
         // Monotonic: never rewind the cursor (a smaller value would re-pull; dedup makes that safe but
         // wasteful — a rewind loop is not). Only ever move forward.
         self.server_cursor = Some(self.server_cursor.map_or(next_cursor, |c| c.max(next_cursor)));
+        Ok(self.client.pull_claims()?)
+    }
+
+    /// Route one deduped, attributable peer entry through §B3 verification. Accept ⇒ store it (the next
+    /// `pull_claims` folds it, and a reload re-folds it from the durable log). Hold ⇒ buffer it, unstored, for
+    /// re-verification after the next [`set_membership`](Self::set_membership). Reject ⇒ count it as an
+    /// anomaly and drop it — never stored, so a forgery can neither be folded nor stall the tail.
+    fn admit(&mut self, env: &[u8], dot: (Vec<u8>, u64)) -> Result<(), CoreError> {
+        match self.classify(env) {
+            Disposition::Accept => {
+                self.seen.insert(dot);
+                self.store.append(&self.doc, &[env.to_vec()])?;
+            }
+            Disposition::Hold => self.hold(env),
+            Disposition::Reject => self.rejected += 1,
+        }
+        Ok(())
+    }
+
+    /// The §B3 disposition for one peer entry. With no shared membership installed (a solo / never-shared
+    /// tree) every entry is accepted — AEAD-only is safe because only the DEK holder can write. Otherwise the
+    /// entry is opened ONLY if a signature must actually be checked (`verify_ingest` calls `open` lazily), and
+    /// an entry whose envelope/header won't even decode on a shared tree is rejected as untrustworthy.
+    fn classify(&self, env: &[u8]) -> Disposition {
+        let Some(membership) = self.membership.as_deref() else {
+            return Disposition::Accept;
+        };
+        let Ok(envelope) = Envelope::decode(env) else {
+            return Disposition::Reject;
+        };
+        let Some(header) = envelope.header.as_ref() else {
+            return Disposition::Reject;
+        };
+        openom_vault::verify_ingest(
+            envelope.version,
+            membership,
+            header,
+            &header.governing_ref,
+            &header.key_id,
+            || self.client.try_open_delta(env),
+        )
+    }
+
+    /// Buffer a held entry, bounded by [`HELD_CAP`](Self::HELD_CAP). An overflow is dropped and counted as an
+    /// anomaly (recovered on a reload's full re-pull), so a peer withholding a keyring can't exhaust memory.
+    fn hold(&mut self, env: &[u8]) {
+        if self.held.len() < Self::HELD_CAP {
+            self.held.push(env.to_vec());
+        } else {
+            self.rejected += 1;
+        }
+    }
+
+    /// Re-verify the Held buffer after a [`set_membership`](Self::set_membership): a now-retained governing
+    /// keyring/epoch releases its entries into the store, the rest stay held or are rejected. Folds the
+    /// released entries and returns the fold count.
+    fn drain_held(&mut self) -> Result<usize, CoreError> {
+        if self.held.is_empty() {
+            return Ok(0);
+        }
+        for env in std::mem::take(&mut self.held) {
+            match envelope_dot(&env) {
+                Some(dot) if !self.seen.contains(&dot) => self.admit(&env, dot)?,
+                _ => {} // undecodable dots never entered the buffer; a since-stored dot needs no replay
+            }
+        }
         Ok(self.client.pull_claims()?)
     }
 

@@ -252,6 +252,17 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         self.quarantined
     }
 
+    /// Open a `Delta` envelope to its plaintext WITHOUT merging — for a caller that must inspect an
+    /// entry (e.g. §B3 author verification) before deciding whether to accept it into the store.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the sealer can't open the envelope (wrong key / corrupt).
+    pub fn try_open_delta(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
+        self.sealer
+            .open(EntryKind::Delta, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
     /// Fold state into a snapshot and CAS it, recording the seq it covers.
     ///
     /// # Errors

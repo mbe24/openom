@@ -9,10 +9,37 @@ use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::Envelope;
 use openom_protocol::Message;
 use openom_sealer::{Sealer, SealerSet};
+use openom_vault::{Governing, Membership};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use store_log::memory::MemoryStore;
 use store_log::DocStore;
+
+/// A scripted [`Membership`] double for the ingest-routing tests — it forces one disposition for every
+/// entry via the neutral policy's *crypto-free* arms (no keyring, no signature check), so the routing
+/// (Accept ⇒ store+fold, Hold ⇒ buffer, Reject ⇒ anomaly+drop) and the Hold-release path can be exercised
+/// in isolation. The real crypto decisions are proven against `ChainMembership`/`DagMembership` in
+/// openom-vault.
+enum Route {
+    Accept,
+    Hold,
+    Reject,
+}
+struct Fake(Route);
+impl Membership for Fake {
+    fn shared(&self) -> bool {
+        // Accept routes through the never-shared arm; Hold/Reject through the shared arm.
+        !matches!(self.0, Route::Accept)
+    }
+    fn resolve(&self, _governing_ref: &[u8], _key_id: &[u8]) -> Governing {
+        match self.0 {
+            // (false, Unattributed) ⇒ Accept; (true, Unattributed) ⇒ Reject — neither opens the entry.
+            Route::Accept | Route::Reject => Governing::Unattributed,
+            // (true, NotYetRetained) ⇒ Hold.
+            Route::Hold => Governing::NotYetRetained,
+        }
+    }
+}
 
 const DEVICE: &str = "did:key:z6MkDevice";
 const PERSON: &str = "openom.org/core/person/v1";
@@ -293,6 +320,76 @@ fn reset_clears_the_tree_and_store_then_reseeds_cleanly() {
     a.commit().unwrap();
     assert!(live_ids(&a).contains("pNew"));
     assert!(!live_ids(&a).contains("pOld"), "no resurrected old id after reset+reseed");
+}
+
+/// Set up a server holding ONE peer entry (anchor `pA`, authored by replica-a) plus a fresh core B over its
+/// own store, sharing the DEK so B can open it. B installs `route` as its §B3 membership before pulling.
+fn peer_entry_and_core_b(route: Route) -> (FakeServer, AppCore<MemoryStore>, Arc<MemoryStore>) {
+    let dek = generate_dek().unwrap();
+    let mut server = FakeServer::default();
+    let mut a = core(b"replica-a", dek.clone(), Arc::new(MemoryStore::new()));
+    a.tree_mut().assert_anchor("pA", PERSON, 1).unwrap();
+    a.commit().unwrap();
+    push(&mut a, &mut server);
+
+    let b_store = Arc::new(MemoryStore::new());
+    let mut b = core(b"replica-b", dek, Arc::clone(&b_store));
+    b.set_membership(Box::new(Fake(route))).unwrap();
+    (server, b, b_store)
+}
+
+#[test]
+fn a_rejected_peer_entry_is_never_stored_folded_or_persisted() {
+    // The recovery invariant + the anti-forgery gate: a §B3-rejected entry must not reach the tree, the
+    // durable store, or the persistence export — yet the cursor still advances so a forgery can't stall the
+    // tail (a reload re-pulls it from the un-pruned server log and re-verifies).
+    let (server, mut b, b_store) = peer_entry_and_core_b(Route::Reject);
+    pull(&mut b, &server);
+
+    assert!(!live_ids(&b).contains("pA"), "a rejected entry never folds into the tree");
+    assert_eq!(
+        b_store.read_updates("tree", None).unwrap().0.len(),
+        0,
+        "a rejected entry is never stored"
+    );
+    assert_eq!(
+        b.export_since(None).unwrap().0.len(),
+        0,
+        "a rejected entry is never persisted (recovery invariant)"
+    );
+    assert!(b.anomalies() >= 1, "a rejected forgery is surfaced as an anomaly");
+    assert!(b.server_since().is_some(), "the cursor advanced past the forgery");
+}
+
+#[test]
+fn a_held_peer_entry_is_buffered_then_released_on_set_membership() {
+    // Hold ⇒ buffered, unstored, un-folded, and NOT an anomaly; a later set_membership whose resolver now
+    // accepts the entry releases it into the store and the tree.
+    let (server, mut b, b_store) = peer_entry_and_core_b(Route::Hold);
+    pull(&mut b, &server);
+    assert!(!live_ids(&b).contains("pA"), "a held entry is not folded");
+    assert_eq!(
+        b_store.read_updates("tree", None).unwrap().0.len(),
+        0,
+        "a held entry is not stored"
+    );
+    assert_eq!(b.anomalies(), 0, "a hold is not an anomaly");
+
+    let folded = b.set_membership(Box::new(Fake(Route::Accept))).unwrap();
+    assert_eq!(folded, 1, "the released entry folds in on set_membership");
+    assert!(live_ids(&b).contains("pA"), "the released entry is now in the tree");
+    assert_eq!(
+        b_store.read_updates("tree", None).unwrap().0.len(),
+        1,
+        "the released entry is now durably stored"
+    );
+}
+
+#[test]
+fn an_accepting_membership_folds_peer_entries_like_the_solo_path() {
+    let (server, mut b, _b_store) = peer_entry_and_core_b(Route::Accept);
+    assert_eq!(pull(&mut b, &server), 1);
+    assert!(live_ids(&b).contains("pA"));
 }
 
 fn json_name(given: &str) -> serde_json::Value {
