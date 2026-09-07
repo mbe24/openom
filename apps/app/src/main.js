@@ -1,15 +1,12 @@
-import { createStore } from './core/store.js';
 import { TreeLibrary, dataset } from './core/library.js';
-import { composeStore } from './core/storeStack.js';
-import { createLibrarySealer, createAppVault } from './core/sealer/index.js';
-import { resetCryptoWorker } from './core/sealer/workerSealer.js';
+import { appCoreWorker, resetAppCoreWorker, remoteTransport, startSyncDriver } from './core/appCoreClient.js';
+import * as Comlink from './vendor/comlink.js';
 import { createLockPolicy } from './core/lockPolicy.js';
 import { SchemaRegistry } from './core/schema.js';
 import { TreeTransfer } from './core/transfer.js';
 import { SessionController, DevAuth } from './core/session.js';
 import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
-import { buildSyncSession } from './core/syncSession.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { stats, search } from './core/queries.js';
@@ -94,7 +91,8 @@ class App {
   gateError = '';
   gateBusy = false;
   gateRecoveryCode = '';
-  pendingSession = null;
+  pendingDid = null;
+  lockable = false; // a real (passphrase) worker core is open — auto-lock / "Lock now" apply
   vault = null;
   // The active member's ONE tree identity (§ treeId.js): realDoc = the UUID string (server resource
   // id, local doc/keyring key, sync docId — all the same); realTreeId = its 16 seam bytes (crypto
@@ -154,7 +152,8 @@ class App {
     // unlock state, so tear the whole stack down, lock the sealer, rebuild the vault, and re-gate. This
     // lives at the composition root; RemoteStore stays dumb (it never swaps a token under a live store).
     this.auth.onChange(() => this.onIdentityChange());
-    this.vault = await createAppVault();
+    this.worker = appCoreWorker();
+    await this.worker.warm();
     if (this.demoEnabled && new URLSearchParams(location.search).get('demo') === '1') {
       await this.startDemo();
       return;
@@ -174,7 +173,7 @@ class App {
   // The gate a returning member lands on: 'unlock' if they have a provisioned tree keyring, else the
   // 'welcome' first-run screen. Resolves (and caches) the member's tree identity as a side effect.
   async gateForMember() {
-    return this.loadTreeIdentity() && (await this.vault.hasKeyring(this.realDoc)) ? 'unlock' : 'welcome';
+    return this.loadTreeIdentity() && (await this.worker.hasKeyring(this.realDoc)) ? 'unlock' : 'welcome';
   }
 
   // The ONE identity source (OPE-336 invariant): the member id the vault provisions/unlocks under MUST
@@ -194,10 +193,10 @@ class App {
   // authed RemoteStore. Tear the old session down first (its signal aborts, in-flight ticks no-op).
   async onIdentityChange() {
     this.stopSync();
-    if (this.sealer) {
-      try { await this.sealer.lock(); } catch (e) { console.warn('[openom] lock on identity change', e); }
+    if (this.lockable && this.realDoc) {
+      try { await this.worker.close(this.realDoc); } catch (e) { console.warn('[openom] close core on identity change', e); }
     }
-    this.sealer = null;
+    this.lockable = false;
     this.lockPolicy?.disarm();
     this.togglePalette(false);
     this.tree = null;
@@ -206,8 +205,9 @@ class App {
     this.focusId = null;
     this.viewStack = [];
     try { await this.blobs?.lock?.(); } catch { /* best-effort */ }
-    // A fresh vault so the next provision/unlock binds to the new member id.
-    try { this.vault = await createAppVault(); } catch (e) { console.error('[openom] rebuild vault on identity change', e); }
+    // A fresh worker so the next provision/unlock binds to the new member id (drops the old DEK).
+    try { resetAppCoreWorker(); this.worker = appCoreWorker(); await this.worker.warm(); }
+    catch (e) { console.error('[openom] rebuild worker on identity change', e); }
     if (!this.auth.memberId()) { this.realDoc = null; this.realTreeId = null; this.showGate('welcome'); return; } // signed out
     this.showGate(await this.gateForMember());
   }
@@ -234,7 +234,10 @@ class App {
 
   async startDemo() {
     // Demo = the seed datasets under the dev key (clearly not the user's real, protected tree).
-    await this.enterApp({ sealer: createLibrarySealer({ dev: true }), seedDataset: this.datasetId });
+    const set = dataset(this.datasetId);
+    const did = 'did:key:zLocalReplica';
+    await this.worker.openDev(new Uint8Array(16), new Uint8Array(8).fill(1), did, set.doc, false);
+    await this.enterApp({ seedDataset: set.id, docId: set.doc, createdBy: did, lockable: false });
   }
 
   async doProvision(passphrase, confirm) {
@@ -249,8 +252,10 @@ class App {
       const id = await ensureTreeIdentity(this.authMemberId());
       this.realDoc = id.uuid;
       this.realTreeId = id.bytes;
-      const { session, recoveryCode } = await this.vault.provision(this.realDoc, this.realTreeId, passphrase, this.authMemberId());
-      this.pendingSession = session;
+      const { recoveryCode, didKey } = await this.worker.provisionCore({
+        passphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
+      });
+      this.pendingDid = didKey;
       this.gateRecoveryCode = recoveryCode;
       this.showGate('recovery');
     } catch (e) {
@@ -263,10 +268,10 @@ class App {
   async gateContinue() {
     // After the recovery-code screen. From provision/recover there's a pending session to enter
     // the app with; from an in-app change-passphrase there isn't — just close the gate.
-    const session = this.pendingSession;
-    this.pendingSession = null;
+    const did = this.pendingDid;
+    this.pendingDid = null;
     this.gateRecoveryCode = '';
-    if (session) await this.enterApp({ sealer: session, docId: this.realDoc, lockable: true });
+    if (did) await this.enterApp({ docId: this.realDoc, createdBy: did, lockable: true });
     else { this.gate = null; this.render(); }
   }
 
@@ -275,7 +280,7 @@ class App {
     this.gate = null;
     this.gateError = '';
     this.gateBusy = false;
-    this.pendingSession = null;
+    this.pendingDid = null;
     this.gateRecoveryCode = '';
     this.render();
   }
@@ -284,15 +289,14 @@ class App {
   // thread, then re-gate. Re-unlock re-derives the key and rebuilds the tree via enterApp.
   // A no-op unless a real, lockable session is open (guards the demo and the gate).
   async lockNow(_reason = 'manual') {
-    if (!this.sealer || !this.tree || this.gate) return;
-    this.stopSync(); // abort sync before freeing the key (its channels seal through this sealer)
-    const sealer = this.sealer;
-    this.sealer = null;
+    if (!this.lockable || !this.tree || this.gate) return;
+    this.stopSync(); // stop the driver before freeing the core (its transport seals through this core)
+    this.lockable = false;
     this.lockPolicy?.disarm();
     this.togglePalette(false);
-    // DRAIN in-flight seals then free the key. Best-effort: even if teardown throws we still
-    // drop the plaintext below and re-gate.
-    try { await sealer.lock(); } catch (e) { console.warn('[openom] lock teardown', e); }
+    // Free the worker core — drops the DEK + every plaintext record held in the worker. Best-effort:
+    // even if teardown throws we still drop the main-thread wrappers below and re-gate.
+    try { await this.worker.close(this.realDoc); } catch (e) { console.warn('[openom] lock teardown', e); }
     // Drop decrypted material: the tree (every plaintext record), the library/transfer wrappers
     // built over it, and the image bytes + object URLs.
     this.tree = null;
@@ -318,8 +322,10 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { session } = await this.vault.unlock(this.realDoc, this.realTreeId, passphrase, this.authMemberId());
-      await this.enterApp({ sealer: session, docId: this.realDoc, lockable: true });
+      const { didKey } = await this.worker.unlockCore({
+        passphrase, treeId: this.realTreeId, memberId: this.authMemberId(), docId: this.realDoc,
+      });
+      await this.enterApp({ docId: this.realDoc, createdBy: didKey, lockable: true });
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
@@ -341,10 +347,9 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { session, recoveryCode: newCode } = await this.vault.recover(this.realDoc, this.realTreeId, recoveryCode, newPassphrase, this.authMemberId());
-      this.pendingSession = session;
-      this.gateRecoveryCode = newCode; // a fresh code — the old one no longer works
-      this.showGate('recovery');
+      // TODO(OPE-383): recover on the app-core worker (solo keyring lifecycle). Not yet wired.
+      void recoveryCode; void newPassphrase;
+      throw new Error('recover is not yet available on the app-core');
     } catch (e) {
       this.gateBusy = false;
       this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-recover');
@@ -368,9 +373,9 @@ class App {
     this.gateError = '';
     this.renderGate();
     try {
-      const { recoveryCode } = await this.vault.changePassphrase(this.realDoc, this.realTreeId, current, next, this.authMemberId());
-      this.gateRecoveryCode = recoveryCode; // a fresh code — the old one no longer works
-      this.showGate('recovery');
+      // TODO(OPE-383): change-passphrase on the app-core worker (solo keyring lifecycle). Not yet wired.
+      void current; void next;
+      throw new Error('change-passphrase is not yet available on the app-core');
     } catch (e) {
       this.gateBusy = false;
       this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-change');
@@ -378,30 +383,18 @@ class App {
     }
   }
 
-  // Compose the store around the resolved sealer, open the tree, and switch to the app.
-  async enterApp({ sealer, seedDataset, docId, lockable = false }) {
-    // Only the real passphrase session is lockable — the demo has no keyring to re-unlock, so
-    // auto-lock/"Lock now" must not touch it (else the user would be stranded at a passphrase
-    // screen for a throwaway demo).
-    this.sealer = lockable ? sealer : null;
-    const base = await createStore();
-    const { store } = await composeStore({ mode: 'local', sealer, local: base.store });
-    this.storeKind = 'sealed / ' + base.kind;
-    this.library = new TreeLibrary(store, this.schema);
+  // Open the tree over the (already-provisioned/unlocked) worker core and switch to the app. `createdBy`
+  // is the core's author did:key; only the real passphrase session is `lockable` (the demo isn't).
+  async enterApp({ seedDataset, docId, createdBy = null, lockable = false }) {
+    this.lockable = lockable;
+    this.storeKind = 'app-core / indexeddb';
+    this.library = new TreeLibrary(this.worker, this.schema);
     let opened;
     if (seedDataset) {
-      try {
-        opened = await this.library.openSeeded(seedDataset);
-      } catch (e) {
-        console.warn('[openom] resetting unreadable local tree (likely pre-encryption data):', e);
-        const doc = dataset(seedDataset).doc;
-        this.library.close(doc);
-        await store.delete(doc);
-        opened = await this.library.openSeeded(seedDataset);
-      }
+      opened = await this.library.openSeeded(seedDataset, createdBy);
       this.datasetId = seedDataset;
     } else {
-      const tree = await this.library.open(docId); // hydrates; empty on first provision
+      const tree = await this.library.open(docId, createdBy); // materializes; empty on first provision
       // Anchor on the first person (from "start with yourself" onboarding, that's you) so a
       // re-open — reload or unlock — lands on the tree, not an "Unknown" placeholder.
       opened = { tree, focusId: tree.allPeople()[0]?.id ?? null };
@@ -416,49 +409,43 @@ class App {
     this.view = tree.allPeople().length === 0 ? 'onboarding' : 'tree';
     this.gate = null;
     // Start the idle clock only for the real, lockable session.
-    if (this.sealer) this.lockPolicy?.arm();
+    if (lockable) this.lockPolicy?.arm();
     // Turn on synced mode for the real tree (gated on a configured backend + an active account).
     this.startSync();
     this.render();
   }
 
-  // Build + start this tree's owned SyncSession. Gated (D3) on a configured managed backend AND an active
-  // account — absent either, the tree stays local-first (no server, no account wall). One SyncSession per
-  // open tree; a prior one is aborted first. Web-only for now (the Tauri vault has no makeDeltaSync yet).
+  // Attach the network transport to the worker core + start the sync driver. Gated on a configured
+  // managed backend AND an active account — absent either, the tree stays local-first (no server, no
+  // account wall). One driver per open tree; a prior one is stopped first.
   startSync() {
     this.stopSync();
-    if (!this.sealer || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
+    if (!this.lockable || !this.tree || !this.realDoc) return; // only the real, lockable tree syncs
     if (!this.serverUrl || !this.auth.memberId()) return; // no backend / no account → local-only
-    if (typeof this.vault?.makeDeltaSync !== 'function') return; // Tauri host: synced mode deferred
     try {
       const remote = new RemoteStore({ baseUrl: this.serverUrl, auth: this.auth });
-      this.sync = buildSyncSession({
-        tree: this.tree,
-        uuid: this.realDoc,
-        treeId: this.realTreeId,
-        session: this.sealer,
-        vault: this.vault,
-        remote,
-        memberId: this.auth.memberId(), // whose role gates the writer base self-heal (Maintainer+)
-        callbacks: {
-          onStatus: (s) => { this.syncStatus = s; },
-          // A dead BACKEND session is independent of the vault (per-backend auth): stop syncing + record
-          // it for the UI to offer re-connect; do NOT lock the passphrase vault.
-          onAuthError: () => { this.syncStatus = { state: 'auth-error' }; console.warn('[openom] sync: backend session needs re-auth'); },
-          onSecurity: (e) => { this.syncStatus = { state: 'security' }; console.warn('[openom] sync: security signal', e); },
-        },
+      // The worker calls the transport across Comlink; auth + serverUrl stay on the main thread.
+      this.worker.attachTransport(this.realDoc, Comlink.proxy(remoteTransport(remote)));
+      this.syncDriver = startSyncDriver(this.worker, this.realDoc, {
+        subscribeEdits: (fn) => this.tree.onRevision(fn),
+        onStatus: (s) => { this.syncStatus = s; this.render(); },
+        // A dead BACKEND session is independent of the vault (per-backend auth): record it for the UI
+        // to offer re-connect; do NOT lock the passphrase core.
+        onAuthError: () => { this.syncStatus = { state: 'auth-error' }; console.warn('[openom] sync: backend session needs re-auth'); },
+        onSecurity: (e) => { this.syncStatus = { state: 'security' }; console.warn('[openom] sync: security signal', e); },
       });
-      this.sync.start();
     } catch (e) {
       console.warn('[openom] sync start failed', e);
     }
   }
 
-  // Abort + drop the SyncSession (aborts its signal, stops the driver, releases the delta subscription).
-  // Called by every teardown path before the plaintext is dropped. Idempotent.
+  // Stop the sync driver + the worker's tick for this tree. Called by every teardown path before the
+  // plaintext core is dropped. Idempotent.
   stopSync() {
-    try { this.sync?.abort(); } catch { /* best-effort */ }
-    this.sync = null;
+    // Stop the main-thread driver (no more syncNow ticks). The worker core stays usable; only lock /
+    // teardown (worker.close) aborts an in-flight tick and frees the core.
+    try { this.syncDriver?.stop(); } catch { /* best-effort */ }
+    this.syncDriver = null;
     this.syncStatus = null;
   }
 
@@ -486,21 +473,22 @@ class App {
     // a lock: drop the plaintext and re-gate. (lockNow's sealer.lock() is a harmless no-op then.)
     window.addEventListener('openom:sealer-locked', () => this.lockNow('evicted'));
     window.addEventListener('openom:worker-error', async () => {
-      this.stopSync(); // the worker is dead — abort the driver + release subscriptions (do NOT sealer.lock a corpse)
-      this.sealer = null;
+      this.stopSync(); // the worker is dead — stop the driver (do NOT close() a corpse)
+      this.lockable = false;
       this.lockPolicy?.disarm();
       this.togglePalette(false);
       this.tree = null;
       this.library = null;
       this.transfer = null;
       try { await this.blobs?.lock?.(); } catch { /* best-effort */ }
-      resetCryptoWorker();
+      resetAppCoreWorker();
       try {
-        this.vault = await createAppVault();
+        this.worker = appCoreWorker();
+        await this.worker.warm();
       } catch (e) {
-        console.error('[openom] could not rebuild crypto worker', e);
+        console.error('[openom] could not rebuild app-core worker', e);
       }
-      const next = (this.loadTreeIdentity() && (await this.vault?.hasKeyring(this.realDoc).catch(() => false))) ? 'unlock' : 'welcome';
+      const next = (this.loadTreeIdentity() && (await this.worker?.hasKeyring(this.realDoc).catch(() => false))) ? 'unlock' : 'welcome';
       this.showGate(next);
     });
   }

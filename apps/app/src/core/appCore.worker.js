@@ -153,6 +153,11 @@ const api = {
     }
   },
 
+  /** Whether a keyring has been provisioned for `docId` (→ show unlock vs. welcome at the gate). */
+  async hasKeyring(docId) {
+    return !!(await keyringStore().loadHead(docId));
+  },
+
   /** Attach the network transport (a Comlink-proxied main-thread `fetch` seam). */
   attachTransport(docId, transport) {
     core(docId).transport = transport;
@@ -215,12 +220,6 @@ const api = {
   /** Run one full tick (push our outbound, then pull + fold the server tail). Single-flighted. */
   async syncNow(docId) {
     return runTick(core(docId));
-  },
-
-  /** Stop syncing this core (teardown / lock). In-flight ticks bail at the next await boundary. */
-  stop(docId) {
-    const c = cores.get(docId);
-    if (c) c.aborted = true;
   },
 
   /** Delete a doc's durably-persisted log (test cleanup / a hard local reset). */
