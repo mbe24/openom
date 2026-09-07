@@ -1,6 +1,6 @@
-# openom-sync
+# openom-docsync
 
-> The client sync loop — seal local claim-op deltas to the store, merge peers' deltas back.
+> openom's binding of the generic `docsync` loop — seal local claim-op deltas to the store, merge peers' deltas back. Drives `docsync` over `openom-tree` (the claim engine) + `openom-sealer`.
 
 **Status:** built · client orchestration, load-bearing · E2EE multi-device sync
 **Last updated:** 2026-08-27
@@ -11,7 +11,7 @@ It ties three layers that each deliberately know nothing of the others: `openom-
 consumes op batches (`ChannelItem`s); `openom-sealer` seals those bytes into E2EE envelopes; a
 `journal::DocStore` persists opaque envelopes as an append log. `SyncClient::push_claims` seals a
 local batch and pushes it; `pull_claims` opens and merges every new log entry into the accumulated op
-set; `materialize` folds that set into the live record set the projection reads; `compact_claims` /
+set; the engine's fold produces the live record set the projection reads; `compact_claims` /
 `bootstrap_claims` publish a snapshot of the live set and load from one instead of replaying the whole
 log.
 
@@ -35,10 +35,10 @@ mean.
 | **SYNC-4** | The set is not separately durable: a crashed client fully rebuilds it by replaying the sealed log alone. | The log is the durable source of truth; the in-memory op set is disposable. | `sync::tests::a_crashed_client_rebuilds_from_the_durable_log` |
 | **SYNC-5** | Each batch is sealed exactly once; a transient append failure keeps it queued and retries the identical sealed bytes, never re-sealing. | Re-sealing on retry mints a fresh nonce under the same chain slot — a self-inflicted hash-chain fork. | (write-ahead queue in `push_claims` / `flush`) |
 | **SYNC-6** | `bootstrap_claims` loads the snapshot plus only the tail after its `covers_through_seq` when one exists, and falls back to a full replay when none does. | A fresh device or a long-lived log never forces an unbounded replay. | `sync::tests::a_fresh_client_bootstraps_from_a_snapshot_plus_the_tail`, `sync::tests::bootstrap_without_a_snapshot_replays_the_whole_log` |
-| **SYNC-7** | A same-author remove propagates and folds the record out of the live set (and out of a later snapshot — the structural GC horizon). | Deletion is a claim-model op, not a store operation; it must converge like any other. | `sync::tests::a_same_author_remove_syncs_and_drops_the_record`, `sync::tests::compaction_folds_out_removed_records` |
+| **SYNC-7** | A moderator remove propagates and folds the record out of the live set (and out of a later snapshot — the structural GC horizon). | Deletion is a claim-model op, not a store operation; it must converge like any other. | `sync::tests::a_moderator_remove_syncs_and_drops_the_record`, `sync::tests::compaction_folds_out_removed_records` |
 | **SYNC-8** | Opening a log sealed under a different DEK fails; it never returns partial or garbage plaintext. | E2EE: a wrong key must fail closed at the boundary this crate calls through. | `sync::tests::a_wrong_key_cannot_open_the_claim_log` |
 
-Run: `node scripts/cargo.mjs test -p openom-sync` (from the repo root; on Windows cargo runs under
+Run: `node scripts/cargo.mjs test -p openom-docsync` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
 
 ## Usage
@@ -50,7 +50,7 @@ use openom_crdt::ChannelItem;
 use openom_crypto::generate_dek;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::Sealer;
-use openom_sync::SyncClient;
+use openom_docsync::SyncClient;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -61,13 +61,13 @@ let sealer_a = Sealer::from_unwrapped(
     1, dek.clone().into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-a".to_vec()),
 );
-let mut a = SyncClient::new(sealer_a, store.clone(), "tree");
+let mut a = SyncClient::new("did:key:z6MkDevice", sealer_a, store.clone(), "tree");
 
 let sealer_b = Sealer::from_unwrapped(
     1, dek.into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-b".to_vec()),
 );
-let mut b = SyncClient::new(sealer_b, store.clone(), "tree");
+let mut b = SyncClient::new("did:key:z6MkDevice", sealer_b, store.clone(), "tree");
 
 let person = ChannelItem::Assert(Record::try_from(json!({
     "id": "pA", "type": "openom.org/core/person/v1",
@@ -77,12 +77,12 @@ let person = ChannelItem::Assert(Record::try_from(json!({
 a.push_claims(&[person]).unwrap(); // sealed + pushed to the shared log
 b.pull_claims().unwrap();          // opened + folded into b's set
 
-assert_eq!(a.materialize().len(), b.materialize().len());
+assert_eq!(a.live_records().unwrap().len(), b.live_records().unwrap().len());
 ```
 
-Entry points: `SyncClient::new`, `push_claims` (edit + push), `pull_claims`, `materialize` /
-`items` (the read model), `flush` / `pending_count` (the write-ahead queue), and `compact_claims` /
-`bootstrap_claims` (snapshot compaction).
+Entry points: `SyncClient::new`, `push_claims` (edit + push), `pull_claims`, `live_records` /
+`tree` (the read model + the wrapped `openom-tree` engine), `flush` / `pending_count` (the write-ahead
+queue), and `compact_claims` / `bootstrap_claims` (snapshot compaction).
 
 ## Position
 

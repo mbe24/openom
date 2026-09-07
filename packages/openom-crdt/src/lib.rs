@@ -334,7 +334,7 @@ pub fn materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<
 /// Serialize a batch of [`ChannelItem`]s to / from the sealed payload bytes.
 ///
 /// the single op-batch
-/// codec, shared by every transport (`openom-sync`'s `SyncClient`, the `openom-tree` engine) so
+/// codec, shared by every transport (`openom-docsync`'s `SyncClient`, the `openom-tree` engine) so
 /// they emit byte-identical bytes and a future CBOR swap (OPE-199, `ldclabs/cbor2`) touches exactly one
 /// place.
 ///

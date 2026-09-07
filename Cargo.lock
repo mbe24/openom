@@ -3686,6 +3686,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openom-docsync"
+version = "0.1.0"
+dependencies = [
+ "docsync",
+ "journal",
+ "openom-claim",
+ "openom-crdt",
+ "openom-crypto",
+ "openom-protocol",
+ "openom-sealer",
+ "openom-tree",
+ "serde_json",
+]
+
+[[package]]
 name = "openom-keyring-api"
 version = "0.1.0"
 dependencies = [
@@ -3780,20 +3795,6 @@ dependencies = [
  "openom-protocol",
  "proptest",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-sync"
-version = "0.1.0"
-dependencies = [
- "docsync",
- "journal",
- "openom-claim",
- "openom-crdt",
- "openom-crypto",
- "openom-protocol",
- "openom-sealer",
- "serde_json",
 ]
 
 [[package]]

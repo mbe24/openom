@@ -1,0 +1,27 @@
+[package]
+name = "openom-docsync"
+description = "openom's binding of the generic docsync loop: a claim-model SyncClient that drives docsync over openom-tree (the claim engine) + openom-sealer (E2EE), sealing claim-op deltas to the store and merging peers' deltas back."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The generic push/pull/compact/bootstrap loop; this crate is the claim-model binding on top of it.
+docsync = { path = "../docsync" }
+openom-sealer = { path = "../openom-sealer" }
+journal = { path = "../journal" }
+openom-protocol = { path = "../openom-protocol" }
+# The op-batch codec (ChannelItem encode/decode), shared with openom-tree so both emit byte-identical bytes.
+openom-crdt = { path = "../openom-crdt" }
+# The one claim engine — SyncTree is a thin docsync::Engine newtype delegating to it (mint + fold + clock).
+openom-tree.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+openom-crypto = { path = "../openom-crypto" }
+# The tests build Claim/Record/Hlc fixtures.
+openom-claim = { path = "../openom-claim" }
+
+[lints]
+workspace = true

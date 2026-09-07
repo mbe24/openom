@@ -1,102 +1,88 @@
-//! The claim-model sync client — the openom adapter over the generic [`docsync`] loop.
+//! The claim-model sync client — openom's binding of the generic [`docsync`] loop.
 //!
 //! A claim update **is** a delta — an op-based change — so it seals as a `Kind::Delta` entry with
 //! `Format::OpenomOps`, appends to the tree's one log, and is deduped by the replica dot like any other
 //! delta. The payload is a batch of [`ChannelItem`]s (from `openom-crdt`); inbound, they accumulate into
-//! a set that [`materialize`] folds into the live record set — the snapshot the projection reads.
+//! the engine's set and its `materialize` fold produces the live record set the projection reads.
 //!
-//! The push / pull / compact / bootstrap loop itself lives in [`docsync`]; openom supplies only the two
-//! seams: a [`ClaimEngine`] (`impl docsync::Engine` — the op-set + fold + codec) and a sealer adapter
-//! (`impl docsync::Sealer` over `openom-sealer`, mapping the entry kind to openom's `Format`). All
-//! claim-specific logic — `materialize`, `moderators`, the `ChannelItem` codec — stays here, caller-side.
+//! The push / pull / compact / bootstrap loop itself lives in [`docsync`]; openom supplies two seams:
+//!  - [`SyncTree`] — `impl docsync::Engine`, a THIN newtype that **delegates to [`openom_tree::Tree`]**,
+//!    the one claim engine (mint + set + fold + read model). No second op-set, no second fold: `Tree` owns
+//!    the HLC clock and observes it on `merge`, so the receive rule holds — which is exactly why the engine
+//!    lives in `Tree` and not here.
+//!  - [`SealerAdapter`] — `impl docsync::Sealer` over `openom-sealer`, mapping the generic entry kind to
+//!    openom's `Format` and reading `covers_through_seq` back out of a snapshot header (openom-tree is
+//!    keyless, so this bridge has no equivalent there — it is genuinely this crate's job).
 //!
 //! **Single-engine-per-app-instance:** the whole app runs the claim engine, so this client's log carries
 //! only claim entries — no mixed-kind routing.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use journal::DocStore;
-use openom_claim::envelope::Record;
-use openom_crdt::{materialize, ChannelItem};
+use openom_crdt::ChannelItem;
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError};
+use openom_tree::{Tree, TreeError};
+use serde_json::Value;
 
 use crate::Result;
 
-/// Transport-side codec bits: the wire [`FORMAT`](codec::FORMAT) tag, plus the batch `encode`/`decode`
-/// re-exported from [`openom_crdt::codec`] — the one place the op-batch codec lives, shared with the
-/// `openom-tree` engine so both emit byte-identical bytes (and a CBOR swap, OPE-199, touches it once).
+/// Transport-side codec bits: the wire [`FORMAT`](codec::FORMAT) tag, plus the batch `encode` re-exported
+/// from [`openom_crdt::codec`] — the one place the op-batch codec lives, shared with the `openom-tree`
+/// engine so both emit byte-identical bytes (and a CBOR swap, OPE-199, touches it once). Decoding is the
+/// engine's job now (Tree's clock-observing `merge`), so only the local-encode + the tag live here.
 pub mod codec {
     /// The wire `Format` tag for claim entries (`FORMAT_OPENOM_OPS` = "JSON op-log entries").
     pub const FORMAT: openom_protocol::v1::Format = openom_protocol::v1::Format::OpenomOps;
 
-    pub use openom_crdt::codec::{decode, encode};
+    pub use openom_crdt::codec::encode;
 }
 
-/// The claim-model merge engine: the accumulated channel items (keyed by content id — a set, idempotent
-/// under re-delivery) plus the moderator set the fold honors. Implements [`docsync::Engine`] so the
-/// generic loop drives it; `materialize`/`set_moderators`/`items` are the caller-side extras reached via
-/// the client's engine accessors.
-pub struct ClaimEngine {
-    // The journal is the durable authority; this map is rebuilt by replaying the log. `materialize` folds
-    // it into the live records.
-    items: BTreeMap<String, ChannelItem>,
-    // The did:keys currently at Maintainer+ — the authors whose Remove/Supersede/Revoke ops the fold
-    // honors. Empty until set from the governing keyring, so a fresh client folds only asserts.
-    moderators: BTreeSet<String>,
-}
+/// The [`docsync::Engine`] seam for the claim model — a thin newtype over [`openom_tree::Tree`] that the
+/// generic loop drives. It holds NO state of its own: the op-set, the moderator-honoring `materialize`
+/// fold, the byte-preserving snapshot, and — crucially — the HLC clock (observed on every `merge`) all
+/// live in `Tree`.
+pub struct SyncTree(Tree);
 
-impl ClaimEngine {
-    const fn new() -> Self {
-        Self {
-            items: BTreeMap::new(),
-            moderators: BTreeSet::new(),
-        }
-    }
-
-    /// The live record set — [`materialize`] over the accumulated ops. The snapshot the projection reads.
-    fn materialize(&self) -> Vec<Record> {
-        let items: Vec<ChannelItem> = self.items.values().cloned().collect();
-        materialize(&items, &self.moderators)
-    }
-}
-
-impl docsync::Engine for ClaimEngine {
+impl docsync::Engine for SyncTree {
+    /// A local edit is a pre-minted batch of channel items (minting — id + HLC + author — is `Tree`'s job,
+    /// done before the batch reaches the transport).
     type Edit = Vec<ChannelItem>;
-    type Error = serde_json::Error;
+    type Error = TreeError;
 
     fn apply_local(&mut self, edit: Vec<ChannelItem>) -> Vec<u8> {
         if edit.is_empty() {
             return Vec::new();
         }
-        // Encode the batch as the delta, then apply it optimistically to the local set.
+        // Encode the batch as the delta, then apply it through `Tree::merge` so the clock observes the ops
+        // and the live view reflects them immediately; the bytes are what the transport seals.
         let bytes = codec::encode(&edit).expect("op-batch JSON encoding is infallible for valid items");
-        for item in edit {
-            self.items.insert(item.id().to_owned(), item);
-        }
+        self.0
+            .merge(&bytes)
+            .expect("re-merging a freshly-encoded local batch is infallible");
         bytes
     }
 
-    fn merge(&mut self, delta: &[u8]) -> std::result::Result<(), serde_json::Error> {
-        for item in codec::decode(delta)? {
-            self.items.insert(item.id().to_owned(), item);
-        }
-        Ok(())
+    fn merge(&mut self, delta: &[u8]) -> std::result::Result<(), TreeError> {
+        self.0.merge(delta).map(|_| ())
     }
 
     fn snapshot(&self) -> Vec<u8> {
-        // The byte-preserving fold: dead (removed/superseded) records drop out; disputed-yet-live claims
-        // and attestations stay. Emitted as a set of `Assert`s.
-        let live: Vec<ChannelItem> = self.materialize().into_iter().map(ChannelItem::Assert).collect();
-        codec::encode(&live).expect("snapshot JSON encoding is infallible for valid records")
+        self.0
+            .snapshot()
+            .expect("snapshot JSON encoding is infallible for valid records")
     }
-    // merge_snapshot defaults to merge — decode the Asserts and re-insert by id.
+
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> std::result::Result<(), TreeError> {
+        self.0.load_snapshot(bytes)
+    }
 }
 
-/// Adapts openom's DEK [`Sealer`] to the [`docsync::Sealer`] seam: maps the generic entry kind to
-/// openom's `Format` (op-log for deltas, JSON for snapshots), fills the openom-only `compression`/
-/// `blob_id` fields, and reads `covers_through_seq` back out of a snapshot envelope's header.
+/// Adapts openom's DEK [`Sealer`] to the [`docsync::Sealer`] seam: maps the generic entry kind to openom's
+/// `Format` (op-log for deltas, JSON for snapshots), fills the openom-only `compression`/`blob_id` fields,
+/// and reads `covers_through_seq` back out of a snapshot envelope's header.
 struct SealerAdapter(Sealer);
 
 impl docsync::Sealer for SealerAdapter {
@@ -147,43 +133,56 @@ impl docsync::Sealer for SealerAdapter {
     }
 }
 
-/// One device's view of a claim-model tree — a thin facade over [`docsync::SyncClient`] wired with a
-/// [`ClaimEngine`] and openom's sealer.
+/// One device's view of a claim-model tree — a facade over [`docsync::SyncClient`] wired with a
+/// [`SyncTree`] (delegating to [`openom_tree::Tree`]) and openom's sealer.
 ///
-/// Preserves the claim-model API (`push_claims` / `pull_claims` /
-/// `compact_claims` / `bootstrap_claims` / `materialize` / `set_moderators`).
+/// Preserves the claim-model API (`push_claims` / `pull_claims` / `compact_claims` / `bootstrap_claims` /
+/// `set_moderators`), and exposes the wrapped [`Tree`] for the app's mint + projection paths.
 pub struct SyncClient<S: DocStore> {
-    inner: docsync::SyncClient<ClaimEngine, SealerAdapter, S>,
+    inner: docsync::SyncClient<SyncTree, SealerAdapter, S>,
 }
 
 impl<S: DocStore> SyncClient<S> {
-    /// Wrap a freshly-unlocked claim tree. `doc` is the store key for this tree's log.
-    pub fn new(sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
+    /// Wrap a freshly-unlocked claim tree. `created_by` is this device's author `did:key` (the [`Tree`]'s
+    /// mint author); `doc` is the store key for this tree's log.
+    pub fn new(created_by: impl Into<String>, sealer: Sealer, store: S, doc: impl Into<String>) -> Self {
         Self {
-            inner: docsync::SyncClient::new(ClaimEngine::new(), SealerAdapter(sealer), store, doc),
+            inner: docsync::SyncClient::new(
+                SyncTree(Tree::new(created_by)),
+                SealerAdapter(sealer),
+                store,
+                doc,
+            ),
         }
+    }
+
+    /// The wrapped engine (for the app's mint / projection paths — `assert_claim`, `project`, …).
+    pub const fn tree(&self) -> &Tree {
+        &self.inner.engine().0
+    }
+
+    /// The wrapped engine, mutably (mint through it; the transport picks the ops up on `flush`).
+    pub const fn tree_mut(&mut self) -> &mut Tree {
+        &mut self.inner.engine_mut().0
     }
 
     /// Set the moderator `did:key`s (members currently at Maintainer or above) whose
     /// Remove/Supersede/Revoke ops the fold honors — from the governing keyring.
     pub fn set_moderators(&mut self, moderators: BTreeSet<String>) {
-        self.inner.engine_mut().moderators = moderators;
+        self.inner.engine_mut().0.set_moderators(moderators);
     }
 
-    /// The live record set — [`materialize`] over the accumulated ops. This is the snapshot the
-    /// projection reads. (Clones the set once per call; the read-model rebuild, not a hot path.)
-    pub fn materialize(&self) -> Vec<Record> {
-        self.inner.engine().materialize()
-    }
-
-    /// The accumulated channel items (borrowed), for a caller that folds them itself.
-    pub fn items(&self) -> impl Iterator<Item = &ChannelItem> {
-        self.inner.engine().items.values()
+    /// The live record set as JSON — the fold's output the projection reads.
+    ///
+    /// # Errors
+    /// Returns a [`TreeError`] if the live set can't be serialized.
+    pub fn live_records(&self) -> std::result::Result<Vec<Value>, TreeError> {
+        self.inner.engine().0.live_records()
     }
 
     /// Seal a batch of channel items as one `Kind::Delta` / `Format::OpenomOps` entry, apply it to the
-    /// local set, queue it, and flush. Seal + chain-advance happen exactly once; a failed flush leaves
-    /// the sealed envelope queued for a byte-identical retry.
+    /// local set, queue it, and flush. Seal + chain-advance happen exactly once; a failed flush leaves the
+    /// sealed envelope queued for a byte-identical retry.
     ///
     /// # Errors
     /// Returns an error if sealing or the store append fails.
@@ -191,8 +190,8 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.apply(items.to_vec())
     }
 
-    /// Append every queued sealed envelope, oldest first. A failed append leaves it (and the rest)
-    /// queued; call again to retry — a re-appended entry dedups on the dot and re-folds idempotently.
+    /// Append every queued sealed envelope, oldest first. A failed append leaves it (and the rest) queued;
+    /// call again to retry — a re-appended entry dedups on the dot and re-folds idempotently.
     ///
     /// # Errors
     /// Returns an error if the store push fails (the entry stays queued for a later retry).
@@ -206,8 +205,8 @@ impl<S: DocStore> SyncClient<S> {
     }
 
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
-    /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate
-    /// entry re-inserts by id. From a fresh client this replays the whole log (the journal is authority).
+    /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate entry
+    /// re-inserts by id. From a fresh client this replays the whole log (the journal is authority).
     ///
     /// # Errors
     /// Returns an error if the store read or a decode fails.
@@ -225,8 +224,8 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.compact()
     }
 
-    /// Bring a fresh client up to date: load the stored snapshot (if any) into the set, then pull only
-    /// the ops after the seq it covers. Falls back to a full log replay when there is no snapshot.
+    /// Bring a fresh client up to date: load the stored snapshot (if any) into the set, then pull only the
+    /// ops after the seq it covers. Falls back to a full log replay when there is no snapshot.
     ///
     /// # Errors
     /// Returns an error if the store read or a decode fails.
@@ -238,7 +237,6 @@ impl<S: DocStore> SyncClient<S> {
 impl<S: DocStore> std::fmt::Debug for SyncClient<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncClient")
-            .field("items", &self.inner.engine().items.len())
             .field("pending", &self.inner.pending_count())
             .finish_non_exhaustive()
     }
@@ -259,11 +257,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    fn client(
-        replica: &[u8],
-        dek: Dek,
-        store: Arc<MemoryStore>,
-    ) -> SyncClient<Arc<MemoryStore>> {
+    // The Tree's `created_by` is this device's author did:key. It is irrelevant to these tests: they push
+    // PRE-BUILT items that carry their own explicit `createdBy`, so the device author never authors anything.
+    const DEVICE: &str = "did:key:z6MkDevice";
+
+    fn client(replica: &[u8], dek: Dek, store: Arc<MemoryStore>) -> SyncClient<Arc<MemoryStore>> {
         let sealer = Sealer::from_unwrapped(
             1,
             dek.into_inner(),
@@ -271,7 +269,7 @@ mod tests {
             KeyId::new(b"epoch-0".to_vec()),
             ReplicaId::new(replica.to_vec()),
         );
-        SyncClient::new(sealer, store, "tree")
+        SyncClient::new(DEVICE, sealer, store, "tree")
     }
 
     /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
@@ -314,11 +312,17 @@ mod tests {
         )
     }
 
+    /// The live record ids after the fold — read through the wrapped Tree.
     fn live(c: &SyncClient<Arc<MemoryStore>>) -> BTreeSet<String> {
-        c.materialize()
+        c.live_records()
+            .unwrap()
             .into_iter()
-            .map(|r| r.id().to_owned())
+            .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_owned))
             .collect()
+    }
+
+    fn empty(c: &SyncClient<Arc<MemoryStore>>) -> bool {
+        c.live_records().unwrap().is_empty()
     }
 
     fn set(items: &[&ChannelItem]) -> BTreeSet<String> {
@@ -377,8 +381,8 @@ mod tests {
 
         a.push_claims(&[remove(&na, "did:key:z6MkA")]).unwrap();
         b.pull_claims().unwrap();
-        assert!(b.materialize().is_empty(), "the remove propagated");
-        assert!(a.materialize().is_empty());
+        assert!(empty(&b), "the remove propagated");
+        assert!(empty(&a));
     }
 
     #[test]
@@ -410,11 +414,7 @@ mod tests {
 
         let mut b = client(b"replica-b", dek, store.clone());
         b.pull_claims().unwrap();
-        assert_eq!(
-            live(&b),
-            set(&[&na]),
-            "the duplicate must not double the record"
-        );
+        assert_eq!(live(&b), set(&[&na]), "the duplicate must not double the record");
     }
 
     #[test]
@@ -480,14 +480,10 @@ mod tests {
         a.push_claims(&[remove(&gone, "did:key:z6MkA")]).unwrap();
         a.compact_claims().unwrap();
 
-        // A fresh client bootstraps only from the snapshot (the tail is empty) — the removed record
-        // is absent, and the record it never touched survives.
+        // A fresh client bootstraps only from the snapshot (the tail is empty) — the removed record is
+        // absent, and the record it never touched survives.
         let mut c = client(b"replica-c", dek, store.clone());
         c.bootstrap_claims().unwrap();
-        assert_eq!(
-            live(&c),
-            set(&[&keep]),
-            "removed record folded out of the snapshot"
-        );
+        assert_eq!(live(&c), set(&[&keep]), "removed record folded out of the snapshot");
     }
 }
