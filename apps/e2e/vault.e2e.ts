@@ -13,6 +13,6 @@ test('WASM vault round-trips across a fresh unlock and rejects a wrong passphras
   expect(r.opened).toBe('the family tree');
   expect(r.wrongRejected).toBe(true); // wrong passphrase refused
   expect(r.plaintextLeaks).toBe(false); // sealed bytes are ciphertext
-  expect(r.revision).toBe(1);
+  expect(r.watermarkLen).toBeGreaterThan(0);
   expect(r.recoveryCodeLen).toBeGreaterThan(20);
 });

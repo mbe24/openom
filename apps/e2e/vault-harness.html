@@ -10,33 +10,34 @@
 <body>
   <div id="status">loading…</div>
   <script type="module">
-    import init, { provision, unlock } from '../app/src/vendor/sealer/openom_sealer.js';
+    import init, { provision, unlock } from '../app/src/vendor/vault/openom_vault.js';
 
     const enc = new TextEncoder();
     const dec = new TextDecoder();
     const treeId = () => new Uint8Array(16).fill(3);
     const MEMBER = 'local-owner';
+    const ENGINE = 'chain';
 
     await init();
 
     window.__vault = {
       // provision on "device A", seal, then unlock on "device B" and open — same DEK.
       async roundTrip() {
-        const p = provision('correct horse', treeId(), MEMBER, new Uint8Array(16).fill(1));
+        const p = provision(ENGINE, 'correct horse', treeId(), MEMBER, new Uint8Array(16).fill(1));
         const a = p.takeSealer();
         const sealed = a.sealEntry('snapshot', 'openom-json', 'none', 0, new Uint8Array(0), 0, new Uint8Array(0), enc.encode('the family tree'));
-        const u = unlock(p.keyring, 'correct horse', treeId(), MEMBER, new Uint8Array(16).fill(2));
+        const u = unlock(ENGINE, p.keyring, 'correct horse', treeId(), MEMBER, new Uint8Array(16).fill(2));
         const opened = dec.decode(u.takeSealer().openEntry('snapshot', sealed.envelope));
         let wrongRejected = false;
         try {
-          unlock(p.keyring, 'WRONG', treeId(), MEMBER, new Uint8Array(16).fill(2));
+          unlock(ENGINE, p.keyring, 'WRONG', treeId(), MEMBER, new Uint8Array(16).fill(2));
         } catch {
           wrongRejected = true;
         }
         // Also: the sealed bytes are ciphertext, not the plaintext name.
         const leaks = new TextDecoder('latin1').decode(sealed.envelope).includes('family tree');
         return {
-          revision: p.revision,
+          watermarkLen: p.watermark.length,
           recoveryCodeLen: p.recoveryCode.length,
           opened,
           unlockOk: opened === 'the family tree',
