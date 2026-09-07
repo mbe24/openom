@@ -1,11 +1,10 @@
 import { FamilyTree, seedAppId } from './familyTree.js';
-import { tabSync } from './tabSync.js';
+import { workerEngine } from './tree/workerEngine.js';
 import { seedOps, SEED_FOCUS } from './seed.js';
 import { khaldunOps, KHALDUN_FOCUS } from './seedKhaldun.js';
 
-// The claim-based engine is the app's only family-tree engine; the former treelog fallback (and its
-// localStorage['openom.engine'] toggle) was dropped at the cutover. seedAppId maps a symbolic seed id
-// to its stable app-facing anchor id.
+// The claim-based engine (now the app-core Web Worker) is the app's only family-tree engine. seedAppId
+// maps a symbolic seed id to its stable app-facing anchor id.
 export { seedAppId };
 
 /** Die mitgelieferten Baeume. Jeder liegt in einem eigenen Dokument. */
@@ -15,42 +14,43 @@ export const DATASETS = [
 ];
 export const dataset = (id) => DATASETS.find((d) => d.id === id) ?? DATASETS[0];
 
-/** Die Sammlung der Baeume. Traegt den Lebenszyklus, nicht der Baum selbst. */
+/** Die Sammlung der Baeume. Traegt den Lebenszyklus, nicht der Baum selbst. Each tree is a `FamilyTree`
+ *  view-model over a `workerEngine` bound to its doc — the worker core (opened by provision/unlock) owns
+ *  the engine, DEK, sync, and durable store. `createdBy` is that core's author did:key. */
 export class TreeLibrary {
-  #store;
+  #worker;
   #schema;
   #open = new Map();
-  #ticks = new Map(); // docId -> cross-tab tabSync cleanup
 
-  constructor(store, schema = null) {
-    this.#store = store;
+  constructor(worker, schema = null) {
+    this.#worker = worker;
     this.#schema = schema;
   }
 
   async list() {
-    return this.#store.list();
+    return [...this.#open.keys()];
   }
 
-  #track(docId, tree) {
+  #build(docId, createdBy) {
+    const tree = new FamilyTree(workerEngine(this.#worker, docId), docId, this.#schema, createdBy);
     this.#open.set(docId, tree);
-    this.#ticks.set(docId, tabSync(tree, docId));
     return tree;
   }
 
-  async open(docId = 'tree-1') {
+  async open(docId, createdBy = null) {
     if (this.#open.has(docId)) return this.#open.get(docId);
-    const tree = new FamilyTree(this.#store, docId, this.#schema);
-    await tree.hydrate();
-    return this.#track(docId, tree);
+    const tree = this.#build(docId, createdBy);
+    await tree.hydrate(); // materialize the worker core's already-hydrated projection
+    return tree;
   }
 
-  async create(docId = 'tree-' + Date.now()) {
-    return this.#track(docId, new FamilyTree(this.#store, docId, this.#schema));
+  async create(docId, createdBy = null) {
+    return this.#build(docId, createdBy);
   }
 
-  async openSeeded(datasetId = 'bach') {
+  async openSeeded(datasetId = 'bach', createdBy = null) {
     const set = dataset(datasetId);
-    const tree = await this.open(set.doc);
+    const tree = await this.open(set.doc, createdBy);
     if (tree.people.size === 0) await tree.seed(set.ops());
     return { tree, focusId: seedAppId(set.focus), datasetId: set.id };
   }
@@ -63,8 +63,11 @@ export class TreeLibrary {
   }
 
   close(docId) {
-    this.#ticks.get(docId)?.();
-    this.#ticks.delete(docId);
     this.#open.delete(docId);
+    try {
+      this.#worker.close(docId); // frees the worker core (drops the DEK it holds)
+    } catch {
+      /* best-effort */
+    }
   }
 }

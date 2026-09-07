@@ -7,16 +7,11 @@
 // This file is being built in stages (OPE-201): stage 1 is the READ adapter (projection → the v2 view
 // shapes the UI reads) + load/merge/snapshot; the write surface (create/update/delete/marriage/child/
 // media/undo/redo/seed) lands in stage 2 and currently throws.
-import { createTree } from './tree/index.js';
 import { compareSiblings } from './sort.js';
 import { profile } from './profile.js';
 import { makeName, definePersonViews, mergeFamilyFields, defineFamilyViews } from './model.js';
 
-const SNAP_TAG = 0xcc; // marks a snapshot payload that carries a coverage-cursor header
-const COMPACT_AT = 200; // replayed-tail length past which hydrate folds the log into a fresh snapshot
-
 const splitGiven = (s) => (String(s ?? '').trim() ? String(s).trim().split(/\s+/) : []);
-const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
 const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 /** A fresh opaque anchor id (person / event) — the engine does not mint anchor ids, the caller does. */
 const uuid = () => 'x_' + hex(crypto.getRandomValues(new Uint8Array(16)));
@@ -87,15 +82,11 @@ export class FamilyTree {
   readOnly = false;
   readOnlyReason = null;
 
-  #store;
   #docId;
   #schema;
   #author;
-  #engine = null;
-  #ready;
+  #engine; // a workerEngine bound to #docId — the app-core Web Worker (owns the DEK, sync, and store)
   #listeners = new Set();
-  #deltaListeners = new Set();
-  #cursor = 0;
   #eventOf = new Map(); // `${personId}|${type}` -> event anchor id (rebuilt each materialize)
   #marriageEventOf = new Map(); // union id -> its marriage event anchor id (rebuilt each materialize)
   #undo = []; // frames of { added:[id], removed:[record] } (in-memory, session-local)
@@ -104,16 +95,18 @@ export class FamilyTree {
   #removeOpId = new Map(); // removed record id -> the Remove op's id, so undo can revoke an anchor removal
   #overlay = new Map(); // pid -> pending display-only patch during a keystroke burst (mints at settle)
 
-  constructor(store, docId, schema = null, createdBy = null) {
-    this.#store = store;
+  // `engine` is a workerEngine (core/tree/workerEngine.js) already bound to an OPEN worker core —
+  // provision/unlock ran before the tree was built. `createdBy` is that core's author did:key, so a
+  // claim this replica authored reads back as "mine".
+  constructor(engine, docId, schema = null, createdBy = null) {
+    this.#engine = engine;
     this.#docId = docId;
     this.#schema = schema;
     this.#author = createdBy ?? DEFAULT_AUTHOR;
-    this.#ready = createTree({ createdBy: this.#author });
   }
 
-  async #ensure() {
-    if (!this.#engine) this.#engine = await this.#ready;
+  // The engine (the worker core) is ready by construction; kept as a hook so call sites read uniformly.
+  #ensure() {
     return this.#engine;
   }
 
@@ -122,21 +115,13 @@ export class FamilyTree {
     return () => this.#listeners.delete(fn);
   }
 
-  /** Subscribe to each locally-produced op batch (raw bytes) — the sync controller seals + pushes them.
-   *  Remote batches merged via mergeRemote are NOT emitted (they must not be pushed back). */
-  onDelta(fn) {
-    this.#deltaListeners.add(fn);
-    return () => this.#deltaListeners.delete(fn);
-  }
-
   /** Set the moderator did:keys (the members currently at Maintainer or above) whose
    *  remove/supersede/revoke ops the engine honors. Call on unlock and on every governing-keyring
    *  change; a solo tree can omit this — the engine defaults to its own author (the owner moderates
    *  their own tree). Re-projects immediately, so a role change resurfaces/hides claims at once. */
   async setModerators(dids) {
-    const eng = await this.#ensure();
-    eng.setModerators(dids);
-    this.#materialize();
+    await this.#engine.setModerators(dids);
+    await this.#materialize();
     this.#bump();
   }
 
@@ -259,10 +244,10 @@ export class FamilyTree {
     }
   }
 
-  /** Rebuild the whole view-facing model from the engine's projection (after a load / merge). */
-  #materialize() {
+  /** Rebuild the whole view-facing model from the engine's projection (after a load / edit / sync). */
+  async #materialize() {
+    const proj = await this.#engine.project();
     profile('materialize', () => {
-      const proj = this.#engine.project();
       const eventsById = new Map(proj.events.map((e) => [e.id, e]));
       const eventsByPerson = new Map();
       this.#eventOf = new Map();
@@ -349,78 +334,16 @@ export class FamilyTree {
   }
 
   /** The canonical person id an anchor resolves to (stable UI handle across same_as merges). */
-  resolveId(anchor) { return this.#engine?.resolveId(anchor) ?? null; }
-
-  // ------------------------------------------------------------------ sync
-  /** The full engine state as a snapshot batch — the sync controller seals it as the bootstrap baseline
-   *  a fresh device restores from. */
-  snapshotBytes() {
-    return this.#engine.snapshot();
-  }
-
-  /** Integrate a peer's op batch (raw bytes the controller already unsealed): merge it, persist it
-   *  locally for durability, and refresh the views. Does not re-emit (not local). */
-  async mergeRemote(bytes) {
-    await this.#ensure();
-    const bin = toU8(bytes);
-    this.#engine.merge(bin);
-    await this.#store.append(this.#docId, [bin]);
-    this.#cursor += 1;
-    this.#materialize();
-    this.#bump();
-  }
-
-  /** Merge store entries appended since our cursor — e.g. by another tab into the shared DocStore —
-   *  into the engine WITHOUT re-appending (the store already holds them), then refresh the view. The
-   *  cross-tab tick (tabSync.js) calls this on a BroadcastChannel ping; set-union makes the tail replay
-   *  idempotent, so the loop is dumb. Returns whether anything was merged. */
-  async syncTail() {
-    await this.#ensure();
-    const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
-    if (!updates.length) return false;
-    for (const u of updates) this.#engine.merge(toU8(u));
-    this.#cursor = cursor ?? this.#cursor + updates.length;
-    this.#materialize();
-    this.#bump();
-    return true;
+  async resolveId(anchor) {
+    return (await this.#engine.resolveId(anchor)) ?? null;
   }
 
   // ------------------------------------------------------------------ loading
-  // Snapshot payload = [SNAP_TAG][u32 BE coverage cursor][engine snapshot bytes] — same envelope as the
-  // treelog engine, so the DocStore stays an opaque-byte store.
-  #wrapSnapshot(snap, cursor) {
-    const out = new Uint8Array(5 + snap.length);
-    out[0] = SNAP_TAG;
-    new DataView(out.buffer).setUint32(1, cursor >>> 0, false);
-    out.set(snap, 5);
-    return out;
-  }
-  #unwrapSnapshot(b) {
-    if (b.length >= 5 && b[0] === SNAP_TAG) {
-      const cursor = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(1, false);
-      return { snapshot: b.subarray(5), cursor };
-    }
-    return { snapshot: b, cursor: 0 }; // unwrapped/foreign — replay the whole log (idempotent)
-  }
-
+  // The worker core owns durability + sync: it hydrates its own log on open (provision/unlock), merges
+  // peers (ingest), snapshots, and compacts. This just materializes the projection into the view model.
   async hydrate() {
-    await this.#ensure();
-    const snap = await this.#store.readSnapshot(this.#docId);
-    if (snap) {
-      const raw = toU8(snap.bytes);
-      const { snapshot, cursor } = this.#unwrapSnapshot(raw);
-      this.#engine = await createTree({ createdBy: this.#author, snapshot });
-      this.#cursor = cursor;
-    }
-    const { updates, cursor } = await this.#store.readUpdates(this.#docId, this.#cursor);
-    profile('hydrate.replay', () => {
-      for (const u of updates) this.#engine.merge(toU8(u));
-    });
-    this.#cursor = cursor ?? this.#cursor + updates.length;
-    this.#materialize();
+    await this.#materialize();
     this.#bump();
-    // Bound reload cost: once the replayed tail is long, fold it into a fresh snapshot.
-    if (updates.length > COMPACT_AT) await this.compact().catch(() => {});
   }
 
   toJSON() {
@@ -442,90 +365,90 @@ export class FamilyTree {
   // claims are touched, so a peer's competing claim survives (the projection resolves the contest).
 
   /** This replica's live claims under (target, predicate). */
-  #liveMine(target, predicate) {
-    return this.#engine.liveClaimsOf(target, predicate).filter((c) => c.createdBy === this.#author);
+  async #liveMine(target, predicate) {
+    return (await this.#engine.liveClaimsOf(target, predicate)).filter((c) => c.createdBy === this.#author);
   }
 
   /** Set (value = object) or clear (value = null) a single-value claim with replace semantics. */
-  #setSingle(target, predicate, value) {
-    const mine = this.#liveMine(target, predicate);
+  async #setSingle(target, predicate, value) {
+    const mine = await this.#liveMine(target, predicate);
     if (value == null) {
-      for (const c of mine) this.#remove(c.id);
+      for (const c of mine) await this.#remove(c.id);
       return;
     }
     const prior = mine[0];
-    prior
+    await (prior
       ? this.#engine.supersedeClaim(prior.id, target, predicate, value)
-      : this.#engine.assertClaim(target, predicate, value);
+      : this.#engine.assertClaim(target, predicate, value));
   }
 
   /** Merge a name patch (given/surname) into this replica's name claim, preserving its other parts. */
-  #setName(pid, patch) {
-    const prior = this.#liveMine(pid, V.P_NAME)[0];
+  async #setName(pid, patch) {
+    const prior = (await this.#liveMine(pid, V.P_NAME))[0];
     const cur = prior
       ? structuredClone(prior.value)
       : { parts: { given: '', family: '', prefix: '', suffix: '' }, convention: 'western', type: 'birth' };
     cur.parts = cur.parts ?? {};
     if ('given' in patch) cur.parts.given = String(patch.given ?? '');
     if ('surname' in patch) cur.parts.family = String(patch.surname ?? '');
-    prior
+    await (prior
       ? this.#engine.supersedeClaim(prior.id, pid, V.P_NAME, cur)
-      : this.#engine.assertClaim(pid, V.P_NAME, cur);
+      : this.#engine.assertClaim(pid, V.P_NAME, cur));
   }
 
   /** The person's event anchor of `type` (birth/death), minting it (+ its type + principal participant)
    *  if absent. `cache` reuses an event minted earlier in the same commit (before re-materialize). */
-  #eventFor(pid, type, cache) {
+  async #eventFor(pid, type, cache) {
     const key = pid + '|' + type;
     if (cache.has(key)) return cache.get(key);
     const existing = this.#eventOf.get(key);
     if (existing) { cache.set(key, existing); return existing; }
     const eid = uuid();
-    this.#engine.assertAnchor(eid, V.TYPE_EVENT);
-    this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type });
-    this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: pid, role: ROLE_PRINCIPAL });
+    await this.#engine.assertAnchor(eid, V.TYPE_EVENT);
+    await this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type });
+    await this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: pid, role: ROLE_PRINCIPAL });
     cache.set(key, eid);
     return eid;
   }
 
   /** Set (or clear) an event's place: a Place is a claim-target id (deterministic per name, so equal
    *  place strings dedup) carrying a place_name claim; the event points at it via event_place. */
-  #setEventPlace(eid, place) {
-    if (!place) { this.#setSingle(eid, V.P_EVENT_PLACE, null); return; }
+  async #setEventPlace(eid, place) {
+    if (!place) { await this.#setSingle(eid, V.P_EVENT_PLACE, null); return; }
     const placeId = 'place:' + place;
-    if (!this.#liveMine(placeId, V.P_PLACE_NAME).some((c) => c.value?.name === place)) {
-      this.#engine.assertClaim(placeId, V.P_PLACE_NAME, { name: place });
+    if (!(await this.#liveMine(placeId, V.P_PLACE_NAME)).some((c) => c.value?.name === place)) {
+      await this.#engine.assertClaim(placeId, V.P_PLACE_NAME, { name: place });
     }
-    this.#setSingle(eid, V.P_EVENT_PLACE, { placeId });
+    await this.#setSingle(eid, V.P_EVENT_PLACE, { placeId });
   }
 
   /** Set (or clear on empty) one custom field value. A boolean is written as an explicit 'true'/'false'
    *  (never cleared), matching the legacy semantics; text/number/option clear on empty. */
-  #setCustom(pid, k, v) {
-    const mine = this.#liveMine(pid, V.P_CUSTOM_VALUE).filter((c) => c.value?.fieldId === k);
+  async #setCustom(pid, k, v) {
+    const mine = (await this.#liveMine(pid, V.P_CUSTOM_VALUE)).filter((c) => c.value?.fieldId === k);
     const isBool = typeof v === 'boolean' || this.#schema?.field?.(k)?.type === 'boolean';
     const clearing = !isBool && (v === '' || v == null);
-    if (clearing) { for (const c of mine) this.#remove(c.id); return; }
+    if (clearing) { for (const c of mine) await this.#remove(c.id); return; }
     const value = { fieldId: k, value: isBool ? String(v === true || v === 'true') : String(v) };
     const prior = mine[0];
-    prior
+    await (prior
       ? this.#engine.supersedeClaim(prior.id, pid, V.P_CUSTOM_VALUE, value)
-      : this.#engine.assertClaim(pid, V.P_CUSTOM_VALUE, value);
+      : this.#engine.assertClaim(pid, V.P_CUSTOM_VALUE, value));
   }
 
   /** Translate an editor patch on person `pid` into engine ops. */
-  #applyPatch(pid, patch, cache) {
-    if ('given' in patch || 'surname' in patch) this.#setName(pid, patch);
+  async #applyPatch(pid, patch, cache) {
+    if ('given' in patch || 'surname' in patch) await this.#setName(pid, patch);
     for (const [key, type] of [['birth', 'birth'], ['death', 'death']]) {
       const placeKey = key + 'Place';
       if (!(key in patch) && !(placeKey in patch)) continue;
-      const eid = this.#eventFor(pid, type, cache);
-      if (key in patch) this.#setSingle(eid, V.P_DATE, patch[key] ? { edtf: String(patch[key]) } : null);
-      if (placeKey in patch) this.#setEventPlace(eid, patch[placeKey]);
+      const eid = await this.#eventFor(pid, type, cache);
+      if (key in patch) await this.#setSingle(eid, V.P_DATE, patch[key] ? { edtf: String(patch[key]) } : null);
+      if (placeKey in patch) await this.#setEventPlace(eid, patch[placeKey]);
     }
-    if ('sex' in patch) this.#setSingle(pid, V.P_SEX, patch.sex ? { sex: patch.sex } : null);
-    if ('note' in patch) this.#setSingle(pid, V.P_BIOGRAPHY, patch.note ? { text: patch.note } : null);
-    if ('custom' in patch) for (const [k, v] of Object.entries(patch.custom)) this.#setCustom(pid, k, v);
+    if ('sex' in patch) await this.#setSingle(pid, V.P_SEX, patch.sex ? { sex: patch.sex } : null);
+    if ('note' in patch) await this.#setSingle(pid, V.P_BIOGRAPHY, patch.note ? { text: patch.note } : null);
+    if ('custom' in patch) for (const [k, v] of Object.entries(patch.custom)) await this.#setCustom(pid, k, v);
   }
 
   // --- undo/redo: a commit's inverse is computed generically by diffing this replica's live record set
@@ -534,17 +457,17 @@ export class FamilyTree {
   // peers. The stacks are in-memory + session-local (reset on hydrate), matching the legacy engine.
 
   /** This replica's live records, id -> record. */
-  #snapshotMine() {
+  async #snapshotMine() {
     const m = new Map();
-    for (const r of this.#engine.liveRecords()) if (r.createdBy === this.#author) m.set(r.id, r);
+    for (const r of await this.#engine.liveRecords()) if (r.createdBy === this.#author) m.set(r.id, r);
     return m;
   }
 
   /** Remove a record, remembering the Remove op's id (returned by the engine) so an anchor removal can
    *  later be revoked — a claim revives by re-assertion (fresh content-hash id), but an anchor's id is
    *  fixed, so its removal must be undone by revoke, not a re-assert the tombstone still suppresses. */
-  #remove(recordId) {
-    const opId = this.#engine.remove(recordId);
+  async #remove(recordId) {
+    const opId = await this.#engine.remove(recordId);
     if (opId) this.#removeOpId.set(recordId, opId);
   }
 
@@ -562,12 +485,11 @@ export class FamilyTree {
    *  with no re-mint churn. Only a claim that left via a Supersede (an edit — no Remove to revoke) is
    *  re-asserted; its fresh HLC timestamp guarantees a new, non-colliding id. Anchors always leave via
    *  Remove, so they always revoke. */
-  #applyFrame(frame) {
-    for (const id of frame.added) this.#remove(id);
+  async #applyFrame(frame) {
+    for (const id of frame.added) await this.#remove(id);
     for (const r of frame.removed) {
       const opId = this.#removeOpId.get(r.id);
-      if (opId) this.#engine.revoke(opId);
-      else this.#engine.assertClaim(r.targetId, r.predicate, r.value);
+      await (opId ? this.#engine.revoke(opId) : this.#engine.assertClaim(r.targetId, r.predicate, r.value));
     }
   }
 
@@ -591,16 +513,12 @@ export class FamilyTree {
   /** Apply the collected op batches: persist, emit to the sync controller, re-materialize, notify, and
    *  (when `before` is given) record the inverse frame for undo. */
   async #commit(before = null, { silent = false } = {}) {
-    // One settled intention = one op-batch: the engine accumulated this edit's ops as they were minted;
-    // flush() encodes them as a single entry (empty if nothing minted). The engine is the source of
-    // truth — the mint calls buffer into it and return nothing.
-    const batch = this.#engine.flush();
-    const batches = batch && batch.length ? [batch] : [];
-    if (batches.length) await profile('store.append', () => this.#store.append(this.#docId, batches));
-    this.#cursor += batches.length;
-    if (this.#deltaListeners.size) for (const d of batches) for (const fn of this.#deltaListeners) fn(d);
-    this.#materialize();
-    if (before) this.#record(this.#frame(before, this.#snapshotMine()), silent);
+    // One settled intention = one op-batch: the worker's engine accumulated this edit's ops as they were
+    // minted; commit() seals them as a single entry AND appends it to the durable log (the worker owns
+    // persistence + the sync push). A no-op if nothing was minted.
+    await this.#engine.commit();
+    await this.#materialize();
+    if (before) this.#record(this.#frame(before, await this.#snapshotMine()), silent);
     if (!silent) this.#bump();
   }
 
@@ -609,41 +527,34 @@ export class FamilyTree {
 
   async undo() {
     if (!this.#undo.length) return;
-    await this.#ensure();
-    const before = this.#snapshotMine();
-    this.#applyFrame(this.#undo.pop());
+    const before = await this.#snapshotMine();
+    await this.#applyFrame(this.#undo.pop());
     await this.#commitReplay(before, this.#redo);
   }
 
   async redo() {
     if (!this.#redo.length) return;
-    await this.#ensure();
-    const before = this.#snapshotMine();
-    this.#applyFrame(this.#redo.pop());
+    const before = await this.#snapshotMine();
+    await this.#applyFrame(this.#redo.pop());
     await this.#commitReplay(before, this.#undo);
   }
 
   /** Commit an undo/redo's ops, pushing the resulting inverse frame onto `target` (the opposite stack). */
   async #commitReplay(before, target) {
-    const batch = this.#engine.flush();
-    const batches = batch && batch.length ? [batch] : [];
-    if (batches.length) await this.#store.append(this.#docId, batches);
-    this.#cursor += batches.length;
-    if (this.#deltaListeners.size) for (const d of batches) for (const fn of this.#deltaListeners) fn(d);
-    this.#materialize();
-    const frame = this.#frame(before, this.#snapshotMine());
+    await this.#engine.commit();
+    await this.#materialize();
+    const frame = this.#frame(before, await this.#snapshotMine());
     if (frame) target.push(frame);
     this.#group = null;
     this.#bump();
   }
 
   async createPerson(fields = {}) {
-    const e = await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const pid = uuid();
     const cache = new Map();
-    e.assertAnchor(pid, V.TYPE_PERSON);
-    this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, cache);
+    await this.#engine.assertAnchor(pid, V.TYPE_PERSON);
+    await this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, cache);
     await this.#commit(before);
     return this.person(pid);
   }
@@ -676,7 +587,6 @@ export class FamilyTree {
   }
 
   async updatePerson(id, patch, opts = {}) {
-    await this.#ensure();
     // Silent (per-keystroke) edit: accumulate into the overlay and refresh the view WITHOUT minting —
     // a permanent claim per keystroke would be garbage. One claim (a supersede) mints at settle.
     if (opts.silent) {
@@ -687,148 +597,142 @@ export class FamilyTree {
     }
     const pending = this.#overlay.get(id);
     this.#overlay.delete(id);
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const cache = new Map();
-    this.#applyPatch(id, { ...(pending ?? {}), ...patch }, cache);
+    await this.#applyPatch(id, { ...(pending ?? {}), ...patch }, cache);
     await this.#commit(before);
     return this.person(id);
   }
   /** Mint a fresh person anchor and apply an initial patch. Returns the new id. */
-  #newPerson(fields, cache) {
+  async #newPerson(fields, cache) {
     const pid = uuid();
-    this.#engine.assertAnchor(pid, V.TYPE_PERSON);
-    this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, cache);
+    await this.#engine.assertAnchor(pid, V.TYPE_PERSON);
+    await this.#applyPatch(pid, { ...NEW_PERSON, ...fields }, cache);
     return pid;
   }
 
   /** The union's marriage event anchor (participants = its parents, type "marriage"), minting if absent. */
-  #marriageEventFor(fam) {
+  async #marriageEventFor(fam) {
     const existing = this.#marriageEventOf.get(fam.id);
     if (existing) return existing;
     const eid = uuid();
-    this.#engine.assertAnchor(eid, V.TYPE_EVENT);
-    this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
+    await this.#engine.assertAnchor(eid, V.TYPE_EVENT);
+    await this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
     for (const parent of fam.spouses) {
-      this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: parent, role: 'spouse' });
+      await this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: parent, role: 'spouse' });
     }
     return eid;
   }
 
   async deletePerson(id) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     // Remove this replica's claims about the person and the anchor itself; relationships others hold
     // that reference this person drop out of the projection on their own (dangling endpoint).
-    for (const c of this.#engine.liveClaimsOfAny(id)) {
-      if (c.createdBy === this.#author) this.#remove(c.id);
+    for (const c of await this.#engine.liveClaimsOfAny(id)) {
+      if (c.createdBy === this.#author) await this.#remove(c.id);
     }
-    this.#remove(id);
+    await this.#remove(id);
     // The person's own events (birth/death) go with them.
     for (const [key, eid] of this.#eventOf) {
       if (!key.startsWith(id + '|')) continue;
-      for (const c of this.#engine.liveClaimsOfAny(eid)) {
-        if (c.createdBy === this.#author) this.#remove(c.id);
+      for (const c of await this.#engine.liveClaimsOfAny(eid)) {
+        if (c.createdBy === this.#author) await this.#remove(c.id);
       }
-      this.#remove(eid);
+      await this.#remove(eid);
     }
     await this.#commit(before);
   }
 
   async addMarriage(aId, bFieldsOrId, facts = {}) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const cache = new Map();
-    const bId = typeof bFieldsOrId === 'string' ? bFieldsOrId : this.#newPerson(bFieldsOrId, cache);
+    const bId = typeof bFieldsOrId === 'string' ? bFieldsOrId : await this.#newPerson(bFieldsOrId, cache);
     const pair = [aId, bId].sort();
-    this.#engine.assertClaim(aId, V.P_PARTNERSHIP, { pair, role: 'spouse' });
+    await this.#engine.assertClaim(aId, V.P_PARTNERSHIP, { pair, role: 'spouse' });
     if ('marriage' in facts || 'place' in facts) {
       const eid = uuid();
-      this.#engine.assertAnchor(eid, V.TYPE_EVENT);
-      this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
-      for (const p of pair) this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: p, role: 'spouse' });
-      if ('marriage' in facts) this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null);
-      if ('place' in facts) this.#setEventPlace(eid, facts.place);
+      await this.#engine.assertAnchor(eid, V.TYPE_EVENT);
+      await this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
+      for (const p of pair) await this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: p, role: 'spouse' });
+      if ('marriage' in facts) await this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null);
+      if ('place' in facts) await this.#setEventPlace(eid, facts.place);
     }
     await this.#commit(before);
-    return this.family('union:' + pair.map((p) => this.resolveId(p) ?? p).sort().join('+'));
+    const canonical = await Promise.all(pair.map(async (p) => (await this.resolveId(p)) ?? p));
+    return this.family('union:' + canonical.sort().join('+'));
   }
 
   async addChild(familyId, fieldsOrId) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const fam = this.family(familyId);
     const parents = fam ? fam.spouses : [];
     const cache = new Map();
-    const pid = typeof fieldsOrId === 'string' ? fieldsOrId : this.#newPerson(fieldsOrId, cache);
+    const pid = typeof fieldsOrId === 'string' ? fieldsOrId : await this.#newPerson(fieldsOrId, cache);
     for (const parent of parents) {
-      this.#engine.assertClaim(pid, V.P_PARENT, { parentPersonId: parent, kind: 'biological' });
+      await this.#engine.assertClaim(pid, V.P_PARENT, { parentPersonId: parent, kind: 'biological' });
     }
     await this.#commit(before);
     return this.person(pid);
   }
 
   async addParents(childId, father = null, mother = null) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const cache = new Map();
     const parentIds = [];
     for (const [role, val] of [['M', father], ['F', mother]]) {
       if (!val) continue;
-      const pid = typeof val === 'string' ? val : this.#newPerson({ sex: role, ...val }, cache);
+      const pid = typeof val === 'string' ? val : await this.#newPerson({ sex: role, ...val }, cache);
       parentIds.push(pid);
-      this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: pid, kind: 'biological' });
+      await this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: pid, kind: 'biological' });
     }
     await this.#commit(before);
-    const canonical = parentIds.map((p) => this.resolveId(p) ?? p).sort();
+    const canonical = (await Promise.all(parentIds.map(async (p) => (await this.resolveId(p)) ?? p))).sort();
     return this.family('union:' + canonical.join('+'));
   }
 
   async removeMarriage(familyId) {
     const fam = this.family(familyId);
     if (!fam) return;
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const parents = fam.spouses;
     for (const p of parents) {
-      for (const c of this.#liveMine(p, V.P_PARTNERSHIP)) {
+      for (const c of await this.#liveMine(p, V.P_PARTNERSHIP)) {
         const pair = c.value?.pair ?? [];
-        if (parents.length === pair.length && parents.every((x) => pair.includes(x))) this.#remove(c.id);
+        if (parents.length === pair.length && parents.every((x) => pair.includes(x))) await this.#remove(c.id);
       }
     }
     for (const childId of fam.children) {
-      for (const c of this.#liveMine(childId, V.P_PARENT)) {
-        if (parents.includes(c.value?.parentPersonId)) this.#remove(c.id);
+      for (const c of await this.#liveMine(childId, V.P_PARENT)) {
+        if (parents.includes(c.value?.parentPersonId)) await this.#remove(c.id);
       }
     }
     const eid = this.#marriageEventOf.get(familyId);
     if (eid) {
-      for (const c of this.#engine.liveClaimsOfAny(eid)) if (c.createdBy === this.#author) this.#remove(c.id);
-      this.#remove(eid);
+      for (const c of await this.#engine.liveClaimsOfAny(eid)) if (c.createdBy === this.#author) await this.#remove(c.id);
+      await this.#remove(eid);
     }
     await this.#commit(before);
   }
 
   async unlinkChild(familyId, personId) {
     const fam = this.family(familyId);
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const parents = fam ? fam.spouses : [];
-    for (const c of this.#liveMine(personId, V.P_PARENT)) {
-      if (parents.includes(c.value?.parentPersonId)) this.#remove(c.id);
+    for (const c of await this.#liveMine(personId, V.P_PARENT)) {
+      if (parents.includes(c.value?.parentPersonId)) await this.#remove(c.id);
     }
     await this.#commit(before);
   }
 
   async unlinkSpouse(familyId, personId) {
     const fam = this.family(familyId);
-    await this.#ensure();
-    const before = this.#snapshotMine();
-    for (const c of this.#liveMine(personId, V.P_PARTNERSHIP)) {
-      if ((c.value?.pair ?? []).includes(personId)) this.#remove(c.id);
+    const before = await this.#snapshotMine();
+    for (const c of await this.#liveMine(personId, V.P_PARTNERSHIP)) {
+      if ((c.value?.pair ?? []).includes(personId)) await this.#remove(c.id);
     }
     for (const childId of fam?.children ?? []) {
-      for (const c of this.#liveMine(childId, V.P_PARENT)) {
-        if (c.value?.parentPersonId === personId) this.#remove(c.id);
+      for (const c of await this.#liveMine(childId, V.P_PARENT)) {
+        if (c.value?.parentPersonId === personId) await this.#remove(c.id);
       }
     }
     await this.#commit(before);
@@ -836,15 +740,14 @@ export class FamilyTree {
 
   async linkSpouse(familyId, personId) {
     const fam = this.family(familyId);
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const other = (fam?.spouses ?? [])[0];
     if (other) {
       const pair = [other, personId].sort();
-      this.#engine.assertClaim(other, V.P_PARTNERSHIP, { pair, role: 'spouse' });
+      await this.#engine.assertClaim(other, V.P_PARTNERSHIP, { pair, role: 'spouse' });
       // Keep the union addressable by the same children: link the new spouse to its children too.
       for (const childId of fam.children) {
-        this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: personId, kind: 'biological' });
+        await this.#engine.assertClaim(childId, V.P_PARENT, { parentPersonId: personId, kind: 'biological' });
       }
     }
     await this.#commit(before);
@@ -853,37 +756,34 @@ export class FamilyTree {
   async setFamilyFacts(familyId, facts) {
     const fam = this.family(familyId);
     if (!fam) return;
-    await this.#ensure();
-    const before = this.#snapshotMine();
-    const eid = this.#marriageEventFor(fam);
-    if ('marriage' in facts) this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null);
-    if ('place' in facts) this.#setEventPlace(eid, facts.place);
+    const before = await this.#snapshotMine();
+    const eid = await this.#marriageEventFor(fam);
+    if ('marriage' in facts) await this.#setSingle(eid, V.P_DATE, facts.marriage ? { edtf: String(facts.marriage) } : null);
+    if ('place' in facts) await this.#setEventPlace(eid, facts.place);
     await this.#commit(before);
   }
 
   async attachMedia(subjectId, { hash, mime, w, h: hh, caption = '', role = 'portrait', crop = null }) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
+    const before = await this.#snapshotMine();
     const value = { mediaHash: hash, mime, role };
     if (w) value.width = Number(w);
     if (hh) value.height = Number(hh);
     if (caption) value.caption = caption;
     if (crop) value.crop = crop;
-    this.#engine.assertClaim(subjectId, V.P_MEDIA_LINK, value);
+    await this.#engine.assertClaim(subjectId, V.P_MEDIA_LINK, value);
     await this.#commit(before);
-    const link = this.#liveMine(subjectId, V.P_MEDIA_LINK).find((c) => c.value?.mediaHash === hash);
+    const link = (await this.#liveMine(subjectId, V.P_MEDIA_LINK)).find((c) => c.value?.mediaHash === hash);
     return { mediaId: hash, linkId: link?.id };
   }
 
   async setPortrait(subjectId, linkId) {
-    await this.#ensure();
-    const before = this.#snapshotMine();
-    for (const c of this.#liveMine(subjectId, V.P_MEDIA_LINK)) {
+    const before = await this.#snapshotMine();
+    for (const c of await this.#liveMine(subjectId, V.P_MEDIA_LINK)) {
       const role = c.value?.role;
       if (c.id === linkId && role !== 'portrait') {
-        this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'portrait' });
+        await this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'portrait' });
       } else if (c.id !== linkId && role === 'portrait') {
-        this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'document' });
+        await this.#engine.supersedeClaim(c.id, subjectId, V.P_MEDIA_LINK, { ...c.value, role: 'document' });
       }
     }
     await this.#commit(before);
@@ -892,20 +792,18 @@ export class FamilyTree {
   async detachMedia(linkId) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
-    await this.#ensure();
-    if (!this.#liveMine(link.subjectId, V.P_MEDIA_LINK).some((c) => c.id === linkId)) return;
-    const before = this.#snapshotMine();
-    this.#remove(linkId);
+    if (!(await this.#liveMine(link.subjectId, V.P_MEDIA_LINK)).some((c) => c.id === linkId)) return;
+    const before = await this.#snapshotMine();
+    await this.#remove(linkId);
     await this.#commit(before);
   }
 
   async setCrop(linkId, crop) {
     const link = this.mediaLinks.get(linkId);
     if (!link) return;
-    await this.#ensure();
-    const mine = this.#liveMine(link.subjectId, V.P_MEDIA_LINK).find((c) => c.id === linkId);
+    const mine = (await this.#liveMine(link.subjectId, V.P_MEDIA_LINK)).find((c) => c.id === linkId);
     if (mine) {
-      this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop });
+      await this.#engine.supersedeClaim(linkId, link.subjectId, V.P_MEDIA_LINK, { ...mine.value, crop });
       await this.#commit(); // no `before` → not undoable
     }
   }
@@ -915,32 +813,31 @@ export class FamilyTree {
    *  and `seedAppId` is the identity. Not undoable (seeding clears the stacks). Fact-less person-general
    *  sources are skipped (they need a host claim — OPE-216). */
   async seed(ops) {
-    await this.#ensure();
     const cache = new Map();
     for (const o of ops) {
       if (o.type === 'upsertPerson') {
-        this.#engine.assertAnchor(o.id, V.TYPE_PERSON);
-        this.#applyPatch(o.id, { ...NEW_PERSON, ...o.fields }, cache);
+        await this.#engine.assertAnchor(o.id, V.TYPE_PERSON);
+        await this.#applyPatch(o.id, { ...NEW_PERSON, ...o.fields }, cache);
       } else if (o.type === 'upsertFamily') {
         const spouses = o.fields.spouses ?? [];
         const children = o.fields.children ?? [];
         if (spouses.length >= 2) {
           const pair = [spouses[0], spouses[1]].sort();
-          this.#engine.assertClaim(spouses[0], V.P_PARTNERSHIP, { pair, role: 'spouse' });
+          await this.#engine.assertClaim(spouses[0], V.P_PARTNERSHIP, { pair, role: 'spouse' });
         }
         for (const c of children) {
           for (const s of spouses) {
-            this.#engine.assertClaim(c, V.P_PARENT, { parentPersonId: s, kind: 'biological' });
+            await this.#engine.assertClaim(c, V.P_PARENT, { parentPersonId: s, kind: 'biological' });
           }
         }
         const facts = o.fields.facts ?? {};
         if (facts.marriage || facts.place) {
           const eid = uuid();
-          this.#engine.assertAnchor(eid, V.TYPE_EVENT);
-          this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
-          for (const s of spouses) this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: s, role: 'spouse' });
-          if (facts.marriage) this.#engine.assertClaim(eid, V.P_DATE, { edtf: String(facts.marriage) });
-          if (facts.place) this.#setEventPlace(eid, facts.place);
+          await this.#engine.assertAnchor(eid, V.TYPE_EVENT);
+          await this.#engine.assertClaim(eid, V.P_EVENT_TYPE, { type: 'marriage' });
+          for (const s of spouses) await this.#engine.assertClaim(eid, V.P_PARTICIPANT, { personId: s, role: 'spouse' });
+          if (facts.marriage) await this.#engine.assertClaim(eid, V.P_DATE, { edtf: String(facts.marriage) });
+          if (facts.place) await this.#setEventPlace(eid, facts.place);
         }
       }
     }
@@ -948,25 +845,12 @@ export class FamilyTree {
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
   }
 
-  /** Fold the whole live set into one snapshot covering log entries 0..#cursor, so the next load
-   *  restores it and replays only the tail. */
-  async compact() {
-    await this.#ensure();
-    const prev = await this.#store.readSnapshot(this.#docId);
-    const payload = this.#wrapSnapshot(this.#engine.snapshot(), this.#cursor);
-    try {
-      await this.#store.putSnapshot(this.#docId, payload, prev?.version ?? null);
-    } catch (err) {
-      if (err?.name !== 'ConflictError') throw err;
-    }
-  }
-
+  // NOTE: a true engine reset (clearing the worker core's claim set) needs a worker-side clear and is a
+  // demo-reseed concern (openom-app-core has no clear op yet — tracked as a follow-up). This clears the
+  // local view bookkeeping and re-reads the projection.
   async reset() {
-    await this.#store.delete(this.#docId);
-    this.#engine = await createTree({ createdBy: this.#author });
-    this.#cursor = 0;
     this.#undo.length = 0; this.#redo.length = 0; this.#group = null; this.#overlay.clear();
-    this.#materialize();
+    await this.#materialize();
     this.#bump();
   }
 }
