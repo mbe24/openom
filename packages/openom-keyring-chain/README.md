@@ -20,8 +20,9 @@ taxonomy. The throughline: **the server is not the security boundary** — it ca
 can't forge an Ed25519 signature — so every guarantee is a client-side check over signed wire data.
 
 It is **openom-domain-specific but openom-dependency-free** (like `openom-keyring-dag`): it depends on the
-generic `keyeo-chain`/`keyeo-core` engines, `openom-keyring-api` (the engine seam), `edsign`, and the
-substrate crates (`prost`/`sha2`/`blobstore`) plus `keyeo-crypto` (the shared key-material types), but on
+generic `keyeo-chain` engine (which re-exports the `keyeo-core` seam types, so this crate names them via
+`keyeo_chain::` and needs no direct `keyeo-core` dep), `openom-keyring-api` (the engine seam), `edsign`, and
+the substrate crates (`prost`/`sha2`/`blobstore`) plus `keyeo-crypto` (the shared key-material types), but on
 **no `openom-*` crate**. The structural keyring wire, formerly in `openom-protocol`, now lives here in
 `wire.rs` (`Keyring` / `Member` / `RecoveryKey` / `KeyringSignature`); the DEK epochs and the recovery
 escrow's KEK wraps ride as `keyeo_crypto::{Epoch, Wrap}` in their canonical `codec` bytes inside `Keyring`.

@@ -6,8 +6,15 @@ mod signing;
 pub use signing::{doc_hash, signing_bytes};
 use signing::{sha256, verify_all, verify_any, verify_threshold};
 
-use keyeo_core::{Role, SignatureScheme};
 use serde::Serialize;
+
+// The generic engine-family SEAM types live in keyeo-core (OPE-306). Re-exported here — mirroring keyeo-dag —
+// so `keyeo_chain::X` resolves for openom-keyring-chain and the engine's other consumers, who then never name
+// keyeo-core directly (a chain client depends on this crate + keyeo-crypto, not the seam crate underneath).
+// `Role`/`SignatureScheme` double as this crate's own internal vocabulary below.
+pub use keyeo_core::{
+    CanonicalBytes, Ed25519, Requirement, Role, SigError, SignatureScheme, Signed,
+};
 
 // Re-export the shared retention/compaction vocabulary so callers reach it via `keyeo_chain::` — matching
 // keyeo-dag, so the compaction wiring needs no per-engine import path.

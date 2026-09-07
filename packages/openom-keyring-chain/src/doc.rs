@@ -8,7 +8,7 @@
 //! (the payload/structural acceptance gate: layout bound, size caps, epochs, epoch ordinals,
 //! signer-key length, wrap-completeness).
 
-use keyeo_core::Ed25519;
+use keyeo_chain::Ed25519;
 use keyeo_chain::{DocHash, GroupId, Governance, Doc, SignerRole, PayloadCommitment, Revision, Signer};
 use keyeo_crypto::{missing, Epoch, RecipientDescriptor, Wrap, WrapMethod};
 use sha2::{Digest, Sha256};
@@ -40,7 +40,7 @@ pub(crate) const S_BAD_KEY_MATERIAL: &str = "key material malformed";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct KeyringRole(pub i16);
 
-impl keyeo_core::Role for KeyringRole {
+impl keyeo_chain::Role for KeyringRole {
     fn grants_at_least(&self, other: &Self) -> bool {
         // Lower ordinal = stronger (Owner==1 is strongest).
         self.0 <= other.0

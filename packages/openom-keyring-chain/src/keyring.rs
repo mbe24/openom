@@ -12,7 +12,7 @@
 
 use crate::doc::KeyringDoc;
 use crate::wire::{Keyring, KeyringSignature};
-use keyeo_core::{Ed25519, SigError, SignatureScheme};
+use keyeo_chain::{Ed25519, SigError, SignatureScheme};
 
 // The Ed25519 key types come from the signing seam — the one crate that holds the ed25519-dalek edge —
 // whose only verify is verify_strict. Downstream (openom-vault, openom-vault-host) consume these through

@@ -15,8 +15,6 @@ keyeo-chain.workspace = true
 # The shared key-material types (Epoch/Wrap) + their canonical codec — the chain stores these as encoded
 # bytes inside its prost envelope and decodes them in the structure gate (OPE-377).
 keyeo-crypto.workspace = true
-# The engine-family seam types (Ed25519 / SigError / Role / SignatureScheme).
-keyeo-core.workspace = true
 # The storage swap seam — the Blob transport for the keyring document (OPE-265).
 blobstore.workspace = true
 # The engine-agnostic swap seam — this crate provides the CHAIN KeyringVerifier adapter (OPE-277).

@@ -3702,7 +3702,6 @@ dependencies = [
  "edsign",
  "getrandom 0.3.4",
  "keyeo-chain",
- "keyeo-core",
  "keyeo-crypto",
  "openom-keyring-api",
  "proptest",
