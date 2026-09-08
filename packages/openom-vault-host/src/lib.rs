@@ -149,7 +149,9 @@ impl From<openom_vault::VaultError> for VaultError {
         let code = match &e {
             E::Crypto(_) => C::CryptoOpen,
             E::Sealer(inner) => sealer_code(inner),
-            E::BadKeyring(_) => C::BadKeyring,
+            // `Sharing` is a keyring/membership orchestration diagnostic (walk fork, invite-pin mismatch,
+            // malformed hop) — a keyring-level failure, surfaced under the same host code as a malformed keyring.
+            E::BadKeyring(_) | E::Sharing(_) => C::BadKeyring,
             E::BadKdfParams => C::BadKdfParams,
             E::MissingWrap => C::MissingWrap,
             E::MemberExists => C::MemberExists,
