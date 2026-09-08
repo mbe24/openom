@@ -7,6 +7,7 @@
 //! `VaultError → JsError` mapping. Behaviour is identical to the pre-lift `wasm.rs` functions — the error
 //! strings are preserved verbatim through [`VaultError::Sharing`].
 
+use openom_crypto::Passphrase;
 use openom_keyring_api::{EngineKind, MembershipEnvelope};
 use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
 use openom_keyring_chain::{
@@ -14,10 +15,15 @@ use openom_keyring_chain::{
     KeyringAnchor, VerifyingKey,
 };
 use openom_keyring_dag::client as dag_client;
-use openom_protocol::v1::KeyringUpdate;
+use openom_keyring_dag::KeyringRole;
+use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+use openom_protocol::v1::{KeyringUpdate, MemberRole};
 use openom_protocol::Message;
+use openom_sealer::SealerSet;
 
-use crate::VaultError;
+use crate::dag_vault::DagVault;
+use crate::lifecycle::VaultContext;
+use crate::{vault, VaultError};
 
 /// An orchestration diagnostic → [`VaultError::Sharing`] (verbatim message, no prefix).
 fn err(msg: impl Into<String>) -> VaultError {
@@ -451,6 +457,188 @@ pub fn keyring_has_been_shared(engine: EngineKind, keyring: &[u8]) -> Result<boo
         EngineKind::Dag => {
             let resolved = dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?;
             Ok(resolved.has_been_shared)
+        }
+    }
+}
+
+/// A non-owner member's unlock result: the DEK sealer to install in the running core, the member's author
+/// `did:key`, and the anti-rollback watermark to persist.
+pub struct MemberUnlock {
+    /// The per-epoch DEK sealer (a member is on a shared tree by definition, so it signs entries).
+    pub sealer: SealerSet,
+    /// The member's author `did:key` (the claim `createdBy`).
+    pub did_key: String,
+    /// The engine-opaque anti-rollback cursor to persist.
+    pub watermark: Vec<u8>,
+}
+
+/// Parse a role tag into the chain engine's [`MemberRole`].
+fn parse_member_role(s: &str) -> Result<MemberRole, VaultError> {
+    match s {
+        "owner" => Ok(MemberRole::Owner),
+        "co-owner" => Ok(MemberRole::CoOwner),
+        "admin" => Ok(MemberRole::Admin),
+        "editor" => Ok(MemberRole::Editor),
+        "viewer" => Ok(MemberRole::Viewer),
+        other => Err(err(format!("unknown role: {other}"))),
+    }
+}
+
+/// Parse a role tag into the dag engine's [`KeyringRole`].
+fn parse_keyring_role(s: &str) -> Result<KeyringRole, VaultError> {
+    match s {
+        "owner" => Ok(KeyringRole::OWNER),
+        "co-owner" => Ok(KeyringRole::CO_OWNER),
+        "maintainer" => Ok(KeyringRole::MAINTAINER),
+        "editor" => Ok(KeyringRole::EDITOR),
+        "viewer" => Ok(KeyringRole::VIEWER),
+        other => Err(err(format!("unknown role: {other}"))),
+    }
+}
+
+/// Split a flat buffer of concatenated 32-byte Ed25519 verify-keys into pinned signer keys. At least one is
+/// required and the length must be a whole multiple of 32.
+fn parse_trusted_signers(bytes: &[u8]) -> Result<Vec<VerifyingKey>, VaultError> {
+    if bytes.is_empty() || bytes.len() % 32 != 0 {
+        return Err(err("trustedSigners must be one or more concatenated 32-byte keys"));
+    }
+    bytes
+        .chunks_exact(32)
+        .map(|c| {
+            let arr: [u8; 32] = c.try_into().expect("chunks_exact(32) yields 32 bytes");
+            VerifyingKey::from_bytes(&arr).map_err(|_| err("invalid trusted signer key"))
+        })
+        .collect()
+}
+
+/// Add a member (owner action) — HPKE-wrap the tree DEK to the OOB-verified joiner keys + record them in a
+/// new signed keyring revision (chain) / `Add` op (dag). Returns the new keyring/anchor + its watermark to
+/// persist; the owner's own session is unchanged (an add mints no new epoch), so it just re-reads membership.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, a bad joiner key, or an
+/// unauthorized add.
+#[allow(clippy::too_many_arguments)]
+pub fn add_member(
+    engine: EngineKind,
+    keyring: &[u8],
+    owner_passphrase: &Passphrase,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_author_public: &[u8],
+    member_hpke_public: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
+    let joiner_id = MemberId::new(new_member_id);
+    match engine {
+        EngineKind::Chain => {
+            let added = vault::add_member(
+                keyring,
+                owner_passphrase,
+                &TreeId::new(tree_id),
+                &MemberId::new(owner_member_id),
+                min_revision,
+                &vault::Joiner::from_bytes(
+                    &joiner_id,
+                    parse_member_role(role)?,
+                    member_author_public,
+                    member_hpke_public,
+                )?,
+            )?;
+            Ok(AcceptedKeyring {
+                keyring: added.keyring,
+                watermark: chain_wm_pinned(
+                    added.revision,
+                    &added.write_key_id,
+                    &added.write_dek_hash,
+                ),
+            })
+        }
+        EngineKind::Dag => {
+            let (tree, owner, replica) = (
+                TreeId::new(tree_id),
+                MemberId::new(owner_member_id),
+                ReplicaId::new(replica_id),
+            );
+            let ctx = VaultContext {
+                tree_id: &tree,
+                member_id: &owner,
+                replica_id: &replica,
+            };
+            let joiner = vault::Joiner::from_bytes(
+                &joiner_id,
+                parse_keyring_role(role)?,
+                member_author_public,
+                member_hpke_public,
+            )?;
+            let anchor = DagVault.add_member(&ctx, keyring, owner_passphrase, &joiner)?;
+            let watermark = DagVault.watermark(&anchor)?;
+            Ok(AcceptedKeyring {
+                keyring: anchor,
+                watermark,
+            })
+        }
+    }
+}
+
+/// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
+/// the anchor (dag), then HPKE-unwrap the member's DEKs with their passphrase + account KDF. Returns a sealer
+/// to install in the core. `trusted_signers` is ignored by the dag (it resolves admission from the anchor).
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a wrong passphrase, an unpinned signer, or a removed member.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_as_member(
+    engine: EngineKind,
+    keyring: &[u8],
+    passphrase: &Passphrase,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+) -> Result<MemberUnlock, VaultError> {
+    let kdf =
+        keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|_| err("bad kdf params"))?;
+    let member = MemberId::new(member_id);
+    match engine {
+        EngineKind::Chain => {
+            let trusted = parse_trusted_signers(trusted_signers)?;
+            let u = vault::unlock_as_member(
+                keyring,
+                &vault::MemberAuth {
+                    passphrase,
+                    kdf: &kdf,
+                    member_id: &member,
+                    trusted_signers: &trusted,
+                },
+                &TreeId::new(tree_id),
+                &ReplicaId::new(replica_id),
+                min_revision,
+            )?;
+            Ok(MemberUnlock {
+                sealer: u.sealer,
+                did_key: u.did_key.into_string(),
+                watermark: chain_wm_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
+            })
+        }
+        EngineKind::Dag => {
+            let (tree, replica) = (TreeId::new(tree_id), ReplicaId::new(replica_id));
+            let ctx = VaultContext {
+                tree_id: &tree,
+                member_id: &member,
+                replica_id: &replica,
+            };
+            let u = DagVault.unlock_as_member(&ctx, keyring, passphrase, &kdf)?;
+            Ok(MemberUnlock {
+                sealer: u.sealer,
+                did_key: u.did_key.into_string(),
+                watermark: u.watermark,
+            })
         }
     }
 }

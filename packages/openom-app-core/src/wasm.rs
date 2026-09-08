@@ -632,6 +632,270 @@ pub fn change_passphrase(
     })
 }
 
+/// The result of an owner membership change (add/remove) — the new keyring/anchor to persist + its watermark.
+/// No handle: the owner's running core keeps its DEK and just re-reads membership via
+/// [`setMembership`](AppCoreHandle::set_membership) after the caller persists the new keyring.
+#[wasm_bindgen]
+pub struct MembershipChange {
+    keyring: Vec<u8>,
+    watermark: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl MembershipChange {
+    /// The new keyring/anchor bytes to persist as the head (chain also retains it per revision).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+
+    /// The engine-opaque anti-rollback watermark to persist.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+}
+
+/// Add a member (owner action) — HPKE-wrap the tree DEK to the OOB-verified joiner keys + record them in a
+/// new keyring revision. Returns the new keyring + watermark to persist; the owner then calls
+/// [`setMembership`](AppCoreHandle::set_membership) so ingest verifies the now-shared tree.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, the owner passphrase is wrong, a joiner key is malformed,
+/// or the add is unauthorized.
+#[wasm_bindgen(js_name = addMember)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn add_member(
+    engine: &str,
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    new_member_id: &str,
+    role: &str,
+    member_author_public: &[u8],
+    member_hpke_public: &[u8],
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::add_member(
+        parse_engine(engine)?,
+        keyring,
+        &Passphrase::new(owner_passphrase.into_bytes()),
+        tree_id,
+        owner_member_id,
+        replica_id,
+        min_revision,
+        new_member_id,
+        role,
+        member_author_public,
+        member_hpke_public,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
+/// the anchor (dag), HPKE-unwrap the member's DEKs with their passphrase + account KDF, and wrap the sealer in
+/// a ready core. Returns an [`OpenResult`] like [`unlock`], whose handle the worker drives.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, or member unlock fails (wrong passphrase / unpinned signer
+/// / removed member).
+#[wasm_bindgen(js_name = unlockAsMember)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn unlock_as_member(
+    engine: &str,
+    keyring: &[u8],
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    doc: String,
+) -> Result<OpenResult, JsError> {
+    let u = openom_vault::sharing::unlock_as_member(
+        parse_engine(engine)?,
+        keyring,
+        &Passphrase::new(passphrase.into_bytes()),
+        member_kdf_params,
+        tree_id,
+        member_id,
+        trusted_signers,
+        replica_id,
+        min_revision,
+    )
+    .map_err(to_js)?;
+    let handle = AppCoreHandle {
+        inner: AppCore::new(
+            u.did_key.clone(),
+            u.sealer,
+            Arc::new(MemoryStore::new()),
+            doc,
+            replica_id.to_vec(),
+        ),
+    };
+    Ok(OpenResult {
+        handle: Some(handle),
+        keyring: Vec::new(),
+        recovery_code: String::new(),
+        did_key: u.did_key,
+        watermark: u.watermark,
+        needs_reseal: false,
+        needs_backfill: false,
+    })
+}
+
+/// Whether this tree HAS BEEN SHARED — a non-founder member was ever admitted. The worker calls this on
+/// unlock to decide whether to install a §B3 resolver (a solo tree needs none).
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown or the keyring is malformed.
+#[wasm_bindgen(js_name = keyringHasBeenShared)]
+pub fn keyring_has_been_shared(engine: &str, keyring: &[u8]) -> Result<bool, JsError> {
+    openom_vault::sharing::keyring_has_been_shared(parse_engine(engine)?, keyring).map_err(to_js)
+}
+
+/// The advisory membership + basis for a keyring, as JSON `{"members":[{"memberId","role"}],"basis":[...]}`
+/// — what the worker pushes to the server's /access channel.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown or the keyring is malformed.
+#[wasm_bindgen(js_name = keyringSummary)]
+pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> {
+    openom_vault::sharing::keyring_summary(parse_engine(engine)?, keyring).map_err(to_js)
+}
+
+/// Whether this keyring's trust state COVERS `stored_basis` — the worker's pre-push staleness guard.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown or the keyring is malformed.
+#[wasm_bindgen(js_name = keyringCovers)]
+#[allow(clippy::needless_pass_by_value)] // wasm-bindgen marshals a JS string array as an owned Vec
+pub fn keyring_covers(
+    engine: &str,
+    keyring: &[u8],
+    stored_basis: Vec<String>,
+) -> Result<bool, JsError> {
+    openom_vault::sharing::keyring_covers(parse_engine(engine)?, keyring, &stored_basis).map_err(to_js)
+}
+
+/// A joining member's verified whole-history walk (`verifyKeyringWalk`): the head revision + RAW head body,
+/// the head's signers (JSON, for the worker's out-of-band fingerprint cross-check), and every RAW per-revision
+/// body (length-prefix framed) for the member to retain.
+#[wasm_bindgen]
+pub struct KeyringWalk {
+    revision: u32,
+    head_keyring: Vec<u8>,
+    signers_json: String,
+    bodies_framed: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl KeyringWalk {
+    /// The verified head revision.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn revision(&self) -> u32 {
+        self.revision
+    }
+    /// The RAW head `Keyring` body — stored as the head and fed to `unlockAsMember`.
+    #[wasm_bindgen(getter, js_name = headKeyring)]
+    #[must_use]
+    pub fn head_keyring(&self) -> Vec<u8> {
+        self.head_keyring.clone()
+    }
+    /// The head's authorized signers as JSON `[{"memberId","authorPublicKey"(hex)}]`.
+    #[wasm_bindgen(getter, js_name = signersJson)]
+    #[must_use]
+    pub fn signers_json(&self) -> String {
+        self.signers_json.clone()
+    }
+    /// Every RAW per-revision body 1..=head, ascending, length-prefix framed.
+    #[wasm_bindgen(getter, js_name = bodiesFramed)]
+    #[must_use]
+    pub fn bodies_framed(&self) -> Vec<u8> {
+        self.bodies_framed.clone()
+    }
+}
+
+/// Verify a tree's WHOLE keyring history from genesis (a joining member's read-side bootstrap): TOFU the
+/// genesis founder, walk to the head, and pin it to the invite's `(revision, keyring_hash)`. Returns the
+/// verified head + signers + every per-revision body to retain.
+///
+/// # Errors
+/// Returns a [`JsError`] on any fail-closed condition (empty/forked history, wrong tree, pin mismatch).
+#[wasm_bindgen(js_name = verifyKeyringWalk)]
+pub fn verify_keyring_walk(
+    tree_id: &[u8],
+    hops: &[u8],
+    pinned_revision: u32,
+    pinned_hash: &[u8],
+) -> Result<KeyringWalk, JsError> {
+    let w = openom_vault::sharing::verify_keyring_walk(tree_id, hops, pinned_revision, pinned_hash)
+        .map_err(to_js)?;
+    Ok(KeyringWalk {
+        revision: w.revision,
+        head_keyring: w.head_keyring,
+        signers_json: w.signers_json,
+        bodies_framed: w.bodies_framed,
+    })
+}
+
+/// Accept a keyring run pulled from the untrusted network (the chain-walk read-side). Returns the new head +
+/// watermark to persist (an empty keyring signals a no-op at the current head).
+///
+/// # Errors
+/// Returns a [`JsError`] on a malformed anchor/hop, a tree mismatch, or a rejected transition.
+#[wasm_bindgen(js_name = syncKeyring)]
+pub fn sync_keyring(
+    anchor: &[u8],
+    tree_id: &[u8],
+    hops: &[u8],
+) -> Result<MembershipChange, JsError> {
+    let a = openom_vault::sharing::accept_remote_keyring(anchor, tree_id, hops).map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: a.keyring,
+        watermark: a.watermark,
+    })
+}
+
+/// Frame a produced chain keyring revision as the wire `KeyringUpdate` the server's `PUT /keyring` accepts —
+/// the outbound publish (`reconcileKeyring`).
+///
+/// # Errors
+/// Returns a [`JsError`] if the keyring isn't a decodable chain keyring.
+#[wasm_bindgen(js_name = wrapChainKeyringUpdate)]
+pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::wrap_chain_keyring_update(keyring).map_err(to_js)
+}
+
+/// Adopt a recovery/succession reset keyring against the trusted anchor (the caller must have shown the new
+/// signer fingerprints for out-of-band confirmation first). Returns the validated keyring + watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] on a malformed keyring, a tree mismatch, a non-next revision, or a rejected reset.
+#[wasm_bindgen(js_name = adoptReset)]
+pub fn adopt_reset(
+    anchor: &[u8],
+    tree_id: &[u8],
+    candidate: &[u8],
+) -> Result<MembershipChange, JsError> {
+    let a = openom_vault::sharing::accept_reset_keyring(anchor, tree_id, candidate).map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: a.keyring,
+        watermark: a.watermark,
+    })
+}
+
 /// The engine tag mapping ([`EngineKind`]'s own `FromStr`, so this and the vault host can't drift).
 fn parse_engine(s: &str) -> Result<EngineKind, JsError> {
     s.parse::<EngineKind>()
