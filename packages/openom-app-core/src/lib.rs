@@ -8,7 +8,7 @@ use openom_docsync::SyncClient;
 use openom_protocol::v1::Envelope;
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
-use openom_vault::{Disposition, Membership};
+use openom_vault::{Disposition, MembershipResolver};
 use serde_json::Value;
 use store_log::DocStore;
 
@@ -74,7 +74,7 @@ pub struct AppCore<S: DocStore> {
     /// AEAD-only is safe there (only the DEK holder can write), so ingest accepts without attribution. The
     /// worker installs `Some(..)` via [`set_membership`](Self::set_membership) once the tree is shared, after
     /// which every peer entry is verified against the resolved roles before it is stored or folded.
-    membership: Option<Box<dyn Membership>>,
+    membership: Option<Box<dyn MembershipResolver>>,
     /// Peer entries HELD because their governing keyring/epoch isn't retained locally yet (the data channel
     /// outran the keyring channel). Re-verified on the next [`set_membership`](Self::set_membership); never
     /// folded until they verify. Bounded by [`HELD_CAP`](Self::HELD_CAP) — an overflow is dropped (counted in
@@ -265,7 +265,8 @@ impl<S: DocStore> AppCore<S> {
     }
 
     /// Install (or refresh) the §B3 governing membership. The worker calls this on unlock and after every
-    /// keyring sync, passing a resolver ([`openom_vault::ChainMembership`] / [`openom_vault::DagMembership`])
+    /// keyring sync, passing a resolver ([`openom_vault::ChainMembershipResolver`] /
+    /// [`openom_vault::DagMembershipResolver`])
     /// built from the freshly-verified keyring. Once set, every peer entry [`ingest`](Self::ingest) sees is
     /// verified against the resolved roles before it is stored or folded.
     ///
@@ -275,7 +276,7 @@ impl<S: DocStore> AppCore<S> {
     ///
     /// # Errors
     /// Returns [`CoreError`] if releasing a now-valid held entry fails to append to the local store or fold.
-    pub fn set_membership(&mut self, membership: Box<dyn Membership>) -> Result<usize, CoreError> {
+    pub fn set_membership(&mut self, membership: Box<dyn MembershipResolver>) -> Result<usize, CoreError> {
         self.membership = Some(membership);
         self.drain_held()
     }

@@ -2377,13 +2377,13 @@ mod tests {
         assert_eq!(member_h.author_member_id, "acct-bob");
     }
 
-    /// §B3 verify-on-ingest over the dag engine (OPE-382 / §8.2): a real shared-dag `DagMembership` accepts a
+    /// §B3 verify-on-ingest over the dag engine (OPE-382 / §8.2): a real shared-dag `DagMembershipResolver` accepts a
     /// signed owner entry, rejects a forged unsigned one, and — the epoch-set fix — STILL accepts an entry
     /// sealed under a PRIOR epoch after a forward-secret rotation, rather than `EpochMismatch`-rejecting it.
     #[test]
     fn dag_verify_ingest_accepts_signed_and_prior_epoch_entries_rejects_forgeries() {
-        use crate::verify::dag::DagMembership;
-        use crate::{verify_ingest, Disposition, Membership};
+        use crate::verify::dag::DagMembershipResolver;
+        use crate::{verify_ingest, Disposition, MembershipResolver};
         use openom_protocol::{v1::Envelope, Message};
         use openom_sealer::SealContext;
 
@@ -2426,14 +2426,14 @@ mod tests {
         let header = env.header.clone().unwrap();
         assert!(!header.author_signature.is_empty(), "the shared-tree owner signs");
 
-        let verify = |m: &DagMembership, h: &openom_protocol::v1::Header| {
+        let verify = |m: &DagMembershipResolver, h: &openom_protocol::v1::Header| {
             verify_ingest(env.version, m, h, &h.governing_ref, &h.key_id, || {
                 Ok::<_, ()>(b"owner edit".to_vec())
             })
         };
 
         // Verified against the shared anchor it was sealed under: ACCEPT.
-        let m0 = DagMembership::new(&shared).unwrap();
+        let m0 = DagMembershipResolver::new(&shared).unwrap();
         assert!(m0.shared());
         assert_eq!(verify(&m0, &header), Disposition::Accept);
 
@@ -2453,7 +2453,7 @@ mod tests {
                 "acct-bob",
             )
             .unwrap();
-        let m1 = DagMembership::new(&rotated).unwrap();
+        let m1 = DagMembershipResolver::new(&rotated).unwrap();
         assert_eq!(
             verify(&m1, &header),
             Disposition::Accept,

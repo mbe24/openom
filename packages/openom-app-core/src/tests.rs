@@ -9,16 +9,16 @@ use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::Envelope;
 use openom_protocol::Message;
 use openom_sealer::{Sealer, SealerSet};
-use openom_vault::{Governing, Membership};
+use openom_vault::{Governing, MembershipResolver};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use store_log::memory::MemoryStore;
 use store_log::DocStore;
 
-/// A scripted [`Membership`] double for the ingest-routing tests — it forces one disposition for every
+/// A scripted [`MembershipResolver`] double for the ingest-routing tests — it forces one disposition for every
 /// entry via the neutral policy's *crypto-free* arms (no keyring, no signature check), so the routing
 /// (Accept ⇒ store+fold, Hold ⇒ buffer, Reject ⇒ anomaly+drop) and the Hold-release path can be exercised
-/// in isolation. The real crypto decisions are proven against `ChainMembership`/`DagMembership` in
+/// in isolation. The real crypto decisions are proven against `ChainMembershipResolver`/`DagMembershipResolver` in
 /// openom-vault.
 enum Route {
     Accept,
@@ -26,7 +26,7 @@ enum Route {
     Reject,
 }
 struct Fake(Route);
-impl Membership for Fake {
+impl MembershipResolver for Fake {
     fn shared(&self) -> bool {
         // Accept routes through the never-shared arm; Hold/Reject through the shared arm.
         !matches!(self.0, Route::Accept)

@@ -4,8 +4,8 @@
 //! authored by a member who held the required capability in the keyring revision that governed it (see
 //! [`crate::attribution`]). The *decision* (rev-0 / shared / hold / reject / accept — a faithful port of
 //! the JS `entryVerifier`) is engine-neutral and lives here; only resolving an entry's governing
-//! membership is engine-specific, behind the [`Membership`] trait. Chain implements it now
-//! ([`chain::ChainMembership`]); the dag engine adds one more impl behind the same seam — nothing in the
+//! membership is engine-specific, behind the [`MembershipResolver`] trait. Chain implements it now
+//! ([`chain::ChainMembershipResolver`]); the dag engine adds one more impl behind the same seam — nothing in the
 //! neutral policy or the caller (`openom-app-core`'s `ingest`) changes.
 
 use openom_keyring_api::MembershipView;
@@ -39,7 +39,7 @@ pub enum Governing {
 /// The per-engine seam. `shared` is monotonic (once a tree has been shared it stays shared, so a mid-
 /// session keyring withhold can't downgrade the rule); `resolve` maps an entry's header coordinates to a
 /// [`Governing`].
-pub trait Membership {
+pub trait MembershipResolver {
     /// Whether the tree has ever been shared (a signature-requiring, multi-member tree).
     fn shared(&self) -> bool;
     /// Resolve the governing membership for an entry sealed under `key_id` with header `governing_ref`.
@@ -65,7 +65,7 @@ pub enum Disposition {
 /// shared tree is not trustworthy).
 pub fn verify_ingest<E>(
     version: u32,
-    membership: &dyn Membership,
+    membership: &dyn MembershipResolver,
     header: &Header,
     governing_ref: &[u8],
     key_id: &[u8],
@@ -112,24 +112,24 @@ fn verify_or_reject<E>(
     }
 }
 
-/// The chain engine's [`Membership`] implementation.
+/// The chain engine's [`MembershipResolver`] implementation.
 pub mod chain {
     use std::collections::BTreeMap;
 
     use openom_keyring_chain::wire::Keyring;
     use openom_protocol::Message;
 
-    use super::{Governing, Membership};
+    use super::{Governing, MembershipResolver};
     use crate::attribution::{epoch_is_attributed, has_been_shared};
 
     /// Resolves an entry's governing keyring from the retained per-revision chain the client keeps.
-    pub struct ChainMembership {
+    pub struct ChainMembershipResolver {
         head: Keyring,
         head_revision: u32,
         retained: BTreeMap<u32, Keyring>,
     }
 
-    impl ChainMembership {
+    impl ChainMembershipResolver {
         /// Build from the current head keyring + the retained governing revisions (both are wire
         /// `Keyring` bytes the caller has already chain-verified and persisted).
         ///
@@ -152,7 +152,7 @@ pub mod chain {
         }
     }
 
-    impl Membership for ChainMembership {
+    impl MembershipResolver for ChainMembershipResolver {
         fn shared(&self) -> bool {
             has_been_shared(&self.head)
         }
@@ -190,7 +190,7 @@ pub mod chain {
     }
 }
 
-/// The dag engine's [`Membership`] implementation (OPE-382; §8.5 of `design.phase-c-dag-attribution.md`).
+/// The dag engine's [`MembershipResolver`] implementation (OPE-382; §8.5 of `design.phase-c-dag-attribution.md`).
 ///
 /// Always-current: a dag entry's governing membership is the CURRENTLY resolved anchor — the dag has no linear
 /// revisions to retain per entry. This is admission-control sound (verifying against current membership can
@@ -204,17 +204,17 @@ pub mod dag {
 
     use openom_keyring_api::MembershipView;
 
-    use super::{Governing, Membership};
+    use super::{Governing, MembershipResolver};
     use crate::VaultError;
 
     /// Resolves an entry's governing membership as the current dag anchor: one resolve + fold at construction.
-    pub struct DagMembership {
+    pub struct DagMembershipResolver {
         view: MembershipView,
         has_been_shared: bool,
         retained_epochs: BTreeSet<Vec<u8>>,
     }
 
-    impl DagMembership {
+    impl DagMembershipResolver {
         /// Build from the current, FLOOR-CHECKED dag anchor bytes — the persisted anchor the caller's watermark
         /// discipline protects, never raw server bytes (else `shared()`'s monotonicity is a construction-time
         /// fiction). Rebuilt after every keyring sync, which also releases any Held entries.
@@ -231,7 +231,7 @@ pub mod dag {
         }
     }
 
-    impl Membership for DagMembership {
+    impl MembershipResolver for DagMembershipResolver {
         fn shared(&self) -> bool {
             self.has_been_shared
         }
@@ -264,8 +264,8 @@ pub mod dag {
 
 #[cfg(test)]
 mod tests {
-    use super::chain::ChainMembership;
-    use super::{verify_ingest, Disposition, Membership};
+    use super::chain::ChainMembershipResolver;
+    use super::{verify_ingest, Disposition, MembershipResolver};
 
     use edsign::SigningKey;
     use keyeo_crypto::{codec, Epoch as KeyeoEpoch, KeyId};
@@ -347,15 +347,15 @@ mod tests {
         }
     }
 
-    fn cm(head: &Keyring, retained: &[(u32, &Keyring)]) -> ChainMembership {
+    fn cm(head: &Keyring, retained: &[(u32, &Keyring)]) -> ChainMembershipResolver {
         let retained: Vec<(u32, Vec<u8>)> = retained
             .iter()
             .map(|(rev, kr)| (*rev, kr.encode_to_vec()))
             .collect();
-        ChainMembership::new(&head.encode_to_vec(), &retained).unwrap()
+        ChainMembershipResolver::new(&head.encode_to_vec(), &retained).unwrap()
     }
 
-    fn ingest(m: &dyn Membership, h: &Header, plaintext: &[u8]) -> Disposition {
+    fn ingest(m: &dyn MembershipResolver, h: &Header, plaintext: &[u8]) -> Disposition {
         verify_ingest(VERSION, m, h, &h.governing_ref, &h.key_id, || {
             Ok::<_, ()>(plaintext.to_vec())
         })
