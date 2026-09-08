@@ -213,6 +213,44 @@ impl AppCoreHandle {
             .map_err(to_js)
     }
 
+    /// Install (or refresh) the §B3 governing membership so [`ingest`](Self::ingest) verifies peer entries
+    /// against the resolved roles. The worker calls this on unlock of a shared tree and after every keyring
+    /// sync, passing the engine tag, the current head keyring/anchor, and — chain only — the retained
+    /// per-revision keyrings as `[revision, Uint8Array][]` (empty for the dag, which resolves from the single
+    /// anchor). Returns how many held entries the refresh released into the tree.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the engine is unknown, a keyring blob is malformed, or releasing a now-valid
+    /// held entry fails.
+    #[wasm_bindgen(js_name = setMembership)]
+    pub fn set_membership(
+        &mut self,
+        engine: &str,
+        head: &[u8],
+        retained: &Array,
+    ) -> Result<usize, JsError> {
+        let mut pairs: Vec<(u32, Vec<u8>)> = Vec::with_capacity(retained.length() as usize);
+        for item in retained.iter() {
+            let pair: Array = item
+                .dyn_into()
+                .map_err(|_| JsError::new("each retained keyring must be [revision, Uint8Array]"))?;
+            let rev = pair
+                .get(0)
+                .as_f64()
+                .ok_or_else(|| JsError::new("retained revision must be a number"))?;
+            let rev = u32::try_from(as_i64(rev, "retained revision")?)
+                .map_err(|_| JsError::new("retained revision out of range"))?;
+            let bytes: Uint8Array = pair
+                .get(1)
+                .dyn_into()
+                .map_err(|_| JsError::new("retained keyring bytes must be a Uint8Array"))?;
+            pairs.push((rev, bytes.to_vec()));
+        }
+        let resolver =
+            openom_vault::resolver_from(parse_engine(engine)?, head, &pairs).map_err(to_js)?;
+        self.inner.set_membership(resolver).map_err(to_js)
+    }
+
     /// How many sealed batches are queued but not yet appended locally (0 == the local write is durable).
     #[wasm_bindgen(js_name = pendingCount)]
     #[must_use]

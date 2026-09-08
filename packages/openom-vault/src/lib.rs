@@ -27,7 +27,7 @@ pub use attribution::{epoch_is_attributed, has_been_shared, verify_entry, EntryE
 pub mod verify;
 pub use verify::chain::ChainMembershipResolver;
 pub use verify::dag::DagMembershipResolver;
-pub use verify::{verify_ingest, Disposition, Governing, MembershipResolver};
+pub use verify::{resolver_from, verify_ingest, Disposition, Governing, MembershipResolver};
 
 // The moderator (Maintainer-or-above did:key) feed for the claim engine's authority — re-typed over the
 // engine-neutral MembershipView so it serves either keyring engine (OPE-308). Moved out of the chain

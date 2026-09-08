@@ -8,10 +8,11 @@
 //! ([`chain::ChainMembershipResolver`]); the dag engine adds one more impl behind the same seam — nothing in the
 //! neutral policy or the caller (`openom-app-core`'s `ingest`) changes.
 
-use openom_keyring_api::MembershipView;
+use openom_keyring_api::{EngineKind, MembershipView};
 use openom_protocol::v1::Header;
 
 use crate::attribution::verify_entry;
+use crate::VaultError;
 
 /// The governing membership an engine resolved for an entry's `governing_ref`.
 pub enum Governing {
@@ -262,10 +263,33 @@ pub mod dag {
     }
 }
 
+/// Build the engine-appropriate [`MembershipResolver`] from the persisted keyring material the worker holds:
+/// the current head keyring/anchor, plus (chain only) the retained per-revision keyrings. This is the single
+/// place the engine → resolver choice is made — a third engine adds one arm here and its own resolver impl,
+/// and nothing else in the verify path changes.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring / anchor bytes are malformed.
+pub fn resolver_from(
+    engine: EngineKind,
+    head: &[u8],
+    retained: &[(u32, Vec<u8>)],
+) -> Result<Box<dyn MembershipResolver>, VaultError> {
+    match engine {
+        EngineKind::Chain => Ok(Box::new(
+            chain::ChainMembershipResolver::new(head, retained).map_err(VaultError::BadKeyring)?,
+        )),
+        // The dag resolves the whole membership from the single current anchor (always-current); it keeps no
+        // per-revision retention, so `retained` is unused for it.
+        EngineKind::Dag => Ok(Box::new(dag::DagMembershipResolver::new(head)?)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::chain::ChainMembershipResolver;
-    use super::{verify_ingest, Disposition, MembershipResolver};
+    use super::{resolver_from, verify_ingest, Disposition, MembershipResolver};
+    use openom_keyring_api::EngineKind;
 
     use edsign::SigningKey;
     use keyeo_crypto::{codec, Epoch as KeyeoEpoch, KeyId};
@@ -367,6 +391,15 @@ mod tests {
         let kr = keyring(3, false, vec![member("m1", MemberRole::Admin, &k)]);
         let m = cm(&kr, &[(3, &kr)]);
         assert_eq!(ingest(&m, &unsigned(0), b"x"), Disposition::Accept);
+    }
+
+    #[test]
+    fn resolver_from_builds_a_working_chain_resolver() {
+        let k = generate_identity().unwrap();
+        let kr = keyring(3, true, vec![member("m1", MemberRole::Admin, &k)]);
+        let m = resolver_from(EngineKind::Chain, &kr.encode_to_vec(), &[(3, kr.encode_to_vec())]).unwrap();
+        let h = signed(Kind::Delta, "m1", &k, 3, b"payload");
+        assert_eq!(ingest(m.as_ref(), &h, b"payload"), Disposition::Accept);
     }
 
     #[test]
