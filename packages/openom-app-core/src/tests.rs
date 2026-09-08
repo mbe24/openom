@@ -392,6 +392,119 @@ fn an_accepting_membership_folds_peer_entries_like_the_solo_path() {
     assert!(live_ids(&b).contains("pA"));
 }
 
+#[test]
+fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery() {
+    // The Half-B payoff: provision a chain tree, SHARE it (add a member), and prove verify-on-ingest goes
+    // live end-to-end. A signed write from a member of the shared keyring is accepted on a peer's ingest; an
+    // UNSIGNED write on the same shared tree (same DEK, no author signature) is rejected and surfaced.
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use openom_protocol::ids::MemberId;
+    use openom_vault::{sharing, vault, ChainMembershipResolver, MembershipResolver};
+
+    const TREE: &[u8] = b"tree-uuid-16byte";
+    let tree = TreeId::new(TREE.to_vec());
+    let owner_id = MemberId::new("acct-owner");
+    let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+
+    // 1. Owner provisions a solo chain tree (genesis revision 1).
+    let prov = vault::provision(&owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let owner_author = prov.did_key.to_public_key();
+    let rev1 = prov.keyring.clone();
+
+    // 2. Bob mints his member account keys (kdf + author + hpke publics).
+    let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+    let bob = vault::provision_member(&bob_pass).unwrap();
+
+    // 3. Owner admits bob (Editor) → a SHARED keyring, revision 2.
+    let added = sharing::add_member(
+        EngineKind::Chain,
+        &rev1,
+        &owner_pass,
+        TREE,
+        "acct-owner",
+        b"ro",
+        1,
+        "acct-bob",
+        "editor",
+        &bob.author_public_key,
+        &bob.hpke_public_key,
+    )
+    .unwrap();
+    let rev2 = added.keyring.clone();
+
+    // A chain resolver over BOTH retained governing revisions: rev 2 (the shared head, which governs the
+    // member's signed writes) and rev 1 (the pre-share genesis, which governs the unsigned forgery so it is
+    // rejected rather than perpetually held for a not-yet-retained keyring).
+    let resolver = || -> Box<dyn MembershipResolver> {
+        Box::new(ChainMembershipResolver::new(&rev2, &[(1u32, rev1.clone()), (2u32, rev2.clone())]).unwrap())
+    };
+
+    let mut server = FakeServer::default();
+
+    // 4. Owner re-unlocks the SHARED keyring → a sealer that signs (has_been_shared), and writes a signed delta.
+    let ou = vault::unlock(&rev2, &owner_pass, &tree, &owner_id, &ReplicaId::new(b"ro".to_vec())).unwrap();
+    let mut owner = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryStore::new()),
+        "tree",
+        b"ro".to_vec(),
+    );
+    owner.set_membership(resolver()).unwrap();
+    owner.tree_mut().assert_anchor("pSigned", PERSON, 1).unwrap();
+    owner.commit().unwrap();
+    push(&mut owner, &mut server);
+
+    // 5. THE FORGERY: unlock the pre-share genesis (rev 1) on a DISTINCT replica → a sealer with the shared
+    //    DEK that does NOT sign (solo era). Its write is unsigned with an empty governing_ref — a backdate
+    //    forgery that, on a shared tree, must be rejected.
+    let fu = vault::unlock(&rev1, &owner_pass, &tree, &owner_id, &ReplicaId::new(b"rf".to_vec())).unwrap();
+    let mut forger = AppCore::new(
+        fu.did_key.into_string(),
+        fu.sealer,
+        Arc::new(MemoryStore::new()),
+        "tree",
+        b"rf".to_vec(),
+    );
+    forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
+    forger.commit().unwrap();
+    push(&mut forger, &mut server);
+
+    // 6. Bob unlocks as a member (his passphrase + kdf, pinning the owner's author key) and verifies rev 2.
+    let bu = sharing::unlock_as_member(
+        EngineKind::Chain,
+        &rev2,
+        &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE,
+        "acct-bob",
+        &owner_author,
+        b"rb",
+        2,
+    )
+    .unwrap();
+    let b_store = Arc::new(MemoryStore::new());
+    let mut bob_core = AppCore::new(
+        bu.did_key,
+        bu.sealer,
+        Arc::clone(&b_store),
+        "tree",
+        b"rb".to_vec(),
+    );
+    bob_core.set_membership(resolver()).unwrap();
+    pull(&mut bob_core, &server);
+
+    assert!(live_ids(&bob_core).contains("pSigned"), "a signed member write on the shared tree is accepted");
+    assert!(!live_ids(&bob_core).contains("pForged"), "an unsigned write on the shared tree is rejected");
+    assert!(bob_core.anomalies() >= 1, "the rejected forgery is surfaced as an anomaly");
+    assert_eq!(
+        b_store.read_updates("tree", None).unwrap().0.len(),
+        1,
+        "only the accepted entry is durably stored"
+    );
+}
+
 fn json_name(given: &str) -> serde_json::Value {
     serde_json::json!({ "parts": { "given": given } })
 }

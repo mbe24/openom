@@ -75,3 +75,7 @@ optional = true
 [dev-dependencies]
 openom-crypto = { path = "../openom-crypto" }
 openom-data-claim = { path = "../openom-data-claim" }
+# The §B3 share→verify integration test drives the real keyring lifecycle + sharing ops: EngineKind for the
+# engine tag, keyeo-crypto to encode the member's KDF params the way the wasm boundary does.
+openom-keyring-api = { path = "../openom-keyring-api" }
+keyeo-crypto = { path = "../keyeo-crypto" }
