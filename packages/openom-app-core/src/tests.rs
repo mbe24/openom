@@ -505,6 +505,121 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     );
 }
 
+#[test]
+fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery() {
+    // The dag counterpart of the chain share→verify proof (dag-from-the-get-go): exercise the DAG arms of
+    // sharing::add_member / unlock_as_member + DagMembershipResolver end-to-end.
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use openom_protocol::ids::MemberId;
+    use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+    use openom_vault::{resolver_from, sharing, vault, DagVault, MembershipResolver};
+
+    const TREE: &[u8] = b"tree-uuid-16byte";
+    let tree = TreeId::new(TREE.to_vec());
+    let owner_id = MemberId::new("acct-owner");
+    let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+    let ro = ReplicaId::new(b"ro".to_vec());
+
+    // 1. Owner provisions a solo dag tree.
+    let prov = DagVault
+        .provision(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &owner_pass,
+        )
+        .unwrap();
+    let solo = prov.anchor.clone();
+
+    // 2. Bob's member account keys.
+    let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+    let bob = vault::provision_member(&bob_pass).unwrap();
+
+    // 3. Owner admits bob (Editor) → a shared anchor (dag ignores min_revision).
+    let added = sharing::add_member(
+        EngineKind::Dag,
+        &solo,
+        &owner_pass,
+        TREE,
+        "acct-owner",
+        b"ro",
+        0,
+        "acct-bob",
+        "editor",
+        &bob.author_public_key,
+        &bob.hpke_public_key,
+    )
+    .unwrap();
+    let shared = added.keyring.clone();
+
+    // The dag resolver comes from the single shared anchor (no per-revision retention).
+    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &shared, &[]).unwrap() };
+
+    let mut server = FakeServer::default();
+
+    // 4. Owner re-unlocks the shared anchor → a signing sealer, and writes a signed delta.
+    let ou = DagVault
+        .unlock(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro },
+            &shared,
+            &owner_pass,
+        )
+        .unwrap();
+    let mut owner = AppCore::new(
+        ou.did_key.into_string(),
+        ou.sealer,
+        Arc::new(MemoryStore::new()),
+        "tree",
+        b"ro".to_vec(),
+    );
+    owner.set_membership(resolver()).unwrap();
+    owner.tree_mut().assert_anchor("pSigned", PERSON, 1).unwrap();
+    owner.commit().unwrap();
+    push(&mut owner, &mut server);
+
+    // 5. Forgery: unlock the SOLO (pre-share) anchor on a distinct replica → a non-signing sealer with the
+    //    shared DEK; its write is unsigned/unattributed and must be rejected on the shared tree.
+    let rf = ReplicaId::new(b"rf".to_vec());
+    let fu = DagVault
+        .unlock(
+            &VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &rf },
+            &solo,
+            &owner_pass,
+        )
+        .unwrap();
+    let mut forger = AppCore::new(
+        fu.did_key.into_string(),
+        fu.sealer,
+        Arc::new(MemoryStore::new()),
+        "tree",
+        b"rf".to_vec(),
+    );
+    forger.tree_mut().assert_anchor("pForged", PERSON, 2).unwrap();
+    forger.commit().unwrap();
+    push(&mut forger, &mut server);
+
+    // 6. Bob unlocks as a member (dag ignores trusted_signers) and verifies against the shared anchor.
+    let bu = sharing::unlock_as_member(
+        EngineKind::Dag,
+        &shared,
+        &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE,
+        "acct-bob",
+        &[],
+        b"rb",
+        0,
+    )
+    .unwrap();
+    let b_store = Arc::new(MemoryStore::new());
+    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::clone(&b_store), "tree", b"rb".to_vec());
+    bob_core.set_membership(resolver()).unwrap();
+    pull(&mut bob_core, &server);
+
+    assert!(live_ids(&bob_core).contains("pSigned"), "a signed member write on the shared dag tree is accepted");
+    assert!(!live_ids(&bob_core).contains("pForged"), "an unsigned write on the shared dag tree is rejected");
+    assert!(bob_core.anomalies() >= 1, "the rejected forgery is surfaced as an anomaly");
+}
+
 fn json_name(given: &str) -> serde_json::Value {
     serde_json::json!({ "parts": { "given": given } })
 }
