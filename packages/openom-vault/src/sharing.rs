@@ -1,0 +1,504 @@
+//! Engine-neutral keyring/membership **orchestration glue** — the marshalling + walk / wrap / summary logic
+//! that sits ABOVE the pure crypto (`verify_walk` / `verify_reset` / `dag_client`) and BELOW the veneers.
+//!
+//! Lifted out of the vault's `wasm.rs` (OPE-382 Half B) so BOTH that wasm veneer AND `openom-app-core`'s
+//! worker veneer call ONE implementation. Everything here is pure Rust returning `Result<_, VaultError>`;
+//! a veneer adds only the JS marshalling (`&str` engine tag → [`EngineKind`], byte arrays) and the
+//! `VaultError → JsError` mapping. Behaviour is identical to the pre-lift `wasm.rs` functions — the error
+//! strings are preserved verbatim through [`VaultError::Sharing`].
+
+use openom_keyring_api::{EngineKind, MembershipEnvelope};
+use openom_keyring_chain::wire::{Keyring, MEMBER_OWNER};
+use openom_keyring_chain::{
+    bootstrap_from_genesis, encode_governing_ref, keyring_hash, verify_reset, verify_walk,
+    KeyringAnchor, VerifyingKey,
+};
+use openom_keyring_dag::client as dag_client;
+use openom_protocol::v1::KeyringUpdate;
+use openom_protocol::Message;
+
+use crate::VaultError;
+
+/// An orchestration diagnostic → [`VaultError::Sharing`] (verbatim message, no prefix).
+fn err(msg: impl Into<String>) -> VaultError {
+    VaultError::Sharing(msg.into())
+}
+
+// --- result shapes (plain Rust; a veneer wraps these in its wasm-bindgen struct) -------------------
+
+/// The accepted head of a walked / reset keyring run: the RAW head `Keyring` body to store + the opaque
+/// anti-rollback watermark to persist. (No sealer — keyring state only; re-unlock to read a rotated epoch.)
+pub struct AcceptedKeyring {
+    /// The RAW chain `Keyring` body bytes to store as the new head (empty on a no-op accept).
+    pub keyring: Vec<u8>,
+    /// The engine-opaque anti-rollback cursor to persist and pass back as the floor.
+    pub watermark: Vec<u8>,
+}
+
+/// A joining member's verified view of a tree's WHOLE keyring history (the `verify_keyring_walk` output).
+pub struct WalkedHistory {
+    /// The verified head revision (>= the invite's pinned revision).
+    pub revision: u32,
+    /// The RAW head `Keyring` body — stored as the head and fed to `unlock_as_member`.
+    pub head_keyring: Vec<u8>,
+    /// The head's authorized signers as JSON `[{"memberId","authorPublicKey"(hex)}]` — the caller computes
+    /// the canonical fingerprint over these and cross-checks the invite's `fp`.
+    pub signers_json: String,
+    /// Every RAW per-revision body 1..=head, ascending, length-prefix framed (`[u32-be len][bytes]…`) so the
+    /// caller unframes + retains each for pre-join attributed-entry verification.
+    pub bodies_framed: Vec<u8>,
+}
+
+// --- small helpers (moved verbatim) ----------------------------------------------------------------
+
+fn hex(b: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        let _ = write!(s, "{x:02x}");
+    }
+    s
+}
+
+/// A dag frontier (concatenated 32-byte op-ids) → `["op:<hex>", ...]`.
+fn dag_basis_tokens(anchor: &[u8]) -> Result<Vec<String>, VaultError> {
+    let wm = dag_client::watermark(anchor).map_err(|e| err(e.to_string()))?;
+    if wm.len() % 32 != 0 {
+        return Err(err("dag watermark is not a whole number of op-ids"));
+    }
+    Ok(wm.chunks_exact(32).map(|c| format!("op:{}", hex(c))).collect())
+}
+
+/// Decode `["op:<hex>", ...]` back to the concatenated 32-byte floor for `check_floor`. `None` if any token
+/// is malformed (→ treated as "not covered", the safe default that triggers a refresh).
+fn dag_floor_from_tokens(tokens: &[String]) -> Option<Vec<u8>> {
+    let mut floor = Vec::with_capacity(tokens.len() * 32);
+    for t in tokens {
+        let h = t.strip_prefix("op:")?;
+        if h.len() != 64 {
+            return None;
+        }
+        for i in 0..32 {
+            floor.push(u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok()?);
+        }
+    }
+    Some(floor)
+}
+
+/// Concatenate byte runs as `[u32-be length][bytes]…` — the framing that keeps a list of variable-length
+/// keyrings marshallable over the plain byte boundary (no serde), the inverse of [`split_length_prefixed`].
+fn frame_length_prefixed(runs: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(runs.iter().map(|r| r.len() + 4).sum());
+    for r in runs {
+        out.extend_from_slice(&u32::try_from(r.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(r);
+    }
+    out
+}
+
+/// Split a buffer of `[u32-be length][bytes]…` frames into slices.
+fn split_length_prefixed(buf: &[u8]) -> Result<Vec<&[u8]>, VaultError> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < buf.len() {
+        if i + 4 > buf.len() {
+            return Err(err("truncated length prefix in hops buffer"));
+        }
+        let len = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+        i += 4;
+        let end = i.checked_add(len).ok_or_else(|| err("length prefix overflow"))?;
+        if end > buf.len() {
+            return Err(err("length prefix overruns hops buffer"));
+        }
+        out.push(&buf[i..end]);
+        i = end;
+    }
+    Ok(out)
+}
+
+/// Build a chain watermark that pins the write epoch: `revision(4) ‖ write_key_id(16) ‖ H(DEK)(32)`, the
+/// commitment recover authenticates the write epoch against (OPE-286 phase 2). Membership ops that open the
+/// write epoch (add/remove member) emit the full pin rather than a bare revision that would erase a prior
+/// recover pin. Falls back to revision-only if the pin isn't sized right.
+#[must_use]
+pub fn chain_wm_pinned(revision: u32, write_key_id: &[u8], write_dek_hash: &[u8]) -> Vec<u8> {
+    let mut wm = revision.to_be_bytes().to_vec();
+    if write_key_id.len() == 16 && write_dek_hash.len() == 32 {
+        wm.extend_from_slice(write_key_id);
+        wm.extend_from_slice(write_dek_hash);
+    }
+    wm
+}
+
+// --- summary DTOs (serde) --------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct KeyringSummaryDto {
+    members: Vec<SummaryMemberDto>,
+    basis: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SummaryMemberDto {
+    #[serde(rename = "memberId")]
+    member_id: String,
+    role: i16,
+}
+
+#[derive(serde::Serialize)]
+struct WalkSignerDto {
+    #[serde(rename = "memberId")]
+    member_id: String,
+    #[serde(rename = "authorPublicKey")]
+    author_public: String,
+}
+
+// --- the lifted orchestration functions ------------------------------------------------------------
+
+/// The resolved advisory membership + the engine-opaque basis for a keyring anchor, as a JSON string
+/// `{"members":[{"memberId","role"}],"basis":[...]}` — what the client asserts to the server's /access.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring/anchor or a failed dag resolve.
+pub fn keyring_summary(engine: EngineKind, keyring: &[u8]) -> Result<String, VaultError> {
+    let dto = match engine {
+        EngineKind::Dag => {
+            let resolved = dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?;
+            KeyringSummaryDto {
+                members: resolved
+                    .members
+                    .members
+                    .iter()
+                    .map(|m| SummaryMemberDto {
+                        member_id: m.member_id.clone(),
+                        role: m.role,
+                    })
+                    .collect(),
+                basis: dag_basis_tokens(keyring)?,
+            }
+        }
+        EngineKind::Chain => {
+            let k = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+            KeyringSummaryDto {
+                members: k
+                    .members
+                    .iter()
+                    .map(|m| SummaryMemberDto {
+                        member_id: m.member_id.clone(),
+                        role: i16::try_from(m.role).unwrap_or(i16::MAX),
+                    })
+                    .collect(),
+                basis: vec![format!("rev:{}:{}", k.revision, hex(keyring_hash(&k).as_slice()))],
+            }
+        }
+    };
+    serde_json::to_string(&dto).map_err(|e| err(e.to_string()))
+}
+
+/// Whether this keyring's trust state COVERS `stored_basis` (the frontier a prior /access push was computed
+/// from) — the client's pre-push staleness guard. dag: every stored tip op-id is in our op closure
+/// (`check_floor`); chain: our revision ≥ the stored revision. An empty basis is trivially covered; a
+/// malformed stored basis is treated as NOT covered (safe default — the caller then refreshes).
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed chain keyring.
+pub fn keyring_covers(
+    engine: EngineKind,
+    keyring: &[u8],
+    stored_basis: &[String],
+) -> Result<bool, VaultError> {
+    if stored_basis.is_empty() {
+        return Ok(true);
+    }
+    Ok(match engine {
+        EngineKind::Dag => dag_floor_from_tokens(stored_basis)
+            .is_some_and(|floor| dag_client::check_floor(keyring, &floor).is_ok()),
+        EngineKind::Chain => {
+            let k = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+            match stored_basis
+                .first()
+                .and_then(|t| t.strip_prefix("rev:"))
+                .and_then(|s| s.split(':').next())
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some(stored_rev) => k.revision >= stored_rev,
+                None => false,
+            }
+        }
+    })
+}
+
+/// Unwrap a served [`MembershipEnvelope`] to its RAW chain `Keyring` body bytes — the format the client
+/// retains per revision and feeds §B3 verify. Refuses a non-chain envelope.
+///
+/// # Errors
+/// Returns [`VaultError`] if the bytes aren't a chain-tagged membership envelope.
+pub fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let env = MembershipEnvelope::decode(bytes)
+        .map_err(|_| err("served keyring is not a valid membership envelope"))?;
+    if env.engine_kind() != Ok(EngineKind::Chain) {
+        return Err(err("served keyring envelope is not a chain keyring"));
+    }
+    Ok(env.body)
+}
+
+/// Accept a keyring run pulled from the **untrusted network** — the chain-walk read-side. `anchor` is the
+/// caller's currently-trusted head; `hops` is `[u32-be len][MembershipEnvelope bytes]…` for the successor
+/// revisions, ascending, no gaps. Each is validated as a legitimate successor of the last ([`verify_walk`]);
+/// a fork / rollback / withheld hop / rogue-signer injection fails closed. An empty run is a no-op at the
+/// current head.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed anchor/hop, a tree mismatch, or a rejected transition.
+///
+/// # Panics
+/// Never in practice: the hop run is validated non-empty before its last element is taken.
+pub fn accept_remote_keyring(
+    anchor: &[u8],
+    tree_id: &[u8],
+    hops: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
+    let anchor_keyring =
+        Keyring::decode(anchor).map_err(|e| err(format!("bad anchor keyring: {e}")))?;
+    if anchor_keyring.tree_id != tree_id {
+        return Err(err("anchor keyring is for a different tree"));
+    }
+    let raw = split_length_prefixed(hops)?;
+    if raw.is_empty() {
+        // No-op / accept opens no epoch — the caller carries the stored write-epoch pin forward onto this
+        // revision rather than let a bare-revision watermark erase a recover pin (OPE-286 phase 2).
+        return Ok(AcceptedKeyring {
+            keyring: Vec::new(),
+            watermark: anchor_keyring.revision.to_be_bytes().to_vec(),
+        });
+    }
+    // Each served hop is a MembershipEnvelope (the server's opaque stored payload); unwrap to the chain's
+    // Keyring body once here so the rest of the client keeps working on raw Keyring bytes.
+    let bodies = raw
+        .iter()
+        .map(|b| unwrap_chain_keyring(b))
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let decoded = bodies
+        .iter()
+        .map(|b| Keyring::decode(b.as_slice()).map_err(|e| err(format!("bad served keyring: {e}"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let new_anchor = verify_walk(&KeyringAnchor::from_keyring(&anchor_keyring), &decoded)
+        .map_err(|e| err(e.to_string()))?;
+    Ok(AcceptedKeyring {
+        keyring: bodies.last().expect("non-empty run").clone(),
+        watermark: new_anchor.revision.to_be_bytes().to_vec(),
+    })
+}
+
+/// Verify a tree's WHOLE keyring history from GENESIS — a joining member's read-side bootstrap. Trusts the
+/// genesis founder on first use (TOFU: the sole owner-role member's author key), walks forward, then PINS the
+/// verified history to the `(revision, keyring_hash)` the owner published out-of-band in the invite. Fails
+/// closed (the caller persists nothing) on an empty/truncated history, a first revision that isn't a genesis
+/// (revision 1) or lacks exactly one owner, any invalid transition, a wrong tree, or a pinned revision
+/// outside the history / whose hash doesn't match.
+///
+/// `hops` is `[u32-be len][MembershipEnvelope bytes]…` for revisions 1..=head, ascending, no gaps.
+///
+/// # Errors
+/// Returns [`VaultError`] on any of the fail-closed conditions above.
+///
+/// # Panics
+/// Never in practice: the hop run is validated non-empty before its last element is taken.
+pub fn verify_keyring_walk(
+    tree_id: &[u8],
+    hops: &[u8],
+    pinned_revision: u32,
+    pinned_hash: &[u8],
+) -> Result<WalkedHistory, VaultError> {
+    if pinned_hash.len() != 32 {
+        return Err(err("pinned keyring hash must be 32 bytes"));
+    }
+    let raw = split_length_prefixed(hops)?;
+    if raw.is_empty() {
+        return Err(err("empty keyring history (need at least the genesis)"));
+    }
+    let bodies = raw
+        .iter()
+        .map(|b| unwrap_chain_keyring(b))
+        .collect::<Result<Vec<Vec<u8>>, _>>()?;
+    let decoded = bodies
+        .iter()
+        .map(|b| Keyring::decode(b.as_slice()).map_err(|e| err(format!("bad served keyring: {e}"))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let genesis = &decoded[0];
+    if genesis.revision != 1 {
+        return Err(err("first keyring in the history is not the genesis (revision 1)"));
+    }
+    // TOFU the genesis founder: the sole role==MEMBER_OWNER member's author key.
+    let owners: Vec<_> = genesis.members.iter().filter(|m| m.role == MEMBER_OWNER).collect();
+    let founder = match owners.as_slice() {
+        [only] => *only,
+        [] => return Err(err("genesis keyring declares no owner")),
+        _ => return Err(err("genesis keyring declares more than one owner")),
+    };
+    let founder_arr: [u8; 32] = founder
+        .author_public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| err("genesis owner author key is not 32 bytes"))?;
+    let founder_key = VerifyingKey::from_bytes(&founder_arr)
+        .map_err(|_| err("genesis owner has an invalid author public key"))?;
+    let genesis_anchor =
+        bootstrap_from_genesis(genesis, &founder_key).map_err(|e| err(e.to_string()))?;
+    let head = verify_walk(&genesis_anchor, &decoded[1..]).map_err(|e| err(e.to_string()))?;
+    if head.tree_id != tree_id {
+        return Err(err("keyring history is for a different tree"));
+    }
+    // Bind the verified history to the invite's out-of-band pin — a PREFIX: the pinned revision must appear
+    // in the verified history with the pinned hash, while the head may be >= it.
+    if pinned_revision < 1 || pinned_revision > head.revision {
+        return Err(err("invite-pinned revision is outside the verified keyring history"));
+    }
+    // genesis == revision 1 + verify_walk enforces contiguous ascending, so revision r is at index r-1.
+    let pinned_body = &decoded[(pinned_revision - 1) as usize];
+    if keyring_hash(pinned_body).as_slice() != pinned_hash {
+        return Err(err("keyring at the invite-pinned revision does not match the pin"));
+    }
+    let signers = head
+        .trusted_signers
+        .iter()
+        .map(|s| WalkSignerDto {
+            member_id: s.member_id.clone(),
+            author_public: hex(&s.public_key),
+        })
+        .collect::<Vec<_>>();
+    let signers_json = serde_json::to_string(&signers).map_err(|e| err(e.to_string()))?;
+    Ok(WalkedHistory {
+        revision: head.revision,
+        head_keyring: bodies.last().expect("non-empty run").clone(),
+        signers_json,
+        bodies_framed: frame_length_prefixed(&bodies),
+    })
+}
+
+/// Frame a raw signed chain `Keyring` revision as the wire `KeyringUpdate` the server's `PUT
+/// /trees/{id}/keyring` accepts — the OUTBOUND mirror of [`accept_remote_keyring`]'s unwrap. `version` = the
+/// server's `KEYRING_UPDATE_VERSION` (1); `tree_id` + `update_ref` are routing hints the server cross-checks
+/// against the signed body; `engine` = `"chain"`; `payload` = the [`MembershipEnvelope`]-wrapped bytes.
+///
+/// # Errors
+/// Returns [`VaultError`] if `keyring` isn't a decodable chain `Keyring`.
+pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, VaultError> {
+    // The server checks `update.version != KEYRING_UPDATE_VERSION` (openom/src/keyring.rs); no shared const
+    // yet, so this literal tracks that value.
+    const KEYRING_UPDATE_VERSION: u32 = 1;
+    let kr = Keyring::decode(keyring).map_err(|e| err(format!("not a decodable chain keyring: {e}")))?;
+    let update = KeyringUpdate {
+        version: KEYRING_UPDATE_VERSION,
+        tree_id: kr.tree_id.clone(),
+        engine: EngineKind::Chain.as_tag().to_string(),
+        update_ref: encode_governing_ref(kr.revision),
+        payload: MembershipEnvelope::wrap(EngineKind::Chain, keyring.to_vec()).encode(),
+    };
+    Ok(update.encode_to_vec())
+}
+
+/// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4). A
+/// reset changes the signer set WITHOUT the old set's endorsement, so `verify_walk` rejects it; this accepts
+/// it, but ONLY if it can't roll back or fork: a structurally valid, self-signed, wrap-complete keyring
+/// ([`verify_reset`]) chaining onto the anchor by hash at exactly `anchor.revision + 1`, pinning the SAME
+/// recovery authority. Trust in the NEW signer set is the CALLER's responsibility (out-of-band re-verify +
+/// user confirm BEFORE calling — this is the commit step).
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a tree mismatch, a non-next revision, a broken hash chain,
+/// or a rejected reset.
+pub fn accept_reset_keyring(
+    anchor: &[u8],
+    tree_id: &[u8],
+    candidate: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
+    let anchor_kr = Keyring::decode(anchor).map_err(|e| err(format!("bad anchor keyring: {e}")))?;
+    let cand = Keyring::decode(candidate).map_err(|e| err(format!("bad candidate keyring: {e}")))?;
+    if anchor_kr.tree_id != tree_id || cand.tree_id != tree_id {
+        return Err(err("keyring is for a different tree"));
+    }
+    // Must supersede our trusted head — never roll back or fork.
+    if cand.revision != anchor_kr.revision + 1 {
+        return Err(err("a reset must be exactly the next revision after the trusted head"));
+    }
+    if cand.prev_keyring_hash.as_slice() != keyring_hash(&anchor_kr) {
+        return Err(err("reset does not chain onto the trusted head"));
+    }
+    // Reader-side RVK continuity gate: the candidate must pin the SAME recovery authority the trusted head
+    // pinned (and be signed by it). The prior authority is the trusted anchor's own RVK (empty ⇒ inert).
+    let prior_rvk = KeyringAnchor::from_keyring(&anchor_kr).recovery_verifying_key;
+    let new_anchor = verify_reset((!prior_rvk.is_empty()).then_some(prior_rvk.as_slice()), &cand)
+        .map_err(|e| err(e.to_string()))?;
+    Ok(AcceptedKeyring {
+        keyring: candidate.to_vec(),
+        watermark: new_anchor.revision.to_be_bytes().to_vec(),
+    })
+}
+
+/// Whether this tree HAS BEEN SHARED — a non-founder member was ever admitted — the MONOTONIC signal that
+/// gates attributed writes (§B3 slice 2). Chain: `first_shared_revision != 0`. Dag: the resolved anchor's
+/// `has_been_shared` (a monotonic effective-`Add` scan). Read from the VERIFIED keyring the caller supplies.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed chain keyring or a failed dag resolve.
+pub fn keyring_has_been_shared(engine: EngineKind, keyring: &[u8]) -> Result<bool, VaultError> {
+    match engine {
+        EngineKind::Chain => {
+            let kr = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+            Ok(crate::has_been_shared(&kr))
+        }
+        EngineKind::Dag => {
+            let resolved = dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?;
+            Ok(resolved.has_been_shared)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        chain_wm_pinned, frame_length_prefixed, split_length_prefixed, unwrap_chain_keyring,
+    };
+    use openom_keyring_api::{EngineKind, MembershipEnvelope};
+    use openom_protocol::Message;
+
+    #[test]
+    fn frame_and_split_round_trip() {
+        let runs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 100]];
+        let framed = frame_length_prefixed(&runs);
+        let split = split_length_prefixed(&framed).unwrap();
+        assert_eq!(split.len(), 3);
+        assert_eq!(split[0], [1, 2, 3]);
+        assert!(split[1].is_empty());
+        assert_eq!(split[2], vec![9u8; 100].as_slice());
+    }
+
+    #[test]
+    fn split_rejects_a_frame_that_overruns_its_length() {
+        // Claims 5 bytes but only 2 follow.
+        assert!(split_length_prefixed(&[0, 0, 0, 5, 1, 2]).is_err());
+        // A dangling partial length prefix.
+        assert!(split_length_prefixed(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn unwrap_chain_keyring_round_trips_and_refuses_non_chain() {
+        let body = b"raw-chain-keyring-bytes".to_vec();
+        let chain = MembershipEnvelope::wrap(EngineKind::Chain, body.clone()).encode();
+        assert_eq!(unwrap_chain_keyring(&chain).unwrap(), body);
+
+        let dag = MembershipEnvelope::wrap(EngineKind::Dag, body).encode();
+        assert!(unwrap_chain_keyring(&dag).is_err(), "a dag envelope is refused");
+        assert!(unwrap_chain_keyring(b"not an envelope").is_err());
+    }
+
+    #[test]
+    fn chain_wm_pinned_emits_the_full_pin_or_falls_back_to_revision() {
+        let full = chain_wm_pinned(7, &[1u8; 16], &[2u8; 32]);
+        assert_eq!(full.len(), 4 + 16 + 32);
+        assert_eq!(&full[..4], 7u32.to_be_bytes());
+        // A wrongly-sized key id / dek hash falls back to a bare revision.
+        assert_eq!(chain_wm_pinned(7, &[1u8; 8], &[2u8; 32]), 7u32.to_be_bytes().to_vec());
+    }
+}

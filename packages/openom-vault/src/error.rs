@@ -60,4 +60,9 @@ pub enum VaultError {
     /// refused rather than silently dropped, since dropping the floor would drop rollback protection.
     #[error("malformed anti-rollback watermark")]
     MalformedWatermark,
+    /// A keyring/membership ORCHESTRATION failure raised by [`crate::sharing`] — a served history that
+    /// forks/rolls back, an invite-pin mismatch, a malformed hop buffer, etc. Carries the verbatim
+    /// diagnostic (these are boundary-marshalling checks, not one of the typed domain failures above).
+    #[error("{0}")]
+    Sharing(String),
 }

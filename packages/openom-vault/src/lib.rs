@@ -24,6 +24,10 @@ pub use app_vault::AppVault;
 pub mod attribution;
 pub use attribution::{epoch_is_attributed, has_been_shared, verify_entry, EntryError};
 
+// Engine-neutral keyring/membership orchestration glue (walk / wrap / summary / reset), lifted out of the
+// wasm veneer so both it and openom-app-core call one implementation (OPE-382 Half B).
+pub mod sharing;
+
 pub mod verify;
 pub use verify::chain::ChainMembershipResolver;
 pub use verify::dag::DagMembershipResolver;
