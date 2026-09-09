@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use openom_data_tree::{OpView, Tree, TreeError};
 use openom_docsync::SyncClient;
-use openom_protocol::v1::{CoverBody, Envelope, Kind};
+use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
 use openom_vault::{Disposition, MembershipResolver};
@@ -303,6 +303,57 @@ impl<S: DocStore> AppCore<S> {
         // longer a Maintainer must stop blessing, so rebuild `covered` from scratch rather than let it grow.
         self.rebuild_covered();
         self.drain_held()
+    }
+
+    /// Author a self-heal **cover** over this device's stored entries whose author was legitimately a member
+    /// but is no longer current (the OPE-382 writer sweep — dag only in practice). Scans the local Accepted
+    /// store: a `Delta` authored by a since-removed EVER-member (pin P6: never a voided thief or a
+    /// never-member) that isn't already covered goes into a `CoverBody`, bound to the author's key. Returns
+    /// the sealed `Cover` envelope for the caller to push to the server (it is NOT stored locally — a Cover
+    /// must not enter the claim log); the cover is folded into the local covered set so a re-sweep is
+    /// idempotent. `None` when there is nothing to cover.
+    ///
+    /// Re-run on every membership change (a removal, or a covering Maintainer's own later removal — pin P4);
+    /// each run covers whatever became uncovered.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the store read or the seal fails.
+    pub fn author_cover(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
+        let entries = self.store.read_updates(&self.doc, None)?.0;
+        let covered_entries: Vec<CoveredEntry> = match self.membership.as_deref() {
+            None => return Ok(None), // solo tree: no removed members to heal
+            Some(membership) => entries
+                .iter()
+                .filter_map(|env| {
+                    let envelope = Envelope::decode(env.as_slice()).ok()?;
+                    let header = envelope.header?;
+                    // Only data (Delta) entries by a SINCE-REMOVED ever-member, not already covered.
+                    if header.kind != Kind::Delta as i32 || membership.current_member(&header.author_member_id)
+                    {
+                        return None;
+                    }
+                    let key = membership.ever_member_key(&header.author_member_id)?; // P6: ever a member
+                    let hash = Sha256::digest(&envelope.ciphertext).to_vec();
+                    if self.covered.contains_key(&hash) {
+                        return None;
+                    }
+                    Some(CoveredEntry {
+                        ciphertext_hash: hash,
+                        author_member_id: header.author_member_id,
+                        author_public_key: key,
+                    })
+                })
+                .collect(),
+        };
+        if covered_entries.is_empty() {
+            return Ok(None);
+        }
+        let sealed = self
+            .client
+            .seal_cover(&CoverBody { entries: covered_entries }.encode_to_vec())?;
+        // Fold our OWN cover locally so the next sweep skips these hashes (we never re-pull our own entries).
+        self.try_fold_cover(&sealed);
+        Ok(Some(sealed))
     }
 
     /// The server log `?since` cursor for the next pull (`None` ⇒ from the beginning).

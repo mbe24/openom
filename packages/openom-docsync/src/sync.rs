@@ -249,6 +249,15 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.try_open_cover(envelope)
     }
 
+    /// Seal a self-heal `Cover` marker (advancing this replica's chain, not stored locally) — the caller
+    /// pushes the returned envelope to the server's log.
+    ///
+    /// # Errors
+    /// Returns an error if sealing fails.
+    pub fn seal_cover(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.inner.seal_cover(plaintext)
+    }
+
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
     /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate entry
     /// re-inserts by id. From a fresh client this replays the whole log (the journal is authority).

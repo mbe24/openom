@@ -254,13 +254,13 @@ pub struct Resolved {
     pub checkpoint_sealing: Option<Vec<SealingEntry>>,
     /// The checkpoint's minting-op baseline (0 on an un-compacted anchor) — seeds the OPE-289 count.
     pub minting_ops_baseline: u32,
-    /// The member ids that were EVER legitimately admitted — the genesis founder plus every member whose
-    /// `Add` op is EFFECTIVE (authorized at its causal position), INCLUDING members later removed (a `Remove`
-    /// is a separate op; it doesn't un-effect the `Add`). It EXCLUDES a carve-out-voided `Add` (a key-thief
-    /// neutralized by a `ReFound` recovery — that Add is not effective). The self-heal (OPE-382 pin P6) uses
-    /// this: a data entry may be covered-accepted only if its author is here, so a voided thief's entries are
-    /// never blessed even by a tricked/malicious cover.
-    pub ever_members: std::collections::BTreeSet<String>,
+    /// The members EVER legitimately admitted (id → their author public key) — the genesis founder plus every
+    /// member whose `Add` op is EFFECTIVE (authorized at its causal position), INCLUDING members later removed
+    /// (a `Remove` is a separate op; it doesn't un-effect the `Add`). It EXCLUDES a carve-out-voided `Add` (a
+    /// key-thief neutralized by a `ReFound` recovery — that Add is not effective). The self-heal (OPE-382)
+    /// uses this two ways: the READER (pin P6) covered-accepts a data entry only if its author is here, so a
+    /// voided thief's entries are never blessed; the WRITER binds the author's key into the cover it mints.
+    pub ever_members: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
@@ -392,21 +392,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     // member whose Add is effective — which INCLUDES removed members (an effective Add survives a Remove) but
     // NOT carve-out-voided Adds (they aren't effective). So a legitimately-removed member's history can be
     // covered-accepted, while a voided thief's cannot.
-    let mut ever_members: std::collections::BTreeSet<String> =
-        members.members.iter().map(|m| m.member_id.clone()).collect();
-    for op_id in engine.effective_ops() {
-        if let Some(op) = by_id.get(&op_id) {
-            match &op.action {
-                MembershipAction::Add { member, .. } => {
-                    ever_members.insert(member.clone());
-                }
-                MembershipAction::Create { initial_members } => {
-                    ever_members.extend(initial_members.iter().map(|m| m.id.clone()));
-                }
-                _ => {}
-            }
-        }
-    }
+    let ever_members = collect_ever_members(&members, engine.effective_ops(), &by_id);
     Ok(Resolved {
         members,
         sealing,
@@ -415,6 +401,35 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         minting_ops_baseline,
         ever_members,
     })
+}
+
+/// The ever-legitimately-a-member set (id → author key): the current members plus every member whose Add is
+/// EFFECTIVE (which includes removed members but excludes carve-out-voided Adds). See [`Resolved::ever_members`].
+fn collect_ever_members(
+    members: &MembershipView,
+    effective: Vec<[u8; 32]>,
+    by_id: &HashMap<[u8; 32], &KeyringOp>,
+) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut ever: std::collections::BTreeMap<String, Vec<u8>> = members
+        .members
+        .iter()
+        .map(|m| (m.member_id.clone(), m.author_public_key.clone()))
+        .collect();
+    for op_id in effective {
+        let Some(op) = by_id.get(&op_id) else { continue };
+        match &op.action {
+            MembershipAction::Add { member, author_public_key, .. } => {
+                ever.entry(member.clone()).or_insert_with(|| author_public_key.to_vec());
+            }
+            MembershipAction::Create { initial_members } => {
+                for m in initial_members {
+                    ever.entry(m.id.clone()).or_insert_with(|| m.author_public_key.to_vec());
+                }
+            }
+            _ => {}
+        }
+    }
+    ever
 }
 
 /// The dag's compaction DECISION for a concrete openom keyring: the checkpoint to author + the ops that may be

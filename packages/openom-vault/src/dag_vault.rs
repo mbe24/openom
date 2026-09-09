@@ -306,8 +306,9 @@ pub(crate) struct VerifyInputs {
     pub view: MembershipView,
     pub shared: bool,
     pub epoch_ids: Vec<Vec<u8>>,
-    /// The ever-legitimately-a-member set — for the self-heal covered-accept P6 gate.
-    pub ever_members: std::collections::BTreeSet<String>,
+    /// The ever-legitimately-a-member set (id → author key) — for the self-heal covered-accept P6 gate (reader)
+    /// and the cover-authoring binding (writer).
+    pub ever_members: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 pub(crate) fn verify_inputs(anchor: &[u8]) -> Result<VerifyInputs, VaultError> {

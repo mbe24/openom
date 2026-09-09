@@ -187,6 +187,29 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         self.push(EntryKind::Delta, plaintext, 0)
     }
 
+    /// Seal a self-heal `Cover` marker in this replica's chain (advancing the counter + prev-hash like any
+    /// entry, so it never collides with a delta) but do NOT store it locally — a Cover must not enter the
+    /// claim log (`pull` would try to open it as a Delta and quarantine it). The caller pushes the returned
+    /// envelope to the server's log directly; peers fold it into their covered set on ingest.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if sealing fails.
+    pub fn seal_cover(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SyncError> {
+        let ctx = SealCtx {
+            kind: EntryKind::Cover,
+            replica_counter: self.next_counter,
+            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
+            covers_through_seq: 0,
+        };
+        let out = self
+            .sealer
+            .seal(&ctx, plaintext)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+        self.next_counter += 1;
+        self.prev_hash = out.ciphertext_hash;
+        Ok(out.envelope)
+    }
+
     fn push(&mut self, kind: EntryKind, plaintext: &[u8], covers: u64) -> Result<(), SyncError> {
         if plaintext.is_empty() {
             return Ok(());

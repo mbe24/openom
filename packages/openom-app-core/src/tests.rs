@@ -723,6 +723,78 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     assert!(!r.ever_member("acct-never"), "someone never admitted is not an ever-member → not coverable");
 }
 
+#[test]
+fn the_writer_authors_a_cover_that_heals_a_removed_members_history() {
+    // SH-3: the self-heal WRITER. An owner holds a member's entries, removes the member, and author_cover()
+    // mints a signed Cover over them — which a fresh replica then honors (covered-accept). Proves writer→reader
+    // end to end with real crypto, and that author_cover binds the right author/key/hashes.
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use openom_protocol::ids::MemberId;
+    use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+    use openom_vault::{resolver_from, sharing, vault, DagVault, MembershipResolver};
+
+    const TREE: &[u8] = b"tree-uuid-16byte";
+    let tree = TreeId::new(TREE.to_vec());
+    let owner = MemberId::new("acct-owner");
+    let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+    let ro = ReplicaId::new(b"ro".to_vec());
+    let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner, replica_id: &ro };
+
+    // Provision, share (add bob); bob writes an entry.
+    let solo = DagVault.provision(&ctx_ro, &owner_pass).unwrap().anchor;
+    let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+    let bob = vault::provision_member(&bob_pass).unwrap();
+    // Bob is a Maintainer — the role that COMMITS deltas directly (an Editor only proposes), so his tree
+    // writes are attributed deltas the owner accepts and stores. This is exactly why the writer scans the
+    // STORE: it only ever mints covers over entries that were legitimately accepted while their author was a
+    // current member.
+    let shared = sharing::add_member(
+        EngineKind::Dag, &solo, &owner_pass, TREE, "acct-owner", b"ro", 0, "acct-bob", "maintainer",
+        &bob.author_public_key, &bob.hpke_public_key,
+    )
+    .unwrap()
+    .keyring;
+
+    let mut server = FakeServer::default();
+    let bu = sharing::unlock_as_member(
+        EngineKind::Dag, &shared, &bob_pass, &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE, "acct-bob", &[], b"rb", 0,
+    )
+    .unwrap();
+    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryStore::new()), "tree", b"rb".to_vec());
+    bob_core.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    bob_core.commit().unwrap();
+    push(&mut bob_core, &mut server);
+    let bob_env = server.log[0].clone();
+
+    // The OWNER opens the shared tree, pulls + accepts + stores bob's entry (bob is a current member).
+    let ou = DagVault.unlock(&ctx_ro, &shared, &owner_pass).unwrap();
+    let mut owner_core = AppCore::new(
+        ou.did_key.into_string(), ou.sealer, Arc::new(MemoryStore::new()), "tree", b"ro".to_vec(),
+    );
+    owner_core.set_membership(resolver_from(EngineKind::Dag, &shared, &[]).unwrap()).unwrap();
+    pull(&mut owner_core, &server);
+    assert!(live_ids(&owner_core).contains("pBob"), "owner accepted bob's entry while bob was a member");
+
+    // Owner removes bob, refreshes its resolver → bob is no longer current (but is an ever-member).
+    let rotated = DagVault.remove_member(&ctx_ro, &shared, &owner_pass, "acct-bob").unwrap();
+    owner_core.set_membership(resolver_from(EngineKind::Dag, &rotated, &[]).unwrap()).unwrap();
+
+    // THE WRITER: author a cover over bob's (now-removed) entry.
+    let cover = owner_core.author_cover().unwrap().expect("a cover is authored for the removed member");
+    assert!(owner_core.author_cover().unwrap().is_none(), "a second sweep is idempotent — nothing left to cover");
+    server.append(cover.clone());
+
+    // A fresh replica on the rotated anchor: bob's entry alone is dropped; WITH the authored cover it verifies.
+    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
+    let mut healed = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r9");
+    healed.set_membership(resolver()).unwrap();
+    healed.ingest(&[bob_env, cover], 2).unwrap();
+    assert!(live_ids(&healed).contains("pBob"), "the authored cover heals the removed member's history");
+    assert_eq!(healed.anomalies(), 0, "the authored cover is honored, nothing rejected");
+}
+
 /// A fresh owner replica over the rotated dag anchor (a new device: owner unlock + a fresh store/replica).
 fn fresh_owner_replica(
     anchor: &[u8],

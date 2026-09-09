@@ -53,6 +53,18 @@ pub trait MembershipResolver {
     fn ever_member(&self, _member_id: &str) -> bool {
         false
     }
+    /// The author public key an ever-member was admitted with — for the self-heal WRITER to bind into a cover
+    /// it mints over that (now-removed) member's entries. `None` if the id was never a legitimate member.
+    /// Defaults to `None` (only the dag resolver mints covers).
+    fn ever_member_key(&self, _member_id: &str) -> Option<Vec<u8>> {
+        None
+    }
+    /// Whether `member_id` is a member RIGHT NOW — the writer covers only entries whose author is no longer
+    /// current (a current member's entries verify normally, no cover needed). Defaults to `true` (permissive:
+    /// a resolver that can't answer shouldn't cause spurious covers).
+    fn current_member(&self, _member_id: &str) -> bool {
+        true
+    }
 }
 
 /// What to do with a pulled entry after §B3 verification.
@@ -269,7 +281,7 @@ pub mod dag {
         view: MembershipView,
         has_been_shared: bool,
         retained_epochs: BTreeSet<Vec<u8>>,
-        ever_members: BTreeSet<String>,
+        ever_members: std::collections::BTreeMap<String, Vec<u8>>,
     }
 
     impl DagMembershipResolver {
@@ -296,7 +308,15 @@ pub mod dag {
         }
 
         fn ever_member(&self, member_id: &str) -> bool {
-            self.ever_members.contains(member_id)
+            self.ever_members.contains_key(member_id)
+        }
+
+        fn ever_member_key(&self, member_id: &str) -> Option<Vec<u8>> {
+            self.ever_members.get(member_id).cloned()
+        }
+
+        fn current_member(&self, member_id: &str) -> bool {
+            self.view.members.iter().any(|m| m.member_id == member_id)
         }
 
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {
