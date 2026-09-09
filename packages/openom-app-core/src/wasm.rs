@@ -942,6 +942,17 @@ pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
     openom_vault::sharing::wrap_chain_keyring_update(keyring).map_err(to_js)
 }
 
+/// Unwrap a served `MembershipEnvelope` to its RAW chain `Keyring` body — the format the client retains per
+/// revision (a member's `syncKeyring` unwraps each successor before retaining it, since §B3 verify decodes a
+/// raw `Keyring`, not the wrapped envelope).
+///
+/// # Errors
+/// Returns a [`JsError`] if the bytes aren't a chain-tagged membership envelope.
+#[wasm_bindgen(js_name = unwrapChainKeyring)]
+pub fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::unwrap_chain_keyring(bytes).map_err(to_js)
+}
+
 /// Adopt a recovery/succession reset keyring against the trusted anchor (the caller must have shown the new
 /// signer fingerprints for out-of-band confirmation first). Returns the validated keyring + watermark.
 ///

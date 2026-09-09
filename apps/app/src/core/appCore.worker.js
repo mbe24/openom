@@ -19,12 +19,14 @@ import init, {
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   unlockAsMember as wasmUnlockAsMember,
   wrapChainKeyringUpdate as wasmWrapKeyringUpdate,
+  unwrapChainKeyring as wasmUnwrapKeyring,
+  syncKeyring as wasmSyncKeyring,
   keyringHasBeenShared as wasmHasBeenShared,
   moderatorsFromKeyring as wasmModerators,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
-import { joinAsMember, publishKeyring } from './sharing.js';
+import { joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl } from './sharing.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());
@@ -344,6 +346,28 @@ const api = {
     } finally {
       res.free();
     }
+  },
+
+  /**
+   * Adopt newer keyring revisions from the server on a shared tree (chain), then refresh this core's §B3
+   * resolver + moderators so it verifies against the current membership. Called by the driver before a data
+   * sync (keyring-before-data), and after a membership change lands. A no-op on a solo/dag/unshared tree.
+   * `treeId` is the tree's 16-byte seam id. Returns { changed }.
+   */
+  async syncKeyring(docId, treeId) {
+    const c = core(docId);
+    const head = await keyringStore().loadHead(docId);
+    if (!head || (head.engine || KEYRING_ENGINE) !== 'chain' || !transportFor(docId)) {
+      return { changed: false };
+    }
+    const r = await syncKeyringImpl(
+      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(docId), keyringStore: keyringStore() },
+      { docId, treeId },
+    );
+    if (r.changed) {
+      await installMembership(c, docId, 'chain', (await keyringStore().loadHead(docId)).bytes);
+    }
+    return { changed: r.changed };
   },
 
   // --- mint (buffer into the current intention; `commit` seals + persists the batch) --------------

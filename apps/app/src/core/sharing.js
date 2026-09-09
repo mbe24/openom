@@ -69,6 +69,39 @@ export class JoinError extends Error {
   }
 }
 
+// The revision encoded in the first 4 bytes of a chain watermark (revision‖key_id‖H(DEK), big-endian).
+function chainRevision(watermark) {
+  if (!watermark || watermark.length < 4) return 0;
+  return new DataView(watermark.buffer, watermark.byteOffset, 4).getUint32(0, false);
+}
+
+/**
+ * Adopt newer CHAIN keyring revisions from the server on an already-joined tree: fetch the successors after
+ * our local head, let the wasm validate them as a legitimate chain onto our anchor (a fork / rollback /
+ * withheld hop throws there and nothing is persisted), then retain each verified revision (unwrapped) under
+ * its WALK-DERIVED number and advance the head. A no-op when there's nothing newer. `deps`: { wasm:
+ * { syncKeyring, unwrapChainKeyring }, transport: { readKeyring }, keyringStore }. Returns { revision, changed }.
+ */
+export async function syncKeyring(deps, { docId, treeId }) {
+  const { wasm, transport, keyringStore } = deps;
+  const anchor = (await keyringStore.head(docId))?.bytes;
+  if (!anchor) throw new Error('no local keyring to sync onto');
+  const since = (await keyringStore.head(docId)).revision;
+  const { revisions } = await transport.readKeyring(docId, since + 1);
+  const successors = (revisions ?? []).filter((r) => r.revision > since);
+  if (successors.length === 0) return { revision: since, changed: false };
+
+  const change = wasm.syncKeyring(anchor, treeId, frameHops(successors.map((s) => s.bytes)));
+  const headRev = chainRevision(change.watermark);
+  // The verified run must sit contiguously on our anchor (no gap) — else the server served a non-adjacent run.
+  if (headRev - successors.length !== since) throw new KeyringForkError(headRev);
+  for (let i = 0; i < successors.length; i += 1) {
+    await keyringStore.save(docId, since + 1 + i, wasm.unwrapChainKeyring(successors[i].bytes));
+  }
+  await keyringStore.saveHead(docId, 'chain', change.keyring);
+  return { revision: headRev, changed: true };
+}
+
 /** The server holds a keyring that forks off our produced tail (a 409 whose bytes differ from ours). */
 export class KeyringForkError extends Error {
   constructor(revision) {

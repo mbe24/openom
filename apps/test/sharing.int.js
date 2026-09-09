@@ -4,7 +4,7 @@
 // / passphrase failure persists NOTHING), handle-free on a post-unlock store failure, the already-present
 // guard, and the fingerprint cross-check.
 import { describe, it, expect } from 'vitest';
-import { joinAsMember, publishKeyring, frameHops, unframe, JoinError, KeyringForkError } from '../app/src/core/sharing.js';
+import { joinAsMember, publishKeyring, syncKeyring, frameHops, unframe, JoinError, KeyringForkError } from '../app/src/core/sharing.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 
 const treeId = new Uint8Array(16).fill(0xaa);
@@ -190,6 +190,50 @@ describe('publishKeyring wiring', () => {
     transport.putKeyring = async () => { throw conflict; };
     await expect(
       publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' }),
+    ).rejects.toBeInstanceOf(KeyringForkError);
+  });
+});
+
+// A wasm double: syncKeyring returns the new head + a watermark encoding `headRev`; unwrapChainKeyring is
+// identity (the real unwrap/validation is Rust-tested).
+function syncWasm(headRev) {
+  const wm = new Uint8Array(52);
+  new DataView(wm.buffer).setUint32(0, headRev, false);
+  return {
+    syncKeyring: () => ({ keyring: new Uint8Array([headRev]), watermark: wm }),
+    unwrapChainKeyring: (b) => b,
+  };
+}
+const REV3 = new Uint8Array([3, 3, 3]);
+
+describe('syncKeyring wiring', () => {
+  it('adopts successors and retains each by walk-derived revision', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1); // local head at rev 1
+    const transport = {
+      readKeyring: async () => ({ revisions: [{ revision: 2, bytes: REV2 }, { revision: 3, bytes: REV3 }], head: 3 }),
+    };
+    const res = await syncKeyring({ wasm: syncWasm(3), transport, keyringStore }, { docId: 'k1', treeId });
+    expect(res).toEqual({ revision: 3, changed: true });
+    expect([...(await keyringStore.at('k1', 2))]).toEqual([...REV2]);
+    expect([...(await keyringStore.at('k1', 3))]).toEqual([...REV3]);
+  });
+
+  it('is a no-op when there is nothing newer', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1);
+    const transport = { readKeyring: async () => ({ revisions: [], head: 1 }) };
+    const res = await syncKeyring({ wasm: syncWasm(1), transport, keyringStore }, { docId: 'k1', treeId });
+    expect(res).toEqual({ revision: 1, changed: false });
+  });
+
+  it('raises a fork when the verified run is not contiguous on our anchor', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1); // since = 1
+    // Server serves one successor but the wasm reports a head of rev 5 (a non-adjacent run: 5-1 !== 1).
+    const transport = { readKeyring: async () => ({ revisions: [{ revision: 2, bytes: REV2 }], head: 5 }) };
+    await expect(
+      syncKeyring({ wasm: syncWasm(5), transport, keyringStore }, { docId: 'k1', treeId }),
     ).rejects.toBeInstanceOf(KeyringForkError);
   });
 });
