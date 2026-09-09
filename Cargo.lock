@@ -3640,6 +3640,7 @@ dependencies = [
  "openom-vault",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "store-log",
  "thiserror 2.0.20",
  "wasm-bindgen",

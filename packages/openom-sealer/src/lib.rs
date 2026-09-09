@@ -92,6 +92,21 @@ impl SealContext {
             blob_id: Vec::new(),
         }
     }
+
+    /// A self-heal cover marker (OPE-382) at the chain head. The body is a `CoverBody` — sealed + signed like
+    /// any entry, only its `kind` differs, so the reader opens it as `Cover` and folds it into the covered set.
+    #[must_use]
+    pub const fn cover(replica_counter: u64, prev_ciphertext_hash: Vec<u8>) -> Self {
+        Self {
+            kind: EntryKind::Cover,
+            format: Format::OpenomJson,
+            compression: Compression::None,
+            replica_counter,
+            prev_ciphertext_hash,
+            covers_through_seq: 0,
+            blob_id: Vec::new(),
+        }
+    }
 }
 
 /// The result of sealing one entry: the complete, wire-ready envelope bytes to upload,

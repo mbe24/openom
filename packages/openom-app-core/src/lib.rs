@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use openom_data_tree::{OpView, Tree, TreeError};
 use openom_docsync::SyncClient;
-use openom_protocol::v1::Envelope;
+use openom_protocol::v1::{CoverBody, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
 use openom_vault::{Disposition, MembershipResolver};
+use sha2::{Digest, Sha256};
 use serde_json::Value;
 use store_log::DocStore;
 
@@ -85,6 +86,17 @@ pub struct AppCore<S: DocStore> {
     /// hold-buffer overflow — never stored, and the cursor still advances so a forgery can't stall the tail.
     /// Surfaced via [`anomalies`](Self::anomalies), never silently swallowed.
     rejected: usize,
+    /// The self-heal covered set (OPE-382 SH-2): `H(ciphertext) → (author_member_id, author_public_key)` for
+    /// every entry a currently-valid Cover marker blesses. A since-removed member's data entry that would
+    /// otherwise fail `UnknownAuthor` is accepted iff its recomputed hash is here AND it still signature-
+    /// verifies against the bound key ([`openom_vault::verify_covered_entry`]). Rebuilt from
+    /// [`cover_envelopes`](Self) on every [`set_membership`](Self) (a cover from a now-removed Maintainer must
+    /// drop out — pin P3), and NOT durable: a fresh replay re-pulls the whole server log, covers included.
+    covered: std::collections::BTreeMap<Vec<u8>, (String, Vec<u8>)>,
+    /// The raw `Cover` envelopes seen this session, retained so [`covered`](Self) can be REBUILT against the
+    /// current membership on each [`set_membership`](Self) (a cover's own validity is current-time — pin P3).
+    /// In-memory only, re-pulled from the server log each session.
+    cover_envelopes: Vec<Vec<u8>>,
 }
 
 impl<S: DocStore> AppCore<S> {
@@ -111,6 +123,8 @@ impl<S: DocStore> AppCore<S> {
             membership: None,
             held: Vec::new(),
             rejected: 0,
+            covered: std::collections::BTreeMap::new(),
+            cover_envelopes: Vec::new(),
         }
     }
 
@@ -174,6 +188,8 @@ impl<S: DocStore> AppCore<S> {
         self.undecodable = 0;
         self.held.clear();
         self.rejected = 0;
+        self.covered.clear();
+        self.cover_envelopes.clear();
         Ok(())
     }
 
@@ -283,6 +299,9 @@ impl<S: DocStore> AppCore<S> {
         // consulted in the verify path (not a guard here) so it doesn't collide with the crypto-free test
         // double that encodes its route via `shared()`. Primary defense is installing the resolver at unlock.
         self.membership = Some(membership);
+        // Re-validate every retained Cover against the NEW membership (pin P3): a cover whose author is no
+        // longer a Maintainer must stop blessing, so rebuild `covered` from scratch rather than let it grow.
+        self.rebuild_covered();
         self.drain_held()
     }
 
@@ -302,7 +321,25 @@ impl<S: DocStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store append or read fails (a broken backend — not one bad entry).
     pub fn ingest(&mut self, payloads: &[Vec<u8>], next_cursor: i64) -> Result<usize, CoreError> {
+        // Two passes (pin: covers-before-covered): a Cover marker is authored AFTER the entries it blesses, so
+        // it sits LATER in the log. Fold every Cover in this page first, then disposition the data entries —
+        // so a since-removed member's entry in the same page is covered-accepted rather than dropped. (A cover
+        // that lands in a LATER page than its covered entry heals on the next full re-pull / reload, when the
+        // whole log arrives together.)
         for env in payloads {
+            if entry_kind(env) == Some(Kind::Cover as i32) {
+                match envelope_dot(env) {
+                    Some((replica, _)) if replica == self.replica => {} // our own, echoed back
+                    Some(dot) if self.seen.contains(&dot) => {} // already folded (a re-pulled tail)
+                    Some(dot) => self.ingest_cover(env, dot),
+                    None => self.undecodable += 1,
+                }
+            }
+        }
+        for env in payloads {
+            if entry_kind(env) == Some(Kind::Cover as i32) {
+                continue; // handled in the covers pass
+            }
             match envelope_dot(env) {
                 None => self.undecodable += 1, // can't attribute or dedup — skip, surface via anomalies
                 Some((replica, _)) if replica == self.replica => {} // our own, echoed back
@@ -314,6 +351,72 @@ impl<S: DocStore> AppCore<S> {
         // wasteful — a rewind loop is not). Only ever move forward.
         self.server_cursor = Some(self.server_cursor.map_or(next_cursor, |c| c.max(next_cursor)));
         Ok(self.client.pull_claims()?)
+    }
+
+    /// Verify + fold one `Cover` marker: it must verify as a current Maintainer+ entry (pin P8 role gate);
+    /// then retain the raw envelope (for [`rebuild_covered`](Self) on a later membership change) and fold its
+    /// body into [`covered`](Self). A cover that doesn't verify (forged / non-member author) is an anomaly.
+    fn ingest_cover(&mut self, env: &[u8], dot: (Vec<u8>, u64)) {
+        if self.try_fold_cover(env) {
+            self.seen.insert(dot);
+            self.cover_envelopes.push(env.to_vec());
+        } else {
+            self.rejected += 1;
+        }
+    }
+
+    /// Verify a Cover envelope against the CURRENT membership and, if valid, fold its `CoverBody` into
+    /// [`covered`](Self). Returns whether it was a valid, current-Maintainer+-authored cover. Shared by the
+    /// ingest path and [`rebuild_covered`](Self). A no-op returning `false` when no membership is installed
+    /// (a solo tree has no removed members to heal).
+    fn try_fold_cover(&mut self, env: &[u8]) -> bool {
+        let Some(membership) = self.membership.as_deref() else {
+            return false;
+        };
+        let Ok(envelope) = Envelope::decode(env) else {
+            return false;
+        };
+        let Some(header) = envelope.header.as_ref() else {
+            return false;
+        };
+        // A cover is a signed Maintainer+ entry (required_role_for_kind(Cover)=Maintainer); verify it exactly
+        // like any entry, opening as Cover.
+        let verdict = openom_vault::verify_ingest(
+            envelope.version,
+            membership,
+            header,
+            &header.governing_ref,
+            &header.key_id,
+            || self.client.try_open_cover(env),
+        );
+        if verdict != Disposition::Accept {
+            return false;
+        }
+        let Ok(plaintext) = self.client.try_open_cover(env) else {
+            return false;
+        };
+        let Ok(body) = CoverBody::decode(plaintext.as_slice()) else {
+            return false;
+        };
+        for e in body.entries {
+            // Skip a malformed binding rather than fail the whole cover.
+            if !e.ciphertext_hash.is_empty() && !e.author_public_key.is_empty() {
+                self.covered
+                    .insert(e.ciphertext_hash, (e.author_member_id, e.author_public_key));
+            }
+        }
+        true
+    }
+
+    /// Rebuild [`covered`](Self) from the retained Cover envelopes against the current membership — pin P3, so
+    /// a cover whose author was since removed stops blessing. Called on every [`set_membership`](Self).
+    fn rebuild_covered(&mut self) {
+        self.covered.clear();
+        let covers = std::mem::take(&mut self.cover_envelopes);
+        for env in &covers {
+            let _ = self.try_fold_cover(env); // re-folds into `covered` iff still valid under current membership
+        }
+        self.cover_envelopes = covers;
     }
 
     /// Route one deduped, attributable peer entry through §B3 verification. Accept ⇒ store it (the next
@@ -346,15 +449,40 @@ impl<S: DocStore> AppCore<S> {
         let Some(header) = envelope.header.as_ref() else {
             return Disposition::Reject;
         };
-        openom_vault::verify_ingest(
+        let verdict = openom_vault::verify_ingest(
             envelope.version,
             membership,
             header,
             &header.governing_ref,
             &header.key_id,
             || self.client.try_open_delta(env),
-        )
+        );
+        // Self-heal covered-accept (SH-2): a since-removed member's entry fails `UnknownAuthor` under the
+        // current membership (dag always-current). Rescue it iff a currently-valid Cover blessed its
+        // RECOMPUTED ciphertext hash (pin P1 — the header field is not authenticated) AND it still carries a
+        // valid author signature by the key the cover bound (pin P2 — a cover waives membership, never
+        // integrity). On chain the entry already verifies against its retained governing revision, so this
+        // never triggers (self-heal is dag-only).
+        if verdict == Disposition::Reject {
+            let hash = Sha256::digest(&envelope.ciphertext);
+            if let Some((member_id, key)) = self.covered.get(hash.as_slice()) {
+                if let Ok(plaintext) = self.client.try_open_delta(env) {
+                    if openom_vault::verify_covered_entry(
+                        envelope.version,
+                        header,
+                        &plaintext,
+                        member_id,
+                        key,
+                    ) {
+                        return Disposition::Accept;
+                    }
+                }
+            }
+        }
+        verdict
     }
+
+    // (entry_kind is a free fn at the bottom of this file.)
 
     /// Buffer a held entry, bounded by [`HELD_CAP`](Self::HELD_CAP). An overflow is dropped and counted as an
     /// anomaly (recovered on a reload's full re-pull), so a peer withholding a keyring can't exhaust memory.
@@ -457,6 +585,12 @@ impl<S: DocStore> AppCore<S> {
 fn envelope_dot(envelope: &[u8]) -> Option<(Vec<u8>, u64)> {
     let header = Envelope::decode(envelope).ok()?.header?;
     Some((header.replica_id, header.replica_counter))
+}
+
+/// The `Header.kind` (a proto `Kind` i32) of a sealed envelope — so ingest can route `Cover` markers through
+/// the covers pass. `None` if the bytes don't decode as an `Envelope` with a header.
+fn entry_kind(envelope: &[u8]) -> Option<i32> {
+    Some(Envelope::decode(envelope).ok()?.header?.kind)
 }
 
 #[cfg(test)]

@@ -42,6 +42,8 @@ openom-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Recompute H(ciphertext) for the self-heal covered-set lookup (the header field is not AAD-bound — pin P1).
+sha2.workspace = true
 
 # A hard rlib dep: the §B3 verify-on-ingest seam (Membership / verify_ingest / Chain+DagMembership) lives
 # here and gates AppCore::ingest in the core (non-wasm) build + tests, plus the rlib keyring lifecycle

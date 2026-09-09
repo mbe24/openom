@@ -626,6 +626,117 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     );
 }
 
+#[test]
+fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
+    // SH-2: the data-channel self-heal. A member writes a signed entry, is removed, and a Maintainer authors a
+    // Cover blessing that entry. A fresh replica resolving the ROTATED anchor (member gone) would drop the
+    // entry as UnknownAuthor — but the cover, folded first, lets it verify. A control replica WITHOUT the
+    // cover drops it, proving the cover is load-bearing.
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use openom_protocol::v1::{CoverBody, CoveredEntry};
+    use openom_protocol::ids::MemberId;
+    use openom_sealer::SealContext;
+    use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+    use openom_vault::{resolver_from, sharing, vault, DagVault, MembershipResolver};
+    use sha2::Digest;
+
+    const TREE: &[u8] = b"tree-uuid-16byte";
+    let tree = TreeId::new(TREE.to_vec());
+    let owner_id = MemberId::new("acct-owner");
+    let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+    let ro = ReplicaId::new(b"ro".to_vec());
+    let rc = ReplicaId::new(b"rc".to_vec());
+    let ctx_ro = VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &ro };
+    let ctx_rc = VaultContext { tree_id: &tree, member_id: &owner_id, replica_id: &rc };
+
+    // Provision, share (add bob), bob writes a signed entry, then bob is removed.
+    let solo = DagVault.provision(&ctx_ro, &owner_pass).unwrap().anchor;
+    let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+    let bob = vault::provision_member(&bob_pass).unwrap();
+    let shared = sharing::add_member(
+        EngineKind::Dag, &solo, &owner_pass, TREE, "acct-owner", b"ro", 0, "acct-bob", "editor",
+        &bob.author_public_key, &bob.hpke_public_key,
+    )
+    .unwrap()
+    .keyring;
+
+    let mut server = FakeServer::default();
+    let bu = sharing::unlock_as_member(
+        EngineKind::Dag, &shared, &bob_pass,
+        &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+        TREE, "acct-bob", &[], b"rb", 0,
+    )
+    .unwrap();
+    let mut bob_core = AppCore::new(bu.did_key, bu.sealer, Arc::new(MemoryStore::new()), "tree", b"rb".to_vec());
+    bob_core.tree_mut().assert_anchor("pBob", PERSON, 1).unwrap();
+    bob_core.commit().unwrap();
+    push(&mut bob_core, &mut server);
+    // Bob's entry, on the server — recompute its ciphertext hash for the cover binding.
+    let bob_env = server.log[0].clone();
+    let bob_hash = sha2::Sha256::digest(Envelope::decode(bob_env.as_slice()).unwrap().ciphertext).to_vec();
+
+    let rotated = DagVault.remove_member(&ctx_ro, &shared, &owner_pass, "acct-bob").unwrap();
+
+    // The owner (a Maintainer) authors a Cover over bob's entry, sealed under the rotated anchor's sealer.
+    let ou = DagVault.unlock(&ctx_rc, &rotated, &owner_pass).unwrap();
+    let body = CoverBody {
+        entries: vec![CoveredEntry {
+            ciphertext_hash: bob_hash,
+            author_member_id: "acct-bob".into(),
+            author_public_key: bob.author_public_key.clone(),
+        }],
+    };
+    let cover_env = ou
+        .sealer
+        .seal_entry(&SealContext::cover(0, Vec::new()), &body.encode_to_vec())
+        .unwrap()
+        .envelope;
+    server.append(cover_env.clone());
+
+    // A resolver over the ROTATED anchor (bob is no longer a member).
+    let resolver = || -> Box<dyn MembershipResolver> { resolver_from(EngineKind::Dag, &rotated, &[]).unwrap() };
+
+    // Control: a fresh replica WITHOUT the cover drops bob's now-unattributed entry.
+    let mut control = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r1");
+    control.set_membership(resolver()).unwrap();
+    control.ingest(&[bob_env.clone()], 1).unwrap();
+    assert!(!live_ids(&control).contains("pBob"), "without a cover, a removed member's entry is dropped");
+    assert!(control.anomalies() >= 1);
+
+    // With the cover: the fresh replica accepts bob's entry (the cover, folded first, blesses it).
+    let mut healed = fresh_owner_replica(&rotated, &owner_pass, &tree, b"r2");
+    healed.set_membership(resolver()).unwrap();
+    healed.ingest(&[bob_env, cover_env], 2).unwrap();
+    assert!(live_ids(&healed).contains("pBob"), "the cover lets the removed member's history verify");
+    assert_eq!(healed.anomalies(), 0, "nothing is rejected — the cover is honored, and it is not a forgery");
+    // The cover itself is projection-inert: it is not a claim.
+    assert!(!live_ids(&healed).contains("acct-bob"));
+}
+
+/// A fresh owner replica over the rotated dag anchor (a new device: owner unlock + a fresh store/replica).
+fn fresh_owner_replica(
+    anchor: &[u8],
+    pass: &openom_crypto::Passphrase,
+    tree: &TreeId,
+    replica: &'static [u8],
+) -> AppCore<MemoryStore> {
+    use openom_protocol::ids::MemberId;
+    use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+    let u = openom_vault::DagVault
+        .unlock(
+            &VaultContext {
+                tree_id: tree,
+                member_id: &MemberId::new("acct-owner"),
+                replica_id: &ReplicaId::new(replica.to_vec()),
+            },
+            anchor,
+            pass,
+        )
+        .unwrap();
+    AppCore::new(u.did_key.into_string(), u.sealer, Arc::new(MemoryStore::new()), "tree", replica.to_vec())
+}
+
 fn json_name(given: &str) -> serde_json::Value {
     serde_json::json!({ "parts": { "given": given } })
 }

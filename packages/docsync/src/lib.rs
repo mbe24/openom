@@ -7,6 +7,8 @@ use store_log::{DocStore, StoreError};
 pub enum EntryKind {
     Delta,
     Snapshot,
+    /// The self-heal covering marker (OPE-382). Opened for verification only, never merged as a claim.
+    Cover,
 }
 
 /// Outbound chain state + kind for one entry, handed to the [`Sealer`].
@@ -263,6 +265,18 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
             .map_err(|e| SyncError::Sealer(Box::new(e)))
     }
 
+    /// Open a `Cover` envelope (the self-heal marker) to its plaintext without merging — so a caller can
+    /// verify + fold its body into the covered set. A Cover is a normal sealed entry under the tree DEK; only
+    /// its header `kind` differs, so the sealer must be told to expect `Cover` (a `Delta`-kind open rejects it).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the sealer can't open the envelope (wrong key / corrupt / wrong kind).
+    pub fn try_open_cover(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
+        self.sealer
+            .open(EntryKind::Cover, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
     /// Fold state into a snapshot and CAS it, recording the seq it covers.
     ///
     /// # Errors
@@ -352,6 +366,7 @@ impl Sealer for PassthroughSealer {
         env.push(match ctx.kind {
             EntryKind::Delta => 0,
             EntryKind::Snapshot => 1,
+            EntryKind::Cover => 2,
         });
         env.extend_from_slice(plaintext);
         Ok(Sealed {

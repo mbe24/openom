@@ -98,6 +98,8 @@ impl docsync::Sealer for SealerAdapter {
         let (kind, format) = match ctx.kind {
             docsync::EntryKind::Delta => (EntryKind::Delta, codec::FORMAT),
             docsync::EntryKind::Snapshot => (EntryKind::Snapshot, Format::OpenomJson),
+            // A Cover body is a proto CoverBody (same op-batch codec framing as a delta plaintext).
+            docsync::EntryKind::Cover => (EntryKind::Cover, codec::FORMAT),
         };
         let oc = SealContext {
             kind,
@@ -123,6 +125,7 @@ impl docsync::Sealer for SealerAdapter {
         let k = match kind {
             docsync::EntryKind::Delta => EntryKind::Delta,
             docsync::EntryKind::Snapshot => EntryKind::Snapshot,
+            docsync::EntryKind::Cover => EntryKind::Cover,
         };
         self.0.open_entry(k, envelope)
     }
@@ -235,6 +238,15 @@ impl<S: DocStore> SyncClient<S> {
     /// Returns an error if the sealer can't open the envelope.
     pub fn try_open_delta(&self, envelope: &[u8]) -> Result<Vec<u8>> {
         self.inner.try_open_delta(envelope)
+    }
+
+    /// Open a `Cover` (self-heal marker) envelope to its plaintext without merging — to verify + fold its
+    /// body into the covered set.
+    ///
+    /// # Errors
+    /// Returns an error if the sealer can't open the envelope.
+    pub fn try_open_cover(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.inner.try_open_cover(envelope)
     }
 
     /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.

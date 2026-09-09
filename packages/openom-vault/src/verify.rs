@@ -113,6 +113,34 @@ fn verify_or_reject<E>(
     }
 }
 
+/// Verify a since-removed member's entry against a **cover binding** (SH-2 covered-accept, pin P2): the entry
+/// must STILL carry a valid author signature over its content, made by the key the cover bound to its author
+/// id — a cover WAIVES only the current-membership/role check, never integrity. Reuses the audited
+/// [`verify_entry`] with a SYNTHETIC single-member view (never escapes this call), so no crypto is duplicated:
+/// the author id must match the entry's `author_member_id`, the signature must verify against `author_public_key`,
+/// and the epoch echoes the entry's own `key_id` (accept any epoch it was legitimately sealed under, as the dag
+/// resolver does). `plaintext` is the AEAD-opened body — the caller must have opened it, which itself proves
+/// integrity of the ciphertext the recomputed hash pinned.
+#[must_use]
+pub fn verify_covered_entry(
+    version: u32,
+    header: &Header,
+    plaintext: &[u8],
+    author_member_id: &str,
+    author_public_key: &[u8],
+) -> bool {
+    let view = MembershipView::new(
+        vec![openom_keyring_api::MemberView {
+            member_id: author_member_id.to_string(),
+            role: openom_roles::ROLE_MAINTAINER,
+            author_public_key: author_public_key.to_vec(),
+            hpke_public_key: Vec::new(),
+        }],
+        false,
+    );
+    verify_entry(version, header, plaintext, &view, &header.key_id).is_ok()
+}
+
 /// The chain engine's [`MembershipResolver`] implementation.
 pub mod chain {
     use std::collections::BTreeMap;
