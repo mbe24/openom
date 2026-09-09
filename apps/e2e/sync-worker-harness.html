@@ -261,6 +261,83 @@
         };
       },
 
+      // THE removeMember lifecycle through the real worker (chain): an owner shares a tree, a member joins and
+      // sees the shared write, then the owner REMOVES the member — rotating the keyring (a forward-secret
+      // re-epoch), re-unlocking the owner under the new epoch, and publishing the rotated revision. Proves live:
+      // the rotation is published, the re-unlocked owner still writes a signed entry that syncs, and the removed
+      // member is cryptographically locked out (a fresh join at the rotated head fails). Chain retains history,
+      // so no self-heal cover is authored here (that path is dag-only, proven in Rust) — authorCover is a no-op.
+      async shareRemoveLockout() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(4);
+        const ownerDoc = `rm-owner-${crypto.randomUUID()}`;
+        const memberDoc = `rm-member-${crypto.randomUUID()}`;
+        const rejoinDoc = `rm-rejoin-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        // Owner provisions the tree + mints the invite pin; member mints an account; owner admits them.
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc);
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+
+        // Owner writes a signed entry; the member joins via the genesis-walk and sees it.
+        await owner.assertAnchor(ownerDoc, 'pShared', PERSON);
+        await owner.commit(ownerDoc);
+        await owner.syncNow(ownerDoc);
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+        await member.syncNow(memberDoc);
+        const beforeRemoval = JSON.parse(await member.project(memberDoc)).people.map((p) => p.id);
+        const headBefore = (await transport.readKeyring(ownerDoc, 1)).head; // rev 2 (genesis + add)
+
+        // OWNER REMOVES the member: rotate the keyring, re-unlock the owner under the new epoch, publish rev 3.
+        await owner.removeMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: 'acct-member',
+        });
+        const headAfter = (await transport.readKeyring(ownerDoc, 1)).head; // rev 3 (after the remove)
+
+        // The re-unlocked owner still signs: write a POST-removal entry and push it.
+        await owner.assertAnchor(ownerDoc, 'pAfter', PERSON);
+        await owner.commit(ownerDoc);
+        const push = await owner.syncNow(ownerDoc);
+        const ownerAfter = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // A REMOVED member is locked out: a fresh worker with the member's account can no longer join the
+        // rotated tree (the walk is valid, but the member is absent from the head membership → unlock fails).
+        const rejoin = spawnWorker();
+        await rejoin.warm();
+        await rejoin.clearPersisted(rejoinDoc);
+        await rejoin.attachTransport(rejoinDoc, Comlink.proxy(transport));
+        let lockedOut = false;
+        try {
+          await rejoin.joinAsMember({
+            treeId, docId: rejoinDoc, passphrase: memberPass, memberId: 'acct-member',
+            memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+          });
+        } catch {
+          lockedOut = true;
+        }
+
+        return { beforeRemoval, headBefore, headAfter, pushState: push.state, ownerAfter, lockedOut };
+      },
+
       // reset() clears the tree + durable store, so a demo reseed replaces rather than piles up.
       async reseedClears() {
         const doc = 'reseed-e2e';

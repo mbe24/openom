@@ -251,6 +251,25 @@ impl AppCoreHandle {
         self.inner.set_membership(resolver).map_err(to_js)
     }
 
+    /// Author a self-heal **cover** over this device's stored entries whose author was a legitimate member but
+    /// is no longer current — the OPE-382 writer sweep. Call after a removal (once
+    /// [`setMembership`](Self::set_membership) has refreshed the resolver): returns the sealed `Cover` envelope
+    /// to push to the server data channel, or `undefined` when there is nothing to cover. The cover is NOT
+    /// stored locally (a Cover must not enter the claim log) but IS folded into the local covered set, so a
+    /// re-sweep is idempotent. Dag-only in practice (the chain retains per-revision history, so its removed
+    /// members' entries verify without a cover).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the store read or the seal fails.
+    #[wasm_bindgen(js_name = authorCover)]
+    pub fn author_cover(&mut self) -> Result<Option<Uint8Array>, JsError> {
+        Ok(self
+            .inner
+            .author_cover()
+            .map_err(to_js)?
+            .map(|bytes| Uint8Array::from(bytes.as_slice())))
+    }
+
     /// How many sealed batches are queued but not yet appended locally (0 == the local write is durable).
     #[wasm_bindgen(js_name = pendingCount)]
     #[must_use]
@@ -740,6 +759,43 @@ pub fn add_member(
         role,
         member_author_public,
         member_hpke_public,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
+/// Remove a member (owner action) — forward-secret re-epoch that drops the member and re-wraps the fresh DEK
+/// only for those who remain. Returns the new keyring + watermark to persist. The removal ROTATES the write
+/// epoch, so the owner's running core must be re-opened via [`unlock`] on the new keyring (its old sealer can
+/// no longer sign), then [`authorCover`](AppCoreHandle::author_cover) mints the self-heal cover.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, the owner passphrase is wrong, the target is the owner or
+/// not a member, or the removal is unauthorized.
+#[wasm_bindgen(js_name = removeMember)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn remove_member(
+    engine: &str,
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    remove_member_id: &str,
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::remove_member(
+        parse_engine(engine)?,
+        keyring,
+        &Passphrase::new(owner_passphrase.into_bytes()),
+        tree_id,
+        owner_member_id,
+        replica_id,
+        min_revision,
+        remove_member_id,
     )
     .map_err(to_js)?;
     Ok(MembershipChange {

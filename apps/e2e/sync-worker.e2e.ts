@@ -88,6 +88,25 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: an owner removes a member through the worker — rotate, re-unlock, lock out', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.shareRemoveLockout());
+
+  expect(r.beforeRemoval).toContain('pShared'); // the member joined and saw the shared write
+  expect(r.headBefore).toBe(2); // genesis + the add
+  expect(r.headAfter).toBe(3); // the removal rotated the keyring and published rev 3
+  expect(r.pushState).toBe('ok'); // the re-unlocked owner sealer signs + syncs under the new epoch
+  expect(r.ownerAfter).toContain('pShared'); // pre-removal history intact
+  expect(r.ownerAfter).toContain('pAfter'); // the post-removal signed write landed
+  expect(r.lockedOut).toBe(true); // the removed member can no longer unlock the rotated tree
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

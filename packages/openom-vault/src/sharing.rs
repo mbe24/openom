@@ -639,6 +639,68 @@ pub fn add_member(
     }
 }
 
+/// Remove a member (owner action) with **forward-secure revocation** — mint a fresh DEK under a new epoch,
+/// wrap it only for those who remain, and record the removal in a new signed keyring revision (chain) /
+/// `Remove` op (dag). Returns the new keyring/anchor + its watermark to persist. Unlike an add, a removal
+/// ROTATES the write epoch, so the owner's running sealer is now stale — the caller must re-unlock on the new
+/// keyring to obtain a signing sealer under the fresh epoch (the worker does this, then authors a self-heal
+/// cover so the removed member's prior history stays verifiable — dag only).
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, an attempt to remove the owner, an
+/// unknown member, or an unauthorized removal.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_member(
+    engine: EngineKind,
+    keyring: &[u8],
+    owner_passphrase: &Passphrase,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    remove_member_id: &str,
+) -> Result<AcceptedKeyring, VaultError> {
+    match engine {
+        EngineKind::Chain => {
+            let removed = vault::remove_member(
+                keyring,
+                owner_passphrase,
+                &TreeId::new(tree_id),
+                &MemberId::new(owner_member_id),
+                min_revision,
+                &MemberId::new(remove_member_id),
+                &ReplicaId::new(replica_id),
+            )?;
+            Ok(AcceptedKeyring {
+                keyring: removed.keyring,
+                watermark: chain_wm_pinned(
+                    removed.revision,
+                    &removed.write_key_id,
+                    &removed.write_dek_hash,
+                ),
+            })
+        }
+        EngineKind::Dag => {
+            let (tree, owner, replica) = (
+                TreeId::new(tree_id),
+                MemberId::new(owner_member_id),
+                ReplicaId::new(replica_id),
+            );
+            let ctx = VaultContext {
+                tree_id: &tree,
+                member_id: &owner,
+                replica_id: &replica,
+            };
+            let anchor = DagVault.remove_member(&ctx, keyring, owner_passphrase, remove_member_id)?;
+            let watermark = DagVault.watermark(&anchor)?;
+            Ok(AcceptedKeyring {
+                keyring: anchor,
+                watermark,
+            })
+        }
+    }
+}
+
 /// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
 /// the anchor (dag), then HPKE-unwrap the member's DEKs with their passphrase + account KDF. Returns a sealer
 /// to install in the core. `trusted_signers` is ignored by the dag (it resolves admission from the anchor).

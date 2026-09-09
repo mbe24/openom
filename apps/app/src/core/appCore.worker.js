@@ -15,6 +15,7 @@ import init, {
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
   addMember as wasmAddMember,
+  removeMember as wasmRemoveMember,
   provisionMember as wasmProvisionMember,
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   unlockAsMember as wasmUnlockAsMember,
@@ -338,6 +339,65 @@ const api = {
         { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
         { docId },
       );
+    }
+  },
+
+  /**
+   * Owner removes a member: forward-secret re-epoch (a fresh DEK the removed member can't reach, re-wrapped
+   * only for those who remain), persist the rotated keyring (+ chain per-revision retention), re-open the
+   * owner's core under the new epoch (the old sealer can no longer sign), and — dag — author a self-heal
+   * cover over the removed member's stored history so a fresh replica still verifies it. The rotated keyring
+   * is published (chain) and the cover pushed to the data channel (dag). `opts`: { passphrase, treeId,
+   * ownerMemberId, minRevision, removeMemberId, engine? }. Returns nothing — the caller re-reads membership.
+   */
+  async removeMember(
+    docId,
+    { passphrase, treeId, ownerMemberId, minRevision = 0, removeMemberId, engine = KEYRING_ENGINE },
+  ) {
+    const c = core(docId);
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const eng = head.engine || engine;
+    const change = wasmRemoveMember(
+      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
+    );
+    await keyringStore().saveHead(docId, eng, change.keyring);
+    // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
+    if (eng === 'chain') {
+      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      await keyringStore().save(docId, revision, change.keyring);
+    }
+    // A removal ROTATES the write epoch, so the owner's running sealer is now stale — its writes would seal
+    // under a dead epoch. Re-unlock on the rotated keyring → a signing sealer under the fresh epoch + the
+    // refreshed §B3 resolver (the removed member now resolves as a since-removed ever-member). Then, on the
+    // dag, author a self-heal cover so that member's already-accepted history stays verifiable on a fresh
+    // replay (the chain retains per-revision membership, so its history needs no cover). hydrate reloads the
+    // durable log, which is what authorCover sweeps.
+    const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, docId);
+    let cover = null;
+    try {
+      await saveWatermark(docId, re.watermark);
+      const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
+      await hydrate(nc);
+      await installMembership(nc, docId, eng, change.keyring);
+      cover = nc.handle.authorCover() ?? null; // Uint8Array (dag, if there is history to cover) | undefined
+      try { c.handle.free(); } catch { /* old handle already gone */ }
+      cores.set(docId, nc);
+    } finally {
+      re.free();
+    }
+    // Publish the rotated keyring so members adopt the removal (chain channel). Best-effort.
+    if (eng === 'chain' && transportFor(docId)) {
+      await publishKeyring(
+        { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+        { docId },
+      );
+    }
+    // Push the self-heal cover to the DATA channel so peers covered-accept the removed member's history. It is
+    // a bare sealed envelope (not in outbound — a Cover never enters the local claim log), so it is appended
+    // directly. Best-effort: if it fails to land, a later authorCover sweep re-mints it (idempotent).
+    if (cover && transportFor(docId)) {
+      await transportFor(docId).appendLog(docId, cover);
     }
   },
 
