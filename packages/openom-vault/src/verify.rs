@@ -45,6 +45,14 @@ pub trait MembershipResolver {
     fn shared(&self) -> bool;
     /// Resolve the governing membership for an entry sealed under `key_id` with header `governing_ref`.
     fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing;
+    /// Whether `member_id` was EVER a legitimate member — the self-heal covered-accept gate (pin P6): a data
+    /// entry may be covered-accepted only if its author is one, so a carve-out-voided thief (never a
+    /// legitimate member) or a never-member is never blessed by a cover. Defaults to `false` (fail-closed):
+    /// only the dag resolver, whose always-current model drops legitimately-removed members' history, needs a
+    /// real answer; the chain resolver retains history so covered-accept never fires there.
+    fn ever_member(&self, _member_id: &str) -> bool {
+        false
+    }
 }
 
 /// What to do with a pulled entry after §B3 verification.
@@ -261,6 +269,7 @@ pub mod dag {
         view: MembershipView,
         has_been_shared: bool,
         retained_epochs: BTreeSet<Vec<u8>>,
+        ever_members: BTreeSet<String>,
     }
 
     impl DagMembershipResolver {
@@ -271,11 +280,12 @@ pub mod dag {
         /// # Errors
         /// Returns [`VaultError`] if the anchor is malformed or its sealing does not fold.
         pub fn new(anchor: &[u8]) -> Result<Self, VaultError> {
-            let (view, has_been_shared, epoch_ids) = crate::dag_vault::verify_inputs(anchor)?;
+            let inputs = crate::dag_vault::verify_inputs(anchor)?;
             Ok(Self {
-                view,
-                has_been_shared,
-                retained_epochs: epoch_ids.into_iter().collect(),
+                view: inputs.view,
+                has_been_shared: inputs.shared,
+                retained_epochs: inputs.epoch_ids.into_iter().collect(),
+                ever_members: inputs.ever_members,
             })
         }
     }
@@ -283,6 +293,10 @@ pub mod dag {
     impl MembershipResolver for DagMembershipResolver {
         fn shared(&self) -> bool {
             self.has_been_shared
+        }
+
+        fn ever_member(&self, member_id: &str) -> bool {
+            self.ever_members.contains(member_id)
         }
 
         fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing {

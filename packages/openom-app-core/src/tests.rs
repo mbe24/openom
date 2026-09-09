@@ -712,6 +712,15 @@ fn a_cover_lets_a_removed_members_history_verify_on_a_fresh_replica() {
     assert_eq!(healed.anomalies(), 0, "nothing is rejected — the cover is honored, and it is not a forgery");
     // The cover itself is projection-inert: it is not a claim.
     assert!(!live_ids(&healed).contains("acct-bob"));
+
+    // Pin P6 — the covered-accept gate distinguishes a legitimately-removed member (whose Add is effective,
+    // so their history MAY be covered) from someone who was NEVER a legitimate member (a never-member, or a
+    // carve-out-voided thief whose Add is not effective — never coverable). A cover binding such an author is
+    // refused regardless of a valid signature, so a tricked/malicious cover can't launder a non-member's
+    // entries.
+    let r = resolver();
+    assert!(r.ever_member("acct-bob"), "a legitimately added-then-removed member is an ever-member");
+    assert!(!r.ever_member("acct-never"), "someone never admitted is not an ever-member → not coverable");
 }
 
 /// A fresh owner replica over the rotated dag anchor (a new device: owner unlock + a fresh store/replica).

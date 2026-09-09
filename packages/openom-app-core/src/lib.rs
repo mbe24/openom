@@ -466,15 +466,21 @@ impl<S: DocStore> AppCore<S> {
         if verdict == Disposition::Reject {
             let hash = Sha256::digest(&envelope.ciphertext);
             if let Some((member_id, key)) = self.covered.get(hash.as_slice()) {
-                if let Ok(plaintext) = self.client.try_open_delta(env) {
-                    if openom_vault::verify_covered_entry(
-                        envelope.version,
-                        header,
-                        &plaintext,
-                        member_id,
-                        key,
-                    ) {
-                        return Disposition::Accept;
+                // Pin P6: only covered-accept an author who was EVER a legitimate member — never a carve-out-
+                // voided thief (their Add was neutralized by a recovery) or a never-member. `ever_member`
+                // resolves that from the current anchor, so even a tricked/malicious cover over a voided
+                // author's entries is refused.
+                if membership.ever_member(member_id) {
+                    if let Ok(plaintext) = self.client.try_open_delta(env) {
+                        if openom_vault::verify_covered_entry(
+                            envelope.version,
+                            header,
+                            &plaintext,
+                            member_id,
+                            key,
+                        ) {
+                            return Disposition::Accept;
+                        }
                     }
                 }
             }

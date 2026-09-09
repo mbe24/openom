@@ -254,6 +254,13 @@ pub struct Resolved {
     pub checkpoint_sealing: Option<Vec<SealingEntry>>,
     /// The checkpoint's minting-op baseline (0 on an un-compacted anchor) — seeds the OPE-289 count.
     pub minting_ops_baseline: u32,
+    /// The member ids that were EVER legitimately admitted — the genesis founder plus every member whose
+    /// `Add` op is EFFECTIVE (authorized at its causal position), INCLUDING members later removed (a `Remove`
+    /// is a separate op; it doesn't un-effect the `Add`). It EXCLUDES a carve-out-voided `Add` (a key-thief
+    /// neutralized by a `ReFound` recovery — that Add is not effective). The self-heal (OPE-382 pin P6) uses
+    /// this: a data entry may be covered-accepted only if its author is here, so a voided thief's entries are
+    /// never blessed even by a tricked/malicious cover.
+    pub ever_members: std::collections::BTreeSet<String>,
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
@@ -381,12 +388,32 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         }
     }
     let has_been_shared = engine.has_been_shared();
+    // The ever-legitimately-a-member set (pin P6): the current members (founder + non-removed) plus every
+    // member whose Add is effective — which INCLUDES removed members (an effective Add survives a Remove) but
+    // NOT carve-out-voided Adds (they aren't effective). So a legitimately-removed member's history can be
+    // covered-accepted, while a voided thief's cannot.
+    let mut ever_members: std::collections::BTreeSet<String> =
+        members.members.iter().map(|m| m.member_id.clone()).collect();
+    for op_id in engine.effective_ops() {
+        if let Some(op) = by_id.get(&op_id) {
+            match &op.action {
+                MembershipAction::Add { member, .. } => {
+                    ever_members.insert(member.clone());
+                }
+                MembershipAction::Create { initial_members } => {
+                    ever_members.extend(initial_members.iter().map(|m| m.id.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
     Ok(Resolved {
         members,
         sealing,
         has_been_shared,
         checkpoint_sealing,
         minting_ops_baseline,
+        ever_members,
     })
 }
 

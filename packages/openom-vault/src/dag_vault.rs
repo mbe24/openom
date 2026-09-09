@@ -302,9 +302,15 @@ fn fold_resolved(resolved: &dag_client::Resolved) -> Result<FoldedSealing, Vault
 /// the write-winner. A legitimate entry sealed under a prior epoch (the norm after any `Remove`/`Reseal`
 /// rotation) must not be falsely `EpochMismatch`-rejected on a fresh replay; membership+role are still checked
 /// against the current view, so this widening never admits an unauthorised author.
-pub(crate) fn verify_inputs(
-    anchor: &[u8],
-) -> Result<(MembershipView, bool, Vec<Vec<u8>>), VaultError> {
+pub(crate) struct VerifyInputs {
+    pub view: MembershipView,
+    pub shared: bool,
+    pub epoch_ids: Vec<Vec<u8>>,
+    /// The ever-legitimately-a-member set — for the self-heal covered-accept P6 gate.
+    pub ever_members: std::collections::BTreeSet<String>,
+}
+
+pub(crate) fn verify_inputs(anchor: &[u8]) -> Result<VerifyInputs, VaultError> {
     let resolved =
         dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
     let folded = fold_resolved(&resolved)?;
@@ -313,7 +319,12 @@ pub(crate) fn verify_inputs(
         .iter()
         .map(|e| e.key_id.as_bytes().to_vec())
         .collect();
-    Ok((resolved.members, resolved.has_been_shared, epoch_ids))
+    Ok(VerifyInputs {
+        view: resolved.members,
+        shared: resolved.has_been_shared,
+        epoch_ids,
+        ever_members: resolved.ever_members,
+    })
 }
 
 /// Build the sealing payload for a covering reseal: a fresh DEK as a single new epoch, wrapped to the RRK
