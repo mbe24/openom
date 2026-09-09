@@ -343,6 +343,14 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     let mut ops = Vec::with_capacity(anchor.ops.len());
     for bytes in &anchor.ops {
         let op = decode_op(bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+        // Content-integrity (H2): the op's id MUST be the content-address of its fields. keyeo's `apply`
+        // authenticates the signature but keys the DAG by the SELF-DECLARED id and never checks it — so a
+        // validly-signed op could be relabeled, forging the Merkle identity the genesis-op pin + the
+        // watermark/`check_floor` anti-rollback rest on. Enforce it here, fail-closed, so any anchor that
+        // resolves has content-addressed ids.
+        if !crate::blob_sync::content_id_matches(&op) {
+            return Err(ClientError::Malformed("op id does not match its content (relabeled op)".into()));
+        }
         ops.push(op.clone());
         engine
             .apply(op)
@@ -401,6 +409,117 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         minting_ops_baseline,
         ever_members,
     })
+}
+
+/// The OOB trust pin a joining dag member binds to (the dag analog of the chain invite `(revision, hash)`):
+/// the content-addressed **genesis op id** (authenticates the founder + genesis config — see H1/H2 below),
+/// the pinned **recovery authority**, and an invite-time **frontier watermark** (the freshness floor — H4).
+/// The owner mints it at invite time via [`anchor_pin`]; the joiner hands it to [`verify_anchor`]. All three
+/// travel out-of-band; a compromised server cannot forge any of them.
+#[derive(Clone)]
+pub struct DagPin {
+    /// The content-address of the genesis `Create` op — a collision-resistant hash over the founder key +
+    /// genesis members + signature. Invariant across every later membership change.
+    pub genesis_op_id: [u8; 32],
+    /// The pinned recovery authority (RVK). NOT covered by `genesis_op_id` (the signed `Create` carries no
+    /// RVK), so it must be pinned + checked separately (H1).
+    pub reset_authority: Option<[u8; 32]>,
+    /// The frontier watermark at invite time — the freshness floor the join enforces so a server can't serve
+    /// an older valid subset (e.g. omit a `Remove` so a removed member reads as active) (H4).
+    pub watermark: Vec<u8>,
+}
+
+/// Mint the OOB [`DagPin`] for the CURRENT anchor (the owner does this at invite time).
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
+pub fn anchor_pin(anchor_bytes: &[u8]) -> Result<DagPin, ClientError> {
+    let anchor: DagAnchor =
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    Ok(DagPin {
+        genesis_op_id: anchor.genesis_op_id,
+        reset_authority: anchor.reset_authority,
+        watermark: watermark(anchor_bytes)?,
+    })
+}
+
+/// Verify an anchor served by an UNTRUSTED network against an OOB [`DagPin`] — the dag analog of the chain
+/// genesis-walk (design.dag-distribution.md). Establishes first-sight trust: the served anchor genuinely
+/// descends from the pinned founder and is no older than invite time. Fail-closed; the caller unlocks (its
+/// own-key anti-substitution) only on `Ok`. Returns the validated [`Resolved`] membership.
+///
+/// The checks, in order:
+/// - **H3** reject a checkpoint anchor (its base is only self-signed, not authority-verified).
+/// - group id, pinned genesis op id, and pinned recovery authority all match the pin.
+/// - `resolve` — every op's signature + content-id (H2) + group is validated and membership folded; this
+///   also confirms the genesis op is present at `genesis_op_id` and content-addresses to it.
+/// - **H1** the membership `resolve` actually trusts (the separate `anchor.genesis` DTO, since the in-DAG
+///   genesis `Create` is resolver-inert) must EXACTLY equal the pinned genesis op's `Create.initial_members`
+///   — else a server pins the real founder op yet seeds a substituted owner via the DTO.
+/// - **H4** `check_floor` against the pin's invite-time watermark — no rollback below invite-time state.
+///
+/// # Errors
+/// Returns [`ClientError`] on any failed check (malformed, checkpoint, pin mismatch, DTO mismatch, rollback).
+pub fn verify_anchor(anchor_bytes: &[u8], group_id: &[u8], pin: &DagPin) -> Result<Resolved, ClientError> {
+    let anchor: DagAnchor =
+        postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
+    if anchor.checkpoint.is_some() {
+        return Err(ClientError::Malformed(
+            "a compacted (checkpoint) anchor is not accepted on an untrusted join/adopt".into(),
+        ));
+    }
+    if anchor.group_id.as_slice() != group_id {
+        return Err(ClientError::Malformed("anchor group id does not match the tree".into()));
+    }
+    if anchor.genesis_op_id != pin.genesis_op_id {
+        return Err(ClientError::Malformed("anchor genesis op id does not match the pin".into()));
+    }
+    if anchor.reset_authority != pin.reset_authority {
+        return Err(ClientError::Malformed("anchor recovery authority does not match the pin".into()));
+    }
+    let resolved = resolve(anchor_bytes)?;
+    // H1: bind the DTO membership resolve trusts to the pinned genesis op's own `initial_members`.
+    let genesis_op = anchor_ops(anchor_bytes)?
+        .into_iter()
+        .find(|o| o.id == anchor.genesis_op_id)
+        .ok_or_else(|| ClientError::Malformed("pinned genesis op absent from the closure".into()))?;
+    let MembershipAction::Create { initial_members } = &genesis_op.action else {
+        return Err(ClientError::Malformed("pinned genesis op is not a Create".into()));
+    };
+    let init_dtos: Vec<_> = initial_members.iter().map(minit_to_dto).collect();
+    if anchor.genesis != init_dtos {
+        return Err(ClientError::Malformed(
+            "anchor genesis membership does not match the pinned genesis op".into(),
+        ));
+    }
+    check_floor(anchor_bytes, &pin.watermark)?;
+    Ok(resolved)
+}
+
+/// Adopt a newer anchor pulled from an UNTRUSTED network onto a member's local anchor (the sync/adopt path).
+/// Re-verifies the remote against the persisted `pin` (founder + recovery authority + group + no checkpoint +
+/// H1 DTO binding) with the member's PERSISTED `floor` as the freshness watermark (H4-on-sync), then
+/// set-union-`merge`s it onto the local anchor. `merge` keeps the local pinned genesis and never drops a
+/// local op, so a server that omitted the member's `Remove` can't re-add a removed member (and `check_floor`
+/// rejects the omission outright). Returns the merged anchor bytes; the caller re-`watermark`s + persists.
+///
+/// # Errors
+/// Returns [`ClientError`] on a failed verify (pin mismatch, checkpoint, rollback below `floor`) or a
+/// malformed anchor.
+pub fn accept_remote_anchor(
+    local_bytes: &[u8],
+    remote_bytes: &[u8],
+    group_id: &[u8],
+    pin: &DagPin,
+    floor: &[u8],
+) -> Result<Vec<u8>, ClientError> {
+    let sync_pin = DagPin {
+        genesis_op_id: pin.genesis_op_id,
+        reset_authority: pin.reset_authority,
+        watermark: floor.to_vec(),
+    };
+    verify_anchor(remote_bytes, group_id, &sync_pin)?;
+    merge(local_bytes, remote_bytes)
 }
 
 /// The ever-legitimately-a-member set (id → author key): the current members plus every member whose Add is
@@ -1010,6 +1129,83 @@ mod tests {
         assert!(
             matches!(check_floor(&a0, &w1), Err(ClientError::RolledBack(_))),
             "the advanced tip is absent from the stale anchor — a rollback"
+        );
+    }
+
+    /// A shared anchor (owner + an added member) with its OOB pin — the join fixture.
+    fn shared_anchor_and_pin() -> (Vec<u8>, DagPin) {
+        let a0 = provision_anchor(b"tree-vd", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+            .unwrap();
+        let pin = anchor_pin(&a1).unwrap();
+        (a1, pin)
+    }
+
+    #[test]
+    fn verify_anchor_accepts_a_legit_anchor_at_the_right_pin() {
+        let (anchor, pin) = shared_anchor_and_pin();
+        let resolved = verify_anchor(&anchor, b"tree-vd", &pin).unwrap();
+        assert!(resolved.has_been_shared, "a shared tree resolves as shared");
+        assert!(resolved.members.members.iter().any(|m| m.member_id == "bob"), "bob is a resolved member");
+    }
+
+    #[test]
+    fn verify_anchor_rejects_a_wrong_tree_or_wrong_pin() {
+        let (anchor, pin) = shared_anchor_and_pin();
+        assert!(verify_anchor(&anchor, b"other-tree", &pin).is_err(), "a wrong tree id is refused");
+        let mut bad = pin.clone();
+        bad.genesis_op_id[0] ^= 0xff;
+        assert!(verify_anchor(&anchor, b"tree-vd", &bad).is_err(), "a wrong genesis-op pin is refused");
+        let mut bad_rvk = pin.clone();
+        bad_rvk.reset_authority = Some([9u8; 32]);
+        assert!(verify_anchor(&anchor, b"tree-vd", &bad_rvk).is_err(), "a wrong recovery-authority pin is refused");
+    }
+
+    #[test]
+    fn verify_anchor_rejects_a_founder_substituted_anchor() {
+        // H1: keep the REAL genesis op (so the genesis_op_id pin matches) but tamper the SEPARATE `anchor.genesis`
+        // DTO that `resolve` actually builds membership from — seed a substituted owner key under the founder id.
+        // Without the DTO<->genesis-op binding, resolve would trust the attacker's key; the H1 check refuses it.
+        let (anchor, pin) = shared_anchor_and_pin();
+        let mut tampered: DagAnchor = postcard::from_bytes(&anchor).unwrap();
+        tampered.genesis = vec![crate::blob_sync::minit_to_dto(&minit("founder", KeyringRole::OWNER, 99))];
+        let bytes = postcard::to_allocvec(&tampered).unwrap();
+        assert!(
+            verify_anchor(&bytes, b"tree-vd", &pin).is_err(),
+            "an anchor whose genesis DTO diverges from the pinned genesis op is refused (founder substitution)"
+        );
+    }
+
+    #[test]
+    fn verify_anchor_rejects_a_rolled_back_anchor() {
+        // H4: pin at the CURRENT (post-add) frontier, then serve the older pre-add anchor. The invite-time
+        // freshness floor must reject it — else a server could serve a stale subset (e.g. before a Remove).
+        let a0 = provision_anchor(b"tree-rb", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+            .unwrap();
+        let pin = anchor_pin(&a1).unwrap(); // watermark = the post-add frontier
+        assert!(verify_anchor(&a1, b"tree-rb", &pin).is_ok(), "the current anchor satisfies its own floor");
+        assert!(
+            matches!(verify_anchor(&a0, b"tree-rb", &pin), Err(ClientError::RolledBack(_))),
+            "an anchor rolled back below the invite-time frontier is refused"
+        );
+    }
+
+    #[test]
+    fn accept_remote_anchor_adopts_forward_and_refuses_rollback() {
+        // The sync/adopt path: a member on a0 adopts the owner's advanced a1 (forward — ok), but refuses to
+        // "adopt" the stale a0 when its floor is already at a1 (a rollback).
+        let a0 = provision_anchor(b"tree-ad", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::MAINTAINER, 2), b"wrap".to_vec(), &sk(1))
+            .unwrap();
+        let pin = anchor_pin(&a0).unwrap();
+        let floor0 = watermark(&a0).unwrap();
+        let merged = accept_remote_anchor(&a0, &a1, b"tree-ad", &pin, &floor0).unwrap();
+        assert!(resolve(&merged).unwrap().members.members.iter().any(|m| m.member_id == "bob"), "adopts a1");
+        let floor1 = watermark(&a1).unwrap();
+        assert!(
+            accept_remote_anchor(&a1, &a0, b"tree-ad", &pin, &floor1).is_err(),
+            "refuses to adopt an anchor rolled back below the member's persisted floor"
         );
     }
 

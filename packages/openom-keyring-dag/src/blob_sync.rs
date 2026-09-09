@@ -225,7 +225,7 @@ enum ActionDto {
     Reseal,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MemberInitDto {
     id: String,
     role: KeyringRole,
@@ -269,6 +269,28 @@ pub(crate) fn decode_op(bytes: &[u8]) -> Result<KeyringOp> {
     );
     op.sealing = dto.sealing;
     Ok(op)
+}
+
+/// Whether an op's declared id is the true content-address of its own fields.
+///
+/// keyeo's `apply` authenticates the SIGNATURE (over group/parents/author/action/sealing) but keys the DAG
+/// by the op's SELF-DECLARED id and never checks it — so a validly-signed op could be RE-LABELED with an
+/// arbitrary id, forging Merkle-DAG identity (which the `watermark`/`check_floor` anti-rollback and the
+/// genesis-op pin both rest on). The CLIENT resolve path enforces this on every op it replays, so an anchor
+/// that resolves has content-addressed ids (the `sign_op` id-supplied constructor for tests / keyless
+/// fixtures deliberately does not, and never reaches `resolve`). Legit client ops (minted via `content_id`)
+/// always match.
+pub(crate) fn content_id_matches(op: &KeyringOp) -> bool {
+    keyeo_dag::content_id(
+        &op.group_id,
+        &op.parents,
+        &op.author,
+        &op.action,
+        &op.sealing,
+        &op.signature,
+        &op.author_public_key,
+    )
+    .0 == op.id
 }
 
 fn sig64(v: &[u8]) -> Result<[u8; 64]> {
