@@ -41,5 +41,5 @@ pub use verify::{
 pub mod membership;
 pub use membership::moderators;
 
-#[cfg(feature = "wasm")]
-pub mod wasm;
+// (The legacy `#[wasm_bindgen]` veneer was retired — the app-core worker is the single wasm surface now;
+// this crate is consumed only as an rlib by openom-app-core + openom-vault-host.)

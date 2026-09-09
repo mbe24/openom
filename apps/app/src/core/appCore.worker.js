@@ -41,8 +41,8 @@ import {
 let ready = null;
 const ensureInit = () => (ready ??= init());
 
-// The keyring engine this build provisions with (matches core/sealer/index.js). Runtime-selectable
-// later (Tauri seam); the web app is chain today.
+// The keyring engine this build provisions with. Runtime-selectable later (Tauri seam); the web app is
+// chain today.
 const KEYRING_ENGINE = 'chain';
 
 // Durable keyring store (IndexedDB; works in a Worker) — persists the genesis keyring on provision so a

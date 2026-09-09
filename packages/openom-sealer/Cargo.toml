@@ -7,7 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [lib]
-# rlib only — the wasm cdylib veneer moved to openom-vault with wasm.rs (OPE-279).
+# rlib only — envelope-only consumers depend on this lean sealer; the single wasm surface is openom-app-core.
 crate-type = ["rlib"]
 
 [dependencies]
