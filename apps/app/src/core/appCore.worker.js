@@ -76,9 +76,12 @@ const transports = new Map();
 const transportFor = (docId) => transports.get(docId) ?? null;
 
 class Core {
-  constructor(handle, docId, persist) {
+  constructor(handle, docId, persist, treeId = null, engine = null) {
     this.handle = handle;
     this.docId = docId;
+    this.treeId = treeId; // the 16-byte seam id — needed to sync the keyring channel before a data pull
+    this.engine = engine; // 'chain' | 'dag' | null — only chain has the per-revision keyring channel to sync
+    this.shared = false; // set once a §B3 resolver is installed (a shared tree) → the tick keyring-syncs first
     this.persist = persist; // mirror the local log to IndexedDB (off for in-memory / UI-test mode)
     this.persistLock = Promise.resolve(); // serialize persistence — commit and a tick both trigger it
     this.syncing = false; // single-flight: one tick at a time
@@ -140,6 +143,18 @@ async function installMembership(core, docId, engine, head) {
   if (!head || !wasmHasBeenShared(engine, head)) return;
   core.handle.setMembership(engine, head, await retainedKeyrings(docId, engine));
   core.handle.setModerators(wasmModerators(engine, head));
+  core.shared = true; // a shared tree → the sync tick pulls the keyring channel before the data channel
+}
+
+// Adopt any newer keyring revisions before a data pull (keyring-before-data), refreshing the resolver +
+// moderators. A no-op unless the tree is shared and has a treeId (chain member-sync only).
+async function syncKeyringForTick(c) {
+  if (!c.shared || c.engine !== 'chain' || !c.treeId || c.aborted) return;
+  const r = await syncKeyringImpl(
+    { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(c.docId), keyringStore: keyringStore() },
+    { docId: c.docId, treeId: c.treeId },
+  );
+  if (r.changed) await installMembership(c, c.docId, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
 }
 
 const api = {
@@ -156,7 +171,7 @@ const api = {
   async openDev(treeId, replicaId, createdBy, docId, persist = false) {
     await ensureInit();
     const handle = AppCoreHandle.dev(treeId, replicaId, createdBy, docId);
-    const core = new Core(handle, docId, persist);
+    const core = new Core(handle, docId, persist, treeId, null); // dev path: never shared, no keyring sync
     await hydrate(core); // importLog (if persisting) + bootstrap — uniform for both modes
     cores.set(docId, core);
     return true;
@@ -176,7 +191,7 @@ const api = {
       // genesis-walk must fetch rev 1 from the server.
       if (engine === 'chain') await keyringStore().save(docId, 1, res.keyring);
       await saveWatermark(docId, res.watermark); // the anti-rollback floor for recover / change-passphrase
-      const core = new Core(res.takeHandle(), docId, true);
+      const core = new Core(res.takeHandle(), docId, true, treeId, engine);
       await hydrate(core); // fresh store → a no-op bootstrap
       cores.set(docId, core);
       return {
@@ -203,7 +218,7 @@ const api = {
     const res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
     try {
       await saveWatermark(docId, res.watermark); // refresh the persisted floor
-      const core = new Core(res.takeHandle(), docId, true);
+      const core = new Core(res.takeHandle(), docId, true, treeId, eng);
       await hydrate(core); // load the persisted log + bootstrap
       await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
       cores.set(docId, core);
@@ -227,10 +242,12 @@ const api = {
       head.engine || engine, recoveryCode, newPassphrase, treeId, memberId, freshReplica(), head.bytes, floor, docId,
     );
     try {
-      await keyringStore().saveHead(docId, head.engine || engine, res.keyring); // the recovered keyring
+      const eng = head.engine || engine;
+      await keyringStore().saveHead(docId, eng, res.keyring); // the recovered keyring
       await saveWatermark(docId, res.watermark);
-      const core = new Core(res.takeHandle(), docId, true);
+      const core = new Core(res.takeHandle(), docId, true, treeId, eng);
       await hydrate(core);
+      await installMembership(core, docId, eng, res.keyring); // a recovered shared tree keeps verifying
       cores.set(docId, core);
       return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
     } finally {
@@ -338,7 +355,7 @@ const api = {
     );
     try {
       await saveWatermark(docId, res.watermark);
-      const c = new Core(res.takeHandle(), docId, true);
+      const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
       await hydrate(c);
       await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
       cores.set(docId, c);
@@ -468,6 +485,8 @@ async function runTick(c) {
   try {
     do {
       c.dirty = false;
+      if (c.aborted) break;
+      await syncKeyringForTick(c); // keyring-before-data: verify the tail against the CURRENT membership
       if (c.aborted) break;
       await pushOnce(c);
       if (c.aborted) break;
