@@ -770,6 +770,12 @@ fn frontier(ops: &[KeyringOp]) -> Vec<[u8; 32]> {
 }
 
 /// Decode an anchor's op closure (shared by [`watermark`] and [`check_floor`]).
+///
+/// NOTE: this decodes ops WITHOUT the [`content_id_matches`](crate::blob_sync::content_id_matches) integrity
+/// check — that lives in [`resolve`], the trust chokepoint. The anti-rollback machinery built on this
+/// ([`watermark`]/[`check_floor`]) keys off op ids, which are only trustworthy AFTER `resolve` has run. On the
+/// untrusted-ingest path [`verify_anchor`] runs `resolve` FIRST, so the floor check sees authenticated ids; a
+/// future caller must preserve that ordering (resolve-then-floor) rather than run the floor on raw bytes.
 fn anchor_ops(anchor_bytes: &[u8]) -> Result<Vec<KeyringOp>, ClientError> {
     let anchor: DagAnchor =
         postcard::from_bytes(anchor_bytes).map_err(|e| ClientError::Malformed(e.to_string()))?;
@@ -864,6 +870,15 @@ pub fn merge(anchor_a: &[u8], anchor_b: &[u8]) -> Result<Vec<u8>, ClientError> {
         postcard::from_bytes(anchor_b).map_err(|e| ClientError::Malformed(e.to_string()))?;
     let mut seen: HashSet<[u8; 32]> = anchor_ops(anchor_a)?.iter().map(|o| o.id).collect();
     for (blob, op) in b.ops.iter().zip(anchor_ops(anchor_b)?) {
+        // Never union a content-id-relabeled op (H2) from the other anchor: `apply` doesn't bind id↔content,
+        // so a relabeled op that reached us would be PERSISTED here and then fail every later `resolve()`
+        // (`Malformed`) — a peer-triggered denial of service on the local keyring. `resolve` re-checks anyway,
+        // but dropping it at the merge chokepoint keeps a poisoned op from ever entering the stored anchor.
+        // (The guarded `accept_remote_anchor` path has already content-validated `b` via `resolve`, so this is
+        // a no-op there; it hardens any UNguarded caller of `merge`.)
+        if !crate::blob_sync::content_id_matches(&op) {
+            continue;
+        }
         if seen.insert(op.id) {
             a.ops.push(blob.clone());
         }
@@ -1226,6 +1241,40 @@ mod tests {
             accept_remote_anchor(&a1, &a0, b"tree-ad", &pin, &floor1).is_err(),
             "refuses to adopt an anchor rolled back below the member's persisted floor"
         );
+    }
+
+    #[test]
+    fn merge_drops_a_content_id_relabeled_op() {
+        // Defense in depth (review observation): `merge` must never union a content-id-relabeled op from the
+        // other anchor — else an UNguarded caller would PERSIST a poisoned op that fails every later resolve().
+        let a0 = provision_anchor(b"tree-mg", "founder", vpk(1), xpk(1), vk(3), b"seal".to_vec(), &sk(1));
+        let genesis_id = {
+            let a: DagAnchor = postcard::from_bytes(&a0).unwrap();
+            a.genesis_op_id
+        };
+        // Mint a valid Add op, then RELABEL its id so it is no longer its own content-address.
+        let mut relabeled = mint(
+            &keyeo_dag::GroupId::new(b"tree-mg".to_vec()),
+            vec![genesis_id],
+            "founder".to_string(),
+            MembershipAction::Add {
+                member: "mallory".to_string(),
+                role: KeyringRole::CO_OWNER,
+                author_public_key: vk(9),
+                hpke_public_key: [9; 32],
+                member_proof: None,
+            },
+            b"wrap".to_vec(),
+            &sk(1),
+        );
+        relabeled.id = [0xAA; 32];
+        let mut b: DagAnchor = postcard::from_bytes(&a0).unwrap();
+        b.ops.push(crate::blob_sync::encode_op(&relabeled));
+        let merged = merge(&a0, &postcard::to_allocvec(&b).unwrap()).unwrap();
+        // The relabeled op was dropped at the merge chokepoint: the merged anchor still resolves cleanly and
+        // mallory (carried only by the relabeled Add) is not a member.
+        let resolved = resolve(&merged).expect("a merge that dropped the relabeled op still resolves");
+        assert!(!resolved.members.members.iter().any(|m| m.member_id == "mallory"));
     }
 
     #[test]
