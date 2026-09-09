@@ -18,12 +18,13 @@ import init, {
   provisionMember as wasmProvisionMember,
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   unlockAsMember as wasmUnlockAsMember,
+  wrapChainKeyringUpdate as wasmWrapKeyringUpdate,
   keyringHasBeenShared as wasmHasBeenShared,
   moderatorsFromKeyring as wasmModerators,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
-import { joinAsMember } from './sharing.js';
+import { joinAsMember, publishKeyring } from './sharing.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());
@@ -169,6 +170,9 @@ const api = {
     const res = wasmProvision(engine, passphrase, treeId, memberId, freshReplica(), docId);
     try {
       await keyringStore().saveHead(docId, engine, res.keyring); // persist genesis for later unlock
+      // Retain the genesis under revision 1 (chain) so a later share can PUBLISH it — a joining member's
+      // genesis-walk must fetch rev 1 from the server.
+      if (engine === 'chain') await keyringStore().save(docId, 1, res.keyring);
       await saveWatermark(docId, res.watermark); // the anti-rollback floor for recover / change-passphrase
       const core = new Core(res.takeHandle(), docId, true);
       await hydrate(core); // fresh store → a no-op bootstrap
@@ -295,6 +299,14 @@ const api = {
       await keyringStore().save(docId, revision, change.keyring);
     }
     await installMembership(c, docId, eng, change.keyring); // the tree is now shared → verify goes live
+    // Publish the shared keyring tail so a member's join can fetch it. Best-effort: if no transport is
+    // attached yet, the owner publishes on the next explicit publishKeyring / sync — the local state stands.
+    if (eng === 'chain' && transportFor(docId)) {
+      await publishKeyring(
+        { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+        { docId },
+      );
+    }
   },
 
   /**

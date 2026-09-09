@@ -69,6 +69,57 @@ export class JoinError extends Error {
   }
 }
 
+/** The server holds a keyring that forks off our produced tail (a 409 whose bytes differ from ours). */
+export class KeyringForkError extends Error {
+  constructor(revision) {
+    super(`keyring fork at revision ${revision}`);
+    this.name = 'KeyringForkError';
+    this.revision = revision;
+  }
+}
+
+function bytesEqual(a, b) {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Publish this device's produced CHAIN keyring tail so peers can pull + verify it: wrap each retained
+ * revision the server is missing and PUT it in ascending single-hop order (the chain verifier admits only
+ * revision == prior+1). A 409 whose served bytes equal ours is benign (already admitted); differing bytes are
+ * a fork. Idempotent + safe to retry. `deps`: { wasm: { wrapChainKeyringUpdate }, transport: { readKeyring,
+ * putKeyring }, keyringStore }. Returns the local head revision published to.
+ */
+export async function publishKeyring(deps, { docId }) {
+  const { wasm, transport, keyringStore } = deps;
+  const localHead = (await keyringStore.head(docId))?.revision ?? 0;
+  if (localHead === 0) return { head: 0 };
+  // The server's current keyring head (0 if none yet); probe from localHead so we don't refetch history.
+  let head = (await transport.readKeyring(docId, localHead)).head ?? 0;
+  while (head < localHead) {
+    const rev = head + 1;
+    const bytes = await keyringStore.at(docId, rev);
+    if (!bytes) throw new Error(`keyring retention gap at revision ${rev}`);
+    const update = wasm.wrapChainKeyringUpdate(bytes);
+    try {
+      await transport.putKeyring(docId, update);
+      head = rev;
+    } catch (e) {
+      if (e?.name === 'ConflictError') {
+        const served = (await transport.readKeyring(docId, rev)).revisions?.[0]?.bytes;
+        if (served && bytesEqual(served, bytes)) {
+          head = rev; // benign: this revision was already admitted with identical bytes
+          continue;
+        }
+        throw new KeyringForkError(rev);
+      }
+      throw e;
+    }
+  }
+  return { head: localHead };
+}
+
 /**
  * Join a shared CHAIN tree as a member (first-time onboarding): fetch the keyring history from the server,
  * genesis-walk + invite-pin verify it in the wasm, retain every verified revision under its WALK-DERIVED
@@ -82,7 +133,7 @@ export class JoinError extends Error {
 export async function joinAsMember(deps, opts) {
   const { wasm, transport, keyringStore, verifyFingerprint } = deps;
   const {
-    treeId, treeUuid, docId, passphrase, memberId, memberKdfParams,
+    treeId, docId, passphrase, memberId, memberKdfParams,
     pinnedRevision, pinnedHash, fp, engine = 'chain',
   } = opts;
   if (engine !== 'chain') throw new JoinError('genesis-walk join is chain-only');
@@ -90,7 +141,8 @@ export async function joinAsMember(deps, opts) {
   // and could roll an already-joined member backward on a stale link. Refuse — resync, don't re-join.
   if (await keyringStore.load(docId)) throw new JoinError('tree already present locally — use sync, not join');
 
-  const { revisions } = await transport.readKeyring(treeUuid, 1);
+  // The server addresses a tree's keyring channel by the same id as its delta log (docId).
+  const { revisions } = await transport.readKeyring(docId, 1);
   if (!revisions || revisions.length === 0) throw new JoinError('no keyring history to verify');
 
   // 1. Verify the walk from genesis, bound to the invite's (revision, hash) prefix pin. Any invalid transition

@@ -4,7 +4,7 @@
 // / passphrase failure persists NOTHING), handle-free on a post-unlock store failure, the already-present
 // guard, and the fingerprint cross-check.
 import { describe, it, expect } from 'vitest';
-import { joinAsMember, frameHops, unframe, JoinError } from '../app/src/core/sharing.js';
+import { joinAsMember, publishKeyring, frameHops, unframe, JoinError, KeyringForkError } from '../app/src/core/sharing.js';
 import { memoryKeyringStore } from '../app/src/core/sealer/keyringStore.js';
 
 const treeId = new Uint8Array(16).fill(0xaa);
@@ -129,5 +129,67 @@ describe('joinAsMember wiring', () => {
       ),
     ).rejects.toThrow(/fingerprint/);
     expect(await keyringStore.load('k1')).toBeNull();
+  });
+});
+
+// A publish transport that records PUTs and reports a server head; putKeyring throws a ConflictError when the
+// revision is already present, mimicking the server's 409.
+function publishTransport(serverHead = 0, presentBytes = {}) {
+  const puts = [];
+  return {
+    puts,
+    async readKeyring(_id, rev) {
+      const bytes = presentBytes[rev];
+      return { revisions: bytes ? [{ revision: rev, bytes }] : [], head: serverHead };
+    },
+    async putKeyring(_id, update) {
+      puts.push(update);
+    },
+  };
+}
+
+// A wasm double whose wrapChainKeyringUpdate just tags the bytes (the real wrap is Rust-tested).
+const wrapWasm = { wrapChainKeyringUpdate: (b) => new Uint8Array([0xff, ...b]) };
+
+describe('publishKeyring wiring', () => {
+  it('publishes every retained revision the server is missing, ascending', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1);
+    await keyringStore.save('k1', 2, REV2);
+    const transport = publishTransport(0);
+    const res = await publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' });
+    expect(res.head).toBe(2);
+    expect(transport.puts).toHaveLength(2); // rev 1 and rev 2
+    expect([...transport.puts[0]]).toEqual([0xff, ...REV1]);
+  });
+
+  it('is a no-op when the server is already at the local head', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1);
+    const transport = publishTransport(1);
+    const res = await publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' });
+    expect(res.head).toBe(1);
+    expect(transport.puts).toHaveLength(0);
+  });
+
+  it('treats a 409 with identical served bytes as benign', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1);
+    const transport = publishTransport(0, { 1: REV1 });
+    const conflict = Object.assign(new Error('409'), { name: 'ConflictError' });
+    transport.putKeyring = async () => { throw conflict; };
+    const res = await publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' });
+    expect(res.head).toBe(1); // advanced past the already-admitted revision
+  });
+
+  it('raises a fork when a 409 serves DIFFERENT bytes', async () => {
+    const keyringStore = memoryKeyringStore();
+    await keyringStore.save('k1', 1, REV1);
+    const transport = publishTransport(0, { 1: REV2 }); // server has different bytes at rev 1
+    const conflict = Object.assign(new Error('409'), { name: 'ConflictError' });
+    transport.putKeyring = async () => { throw conflict; };
+    await expect(
+      publishKeyring({ wasm: wrapWasm, transport, keyringStore }, { docId: 'k1' }),
+    ).rejects.toBeInstanceOf(KeyringForkError);
   });
 });
