@@ -1009,6 +1009,77 @@ pub fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     openom_vault::sharing::unwrap_chain_keyring(bytes).map_err(to_js)
 }
 
+// --- dag keyring distribution (OPE-392): the dag counterparts of the chain walk/hash/wrap veneers. The
+//     worker uses these to publish an anchor, first-sight-JOIN against an OOB pin, and adopt newer anchors. --
+
+/// Mint the OOB trust pin for a dag tree's CURRENT anchor (owner, invite time) — the dag analog of
+/// [`keyring_hash`]. Opaque bytes: the genesis-op id + recovery authority + invite-time frontier the joiner
+/// binds to.
+///
+/// # Errors
+/// Returns a [`JsError`] if the anchor is malformed.
+#[wasm_bindgen(js_name = dagAnchorPin)]
+pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::dag_anchor_pin(anchor).map_err(to_js)
+}
+
+/// Verify a dag anchor served by the untrusted network against an OOB pin — a member's first-sight JOIN, the
+/// dag analog of [`verify_keyring_walk`]. Returns the validated anchor + watermark to persist; the worker then
+/// calls [`unlock_as_member`] to open the member core. Throws on any failed trust check.
+///
+/// # Errors
+/// Returns a [`JsError`] on a malformed anchor/pin or a failed trust check.
+#[wasm_bindgen(js_name = verifyDagAnchor)]
+pub fn verify_dag_anchor(anchor: &[u8], tree_id: &[u8], pin: &[u8]) -> Result<MembershipChange, JsError> {
+    let a = openom_vault::sharing::verify_dag_anchor(anchor, tree_id, pin).map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: a.keyring,
+        watermark: a.watermark,
+    })
+}
+
+/// Adopt a newer dag anchor pulled from the untrusted network onto the local one (a member's SYNC), enforcing
+/// the persisted pin + anti-rollback `floor`. Returns the merged anchor + its new watermark.
+///
+/// # Errors
+/// Returns a [`JsError`] on a malformed input or a failed verify / rollback check.
+#[wasm_bindgen(js_name = acceptRemoteDagAnchor)]
+pub fn accept_remote_dag_anchor(
+    local: &[u8],
+    remote: &[u8],
+    tree_id: &[u8],
+    pin: &[u8],
+    floor: &[u8],
+) -> Result<MembershipChange, JsError> {
+    let a = openom_vault::sharing::accept_remote_dag_anchor(local, remote, tree_id, pin, floor)
+        .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: a.keyring,
+        watermark: a.watermark,
+    })
+}
+
+/// Frame a full dag anchor as the wire `KeyringUpdate` the server's keyring channel accepts (the dag mirror of
+/// [`wrap_chain_keyring_update`]). `revision` = the target server slot (server-head + 1); `tree_id` is a
+/// routing hint.
+///
+/// # Errors
+/// Returns a [`JsError`] if framing fails.
+#[wasm_bindgen(js_name = wrapDagKeyringUpdate)]
+pub fn wrap_dag_keyring_update(anchor: &[u8], tree_id: &[u8], revision: u32) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::wrap_dag_keyring_update(anchor, tree_id, revision).map_err(to_js)
+}
+
+/// Unwrap a served dag `MembershipEnvelope` payload to the raw anchor bytes (the dag mirror of
+/// [`unwrap_chain_keyring`]).
+///
+/// # Errors
+/// Returns a [`JsError`] if the bytes aren't a dag-tagged membership envelope.
+#[wasm_bindgen(js_name = unwrapDagKeyring)]
+pub fn unwrap_dag_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::unwrap_dag_keyring(bytes).map_err(to_js)
+}
+
 /// The content hash of a raw chain keyring revision — what an invite pins so a joiner's genesis-walk binds
 /// the verified history to the owner's published revision.
 ///

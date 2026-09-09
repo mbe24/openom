@@ -338,6 +338,94 @@
         return { beforeRemoval, headBefore, headAfter, pushState: push.state, ownerAfter, lockedOut };
       },
 
+      // THE dag distribution loop through the real worker: an owner provisions a DAG tree, admits a member,
+      // and the member JOINS by verifying a self-contained anchor against an OOB pin (no per-revision walk) —
+      // then verify-on-ingest accepts the owner's signed write AND the member's own maintainer write across
+      // the pull. A wrong pin is refused. Finally a removeMember rotates + republishes the anchor and authors
+      // the self-heal cover, pushing it to the data channel (the cover's covered-accept READER is proven in
+      // Rust — SH-3; the browser proves the dag join/publish/sync/verify wiring + the live cover trigger).
+      async shareVerifyDag() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(6);
+        const ownerDoc = `dag-owner-${crypto.randomUUID()}`;
+        const memberDoc = `dag-member-${crypto.randomUUID()}`;
+        const badDoc = `dag-bad-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        // Owner provisions a DAG tree, mints a member account, admits it as a Maintainer (so it can commit).
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner',
+          newMemberId: 'acct-member', role: 'maintainer',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine: 'dag',
+        });
+        const pin = await owner.dagAnchorPin(ownerDoc); // the OOB trust pin (post-add anchor)
+
+        // Owner writes a signed entry and pushes it.
+        await owner.assertAnchor(ownerDoc, 'pShared', PERSON);
+        await owner.commit(ownerDoc);
+        await owner.syncNow(ownerDoc);
+
+        // A WRONG pin is refused (the trust gate): flip a byte of the pin → the join must throw.
+        const badPin = new Uint8Array(pin); badPin[0] ^= 0xff;
+        const bad = spawnWorker();
+        await bad.warm();
+        await bad.clearPersisted(badDoc);
+        await bad.attachTransport(badDoc, Comlink.proxy(transport));
+        let wrongPinRejected = false;
+        try {
+          await bad.joinAsMember({
+            engine: 'dag', treeId, docId: badDoc, passphrase: memberPass, memberId: 'acct-member',
+            memberKdfParams: acct.kdfParams, pin: badPin,
+          });
+        } catch { wrongPinRejected = true; }
+
+        // The member JOINS with the right pin, syncs, and sees the owner's signed write.
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        const joined = await member.joinAsMember({
+          engine: 'dag', treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pin,
+        });
+        await member.syncNow(memberDoc);
+        const memberSees = JSON.parse(await member.project(memberDoc)).people.map((p) => p.id);
+
+        // The member writes its OWN maintainer entry; the owner pulls it and verify-on-ingest accepts it.
+        await member.assertAnchor(memberDoc, 'pMember', PERSON);
+        await member.commit(memberDoc);
+        await member.syncNow(memberDoc);
+        await owner.syncNow(ownerDoc);
+        const ownerSees = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // Owner REMOVES the member: rotate + republish the anchor, and author + push the self-heal cover over
+        // the member's now-removed history. The data channel grows by exactly the cover.
+        const keyringHeadBefore = (await transport.readKeyring(ownerDoc, 1)).head;
+        const dataBefore = transport._size();
+        await owner.removeMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: 'acct-member', engine: 'dag',
+        });
+        const keyringHeadAfter = (await transport.readKeyring(ownerDoc, 1)).head;
+        const dataAfter = transport._size();
+
+        return {
+          joinedDid: joined.didKey,
+          memberSees,
+          ownerSees,
+          wrongPinRejected,
+          keyringGrew: keyringHeadAfter > keyringHeadBefore,
+          coverPushed: dataAfter - dataBefore,
+        };
+      },
+
       // reset() clears the tree + durable store, so a demo reseed replaces rather than piles up.
       async reseedClears() {
         const doc = 'reseed-e2e';

@@ -25,10 +25,18 @@ import init, {
   syncKeyring as wasmSyncKeyring,
   keyringHasBeenShared as wasmHasBeenShared,
   moderatorsFromKeyring as wasmModerators,
+  dagAnchorPin as wasmDagAnchorPin,
+  verifyDagAnchor as wasmVerifyDagAnchor,
+  acceptRemoteDagAnchor as wasmAcceptRemoteDagAnchor,
+  wrapDagKeyringUpdate as wasmWrapDagKeyringUpdate,
+  unwrapDagKeyring as wasmUnwrapDagKeyring,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
-import { joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl } from './sharing.js';
+import {
+  joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
+  joinDagAnchor, publishDagAnchor, syncDagAnchor,
+} from './sharing.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());
@@ -148,15 +156,45 @@ async function installMembership(core, docId, engine, head) {
   core.shared = true; // a shared tree → the sync tick pulls the keyring channel before the data channel
 }
 
-// Adopt any newer keyring revisions before a data pull (keyring-before-data), refreshing the resolver +
-// moderators. A no-op unless the tree is shared and has a treeId (chain member-sync only).
+// Publish this device's current membership so peers can fetch + verify it (owner action, after an add/remove).
+// Chain PUTs the missing revision tail; the dag PUTs the full self-contained anchor as the next slot. A no-op
+// with no transport attached — the local state stands and publishes on the next call.
+async function publishMembership(docId, engine, treeId) {
+  if (!transportFor(docId)) return;
+  if (engine === 'chain') {
+    await publishKeyring(
+      { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+      { docId },
+    );
+  } else if (engine === 'dag') {
+    await publishDagAnchor(
+      { wasm: { wrapDagKeyringUpdate: wasmWrapDagKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
+      { docId, treeId },
+    );
+  }
+}
+
+// Adopt any newer keyring/membership before a data pull (keyring-before-data), refreshing the resolver +
+// moderators. A no-op unless the tree is shared and has a treeId. Chain walks the per-revision successors; the
+// dag adopts the latest self-contained anchor against its pin + the persisted anti-rollback floor.
 async function syncKeyringForTick(c) {
-  if (!c.shared || c.engine !== 'chain' || !c.treeId || c.aborted) return;
-  const r = await syncKeyringImpl(
-    { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(c.docId), keyringStore: keyringStore() },
-    { docId: c.docId, treeId: c.treeId },
-  );
-  if (r.changed) await installMembership(c, c.docId, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
+  if (!c.shared || !c.treeId || c.aborted) return;
+  if (c.engine === 'chain') {
+    const r = await syncKeyringImpl(
+      { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(c.docId), keyringStore: keyringStore() },
+      { docId: c.docId, treeId: c.treeId },
+    );
+    if (r.changed) await installMembership(c, c.docId, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
+  } else if (c.engine === 'dag') {
+    const r = await syncDagAnchor(
+      { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, dagAnchorPin: wasmDagAnchorPin, acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor }, transport: transportFor(c.docId), keyringStore: keyringStore() },
+      { docId: c.docId, treeId: c.treeId, floor: await loadWatermark(c.docId) },
+    );
+    if (r.changed) {
+      await saveWatermark(c.docId, r.watermark);
+      await installMembership(c, c.docId, 'dag', (await keyringStore().loadHead(c.docId)).bytes);
+    }
+  }
 }
 
 const api = {
@@ -332,14 +370,10 @@ const api = {
     } finally {
       re.free();
     }
-    // Publish the shared keyring tail so a member's join can fetch it. Best-effort: if no transport is
-    // attached yet, the owner publishes on the next explicit publishKeyring / sync — the local state stands.
-    if (eng === 'chain' && transportFor(docId)) {
-      await publishKeyring(
-        { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
-        { docId },
-      );
-    }
+    // Publish the shared keyring so a member's join can fetch it. Best-effort: if no transport is attached yet,
+    // the owner publishes on the next explicit publish / sync — the local state stands. Chain publishes the
+    // revision tail; the dag PUTs the full self-contained anchor as the next slot.
+    await publishMembership(docId, eng, treeId);
   },
 
   /**
@@ -386,13 +420,8 @@ const api = {
     } finally {
       re.free();
     }
-    // Publish the rotated keyring so members adopt the removal (chain channel). Best-effort.
-    if (eng === 'chain' && transportFor(docId)) {
-      await publishKeyring(
-        { wasm: { wrapChainKeyringUpdate: wasmWrapKeyringUpdate }, transport: transportFor(docId), keyringStore: keyringStore() },
-        { docId },
-      );
-    }
+    // Publish the rotated keyring so members adopt the removal. Best-effort.
+    await publishMembership(docId, eng, treeId);
     // Push the self-heal cover to the DATA channel so peers covered-accept the removed member's history. It is
     // a bare sealed envelope (not in outbound — a Cover never enters the local claim log), so it is appended
     // directly. Best-effort: if it fails to land, a later authorCover sweep re-mints it (idempotent).
@@ -411,6 +440,17 @@ const api = {
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const revision = (await keyringStore().head(docId))?.revision ?? 1;
     return { revision, hash: wasmKeyringHash(head.bytes) };
+  },
+
+  /**
+   * The OOB trust pin for the current DAG anchor — the dag analog of `keyringHash`. The owner mints this at
+   * invite time and hands it to the joiner out-of-band; the joiner passes it to `joinAsMember({ engine:'dag',
+   * pin })`. Opaque bytes (the genesis-op id + recovery authority + invite-time frontier). Dag only.
+   */
+  async dagAnchorPin(docId) {
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    return wasmDagAnchorPin(head.bytes);
   },
 
   /**
@@ -434,10 +474,17 @@ const api = {
     await ensureInit();
     const { docId, engine = KEYRING_ENGINE } = opts;
     if (!transportFor(docId)) throw new Error('attach a transport before joining');
-    const res = await joinAsMember(
-      { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember: wasmUnlockAsMember }, transport: transportFor(docId), keyringStore: keyringStore() },
-      opts,
-    );
+    // The dag joins over a self-contained anchor verified against an OOB pin; the chain genesis-walks the
+    // per-revision keyring history. Both return an OpenResult whose handle is the ready member core.
+    const res = engine === 'dag'
+      ? await joinDagAnchor(
+        { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, verifyDagAnchor: wasmVerifyDagAnchor, unlockAsMember: wasmUnlockAsMember }, transport: transportFor(docId), keyringStore: keyringStore() },
+        opts,
+      )
+      : await joinAsMember(
+        { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember: wasmUnlockAsMember }, transport: transportFor(docId), keyringStore: keyringStore() },
+        opts,
+      );
     try {
       await saveWatermark(docId, res.watermark);
       const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);

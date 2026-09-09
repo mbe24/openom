@@ -404,6 +404,93 @@ pub fn wrap_chain_keyring_update(keyring: &[u8]) -> Result<Vec<u8>, VaultError> 
     Ok(update.encode_to_vec())
 }
 
+// --- dag keyring distribution (OPE-392) — the thin marshallers over `openom_keyring_dag::client`'s trust
+//     primitives; the dag counterparts of the chain walk/wrap/hash above. ------------------------------------
+
+/// Mint the OOB trust pin for a dag tree's CURRENT anchor (owner, at invite time): the genesis-op id +
+/// recovery authority + invite-time frontier a joiner binds to. Opaque bytes; the joiner hands them back to
+/// [`verify_dag_anchor`]. The dag analog of [`chain_keyring_hash`].
+///
+/// # Errors
+/// Returns [`VaultError`] if the anchor is malformed.
+pub fn dag_anchor_pin(anchor: &[u8]) -> Result<Vec<u8>, VaultError> {
+    Ok(dag_client::anchor_pin(anchor)
+        .map_err(|e| err(e.to_string()))?
+        .encode())
+}
+
+/// Verify a dag anchor served by the UNTRUSTED network against an OOB pin — a member's first-sight JOIN, the
+/// dag analog of [`verify_keyring_walk`]. Returns the validated anchor + its watermark to persist.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed anchor/pin or any failed trust check (founder substitution, rollback,
+/// wrong tree, checkpoint).
+pub fn verify_dag_anchor(anchor: &[u8], tree_id: &[u8], pin: &[u8]) -> Result<AcceptedKeyring, VaultError> {
+    let pin = dag_client::DagPin::decode(pin).map_err(|e| err(e.to_string()))?;
+    dag_client::verify_anchor(anchor, tree_id, &pin).map_err(|e| err(e.to_string()))?;
+    let watermark = dag_client::watermark(anchor).map_err(|e| err(e.to_string()))?;
+    Ok(AcceptedKeyring {
+        keyring: anchor.to_vec(),
+        watermark,
+    })
+}
+
+/// Adopt a newer dag anchor pulled from the UNTRUSTED network onto the caller's local anchor — a member's
+/// SYNC, enforcing the persisted pin + anti-rollback floor. Returns the merged anchor + its new watermark.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed input or a failed verify / rollback check.
+pub fn accept_remote_dag_anchor(
+    local: &[u8],
+    remote: &[u8],
+    tree_id: &[u8],
+    pin: &[u8],
+    floor: &[u8],
+) -> Result<AcceptedKeyring, VaultError> {
+    let pin = dag_client::DagPin::decode(pin).map_err(|e| err(e.to_string()))?;
+    let merged = dag_client::accept_remote_anchor(local, remote, tree_id, &pin, floor)
+        .map_err(|e| err(e.to_string()))?;
+    let watermark = dag_client::watermark(&merged).map_err(|e| err(e.to_string()))?;
+    Ok(AcceptedKeyring {
+        keyring: merged,
+        watermark,
+    })
+}
+
+/// Frame a full dag anchor as the wire `KeyringUpdate` the server's keyring channel accepts — the dag mirror
+/// of [`wrap_chain_keyring_update`]. A dag anchor carries no revision of its own, so the caller supplies the
+/// target server slot (`revision` = server-head + 1) and the `tree_id` as routing hints.
+///
+/// # Errors
+/// Never fails today (the anchor is passed through opaquely); returns [`VaultError`] for signature symmetry
+/// with the chain wrap.
+#[allow(clippy::unnecessary_wraps)]
+pub fn wrap_dag_keyring_update(anchor: &[u8], tree_id: &[u8], revision: u32) -> Result<Vec<u8>, VaultError> {
+    const KEYRING_UPDATE_VERSION: u32 = 1;
+    let update = KeyringUpdate {
+        version: KEYRING_UPDATE_VERSION,
+        tree_id: tree_id.to_vec(),
+        engine: EngineKind::Dag.as_tag().to_string(),
+        update_ref: encode_governing_ref(revision),
+        payload: MembershipEnvelope::wrap(EngineKind::Dag, anchor.to_vec()).encode(),
+    };
+    Ok(update.encode_to_vec())
+}
+
+/// Unwrap a served dag `MembershipEnvelope` payload to the raw anchor bytes — the dag mirror of
+/// [`unwrap_chain_keyring`].
+///
+/// # Errors
+/// Returns [`VaultError`] if the bytes aren't a dag-tagged membership envelope.
+pub fn unwrap_dag_keyring(bytes: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let env = MembershipEnvelope::decode(bytes)
+        .map_err(|_| err("served keyring is not a valid membership envelope"))?;
+    if env.engine_kind() != Ok(EngineKind::Dag) {
+        return Err(err("served keyring envelope is not a dag anchor"));
+    }
+    Ok(env.body)
+}
+
 /// Validate a **recovery/succession reset** keyring against the caller's trusted `anchor` (§B3 slice 4). A
 /// reset changes the signer set WITHOUT the old set's endorsement, so `verify_walk` rejects it; this accepts
 /// it, but ONLY if it can't roll back or fork: a structurally valid, self-signed, wrap-complete keyring

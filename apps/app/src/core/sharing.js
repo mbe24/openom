@@ -226,3 +226,96 @@ export async function joinAsMember(deps, opts) {
   }
   return res;
 }
+
+// --- dag keyring distribution (OPE-392) — the dag counterparts of joinAsMember/publishKeyring/syncKeyring.
+//     A dag anchor is ONE self-contained blob (the full membership op-DAG), so there is no per-revision walk:
+//     the joiner takes the highest served revision (the whole history) and verifies it against an OOB pin.
+
+/**
+ * Join a shared DAG tree as a member (first-time onboarding): read the served anchor, verify it against the
+ * OOB pin (founder authenticity + invite-time freshness + no-checkpoint — all in the wasm `verifyDagAnchor`),
+ * then unlock as the member and retain the anchor as head. Fail-closed — any check throws a `JoinError` and
+ * persists nothing. `deps`: { wasm: { unwrapDagKeyring, verifyDagAnchor, unlockAsMember }, transport:
+ * { readKeyring }, keyringStore }. `opts`: { treeId(bytes), docId, passphrase, memberId, memberKdfParams(bytes),
+ * pin(bytes) }. Returns the wasm `OpenResult` (its handle is the ready member core).
+ */
+export async function joinDagAnchor(deps, opts) {
+  const { wasm, transport, keyringStore } = deps;
+  const { treeId, docId, passphrase, memberId, memberKdfParams, pin } = opts;
+  if (await keyringStore.load(docId)) throw new JoinError('tree already present locally — use sync, not join');
+
+  const { revisions } = await transport.readKeyring(docId, 1);
+  if (!revisions || revisions.length === 0) throw new JoinError('no keyring anchor to verify');
+  // Self-contained anchor: the HIGHEST served revision is the full current membership history.
+  const anchor = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+
+  // 1. Verify the served anchor against the OOB pin (throws on founder substitution / rollback / checkpoint).
+  let verified;
+  try {
+    verified = wasm.verifyDagAnchor(anchor, treeId, pin); // { keyring, watermark }
+  } catch (e) {
+    throw new JoinError(e?.message ?? String(e));
+  }
+  // 2. Unlock as the member against the VERIFIED anchor (own-key anti-substitution). A "not a member" error
+  //    here is the normal pre-admit "waiting for the owner to approve" state.
+  let res;
+  try {
+    res = wasm.unlockAsMember(
+      'dag', verified.keyring, passphrase, memberKdfParams, treeId, memberId,
+      new Uint8Array(0), freshReplicaId(), 0, docId,
+    );
+  } catch (e) {
+    throw new JoinError(e?.message ?? String(e));
+  }
+  // 3. Persist the verified anchor as head (persist-last; free the handle if the store write fails).
+  try {
+    await keyringStore.saveHead(docId, 'dag', verified.keyring);
+  } catch (e) {
+    try {
+      res.takeHandle()?.free();
+    } catch {
+      /* already gone */
+    }
+    throw e;
+  }
+  return res;
+}
+
+/**
+ * Publish the owner's current DAG anchor to the keyring channel (after an add/remove) — PUT the full anchor as
+ * the next server revision. A dag anchor is self-contained, so one PUT carries the whole membership history.
+ * `deps`: { wasm: { wrapDagKeyringUpdate }, transport: { readKeyring, putKeyring }, keyringStore }.
+ */
+export async function publishDagAnchor(deps, { docId, treeId }) {
+  const { wasm, transport, keyringStore } = deps;
+  const head = await keyringStore.loadHead(docId);
+  if (!head || (head.engine || 'dag') !== 'dag') return { head: 0 };
+  const serverHead = (await transport.readKeyring(docId, 1)).head ?? 0;
+  const revision = serverHead + 1;
+  await transport.putKeyring(docId, wasm.wrapDagKeyringUpdate(head.bytes, treeId, revision));
+  return { head: revision };
+}
+
+/**
+ * Adopt newer DAG membership from the server onto an already-joined member's local anchor: read the latest
+ * served anchor and `acceptRemoteDagAnchor` it onto ours, enforcing the pin (derived from our OWN verified
+ * local anchor — its genesis + recovery authority are already pinned) and the anti-rollback `floor` (our
+ * persisted watermark). Throws on a rollback / founder-substituted anchor. A no-op when nothing is newer.
+ * `deps`: { wasm: { unwrapDagKeyring, dagAnchorPin, acceptRemoteDagAnchor }, transport: { readKeyring },
+ * keyringStore }. Returns { changed, watermark? }.
+ */
+export async function syncDagAnchor(deps, { docId, treeId, floor }) {
+  const { wasm, transport, keyringStore } = deps;
+  const head = await keyringStore.loadHead(docId);
+  if (!head || (head.engine || 'dag') !== 'dag') return { changed: false };
+  const { revisions } = await transport.readKeyring(docId, 1);
+  if (!revisions || revisions.length === 0) return { changed: false };
+  const remote = wasm.unwrapDagKeyring(revisions[revisions.length - 1].bytes);
+  // The pin's founder identity comes from our TRUSTED local anchor (verified at join); the floor is our
+  // persisted watermark. acceptRemoteDagAnchor throws on a rollback below the floor or a founder swap.
+  const pin = wasm.dagAnchorPin(head.bytes);
+  const adopted = wasm.acceptRemoteDagAnchor(head.bytes, remote, treeId, pin, floor); // { keyring, watermark }
+  if (bytesEqual(adopted.keyring, head.bytes)) return { changed: false };
+  await keyringStore.saveHead(docId, 'dag', adopted.keyring);
+  return { changed: true, watermark: adopted.watermark };
+}

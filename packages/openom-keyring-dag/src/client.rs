@@ -416,7 +416,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
 /// the pinned **recovery authority**, and an invite-time **frontier watermark** (the freshness floor — H4).
 /// The owner mints it at invite time via [`anchor_pin`]; the joiner hands it to [`verify_anchor`]. All three
 /// travel out-of-band; a compromised server cannot forge any of them.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DagPin {
     /// The content-address of the genesis `Create` op — a collision-resistant hash over the founder key +
     /// genesis members + signature. Invariant across every later membership change.
@@ -427,6 +427,25 @@ pub struct DagPin {
     /// The frontier watermark at invite time — the freshness floor the join enforces so a server can't serve
     /// an older valid subset (e.g. omit a `Remove` so a removed member reads as active) (H4).
     pub watermark: Vec<u8>,
+}
+
+impl DagPin {
+    /// Serialize the pin for the out-of-band channel (opaque to the caller).
+    ///
+    /// # Panics
+    /// Never in practice: a `DagPin` (two fixed arrays + a byte vec) always serializes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("DagPin serialization is infallible")
+    }
+
+    /// Parse an out-of-band pin.
+    ///
+    /// # Errors
+    /// Returns [`ClientError::Malformed`] if the bytes are not a valid encoded pin.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ClientError> {
+        postcard::from_bytes(bytes).map_err(|e| ClientError::Malformed(e.to_string()))
+    }
 }
 
 /// Mint the OOB [`DagPin`] for the CURRENT anchor (the owner does this at invite time).

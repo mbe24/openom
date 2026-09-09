@@ -107,6 +107,25 @@ test('app-core: an owner removes a member through the worker — rotate, re-unlo
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: dag distribution — a member joins by pin, writes, and removeMember authors a cover', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.shareVerifyDag());
+
+  expect(r.joinedDid.length).toBeGreaterThan(0); // the member verified the anchor against the OOB pin + unlocked
+  expect(r.wrongPinRejected).toBe(true); // a tampered pin is refused — the founder/freshness trust gate holds
+  expect(r.memberSees).toContain('pShared'); // verify-on-ingest accepted the owner's signed dag write
+  expect(r.ownerSees).toContain('pShared');
+  expect(r.ownerSees).toContain('pMember'); // the member's own maintainer write verified on the owner's pull
+  expect(r.keyringGrew).toBe(true); // removeMember rotated + republished the anchor
+  expect(r.coverPushed).toBe(1); // removeMember authored + pushed exactly one self-heal cover to the data channel
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
