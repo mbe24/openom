@@ -277,6 +277,11 @@ impl<S: DocStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if releasing a now-valid held entry fails to append to the local store or fold.
     pub fn set_membership(&mut self, membership: Box<dyn MembershipResolver>) -> Result<usize, CoreError> {
+        // NOTE (follow-up): a sticky-shared guard here — refuse a resolver that reports `!shared()` when the
+        // current one reports `shared()`, so a worker bug feeding a stale pre-share keyring can't downgrade
+        // mid-session to accept-all — is worth adding, but must be threaded as a separate `was_shared` flag
+        // consulted in the verify path (not a guard here) so it doesn't collide with the crypto-free test
+        // double that encodes its route via `shared()`. Primary defense is installing the resolver at unlock.
         self.membership = Some(membership);
         self.drain_held()
     }
@@ -368,9 +373,17 @@ impl<S: DocStore> AppCore<S> {
         if self.held.is_empty() {
             return Ok(0);
         }
-        for env in std::mem::take(&mut self.held) {
-            match envelope_dot(&env) {
-                Some(dot) if !self.seen.contains(&dot) => self.admit(&env, dot)?,
+        let held = std::mem::take(&mut self.held);
+        for (i, env) in held.iter().enumerate() {
+            match envelope_dot(env) {
+                Some(dot) if !self.seen.contains(&dot) => {
+                    if let Err(e) = self.admit(env, dot) {
+                        // A local-store append failed — keep the failed entry AND the un-visited remainder
+                        // for a later retry rather than silently dropping them.
+                        self.held.extend_from_slice(&held[i..]);
+                        return Err(e);
+                    }
+                }
                 _ => {} // undecodable dots never entered the buffer; a since-stored dot needs no replay
             }
         }

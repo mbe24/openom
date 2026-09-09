@@ -123,6 +123,11 @@ pub mod chain {
     use super::{Governing, MembershipResolver};
     use crate::attribution::{epoch_is_attributed, has_been_shared};
 
+    /// How many revisions past the verified head a `governing_ref` may be before it is deemed fabricated
+    /// (Reject) rather than a not-yet-synced keyring race (Hold). A membership op is one revision, so a
+    /// handful of look-ahead covers any realistic keyring-behind-data race; beyond it the ref is bogus.
+    const HEAD_LOOKAHEAD: u32 = 16;
+
     /// Resolves an entry's governing keyring from the retained per-revision chain the client keeps.
     pub struct ChainMembershipResolver {
         head: Keyring,
@@ -135,7 +140,9 @@ pub mod chain {
         /// `Keyring` bytes the caller has already chain-verified and persisted).
         ///
         /// # Errors
-        /// Returns a decode error string if any keyring blob is malformed.
+        /// Returns a decode error string if any keyring blob is malformed, a retained keyring's own revision
+        /// disagrees with its `(rev, bytes)` key (a caller transposition would otherwise verify entries
+        /// against the WRONG revision's membership silently), or a retained keyring is for a different tree.
         pub fn new(head_bytes: &[u8], retained: &[(u32, Vec<u8>)]) -> Result<Self, String> {
             let head = Keyring::decode(head_bytes).map_err(|e| format!("bad head keyring: {e}"))?;
             let head_revision = head.revision;
@@ -143,6 +150,12 @@ pub mod chain {
             for (rev, bytes) in retained {
                 let kr =
                     Keyring::decode(bytes.as_slice()).map_err(|e| format!("bad keyring rev {rev}: {e}"))?;
+                if kr.revision != *rev {
+                    return Err(format!("retained keyring at key {rev} declares revision {}", kr.revision));
+                }
+                if kr.tree_id != head.tree_id {
+                    return Err(format!("retained keyring rev {rev} is for a different tree than the head"));
+                }
                 map.insert(*rev, kr);
             }
             Ok(Self {
@@ -169,9 +182,12 @@ pub mod chain {
                     expected_key_id: newest_key_id(kr),
                     epoch_attributed: epoch_is_attributed(kr, key_id),
                 },
-                // A ref above the verified head can't be legitimately reachable; at/below head it's a
-                // transient retention gap (we haven't synced that revision yet).
-                None if rev > self.head_revision => Governing::Illegitimate,
+                // Beyond a small look-ahead of the verified head the ref is fabricated → hard Reject. WITHIN
+                // it, a rev just past the head is the benign "keyring channel hasn't caught up with the data
+                // channel" race (owner shared + immediately wrote): HOLD and re-verify after the next keyring
+                // sync — like the dag's unknown-epoch case — rather than terminally dropping a legit racing
+                // entry (the two engines otherwise disagree on the identical race).
+                None if rev > self.head_revision.saturating_add(HEAD_LOOKAHEAD) => Governing::Illegitimate,
                 None => Governing::NotYetRetained,
             }
         }
@@ -194,12 +210,16 @@ pub mod chain {
 /// The dag engine's [`MembershipResolver`] implementation (OPE-382; §8.5 of `design.phase-c-dag-attribution.md`).
 ///
 /// Always-current: a dag entry's governing membership is the CURRENTLY resolved anchor — the dag has no linear
-/// revisions to retain per entry. This is admission-control sound (verifying against current membership can
-/// only be MORE restrictive than a correct at-authoring model, so no forgery slips through); its cost is that a
-/// since-removed member's history is dropped on a fresh replay, which the data-channel self-heal closes
-/// separately. The epoch-consistency check accepts ANY epoch the tree has folded (`retained_epochs`), not only
-/// the write-winner, so a legitimate prior-epoch entry (the norm after any `Remove`/`Reseal`) is not falsely
-/// `EpochMismatch`-rejected.
+/// revisions to retain per entry. This is admission-control sound in the common direction (an ex-member or a
+/// forger who was never a member fails `UnknownAuthor`). It is NOT strictly "only more restrictive," though: it
+/// is current-dependent in BOTH directions — a member later PROMOTED to a role they lacked when they authored
+/// an old (still re-pullable) entry has that backdated entry retroactively ACCEPTED, keeping its original
+/// causal/HLC position (so it can win a supersede race it shouldn't and falsifies audit history). That residue
+/// is bounded (a now-authorised author could re-mint equivalent content) and is closed by the snapshot-boundary
+/// (a signed checkpoint pins what was accepted below it), not here. Its OTHER cost is that a since-removed
+/// member's history is dropped on a fresh replay, which the data-channel self-heal closes separately. The
+/// epoch-consistency check accepts ANY epoch the tree has folded (`retained_epochs`), not only the write-winner,
+/// so a legitimate prior-epoch entry (the norm after any `Remove`/`Reseal`) is not falsely `EpochMismatch`-rejected.
 pub mod dag {
     use std::collections::BTreeSet;
 
@@ -439,14 +459,15 @@ mod tests {
     }
 
     #[test]
-    fn a_ref_beyond_the_head_is_rejected_not_held() {
+    fn a_ref_just_past_the_head_holds_but_a_far_future_ref_is_rejected() {
         let k = generate_identity().unwrap();
         let head = keyring(3, true, vec![member("m1", MemberRole::Admin, &k)]);
         let m = cm(&head, &[(3, &head)]);
-        // The entry stamps rev 4, above the verified head (3): illegitimate, a hard reject (not a hold that
-        // would stall the tail forever).
-        let h = signed(Kind::Delta, "m1", &k, 4, b"x");
-        assert_eq!(ingest(&m, &h, b"x"), Disposition::Reject);
+        // rev 4 is one past the verified head (3) — the benign "keyring channel hasn't caught up" race → Hold
+        // and re-verify after the next keyring sync, not a terminal drop.
+        assert_eq!(ingest(&m, &signed(Kind::Delta, "m1", &k, 4, b"x"), b"x"), Disposition::Hold);
+        // A ref far past the head is fabricated → hard Reject (can't stall the tail forever).
+        assert_eq!(ingest(&m, &signed(Kind::Delta, "m1", &k, 100, b"x"), b"x"), Disposition::Reject);
     }
 
     #[test]

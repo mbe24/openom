@@ -3628,6 +3628,7 @@ version = "0.1.0"
 dependencies = [
  "docsync",
  "js-sys",
+ "keyeo-crypto",
  "openom-crypto",
  "openom-data-claim",
  "openom-data-crdt",

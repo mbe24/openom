@@ -472,12 +472,14 @@ pub struct MemberUnlock {
     pub watermark: Vec<u8>,
 }
 
-/// Parse a role tag into the chain engine's [`MemberRole`].
+/// Parse a role tag into the chain engine's [`MemberRole`]. Accepts the canonical `"maintainer"` (the app's
+/// role vocabulary) as well as the chain's own `"admin"` tag for it, so ONE role string from the JS caller
+/// resolves on either engine (the dag's `parse_keyring_role` speaks `"maintainer"`).
 fn parse_member_role(s: &str) -> Result<MemberRole, VaultError> {
     match s {
         "owner" => Ok(MemberRole::Owner),
         "co-owner" => Ok(MemberRole::CoOwner),
-        "admin" => Ok(MemberRole::Admin),
+        "maintainer" | "admin" => Ok(MemberRole::Admin),
         "editor" => Ok(MemberRole::Editor),
         "viewer" => Ok(MemberRole::Viewer),
         other => Err(err(format!("unknown role: {other}"))),

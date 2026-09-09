@@ -433,9 +433,10 @@ fn a_shared_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forgery()
     .unwrap();
     let rev2 = added.keyring.clone();
 
-    // A chain resolver over BOTH retained governing revisions: rev 2 (the shared head, which governs the
-    // member's signed writes) and rev 1 (the pre-share genesis, which governs the unsigned forgery so it is
-    // rejected rather than perpetually held for a not-yet-retained keyring).
+    // A chain resolver retaining both governing revisions: rev 2 (the shared head, which governs the member's
+    // signed writes) and rev 1 (the pre-share genesis, retained for realism — a member retains its history).
+    // The unsigned forgery below carries an EMPTY governing_ref (rev 0), so it is Unattributed→Reject
+    // regardless of retention.
     let resolver = || -> Box<dyn MembershipResolver> {
         Box::new(ChainMembershipResolver::new(&rev2, &[(1u32, rev1.clone()), (2u32, rev2.clone())]).unwrap())
     };
@@ -618,6 +619,11 @@ fn a_shared_dag_tree_accepts_a_signed_member_write_and_rejects_an_unsigned_forge
     assert!(live_ids(&bob_core).contains("pSigned"), "a signed member write on the shared dag tree is accepted");
     assert!(!live_ids(&bob_core).contains("pForged"), "an unsigned write on the shared dag tree is rejected");
     assert!(bob_core.anomalies() >= 1, "the rejected forgery is surfaced as an anomaly");
+    assert_eq!(
+        b_store.read_updates("tree", None).unwrap().0.len(),
+        1,
+        "only the accepted entry is durably stored"
+    );
 }
 
 fn json_name(given: &str) -> serde_json::Value {

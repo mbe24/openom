@@ -733,17 +733,22 @@ pub fn unlock_as_member(
         min_revision,
     )
     .map_err(to_js)?;
-    let handle = AppCoreHandle {
-        inner: AppCore::new(
-            u.did_key.clone(),
-            u.sealer,
-            Arc::new(MemoryStore::new()),
-            doc,
-            replica_id.to_vec(),
-        ),
-    };
+    let mut inner = AppCore::new(
+        u.did_key.clone(),
+        u.sealer,
+        Arc::new(MemoryStore::new()),
+        doc,
+        replica_id.to_vec(),
+    );
+    // A member-unlocked core is a SHARED tree by definition, so install a §B3 resolver AT CONSTRUCTION —
+    // never leave it in the accept-all `membership: None` state where a sync tick before the worker's first
+    // setMembership would fold forgeries. The dag anchor is self-sufficient; the chain gets the head with an
+    // empty retained set (older governing revisions Hold — fail-closed — until the worker supplies them).
+    let resolver =
+        openom_vault::resolver_from(parse_engine(engine)?, keyring, &[]).map_err(to_js)?;
+    inner.set_membership(resolver).map_err(to_js)?;
     Ok(OpenResult {
-        handle: Some(handle),
+        handle: Some(AppCoreHandle { inner }),
         keyring: Vec::new(),
         recovery_code: String::new(),
         did_key: u.did_key,
