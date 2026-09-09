@@ -602,7 +602,7 @@ pub fn moderators_from_keyring(engine: EngineKind, keyring: &[u8]) -> Result<Vec
 }
 
 /// A non-owner member's unlock result: the DEK sealer to install in the running core, the member's author
-/// `did:key`, and the anti-rollback watermark to persist.
+/// `did:key`, the anti-rollback watermark to persist, and the retained epoch-adopt secret.
 pub struct MemberUnlock {
     /// The per-epoch DEK sealer (a member is on a shared tree by definition, so it signs entries).
     pub sealer: SealerSet,
@@ -610,6 +610,56 @@ pub struct MemberUnlock {
     pub did_key: String,
     /// The engine-opaque anti-rollback cursor to persist.
     pub watermark: Vec<u8>,
+    /// The member's retained epoch-adopt capability (OPE-393). A member unlock ALWAYS has one (a member is on
+    /// a shared tree by definition), so it is non-optional — the running core holds it to splice a later
+    /// (post-removal) epoch into its sealer on sync without a passphrase.
+    pub epoch_secret: MemberEpochSecret,
+}
+
+/// A member's retained epoch-adopt capability (OPE-393): the HPKE secret plus the context
+/// [`vault_core::member_epoch_deks`](crate) needs to unwrap a LATER epoch's DEK from a synced keyring/anchor
+/// WITHOUT the passphrase. The running member core holds this (never exposed to JS) and calls [`adopt`] after
+/// a keyring sync that rotated the write epoch (a removal), so it can then OPEN content sealed under the new
+/// epoch — the self-heal cover included — and SEAL new entries under it. The counterpart to the owner's
+/// passphrase re-unlock, which a member's background sync can't do (no passphrase in scope).
+///
+/// [`adopt`]: MemberEpochSecret::adopt
+pub struct MemberEpochSecret {
+    engine: EngineKind,
+    hpke_secret: openom_crypto::HpkePrivate,
+    tree_id: Vec<u8>,
+    member_id: String,
+}
+
+/// The epochs a [`MemberEpochSecret::adopt`] recovered from a synced keyring — to splice into the running
+/// sealer via [`openom_sealer::SealerSet::adopt_epochs`].
+pub struct AdoptedEpochs {
+    /// The reachable epoch DEKs `(key_id, dek)`; the sealer skips epochs it already holds (idempotent).
+    pub epochs: Vec<(Vec<u8>, openom_crypto::Key32)>,
+    /// The new write epoch's `key_id` — the highest-ordinal epoch the member can actually reach.
+    pub write_key_id: Vec<u8>,
+    /// The refreshed `governing_ref` for the new write epoch, so the member's attributed writes stamp the
+    /// current head (empty on a never-shared tree, where writes are unattributed).
+    pub governing_ref: Vec<u8>,
+}
+
+impl MemberEpochSecret {
+    /// Re-derive the reachable epoch DEKs from a freshly-synced keyring/anchor — a member's counterpart to the
+    /// owner re-unlock, needing no passphrase. The caller splices the result into the running sealer.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the keyring/anchor is malformed or the member now reaches NO epoch (a removed
+    /// member — the caller treats that as "nothing to adopt", not a hard failure).
+    pub fn adopt(&self, keyring: &[u8]) -> Result<AdoptedEpochs, VaultError> {
+        match self.engine {
+            EngineKind::Chain => {
+                vault::adopt_member_epochs(keyring, &self.hpke_secret, &self.tree_id, &self.member_id)
+            }
+            EngineKind::Dag => {
+                DagVault.adopt_member_epochs(keyring, &self.hpke_secret, &self.tree_id, &self.member_id)
+            }
+        }
+    }
 }
 
 /// Parse a role tag into the chain engine's [`MemberRole`]. Accepts the canonical `"maintainer"` (the app's
@@ -809,10 +859,16 @@ pub fn unlock_as_member(
     let kdf =
         keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|_| err("bad kdf params"))?;
     let member = MemberId::new(member_id);
+    let epoch_secret = |engine, hpke_secret| MemberEpochSecret {
+        engine,
+        hpke_secret,
+        tree_id: tree_id.to_vec(),
+        member_id: member_id.to_string(),
+    };
     match engine {
         EngineKind::Chain => {
             let trusted = parse_trusted_signers(trusted_signers)?;
-            let u = vault::unlock_as_member(
+            let (u, hpke_secret) = vault::unlock_as_member(
                 keyring,
                 &vault::MemberAuth {
                     passphrase,
@@ -828,6 +884,7 @@ pub fn unlock_as_member(
                 sealer: u.sealer,
                 did_key: u.did_key.into_string(),
                 watermark: chain_wm_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
+                epoch_secret: epoch_secret(EngineKind::Chain, hpke_secret),
             })
         }
         EngineKind::Dag => {
@@ -837,11 +894,12 @@ pub fn unlock_as_member(
                 member_id: &member,
                 replica_id: &replica,
             };
-            let u = DagVault.unlock_as_member(&ctx, keyring, passphrase, &kdf)?;
+            let (u, hpke_secret) = DagVault.unlock_as_member(&ctx, keyring, passphrase, &kdf)?;
             Ok(MemberUnlock {
                 sealer: u.sealer,
                 did_key: u.did_key.into_string(),
                 watermark: u.watermark,
+                epoch_secret: epoch_secret(EngineKind::Dag, hpke_secret),
             })
         }
     }

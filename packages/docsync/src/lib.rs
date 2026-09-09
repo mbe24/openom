@@ -167,6 +167,12 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         &mut self.engine
     }
 
+    /// Mutable access to the sealer — for caller-specific key-material operations docsync doesn't generalize
+    /// (e.g. splicing a newly-reachable epoch DEK into a running member's set after a rotation).
+    pub const fn sealer_mut(&mut self) -> &mut K {
+        &mut self.sealer
+    }
+
     /// Apply a local edit and immediately push it.
     ///
     /// # Errors

@@ -126,6 +126,24 @@ test('app-core: dag distribution — a member joins by pin, writes, and removeMe
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: dag self-heal — a remaining member adopts the rotated epoch and covered-accepts removed history', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.dagSelfHealCoveredAccept());
+
+  expect(r.carolBeforeRemoval).not.toContain('pBob'); // carol hadn't pulled bob's write before the removal
+  expect(r.carolSyncState).toBe('ok');
+  // After the removal, carol adopted the rotated epoch (so she could open the new-epoch cover) and
+  // covered-accepted bob's now-removed history — the full self-heal loop, live in a browser.
+  expect(r.carolAfter).toContain('pBob');
+  expect(r.carolAnomalies).toBe(0); // the cover is honored — nothing rejected
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

@@ -270,6 +270,19 @@ impl AppCoreHandle {
             .map(|bytes| Uint8Array::from(bytes.as_slice())))
     }
 
+    /// Adopt a rotated write epoch after a keyring sync (OPE-393) — a member's counterpart to the owner
+    /// re-unlock. Given the freshly-synced keyring/anchor, the core unwraps its newly-reachable epoch DEK with
+    /// the retained member secret (no passphrase) and splices it into the running sealer, so it can now OPEN
+    /// content sealed under the new epoch (the self-heal cover included) and SEAL under it. A no-op (0) on a
+    /// core with no retained member secret (owner / solo). Returns how many NEW epochs were spliced in.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the keyring is malformed or the member now reaches no epoch.
+    #[wasm_bindgen(js_name = adoptEpochs)]
+    pub fn adopt_epochs(&mut self, keyring: &[u8]) -> Result<usize, JsError> {
+        self.inner.adopt_epochs(keyring).map_err(to_js)
+    }
+
     /// How many sealed batches are queued but not yet appended locally (0 == the local write is durable).
     #[wasm_bindgen(js_name = pendingCount)]
     #[must_use]
@@ -844,6 +857,9 @@ pub fn unlock_as_member(
         doc,
         replica_id.to_vec(),
     );
+    // Retain the member's epoch-adopt secret so a keyring sync that rotates the write epoch (a removal) can
+    // splice the new epoch DEK into this running core WITHOUT a passphrase (OPE-393). Stays inside the core.
+    inner.set_member_epoch_secret(u.epoch_secret);
     // A member-unlocked core is a SHARED tree by definition, so install a §B3 resolver AT CONSTRUCTION —
     // never leave it in the accept-all `membership: None` state where a sync tick before the worker's first
     // setMembership would fold forgeries. The dag anchor is self-sufficient; the chain gets the head with an

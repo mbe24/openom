@@ -28,6 +28,9 @@ pub enum CoreError {
     /// A local durable-store error (the replicator's direct append / read).
     #[error(transparent)]
     Store(#[from] store_log::StoreError),
+    /// A vault crypto error — e.g. a member's epoch adopt over a malformed keyring (OPE-393).
+    #[error(transparent)]
+    Vault(#[from] openom_vault::VaultError),
 }
 
 /// The local-origin sealed deltas awaiting a server push, and the local-store cursor they cover.
@@ -97,6 +100,11 @@ pub struct AppCore<S: DocStore> {
     /// current membership on each [`set_membership`](Self) (a cover's own validity is current-time — pin P3).
     /// In-memory only, re-pulled from the server log each session.
     cover_envelopes: Vec<Vec<u8>>,
+    /// A MEMBER core retains its epoch-adopt secret (the HPKE secret + context) so a keyring sync that rotated
+    /// the write epoch (a removal) can splice the new epoch DEK into the running sealer WITHOUT a passphrase
+    /// (OPE-393) — see [`adopt_epochs`](Self::adopt_epochs). `None` on an owner / solo / never-shared core.
+    /// Never crosses to JS (the wasm veneer sets it inside this core at member unlock).
+    member_epoch_secret: Option<openom_vault::sharing::MemberEpochSecret>,
 }
 
 impl<S: DocStore> AppCore<S> {
@@ -125,7 +133,32 @@ impl<S: DocStore> AppCore<S> {
             rejected: 0,
             covered: std::collections::BTreeMap::new(),
             cover_envelopes: Vec::new(),
+            member_epoch_secret: None,
         }
+    }
+
+    /// Retain the member's epoch-adopt secret (OPE-393) — set by the wasm veneer at a MEMBER unlock so the
+    /// running core can adopt a later epoch on sync. Never exposed to JS.
+    pub fn set_member_epoch_secret(&mut self, secret: openom_vault::sharing::MemberEpochSecret) {
+        self.member_epoch_secret = Some(secret);
+    }
+
+    /// Adopt a rotated write epoch after a keyring sync — a member's counterpart to the owner re-unlock. Uses
+    /// the retained epoch-adopt secret to unwrap the freshly-synced keyring's reachable epochs (no passphrase)
+    /// and splices any new one into the running sealer, so the core can now OPEN content sealed under the new
+    /// epoch (the self-heal cover included) and SEAL under it. A no-op (returns 0) on a core with no retained
+    /// secret. Returns how many NEW epochs were spliced in.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the keyring is malformed or the member now reaches no epoch (a removed member).
+    pub fn adopt_epochs(&mut self, keyring: &[u8]) -> Result<usize, CoreError> {
+        let adopted = match self.member_epoch_secret.as_ref() {
+            None => return Ok(0),
+            Some(secret) => secret.adopt(keyring)?, // owned result — the borrow of `self` ends here
+        };
+        Ok(self
+            .client
+            .adopt_epochs(adopted.epochs, adopted.write_key_id, adopted.governing_ref))
     }
 
     /// The hold buffer's cap — entries awaiting a not-yet-synced governing keyring. Beyond this an overflow is

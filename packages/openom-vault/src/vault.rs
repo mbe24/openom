@@ -881,7 +881,7 @@ pub fn unlock_as_member(
     tree_id: &TreeId,
     replica_id: &ReplicaId,
     min_revision: u32,
-) -> Result<Unlocked, VaultError> {
+) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
     let member_passphrase = member.passphrase.expose();
     let member_kdf = member.kdf;
     let trusted_signers = member.trusted_signers;
@@ -928,12 +928,51 @@ pub fn unlock_as_member(
         let governing_ref = openom_keyring_chain::encode_governing_ref(keyring.revision);
         sealer = sealer.with_author(root.identity, member_id.to_string(), governing_ref);
     }
-    Ok(Unlocked {
-        sealer,
-        revision: keyring.revision,
-        did_key,
+    // A member unlock ALWAYS carries the HPKE secret (a member exists only on a shared tree): the running core
+    // retains it to adopt a later (post-removal) epoch on sync without the passphrase (OPE-393). It is a
+    // first-class second value, not an `Option` on the shared `Unlocked` — the owner path structurally has none.
+    Ok((
+        Unlocked {
+            sealer,
+            revision: keyring.revision,
+            did_key,
+            write_key_id,
+            write_dek_hash,
+        },
+        root.hpke_secret,
+    ))
+}
+
+/// Re-derive a member's reachable epoch DEKs from a freshly-synced chain keyring, using the HPKE secret the
+/// core retained at unlock — the crypto behind a member's epoch ADOPT on a rotation (OPE-393). No passphrase,
+/// no signature re-check (the sync path already verified the keyring): just unwrap the member's per-epoch
+/// wraps, like [`unlock_as_member`] but over an already-trusted keyring. Returns the reachable epochs + the
+/// new write epoch + the refreshed `governing_ref`.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring is malformed, is for a different tree, or the member reaches no epoch.
+pub fn adopt_member_epochs(
+    keyring_bytes: &[u8],
+    hpke_secret: &openom_crypto::HpkePrivate,
+    tree_id: &[u8],
+    member_id: &str,
+) -> Result<crate::sharing::AdoptedEpochs, VaultError> {
+    let keyring = decode_keyring(keyring_bytes)?;
+    if keyring.tree_id != tree_id {
+        return Err(VaultError::TreeMismatch);
+    }
+    let deks = member_epoch_deks(&keyring_epochs(&keyring)?, tree_id, member_id, hpke_secret);
+    let write_key_id = write_epoch_by_ordinal(&deks)?;
+    let governing_ref = if crate::has_been_shared(&keyring) {
+        openom_keyring_chain::encode_governing_ref(keyring.revision)
+    } else {
+        Vec::new()
+    };
+    let epochs = deks.into_iter().map(|(k, _e, d)| (k, d.into_inner())).collect();
+    Ok(crate::sharing::AdoptedEpochs {
+        epochs,
         write_key_id,
-        write_dek_hash,
+        governing_ref,
     })
 }
 
@@ -1841,7 +1880,7 @@ mod tests {
 
         // Member unlock: signs as the member.
         let founder = founder_key(&add.keyring);
-        let u_member = unlock_as_member(
+        let (u_member, _) = unlock_as_member(
             &add.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"m pass"),
@@ -2653,7 +2692,7 @@ mod tests {
 
         // The member unlocks against the pinned founder key and reads the owner's data.
         let pinned = founder_key(&owner.keyring);
-        let u = unlock_as_member(
+        let (u, _) = unlock_as_member(
             &added.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"member pass"),
@@ -2910,7 +2949,7 @@ mod tests {
         ));
 
         // B (remaining) unlocks the new epoch and reads the owner's post-removal content.
-        let bu = unlock_as_member(
+        let (bu, _) = unlock_as_member(
             &removed.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"b pass"),
@@ -3011,7 +3050,7 @@ mod tests {
 
         // Continuity: the member still verifies against the key they pinned BEFORE the change
         // (the old founder co-signed the transition), and reads the owner's content.
-        let via_old = unlock_as_member(
+        let (via_old, _) = unlock_as_member(
             &re.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"member pass"),
@@ -3298,7 +3337,7 @@ mod tests {
         )
         .unwrap();
         let pinned = founder_key(&owner.keyring);
-        let u = unlock_as_member(
+        let (u, _) = unlock_as_member(
             &added.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"m pass"),
@@ -3483,7 +3522,7 @@ mod tests {
         // The added member unlocks (trusting the founder AND the co-owner who added them — a
         // co-owner signed this revision) and reads content sealed before they joined.
         let co_vk = vk(&co.author_public_key);
-        let u = unlock_as_member(
+        let (u, _) = unlock_as_member(
             &added.keyring,
             &MemberAuth {
                 passphrase: &Passphrase::new(b"m3 pass"),

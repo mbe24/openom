@@ -823,7 +823,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         })?;
         let trusted = parse_trusted_signers(&trusted_signers)?;
         let replica = self.fresh_replica()?;
-        let u = vault::unlock_as_member(
+        // The retained HPKE secret (`_`) enables a member's epoch adopt-on-sync (OPE-393) — not yet wired on
+        // the Tauri host path; the running member core there re-unlocks with the passphrase for now.
+        let (u, _) = vault::unlock_as_member(
             &keyring,
             &vault::MemberAuth {
                 passphrase: &Passphrase::new(passphrase.into_bytes()),
@@ -1308,7 +1310,9 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             member_id: &member,
             replica_id: &rep,
         };
-        let u = dag.unlock_as_member(
+        // The retained HPKE secret (`_`) enables a member's epoch adopt-on-sync (OPE-393) — not yet wired on
+        // the Tauri host path.
+        let (u, _) = dag.unlock_as_member(
             &ctx,
             &anchor,
             &Passphrase::new(passphrase.into_bytes()),

@@ -184,7 +184,7 @@ async function syncKeyringForTick(c) {
       { wasm: { syncKeyring: wasmSyncKeyring, unwrapChainKeyring: wasmUnwrapKeyring }, transport: transportFor(c.docId), keyringStore: keyringStore() },
       { docId: c.docId, treeId: c.treeId },
     );
-    if (r.changed) await installMembership(c, c.docId, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
+    if (r.changed) await refreshMembershipAndEpochs(c, 'chain', (await keyringStore().loadHead(c.docId)).bytes);
   } else if (c.engine === 'dag') {
     const r = await syncDagAnchor(
       { wasm: { unwrapDagKeyring: wasmUnwrapDagKeyring, dagAnchorPin: wasmDagAnchorPin, acceptRemoteDagAnchor: wasmAcceptRemoteDagAnchor }, transport: transportFor(c.docId), keyringStore: keyringStore() },
@@ -192,9 +192,18 @@ async function syncKeyringForTick(c) {
     );
     if (r.changed) {
       await saveWatermark(c.docId, r.watermark);
-      await installMembership(c, c.docId, 'dag', (await keyringStore().loadHead(c.docId)).bytes);
+      await refreshMembershipAndEpochs(c, 'dag', (await keyringStore().loadHead(c.docId)).bytes);
     }
   }
+}
+
+// After a member adopts a keyring change: refresh the §B3 resolver + moderators AND — if the change rotated
+// the write epoch (a removal) — splice the new epoch DEK into the running sealer so the member can decrypt
+// post-rotation content (incl. the self-heal cover). adoptEpochs is a no-op on an owner core (no retained
+// member secret) and idempotent when no epoch is new, so it is safe to call after any membership change.
+async function refreshMembershipAndEpochs(c, engine, head) {
+  await installMembership(c, c.docId, engine, head);
+  c.handle.adoptEpochs(head);
 }
 
 const api = {

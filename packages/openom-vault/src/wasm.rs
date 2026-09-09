@@ -609,7 +609,9 @@ pub fn unlock_as_member(
     let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
         .map_err(|_| JsError::new("bad kdf params"))?;
     let trusted = parse_trusted_signers(trusted_signers)?;
-    let u = vault::unlock_as_member(
+    // `_` drops the member's retained HPKE secret — the epoch adopt-on-sync (OPE-393) is wired on the app-core
+    // worker path, not this legacy vault veneer.
+    let (u, _) = vault::unlock_as_member(
         keyring,
         &vault::MemberAuth {
             passphrase: &Passphrase::new(passphrase.into_bytes()),
@@ -852,7 +854,7 @@ pub fn dag_unlock_as_member(
         member_id: &member,
         replica_id: &rep,
     };
-    let u = DagVault
+    let (u, _) = DagVault
         .unlock_as_member(
             &ctx,
             keyring,

@@ -426,6 +426,77 @@
         };
       },
 
+      // THE dag self-heal, end to end through the worker (OPE-382 + OPE-393): an owner admits TWO maintainers
+      // (bob + carol), bob writes, the owner removes bob — authoring a cover under the NEW (post-removal) epoch
+      // — and carol, a REMAINING member, syncs: she adopts the rotated epoch (so she can open the cover) and
+      // covered-accepts bob's now-removed history. Proves the cover's covered-accept READER live in a browser,
+      // which needs the OPE-393 epoch adopt-on-sync (without it carol couldn't decrypt the new-epoch cover).
+      async dagSelfHealCoveredAccept() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(8);
+        const ownerDoc = `sh-owner-${crypto.randomUUID()}`;
+        const bobDoc = `sh-bob-${crypto.randomUUID()}`;
+        const carolDoc = `sh-carol-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const bobPass = 'bob passphrase here';
+        const carolPass = 'carol passphrase here';
+
+        // Owner provisions a dag tree and admits bob + carol, both Maintainers (so they commit deltas).
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+
+        const bob = spawnWorker(); await bob.warm(); await bob.clearPersisted(bobDoc);
+        const bobAcct = await bob.provisionMember(bobPass);
+        const carol = spawnWorker(); await carol.warm(); await carol.clearPersisted(carolDoc);
+        const carolAcct = await carol.provisionMember(carolPass);
+
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-bob', role: 'maintainer',
+          memberAuthorPublic: bobAcct.authorPublicKey, memberHpkePublic: bobAcct.hpkePublicKey, engine: 'dag',
+        });
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-carol', role: 'maintainer',
+          memberAuthorPublic: carolAcct.authorPublicKey, memberHpkePublic: carolAcct.hpkePublicKey, engine: 'dag',
+        });
+        const pin = await owner.dagAnchorPin(ownerDoc); // one pin over the anchor with BOTH members
+
+        // bob + carol join. They share the current epoch, so carol can later decrypt bob's write.
+        await bob.attachTransport(bobDoc, Comlink.proxy(transport));
+        await bob.joinAsMember({ engine: 'dag', treeId, docId: bobDoc, passphrase: bobPass, memberId: 'acct-bob', memberKdfParams: bobAcct.kdfParams, pin });
+        await carol.attachTransport(carolDoc, Comlink.proxy(transport));
+        await carol.joinAsMember({ engine: 'dag', treeId, docId: carolDoc, passphrase: carolPass, memberId: 'acct-carol', memberKdfParams: carolAcct.kdfParams, pin });
+
+        // bob writes a signed entry and pushes it; the owner pulls it (so its store holds bob's entry to cover).
+        await bob.assertAnchor(bobDoc, 'pBob', PERSON);
+        await bob.commit(bobDoc);
+        await bob.syncNow(bobDoc);
+        await owner.syncNow(ownerDoc);
+
+        // Carol has NOT synced data yet — she will first see pBob only AFTER bob's removal, so the covered-accept
+        // path (not a normal-member accept) is what admits it.
+        const carolBeforeRemoval = JSON.parse(await carol.project(carolDoc)).people.map((p) => p.id);
+
+        // Owner REMOVES bob: forward-secret re-epoch, author + push the self-heal cover (under the new epoch),
+        // publish the rotated anchor.
+        await owner.removeMember(ownerDoc, { passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', removeMemberId: 'acct-bob', engine: 'dag' });
+
+        // Carol syncs: keyring-before-data adopts the rotated anchor (bob removed) + ADOPTS the new epoch DEK,
+        // then pulls the data — bob's pBob (old epoch, held since join) + the cover (new epoch, just adopted).
+        // Her rotated resolver sees bob as removed-but-ever-member → she covered-accepts pBob.
+        const carolSync = await carol.syncNow(carolDoc);
+        const carolAfter = JSON.parse(await carol.project(carolDoc)).people.map((p) => p.id);
+
+        return {
+          carolBeforeRemoval,
+          carolAfter,
+          carolSyncState: carolSync.state,
+          carolAnomalies: carolSync.anomalies,
+        };
+      },
+
       // reset() clears the tree + durable store, so a demo reseed replaces rather than piles up.
       async reseedClears() {
         const doc = 'reseed-e2e';

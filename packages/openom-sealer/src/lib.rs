@@ -1,6 +1,9 @@
 #![doc = include_str!("../README.md")]
 
-use openom_crypto::{open_envelope, seal_envelope, CryptoError, Key32};
+use openom_crypto::{open_envelope, seal_envelope, CryptoError};
+/// The raw 32-byte DEK the sealer holds per epoch — re-exported so downstream crates (e.g. `openom-docsync`)
+/// can name the [`SealerSet::adopt_epochs`] argument type without a direct `openom-crypto` dependency.
+pub use openom_crypto::Key32;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_protocol::v1::{Aead, Compression, Envelope, Format, Header, Kind};
 use openom_protocol::Message;
@@ -393,6 +396,54 @@ impl SealerSet {
             w.set_author(signing_key, member_id, governing_ref);
         }
         self
+    }
+
+    /// Splice newly-reachable epoch DEKs into a RUNNING set after a rotation — a member's counterpart to the
+    /// owner's re-unlock. A removal mints a fresh forward-secret epoch and re-wraps it to the remaining
+    /// members; on the keyring sync a member unwraps that epoch (with its retained HPKE secret) and calls this
+    /// so it can now OPEN content sealed under the new epoch (incl. the self-heal cover) AND, if attributed,
+    /// SEAL new entries under it. Pushes each epoch not already held, advances the write epoch, and MOVES the
+    /// author identity to the new write-epoch sealer with the refreshed `governing_ref`. The per-replica chain
+    /// (counter/prev) lives in [`SealContext`], not the sealer, so pushing epochs preserves it. Idempotent —
+    /// epochs already held are skipped, so re-adopting the same keyring adds nothing. Returns how many NEW
+    /// epochs were spliced in.
+    pub fn adopt_epochs(
+        &mut self,
+        epochs: Vec<(Vec<u8>, Key32)>,
+        write_key_id: Vec<u8>,
+        governing_ref: Vec<u8>,
+    ) -> usize {
+        let replica_id = self
+            .sealers
+            .first()
+            .map_or_else(Vec::new, |s| s.replica_id.clone());
+        // Take the author off the CURRENT write-epoch sealer (if attributed) to re-attach to the new one.
+        let author = self
+            .sealers
+            .iter_mut()
+            .find(|s| s.key_id == self.write_key_id)
+            .and_then(|s| s.author.take());
+        let mut added = 0;
+        for (key_id, dek) in epochs {
+            if self.sealers.iter().any(|s| s.key_id == key_id) {
+                continue; // already held — idempotent
+            }
+            self.sealers.push(Sealer::from_unwrapped(
+                openom_protocol::ENVELOPE_VERSION,
+                dek,
+                TreeId::new(self.tree_id.clone()),
+                KeyId::new(key_id),
+                ReplicaId::new(replica_id.clone()),
+            ));
+            added += 1;
+        }
+        self.write_key_id = write_key_id;
+        if let Some(a) = author {
+            if let Some(w) = self.sealers.iter_mut().find(|s| s.key_id == self.write_key_id) {
+                w.set_author(a.signing_key, a.member_id, governing_ref);
+            }
+        }
+        added
     }
 
     /// A single-epoch set — the local-development / demo path (one dev sealer).

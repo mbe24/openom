@@ -33,7 +33,7 @@ use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlock
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
     new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf,
-    validated_kdf, RecoveryEscrow,
+    validated_kdf, write_epoch_by_ordinal, RecoveryEscrow,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
@@ -872,7 +872,7 @@ impl DagVault {
         anchor: &[u8],
         passphrase: &Passphrase,
         member_kdf: &KeyeoKdfParams,
-    ) -> Result<Unlocked, VaultError> {
+    ) -> Result<(Unlocked, openom_crypto::HpkePrivate), VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
         let replica_id = ctx.replica_id.as_bytes();
@@ -915,12 +915,50 @@ impl DagVault {
         if resolved.has_been_shared {
             sealer = sealer.with_author(root.identity, member_id.to_string(), watermark.clone());
         }
-        Ok(Unlocked {
-            sealer,
-            watermark,
-            did_key: DidKey::from_public_key(&my_key),
-            needs_reseal,
-            needs_backfill,
+        // A member unlock ALWAYS carries the HPKE secret (a member exists only on a shared tree): the running
+        // core retains it to adopt a later (post-removal) epoch on sync without the passphrase (OPE-393) — a
+        // first-class second value, not an `Option` on the shared `Unlocked` (the owner path has none).
+        Ok((
+            Unlocked {
+                sealer,
+                watermark,
+                did_key: DidKey::from_public_key(&my_key),
+                needs_reseal,
+                needs_backfill,
+            },
+            root.hpke_secret,
+        ))
+    }
+
+    /// Re-derive a member's reachable epoch DEKs from a freshly-synced dag anchor, using the HPKE secret the
+    /// core retained at unlock — the crypto behind a member's epoch ADOPT on a rotation (OPE-393). No
+    /// passphrase, no re-verification (the sync path already verified the anchor): resolve, fold the sealing,
+    /// and unwrap the member's per-epoch wraps, like [`Self::unlock_as_member`] over an already-trusted anchor.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed or the member reaches no epoch.
+    pub fn adopt_member_epochs(
+        &self,
+        anchor: &[u8],
+        hpke_secret: &openom_crypto::HpkePrivate,
+        tree_id: &[u8],
+        member_id: &str,
+    ) -> Result<crate::sharing::AdoptedEpochs, VaultError> {
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let FoldedSealing { epochs, .. } = fold_resolved(&resolved)?;
+        let deks = member_epoch_deks(&epochs, tree_id, member_id, hpke_secret);
+        let write_key_id = write_epoch_by_ordinal(&deks)?;
+        let governing_ref = if resolved.has_been_shared {
+            dag_client::watermark(anchor).map_err(map_floor_err)?
+        } else {
+            Vec::new()
+        };
+        let epochs_out = deks.into_iter().map(|(k, _e, d)| (k, d.into_inner())).collect();
+        Ok(crate::sharing::AdoptedEpochs {
+            epochs: epochs_out,
+            write_key_id,
+            governing_ref,
         })
     }
 
@@ -2373,7 +2411,7 @@ mod tests {
 
         // Member unlock: bob signs as himself.
         let bob_id = MemberId::new("acct-bob");
-        let u_member = DagVault
+        let (u_member, _) = DagVault
             .unlock_as_member(
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                 &new_anchor,
@@ -2512,7 +2550,7 @@ mod tests {
 
         // bob unlocks with his own passphrase + account KDF and reads the shared data.
         let bob_id = MemberId::new("acct-bob");
-        let u = DagVault
+        let (u, _) = DagVault
             .unlock_as_member(
                 &ctx(&tree, &bob_id, &ReplicaId::new(b"r-bob")),
                 &new_anchor,

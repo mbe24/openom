@@ -182,6 +182,21 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.engine_mut().0.set_moderators(moderators);
     }
 
+    /// Splice newly-reachable epoch DEKs into the running sealer after a rotation — a member's epoch ADOPT
+    /// (OPE-393). Delegates to [`openom_sealer::SealerSet::adopt_epochs`]. Returns how many NEW epochs were
+    /// added (0 if the sealer already held them all — idempotent).
+    pub fn adopt_epochs(
+        &mut self,
+        epochs: Vec<(Vec<u8>, openom_sealer::Key32)>,
+        write_key_id: Vec<u8>,
+        governing_ref: Vec<u8>,
+    ) -> usize {
+        self.inner
+            .sealer_mut()
+            .0
+            .adopt_epochs(epochs, write_key_id, governing_ref)
+    }
+
     /// The live record set as JSON — the fold's output the projection reads.
     ///
     /// # Errors
