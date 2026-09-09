@@ -76,8 +76,7 @@ pub async fn intent(
     // header is meaningless.
     let ok = base64::engine::general_purpose::STANDARD
         .decode(req.object_sha256.as_bytes())
-        .ok()
-        .is_some_and(|d| d.len() == 32);
+        .is_ok_and(|d| d.len() == 32);
     if !ok {
         return Err(ApiError::BadRequest(
             "object_sha256 must be base64 of a 32-byte SHA-256".into(),
