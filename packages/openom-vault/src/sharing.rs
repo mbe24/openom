@@ -708,4 +708,57 @@ mod tests {
         // A wrongly-sized key id / dek hash falls back to a bare revision.
         assert_eq!(chain_wm_pinned(7, &[1u8; 8], &[2u8; 32]), 7u32.to_be_bytes().to_vec());
     }
+
+    /// SPIKE (OPE-388 de-risk): drive the CHAIN genesis-walk member-join end-to-end at the rlib level, to
+    /// validate the exact data flow the worker JS must marshal — wrap each revision as the server's
+    /// `MembershipEnvelope`, frame the hops, `verify_keyring_walk` from the genesis pin, then `unlock_as_member`
+    /// at the verified head. If this passes, the worker join is just marshalling these calls.
+    #[test]
+    fn chain_genesis_walk_join_end_to_end() {
+        use crate::vault;
+        use openom_crypto::Passphrase;
+        use openom_keyring_chain::{keyring_hash, wire::Keyring};
+        use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
+
+        let tree = TreeId::new(b"tree-uuid-16byte".to_vec());
+        let owner = MemberId::new("acct-owner");
+        let owner_pass = Passphrase::new(b"owner passphrase".to_vec());
+
+        // Owner provisions the genesis (rev 1); bob mints his member account; owner admits bob (rev 2).
+        let prov = vault::provision(&owner_pass, &tree, &owner, &ReplicaId::new(b"ro".to_vec())).unwrap();
+        let owner_key = prov.did_key.to_public_key(); // the signer bob pins
+        let bob_pass = Passphrase::new(b"bob passphrase".to_vec());
+        let bob = vault::provision_member(&bob_pass).unwrap();
+        let shared = super::add_member(
+            EngineKind::Chain, &prov.keyring, &owner_pass, b"tree-uuid-16byte", "acct-owner", b"ro", 1,
+            "acct-bob", "editor", &bob.author_public_key, &bob.hpke_public_key,
+        )
+        .unwrap()
+        .keyring;
+
+        // The server stores each revision as a MembershipEnvelope; the joiner pulls them framed as hops.
+        let hops = frame_length_prefixed(&[
+            MembershipEnvelope::wrap(EngineKind::Chain, prov.keyring.clone()).encode(),
+            MembershipEnvelope::wrap(EngineKind::Chain, shared.clone()).encode(),
+        ]);
+        let pin_hash = keyring_hash(&Keyring::decode(prov.keyring.as_slice()).unwrap())
+            .as_slice()
+            .to_vec();
+
+        // Genesis-walk + invite-pin (pin the genesis rev 1).
+        let walk = super::verify_keyring_walk(b"tree-uuid-16byte", &hops, 1, &pin_hash).unwrap();
+        assert_eq!(walk.revision, 2, "walks to the shared head");
+        assert_eq!(walk.head_keyring, shared, "head body is the rev-2 keyring");
+        assert_eq!(split_length_prefixed(&walk.bodies_framed).unwrap().len(), 2, "retains both revisions");
+
+        // Bob joins at the verified head, pinning the owner as the trusted signer.
+        let unlocked = super::unlock_as_member(
+            EngineKind::Chain, &walk.head_keyring, &bob_pass,
+            &keyeo_crypto::codec::encode_kdf_params(&bob.kdf_params),
+            b"tree-uuid-16byte", "acct-bob", &owner_key, b"rb", walk.revision,
+        )
+        .unwrap();
+        assert!(!unlocked.did_key.is_empty(), "bob unlocks as a member and gets his author did:key");
+        assert_eq!(unlocked.watermark.len(), 4 + 16 + 32, "the head watermark is the OPE-286 pinned form");
+    }
 }
