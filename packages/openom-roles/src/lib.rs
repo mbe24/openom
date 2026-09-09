@@ -52,12 +52,13 @@ impl Access {
 /// The weakest role allowed to AUTHOR an entry of `kind` — the client-side verify mapping, mirroring the
 /// server's endpoint matrix.
 ///
-/// Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+.
+/// Snapshot & Delta are commits (Maintainer+); Proposal and Media are Editor+. Cover is the self-heal
+/// marker — a Maintainer+ act (it blesses a removed member's data, an authority a mere Editor lacks).
 /// `None` for a kind that can't be role-gated (unspecified).
 #[must_use]
 pub const fn required_role_for_kind(kind: Kind) -> Option<i16> {
     match kind {
-        Kind::Snapshot | Kind::Delta => Some(ROLE_MAINTAINER),
+        Kind::Snapshot | Kind::Delta | Kind::Cover => Some(ROLE_MAINTAINER),
         Kind::Proposal | Kind::Media => Some(ROLE_EDITOR),
         Kind::Unspecified => None,
     }
@@ -85,6 +86,7 @@ mod tests {
         );
         assert_eq!(required_role_for_kind(Kind::Proposal), Some(ROLE_EDITOR));
         assert_eq!(required_role_for_kind(Kind::Media), Some(ROLE_EDITOR));
+        assert_eq!(required_role_for_kind(Kind::Cover), Some(ROLE_MAINTAINER));
         assert_eq!(required_role_for_kind(Kind::Unspecified), None);
     }
 

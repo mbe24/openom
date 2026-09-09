@@ -23,6 +23,10 @@ pub enum EntryKind {
     /// A staged bundle of edits awaiting approval — sealed under the tree DEK but kept in a
     /// separate proposals channel, never on the append/log path.
     Proposal,
+    /// A data-channel self-heal marker (OPE-382): a Maintainer+-signed log entry whose sealed body is a set
+    /// of covered ciphertext-hashes (each with the author key that signed it), blessing a since-removed
+    /// member's entries so they still verify on a fresh replay. Projection-inert — never folded as a claim.
+    Cover,
 }
 
 impl EntryKind {
@@ -32,6 +36,7 @@ impl EntryKind {
             Self::Delta => Kind::Delta,
             Self::Media => Kind::Media,
             Self::Proposal => Kind::Proposal,
+            Self::Cover => Kind::Cover,
         }
     }
 
@@ -41,6 +46,7 @@ impl EntryKind {
             Kind::Delta => Some(Self::Delta),
             Kind::Media => Some(Self::Media),
             Kind::Proposal => Some(Self::Proposal),
+            Kind::Cover => Some(Self::Cover),
             Kind::Unspecified => None,
         }
     }

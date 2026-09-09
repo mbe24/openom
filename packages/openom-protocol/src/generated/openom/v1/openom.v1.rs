@@ -90,6 +90,28 @@ pub struct Header {
     #[prost(bytes="vec", tag="15")]
     pub blob_id: ::prost::alloc::vec::Vec<u8>,
 }
+/// The decrypted body of a KIND_COVER entry (OPE-382 self-heal): the set of entries this cover blesses. Each
+/// covered entry names its ciphertext-hash (H(ciphertext), recomputed by the reader — the header field is
+/// unauthenticated) plus the id + author key that signed it, so the reader verifies the covered entry's
+/// signature against these bound values while WAIVING only the current-membership/role check. The cover
+/// author must have observed + accepted each entry it lists (a Maintainer's own signed, auditable act).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CoverBody {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<CoveredEntry>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CoveredEntry {
+    /// H(ciphertext) of the blessed entry — recomputed from the actual ciphertext at verify time.
+    #[prost(bytes="vec", tag="1")]
+    pub ciphertext_hash: ::prost::alloc::vec::Vec<u8>,
+    /// The blessed entry's claimed author (must equal its header.author_member_id).
+    #[prost(string, tag="2")]
+    pub author_member_id: ::prost::alloc::string::String,
+    /// The Ed25519 verify key the blessed entry's author_signature is checked against.
+    #[prost(bytes="vec", tag="3")]
+    pub author_public_key: ::prost::alloc::vec::Vec<u8>,
+}
 /// The managed keyring-endpoint transport envelope: the ONE message the server parses for
 /// `PUT /trees/{id}/keyring`. It carries only ROUTING metadata the server uses WITHOUT understanding any
 /// keyring implementation, plus an opaque `payload`. The server dispatches on `engine` to a KeyringVerifier,
@@ -123,6 +145,13 @@ pub struct KeyringUpdate {
 /// separate proposals channel and MUST be refused on the append/log path, so a
 /// malicious server can't replay an editor's proposal into the tree. MEDIA and
 /// PROPOSAL leave the tree-coordination fields above empty.
+///
+/// COVER is the data-channel self-heal marker (OPE-382): a Maintainer+-authored,
+/// signed log entry whose sealed body is a set of ciphertext-hashes (each paired
+/// with the author key that signed the covered entry) that the author has observed
+/// and accepted, blessing those entries so a since-removed member's history still
+/// verifies on a fresh replay. It is projection-inert — never a claim; the reader
+/// folds its body into the covered set, never into the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum Kind {
@@ -131,6 +160,7 @@ pub enum Kind {
     Delta = 2,
     Media = 3,
     Proposal = 4,
+    Cover = 5,
 }
 impl Kind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -144,6 +174,7 @@ impl Kind {
             Self::Delta => "KIND_DELTA",
             Self::Media => "KIND_MEDIA",
             Self::Proposal => "KIND_PROPOSAL",
+            Self::Cover => "KIND_COVER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -154,6 +185,7 @@ impl Kind {
             "KIND_DELTA" => Some(Self::Delta),
             "KIND_MEDIA" => Some(Self::Media),
             "KIND_PROPOSAL" => Some(Self::Proposal),
+            "KIND_COVER" => Some(Self::Cover),
             _ => None,
         }
     }

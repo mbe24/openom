@@ -84,12 +84,38 @@ message Header {
 // separate proposals channel and MUST be refused on the append/log path, so a
 // malicious server can't replay an editor's proposal into the tree. MEDIA and
 // PROPOSAL leave the tree-coordination fields above empty.
+//
+// COVER is the data-channel self-heal marker (OPE-382): a Maintainer+-authored,
+// signed log entry whose sealed body is a set of ciphertext-hashes (each paired
+// with the author key that signed the covered entry) that the author has observed
+// and accepted, blessing those entries so a since-removed member's history still
+// verifies on a fresh replay. It is projection-inert — never a claim; the reader
+// folds its body into the covered set, never into the tree.
 enum Kind {
   KIND_UNSPECIFIED = 0;
   KIND_SNAPSHOT = 1;
   KIND_DELTA = 2;
   KIND_MEDIA = 3;
   KIND_PROPOSAL = 4;
+  KIND_COVER = 5;
+}
+
+// The decrypted body of a KIND_COVER entry (OPE-382 self-heal): the set of entries this cover blesses. Each
+// covered entry names its ciphertext-hash (H(ciphertext), recomputed by the reader — the header field is
+// unauthenticated) plus the id + author key that signed it, so the reader verifies the covered entry's
+// signature against these bound values while WAIVING only the current-membership/role check. The cover
+// author must have observed + accepted each entry it lists (a Maintainer's own signed, auditable act).
+message CoverBody {
+  repeated CoveredEntry entries = 1;
+}
+
+message CoveredEntry {
+  // H(ciphertext) of the blessed entry — recomputed from the actual ciphertext at verify time.
+  bytes ciphertext_hash = 1;
+  // The blessed entry's claimed author (must equal its header.author_member_id).
+  string author_member_id = 2;
+  // The Ed25519 verify key the blessed entry's author_signature is checked against.
+  bytes author_public_key = 3;
 }
 
 // Encoding of the decrypted payload.
