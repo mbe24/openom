@@ -523,7 +523,10 @@ const api = {
       { docId, treeId },
     );
     if (r.changed) {
-      await installMembership(c, docId, 'chain', (await keyringStore().loadHead(docId)).bytes);
+      // Refresh the resolver AND adopt any rotated epoch (OPE-393) — the same as the sync tick. Using plain
+      // installMembership here would leave a remaining member unable to read post-rotation content, silently
+      // reintroducing the bug OPE-393 fixes if this standalone method is ever wired to a UI action.
+      await refreshMembershipAndEpochs(c, 'chain', (await keyringStore().loadHead(docId)).bytes);
     }
     return { changed: r.changed };
   },

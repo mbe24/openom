@@ -417,16 +417,24 @@ impl SealerSet {
             .sealers
             .first()
             .map_or_else(Vec::new, |s| s.replica_id.clone());
-        // Take the author off the CURRENT write-epoch sealer (if attributed) to re-attach to the new one.
-        let author = self
-            .sealers
-            .iter_mut()
-            .find(|s| s.key_id == self.write_key_id)
-            .and_then(|s| s.author.take());
+        // Take the author off the CURRENT write-epoch sealer (if attributed) to re-attach to the new one. The
+        // current write epoch is always present (a member always holds its own write epoch), so a `None` here
+        // would be a lost author — guard the invariant in debug builds rather than silently drop it.
+        let non_empty = !self.sealers.is_empty();
+        let write = self.sealers.iter_mut().find(|s| s.key_id == self.write_key_id);
+        debug_assert!(
+            write.is_some() || !non_empty,
+            "adopt_epochs: the current write epoch is absent from the sealer set"
+        );
+        let author = write.and_then(|s| s.author.take());
         let mut added = 0;
         for (key_id, dek) in epochs {
-            if self.sealers.iter().any(|s| s.key_id == key_id) {
-                continue; // already held — idempotent
+            if let Some(existing) = self.sealers.iter().find(|s| s.key_id == key_id) {
+                // Idempotent: an epoch already held is skipped. `key_id`s are CSPRNG-minted, so the same id with
+                // a DIFFERENT DEK is impossible without a collision or a bug — assert it rather than silently
+                // keep the stale key.
+                debug_assert!(existing.dek == dek, "adopt_epochs: same key_id with a different DEK");
+                continue;
             }
             self.sealers.push(Sealer::from_unwrapped(
                 openom_protocol::ENVELOPE_VERSION,
@@ -516,6 +524,39 @@ mod tests {
             KeyId::new(b"epoch-0".to_vec()),
             ReplicaId::new(b"replica-0".to_vec()),
         )
+    }
+
+    #[test]
+    fn adopt_epochs_splices_a_new_write_epoch_and_moves_the_author() {
+        let tree = TreeId::new(b"tree-uuid-16byte".to_vec());
+        let replica = ReplicaId::new(b"replica-0".to_vec());
+        let dek0 = openom_crypto::generate_dek().unwrap().into_inner();
+        let mut set = SealerSet::new(
+            tree,
+            replica,
+            vec![(b"epoch-0".to_vec(), dek0)],
+            KeyId::new(b"epoch-0".to_vec()),
+        )
+        .with_author(edsign::SigningKey::from_seed(&[7u8; 32]), "acct-bob".into(), b"gov-0".to_vec());
+
+        // Splice a NEW epoch and make it the write epoch (a member's post-removal adopt).
+        let dek1 = openom_crypto::generate_dek().unwrap().into_inner();
+        let added = set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1.clone())], b"epoch-1".to_vec(), b"gov-1".to_vec());
+        assert_eq!(added, 1, "one new epoch spliced in");
+
+        // New entries now seal under the adopted write epoch, still attributed (the author moved).
+        let out = set.seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"post-rotation").unwrap();
+        let header = Envelope::decode(out.envelope.as_slice()).unwrap().header.unwrap();
+        assert_eq!(header.key_id, b"epoch-1", "seals under the adopted write epoch");
+        assert!(!header.author_signature.is_empty(), "the author moved to the new write epoch");
+        assert_eq!(set.open_entry(EntryKind::Snapshot, &out.envelope).unwrap(), b"post-rotation");
+
+        // Idempotent: re-adopting a held epoch adds nothing.
+        assert_eq!(
+            set.adopt_epochs(vec![(b"epoch-1".to_vec(), dek1)], b"epoch-1".to_vec(), b"gov-1".to_vec()),
+            0,
+            "re-adopting a held epoch is a no-op"
+        );
     }
 
     #[test]

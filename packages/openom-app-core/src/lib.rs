@@ -146,15 +146,25 @@ impl<S: DocStore> AppCore<S> {
     /// Adopt a rotated write epoch after a keyring sync — a member's counterpart to the owner re-unlock. Uses
     /// the retained epoch-adopt secret to unwrap the freshly-synced keyring's reachable epochs (no passphrase)
     /// and splices any new one into the running sealer, so the core can now OPEN content sealed under the new
-    /// epoch (the self-heal cover included) and SEAL under it. A no-op (returns 0) on a core with no retained
-    /// secret. Returns how many NEW epochs were spliced in.
+    /// epoch (the self-heal cover included) and SEAL under it. Returns how many NEW epochs were spliced in.
+    ///
+    /// A NO-OP (returns 0) when: this core retains no member secret (an owner / solo core); OR the member now
+    /// reaches no epoch at all — a REMOVED member. That last case is deliberately not an error: a removal is
+    /// exactly the sync where a member discovers it was removed, and the sync tick must not throw over it
+    /// ("reconcile = one tick, never throws"). Their old-epoch DEKs already cover the history they can read.
     ///
     /// # Errors
-    /// Returns [`CoreError`] if the keyring is malformed or the member now reaches no epoch (a removed member).
+    /// Returns [`CoreError`] if the keyring/anchor is malformed (a genuine data fault, distinct from an
+    /// empty-reach removed member).
     pub fn adopt_epochs(&mut self, keyring: &[u8]) -> Result<usize, CoreError> {
         let adopted = match self.member_epoch_secret.as_ref() {
             None => return Ok(0),
-            Some(secret) => secret.adopt(keyring)?, // owned result — the borrow of `self` ends here
+            Some(secret) => match secret.adopt(keyring) {
+                Ok(a) => a, // owned result — the borrow of `self` ends here
+                // A removed member reaches no epoch → nothing to adopt. Fail SOFT (0), never throw on the tick.
+                Err(openom_vault::VaultError::MissingWrap) => return Ok(0),
+                Err(e) => return Err(e.into()),
+            },
         };
         Ok(self
             .client

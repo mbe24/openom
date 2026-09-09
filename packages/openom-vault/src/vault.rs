@@ -1676,9 +1676,10 @@ const _: () = assert!(KEY_ID_LEN == 16);
 #[cfg(test)]
 mod tests {
     use super::{
-        add_co_owner, add_member, add_member_as_co_owner, change_passphrase, provision,
-        provision_member, recover, remove_co_owner, remove_member, remove_member_as_co_owner,
-        rotate_recovery, unlock, unlock_as_member, Joiner, MemberAuth, RecoverWatermark,
+        add_co_owner, add_member, add_member_as_co_owner, adopt_member_epochs, change_passphrase,
+        provision, provision_member, recover, remove_co_owner, remove_member,
+        remove_member_as_co_owner, rotate_recovery, unlock, unlock_as_member, Joiner, MemberAuth,
+        RecoverWatermark,
     };
     use crate::VaultError;
     use openom_crypto::{derive_root, generate_recovery_code, Passphrase};
@@ -2978,6 +2979,51 @@ mod tests {
             &ReplicaId::new(b"r")
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_remaining_member_adopts_the_rotated_epoch_without_a_passphrase() {
+        // OPE-393: after a removal rotates the write epoch, a REMAINING member re-derives the new epoch DEK
+        // from the synced keyring with its RETAINED HPKE secret (no passphrase) and can then open post-rotation
+        // content — the member's counterpart to the owner's passphrase re-unlock.
+        let owner = provision(&Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), &ReplicaId::new(b"r-owner")).unwrap();
+        let a = provision_member(&Passphrase::new(b"a pass")).unwrap();
+        let b = provision_member(&Passphrase::new(b"b pass")).unwrap();
+        let k1 = add_member(&owner.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&MemberId::new(MEMBER2), MemberRole::Editor, &a.author_public_key, &a.hpke_public_key).unwrap()).unwrap();
+        let k2 = add_member(&k1.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &Joiner::from_bytes(&MemberId::new(MEMBER3), MemberRole::Editor, &b.author_public_key, &b.hpke_public_key).unwrap()).unwrap();
+        let pinned = founder_key(&owner.keyring);
+
+        // B unlocks on the PRE-removal keyring — capturing its HPKE secret (the tuple's second value). A too,
+        // so we can prove the removed member's adopt fails closed.
+        let (a_pass, b_pass) = (Passphrase::new(b"a pass"), Passphrase::new(b"b pass"));
+        let (b_id, a_id) = (MemberId::new(MEMBER3), MemberId::new(MEMBER2));
+        let (bu, b_hpke) = unlock_as_member(
+            &k2.keyring,
+            &MemberAuth { passphrase: &b_pass, kdf: &b.kdf_params, member_id: &b_id, trusted_signers: &[pinned] },
+            &TreeId::new(TREE), &ReplicaId::new(b"r-b"), 0,
+        )
+        .unwrap();
+        let (_, a_hpke) = unlock_as_member(
+            &k2.keyring,
+            &MemberAuth { passphrase: &a_pass, kdf: &a.kdf_params, member_id: &a_id, trusted_signers: &[pinned] },
+            &TreeId::new(TREE), &ReplicaId::new(b"r-a"), 0,
+        )
+        .unwrap();
+
+        // Owner removes A → new epoch; seals content under it. B's PRE-removal sealer can't open it yet.
+        let removed = remove_member(&k2.keyring, &Passphrase::new(b"owner pass"), &TreeId::new(TREE), &MemberId::new(MEMBER), 0, &MemberId::new(MEMBER2), &ReplicaId::new(b"r-owner2")).unwrap();
+        let new_sealed = seal_open(&removed.sealer, b"post-removal secret");
+        assert!(bu.sealer.open_entry(EntryKind::Snapshot, &new_sealed).is_err(), "B's old-epoch sealer can't open new-epoch content");
+
+        // B ADOPTS the rotated keyring with its retained HPKE secret (no passphrase) and splices the new epoch.
+        let adopted = adopt_member_epochs(&removed.keyring, &b_hpke, TREE, MEMBER3).unwrap();
+        assert!(adopted.epochs.iter().any(|(k, _)| k.as_slice() == adopted.write_key_id.as_slice()), "the new write epoch is reachable");
+        let mut sealer = bu.sealer;
+        sealer.adopt_epochs(adopted.epochs, adopted.write_key_id, adopted.governing_ref);
+        assert_eq!(sealer.open_entry(EntryKind::Snapshot, &new_sealed).unwrap(), b"post-removal secret", "B now opens post-rotation content");
+
+        // A REMOVED member reaches no epoch → MissingWrap (the app-core caller turns this into a soft no-op).
+        assert!(matches!(adopt_member_epochs(&removed.keyring, &a_hpke, TREE, MEMBER2), Err(VaultError::MissingWrap)));
     }
 
     #[test]
