@@ -70,6 +70,24 @@ test('app-core: real keyring lifecycle — provision, mint, reload, unlock', asy
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: an owner shares a tree and a member joins + verifies through the worker', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.shareAndVerify());
+
+  // The member genesis-walked the published keyring and unlocked as a member.
+  expect(r.joinedDid.length).toBeGreaterThan(0);
+  expect(r.serverKeyringHead).toBe(2); // owner published rev 1 (genesis) + rev 2 (after the add)
+  expect(r.sync.state).toBe('ok');
+  // Verify-on-ingest ACCEPTED the owner's signed write on the shared tree — the member sees it.
+  expect(r.memberPeople).toContain('pShared');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

@@ -953,6 +953,16 @@ pub fn unwrap_chain_keyring(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
     openom_vault::sharing::unwrap_chain_keyring(bytes).map_err(to_js)
 }
 
+/// The content hash of a raw chain keyring revision — what an invite pins so a joiner's genesis-walk binds
+/// the verified history to the owner's published revision.
+///
+/// # Errors
+/// Returns a [`JsError`] if the bytes aren't a decodable chain keyring.
+#[wasm_bindgen(js_name = keyringHash)]
+pub fn keyring_hash(keyring: &[u8]) -> Result<Vec<u8>, JsError> {
+    openom_vault::sharing::chain_keyring_hash(keyring).map_err(to_js)
+}
+
 /// Adopt a recovery/succession reset keyring against the trusted anchor (the caller must have shown the new
 /// signer fingerprints for out-of-band confirmation first). Returns the validated keyring + watermark.
 ///

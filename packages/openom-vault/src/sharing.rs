@@ -461,6 +461,17 @@ pub fn keyring_has_been_shared(engine: EngineKind, keyring: &[u8]) -> Result<boo
     }
 }
 
+/// The content hash of a chain keyring revision — what an invite pins so a joiner's genesis-walk can bind the
+/// verified history to the exact revision the owner published out-of-band. `keyring` is the RAW chain
+/// `Keyring` body.
+///
+/// # Errors
+/// Returns [`VaultError`] if the bytes aren't a decodable chain keyring.
+pub fn chain_keyring_hash(keyring: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let kr = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+    Ok(keyring_hash(&kr).as_slice().to_vec())
+}
+
 /// A joining member's minted account (from [`provision_member`]): the KDF params (already `codec`-encoded,
 /// ready to persist) + the two OOB-shareable public keys.
 pub struct MemberAccount {

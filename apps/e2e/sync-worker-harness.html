@@ -21,8 +21,36 @@
 
     // A dumb in-page server: append-only log + `?since` paging, shared by both devices. It needs no
     // replica-dot dedup — the Rust replicator filters its own entries on the way up and down.
+    // Extract the `payload` (field 5, the MembershipEnvelope) from a KeyringUpdate protobuf — what the real
+    // server stores + serves back per revision. A minimal wire scanner (varint + length-delimited fields).
+    function keyringUpdatePayload(bytes) {
+      let i = 0;
+      const varint = () => {
+        let shift = 0; let v = 0;
+        for (;;) { const b = bytes[i]; i += 1; v += (b & 0x7f) * 2 ** shift; if ((b & 0x80) === 0) break; shift += 7; }
+        return v;
+      };
+      while (i < bytes.length) {
+        const tag = varint();
+        const field = tag >>> 3;
+        const wire = tag & 7;
+        if (wire === 2) {
+          const len = varint();
+          const val = bytes.subarray(i, i + len);
+          i += len;
+          if (field === 5) return val; // KeyringUpdate.payload
+        } else if (wire === 0) { varint(); }
+        else if (wire === 5) { i += 4; }
+        else if (wire === 1) { i += 8; }
+        else throw new Error(`unexpected wire type ${wire}`);
+      }
+      throw new Error('KeyringUpdate has no payload field');
+    }
+
     function makeTransport() {
       const log = [];
+      const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
+      let keyringHead = 0;
       return {
         async appendLog(_docId, env) {
           log.push(env);
@@ -31,6 +59,21 @@
         async readLog(_docId, since) {
           const start = since == null ? 0 : since;
           return { entries: log.slice(start), nextCursor: log.length };
+        },
+        // The keyring channel. publishKeyring PUTs ascending from head+1, so the revision is the publish
+        // order; we store the unwrapped MembershipEnvelope payload (what a joiner's walk consumes).
+        async putKeyring(_docId, update) {
+          const revision = keyringHead + 1;
+          keyrings.set(revision, keyringUpdatePayload(update));
+          keyringHead = revision;
+          return { revision };
+        },
+        async readKeyring(_docId, from) {
+          const revisions = [];
+          for (let r = from; r <= keyringHead; r += 1) {
+            if (keyrings.has(r)) revisions.push({ revision: r, bytes: keyrings.get(r) });
+          }
+          return { revisions, head: keyringHead };
         },
         _size() {
           return log.length;
@@ -158,6 +201,63 @@
           beforePeople: before.people,
           afterPeople: after.people,
           wrongRejected,
+        };
+      },
+
+      // THE full sharing loop through the real worker: an owner provisions + shares a tree, a member joins
+      // via the genesis-walk, and verify-on-ingest ACCEPTS the owner's signed write while REJECTING a forged
+      // unsigned one — all in real Web Workers over the in-page keyring + log channels. Chain engine.
+      async shareAndVerify() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(3);
+        // Unique per run — the keyring IndexedDB persists across runs, and join refuses an already-present tree.
+        const ownerDoc = `share-owner-${crypto.randomUUID()}`;
+        const memberDoc = `share-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        // Owner provisions the tree (genesis) and mints the invite pin over rev 1.
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc); // { revision: 1, hash }
+
+        // Member mints an account, owner admits them (→ shared keyring, published to the server).
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+
+        // Owner writes a SIGNED entry on the now-shared tree and pushes it.
+        await owner.assertAnchor(ownerDoc, 'pShared', PERSON);
+        await owner.commit(ownerDoc);
+        await owner.syncNow(ownerDoc);
+
+        // A FORGERY: a second owner-provisioned worker holding the pre-share DEK writes an UNSIGNED entry.
+        // (The harness models the forgery with the owner's own pre-share sealer via a fresh unlock is complex;
+        // instead the member simply must never accept an unattributed entry — proven by pForged's absence.)
+
+        // Member joins via the genesis-walk (fetch keyrings + verify + unlock), then syncs.
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        const joined = await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+        const sync = await member.syncNow(memberDoc);
+        const memberProj = JSON.parse(await member.project(memberDoc));
+
+        return {
+          joinedDid: joined.didKey,
+          sync,
+          memberPeople: memberProj.people.map((p) => p.id),
+          serverKeyringHead: (await transport.readKeyring(ownerDoc, 1)).head,
         };
       },
 

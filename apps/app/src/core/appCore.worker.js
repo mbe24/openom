@@ -20,6 +20,7 @@ import init, {
   unlockAsMember as wasmUnlockAsMember,
   wrapChainKeyringUpdate as wasmWrapKeyringUpdate,
   unwrapChainKeyring as wasmUnwrapKeyring,
+  keyringHash as wasmKeyringHash,
   syncKeyring as wasmSyncKeyring,
   keyringHasBeenShared as wasmHasBeenShared,
   moderatorsFromKeyring as wasmModerators,
@@ -311,13 +312,25 @@ const api = {
       newMemberId, role, memberAuthorPublic, memberHpkePublic,
     );
     await keyringStore().saveHead(docId, eng, change.keyring);
-    await saveWatermark(docId, change.watermark);
     // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
     if (eng === 'chain') {
       const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
       await keyringStore().save(docId, revision, change.keyring);
     }
-    await installMembership(c, docId, eng, change.keyring); // the tree is now shared → verify goes live
+    // A solo→shared transition: the running sealer (built while solo) does NOT sign, so its writes would be
+    // rejected by peers. Re-unlock the owner on the shared keyring (the DEK is unchanged) → a signing sealer +
+    // the §B3 resolver — so subsequent writes are attributed. Mirrors unlockCore; hydrate preserves the log.
+    const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, docId);
+    try {
+      await saveWatermark(docId, re.watermark);
+      const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
+      await hydrate(nc);
+      await installMembership(nc, docId, eng, change.keyring); // the tree is now shared → verify goes live
+      try { c.handle.free(); } catch { /* old handle already gone */ }
+      cores.set(docId, nc);
+    } finally {
+      re.free();
+    }
     // Publish the shared keyring tail so a member's join can fetch it. Best-effort: if no transport is
     // attached yet, the owner publishes on the next explicit publishKeyring / sync — the local state stands.
     if (eng === 'chain' && transportFor(docId)) {
@@ -326,6 +339,18 @@ const api = {
         { docId },
       );
     }
+  },
+
+  /**
+   * The invite pin for the current keyring head: { revision, hash } — the owner mints this at invite time so
+   * a joiner's genesis-walk can bind the verified history to the exact revision the owner published. Chain
+   * only. (The full invite link / s_mac protocol is the sharing UI's job; this is the crypto primitive.)
+   */
+  async keyringHash(docId) {
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const revision = (await keyringStore().head(docId))?.revision ?? 1;
+    return { revision, hash: wasmKeyringHash(head.bytes) };
   },
 
   /**
