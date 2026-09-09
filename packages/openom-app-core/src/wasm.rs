@@ -778,6 +778,17 @@ pub fn keyring_summary(engine: &str, keyring: &[u8]) -> Result<String, JsError> 
     openom_vault::sharing::keyring_summary(parse_engine(engine)?, keyring).map_err(to_js)
 }
 
+/// The moderator `did:key`s (Maintainer+ members) resolved from a keyring — the worker feeds these to the
+/// core's `setModerators` on unlock and after every keyring change, so the claim fold honors the current
+/// moderator authority.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown or the keyring is malformed.
+#[wasm_bindgen(js_name = moderatorsFromKeyring)]
+pub fn moderators_from_keyring(engine: &str, keyring: &[u8]) -> Result<Vec<String>, JsError> {
+    openom_vault::sharing::moderators_from_keyring(parse_engine(engine)?, keyring).map_err(to_js)
+}
+
 /// Whether this keyring's trust state COVERS `stored_basis` — the worker's pre-push staleness guard.
 ///
 /// # Errors

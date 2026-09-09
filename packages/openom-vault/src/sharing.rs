@@ -461,6 +461,23 @@ pub fn keyring_has_been_shared(engine: EngineKind, keyring: &[u8]) -> Result<boo
     }
 }
 
+/// The moderator `did:key`s (members at Maintainer+) resolved from a keyring — the set the claim engine's
+/// fold treats as authorized to remove/supersede/revoke any claim. The worker feeds these to
+/// `AppCore::set_moderators` on unlock + every keyring change. Engine-neutral over the resolved membership.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed chain keyring or a failed dag resolve.
+pub fn moderators_from_keyring(engine: EngineKind, keyring: &[u8]) -> Result<Vec<String>, VaultError> {
+    let view = match engine {
+        EngineKind::Chain => {
+            let kr = Keyring::decode(keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+            openom_keyring_chain::membership_view(&kr)
+        }
+        EngineKind::Dag => dag_client::resolve(keyring).map_err(|e| err(e.to_string()))?.members,
+    };
+    Ok(crate::membership::moderators(&view).into_iter().collect())
+}
+
 /// A non-owner member's unlock result: the DEK sealer to install in the running core, the member's author
 /// `did:key`, and the anti-rollback watermark to persist.
 pub struct MemberUnlock {

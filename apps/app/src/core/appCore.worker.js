@@ -14,6 +14,9 @@ import init, {
   unlock as wasmUnlock,
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
+  addMember as wasmAddMember,
+  keyringHasBeenShared as wasmHasBeenShared,
+  moderatorsFromKeyring as wasmModerators,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -104,6 +107,30 @@ function core(docId) {
   return c;
 }
 
+// Gather a chain tree's retained per-revision keyrings as `[revision, Uint8Array][]` for the §B3 resolver.
+// The dag resolves membership from its single anchor, so it retains nothing (returns []).
+async function retainedKeyrings(docId, engine) {
+  if (engine !== 'chain') return [];
+  const head = await keyringStore().head(docId);
+  if (!head) return [];
+  const pairs = [];
+  for (let r = 1; r <= head.revision; r += 1) {
+    const bytes = await keyringStore().at(docId, r);
+    if (bytes) pairs.push([r, bytes]);
+  }
+  return pairs;
+}
+
+// Activate verify-on-ingest for a SHARED tree: install the §B3 resolver (built from the head keyring + the
+// retained revisions) and feed the current moderators to the claim fold. A solo/never-shared tree needs
+// neither (only the DEK holder can write), so this is a no-op there. Called on unlock and after each keyring
+// change, so ingest verifies peer entries against the current membership.
+async function installMembership(core, docId, engine, head) {
+  if (!head || !wasmHasBeenShared(engine, head)) return;
+  core.handle.setMembership(engine, head, await retainedKeyrings(docId, engine));
+  core.handle.setModerators(wasmModerators(engine, head));
+}
+
 const api = {
   /** Pre-warm the wasm init so the first open is fast. */
   async warm() {
@@ -158,11 +185,13 @@ const api = {
     await ensureInit();
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
-    const res = wasmUnlock(head.engine || engine, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
+    const eng = head.engine || engine;
+    const res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
     try {
       await saveWatermark(docId, res.watermark); // refresh the persisted floor
       const core = new Core(res.takeHandle(), docId, true);
       await hydrate(core); // load the persisted log + bootstrap
+      await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
       cores.set(docId, core);
       return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
     } finally {
@@ -229,6 +258,35 @@ const api = {
 
   setModerators(docId, dids) {
     core(docId).handle.setModerators(dids);
+  },
+
+  /**
+   * Owner admits a member: HPKE-wrap the tree DEK to the joiner's OOB-verified keys, persist the new shared
+   * keyring (+ chain per-revision retention), and refresh this core's §B3 resolver so it now verifies peer
+   * entries. The owner's running session is unchanged (an add mints no new epoch). `opts`: { passphrase,
+   * treeId, ownerMemberId, minRevision, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine? }.
+   * Returns nothing — the caller re-reads membership via the projection.
+   */
+  async addMember(
+    docId,
+    { passphrase, treeId, ownerMemberId, minRevision = 0, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine = KEYRING_ENGINE },
+  ) {
+    const c = core(docId);
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const eng = head.engine || engine;
+    const change = wasmAddMember(
+      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision,
+      newMemberId, role, memberAuthorPublic, memberHpkePublic,
+    );
+    await keyringStore().saveHead(docId, eng, change.keyring);
+    await saveWatermark(docId, change.watermark);
+    // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
+    if (eng === 'chain') {
+      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      await keyringStore().save(docId, revision, change.keyring);
+    }
+    await installMembership(c, docId, eng, change.keyring); // the tree is now shared → verify goes live
   },
 
   // --- mint (buffer into the current intention; `commit` seals + persists the batch) --------------
