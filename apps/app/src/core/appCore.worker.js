@@ -15,11 +15,15 @@ import init, {
   recover as wasmRecover,
   changePassphrase as wasmChangePassphrase,
   addMember as wasmAddMember,
+  provisionMember as wasmProvisionMember,
+  verifyKeyringWalk as wasmVerifyKeyringWalk,
+  unlockAsMember as wasmUnlockAsMember,
   keyringHasBeenShared as wasmHasBeenShared,
   moderatorsFromKeyring as wasmModerators,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
+import { joinAsMember } from './sharing.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());
@@ -63,11 +67,15 @@ const store = () => (idb ??= new IndexedDbStore());
 /** docId -> Core. Two replicas of the SAME tree run in SEPARATE workers (same docId, distinct core). */
 const cores = new Map();
 
+/** docId -> network transport. Keyed here (not on the Core) so a member JOIN can fetch the keyring history
+ * BEFORE its core exists. Set by `attachTransport`, read by the sync tick + join. */
+const transports = new Map();
+const transportFor = (docId) => transports.get(docId) ?? null;
+
 class Core {
   constructor(handle, docId, persist) {
     this.handle = handle;
     this.docId = docId;
-    this.transport = null;
     this.persist = persist; // mirror the local log to IndexedDB (off for in-memory / UI-test mode)
     this.persistLock = Promise.resolve(); // serialize persistence — commit and a tick both trigger it
     this.syncing = false; // single-flight: one tick at a time
@@ -253,7 +261,7 @@ const api = {
 
   /** Attach the network transport (a Comlink-proxied main-thread `fetch` seam). */
   attachTransport(docId, transport) {
-    core(docId).transport = transport;
+    transports.set(docId, transport);
   },
 
   setModerators(docId, dids) {
@@ -287,6 +295,43 @@ const api = {
       await keyringStore().save(docId, revision, change.keyring);
     }
     await installMembership(c, docId, eng, change.keyring); // the tree is now shared → verify goes live
+  },
+
+  /**
+   * Mint a joining member's account identity from their passphrase (the first member-flow step, before the
+   * owner admits them). Returns { kdfParams, authorPublicKey, hpkePublicKey } — the caller persists kdfParams
+   * and hands the two public keys to the owner out-of-band. The secrets stay in the worker.
+   */
+  async provisionMember(passphrase) {
+    await ensureInit();
+    const m = wasmProvisionMember(passphrase);
+    return { kdfParams: m.kdfParams, authorPublicKey: m.authorPublicKey, hpkePublicKey: m.hpkePublicKey };
+  },
+
+  /**
+   * Join a shared tree as a member: fetch the keyring history, genesis-walk + invite-pin verify it, retain
+   * every verified revision, and unlock as the member — opening a durable, verify-active core. `opts`:
+   * { treeId, treeUuid, docId, passphrase, memberId, memberKdfParams, pinnedRevision, pinnedHash, engine? }.
+   * `transport` must already be reachable for the keyring fetch (attach it before joining). Returns didKey.
+   */
+  async joinAsMember(opts) {
+    await ensureInit();
+    const { docId, engine = KEYRING_ENGINE } = opts;
+    if (!transportFor(docId)) throw new Error('attach a transport before joining');
+    const res = await joinAsMember(
+      { wasm: { verifyKeyringWalk: wasmVerifyKeyringWalk, unlockAsMember: wasmUnlockAsMember }, transport: transportFor(docId), keyringStore: keyringStore() },
+      opts,
+    );
+    try {
+      await saveWatermark(docId, res.watermark);
+      const c = new Core(res.takeHandle(), docId, true);
+      await hydrate(c);
+      await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
+      cores.set(docId, c);
+      return { didKey: res.didKey };
+    } finally {
+      res.free();
+    }
   },
 
   // --- mint (buffer into the current intention; `commit` seals + persists the batch) --------------
@@ -371,11 +416,13 @@ const api = {
       /* already gone */
     }
     cores.delete(docId);
+    transports.delete(docId);
   },
 };
 
 async function runTick(c) {
-  if (!c.transport) return { state: 'no-transport' };
+  const transport = transportFor(c.docId);
+  if (!transport) return { state: 'no-transport' };
   if (c.aborted) return { state: 'stopped' };
   if (c.syncing) {
     c.dirty = true; // fold this request into the running tick
@@ -401,10 +448,11 @@ async function runTick(c) {
 }
 
 async function pushOnce(c) {
+  const transport = transportFor(c.docId);
   const out = c.handle.outbound(); // { entries: Uint8Array[], through: number }
   for (const env of out.entries) {
     if (c.aborted) return;
-    await c.transport.appendLog(c.docId, env);
+    await transport.appendLog(c.docId, env);
   }
   if (c.aborted) return; // no await between this check and markPushed → close() can't free under us
   c.handle.markPushed(out.through);
@@ -417,7 +465,7 @@ async function pullOnce(c) {
   for (;;) {
     if (c.aborted) return;
     const since = c.handle.serverSince(); // number | undefined
-    const page = await c.transport.readLog(c.docId, since); // { entries: Uint8Array[], nextCursor }
+    const page = await transportFor(c.docId).readLog(c.docId, since); // { entries: Uint8Array[], nextCursor }
     if (c.aborted) return;
     c.handle.ingest(page.entries, page.nextCursor);
     await persistDelta(c); // durably mirror the folded server deltas too

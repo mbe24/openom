@@ -632,6 +632,54 @@ pub fn change_passphrase(
     })
 }
 
+/// A joining member's freshly-minted account identity (before they claim an invite): the KDF params to
+/// persist locally + the two public keys to hand the owner OOB for `addMember`. The secrets never leave the
+/// worker — they re-derive from the passphrase on `unlockAsMember`.
+#[wasm_bindgen]
+pub struct MemberIdentity {
+    kdf_params: Vec<u8>,
+    author_public_key: Vec<u8>,
+    hpke_public_key: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl MemberIdentity {
+    /// The account's KDF params (persist locally; replay on `unlockAsMember`).
+    #[wasm_bindgen(getter, js_name = kdfParams)]
+    #[must_use]
+    pub fn kdf_params(&self) -> Vec<u8> {
+        self.kdf_params.clone()
+    }
+    /// The Ed25519 author public key (hand to the owner for `addMember`).
+    #[wasm_bindgen(getter, js_name = authorPublicKey)]
+    #[must_use]
+    pub fn author_public_key(&self) -> Vec<u8> {
+        self.author_public_key.clone()
+    }
+    /// The X25519 HPKE public key (hand to the owner for `addMember`).
+    #[wasm_bindgen(getter, js_name = hpkePublicKey)]
+    #[must_use]
+    pub fn hpke_public_key(&self) -> Vec<u8> {
+        self.hpke_public_key.clone()
+    }
+}
+
+/// Mint a joining member's account identity from their passphrase — the first step of the member flow (before
+/// the owner admits them). Returns the KDF params + the OOB-shareable public keys.
+///
+/// # Errors
+/// Returns a [`JsError`] if the member secret derivation fails.
+#[wasm_bindgen(js_name = provisionMember)]
+pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
+    let m = openom_vault::sharing::provision_member(&Passphrase::new(passphrase.into_bytes()))
+        .map_err(to_js)?;
+    Ok(MemberIdentity {
+        kdf_params: m.kdf_params,
+        author_public_key: m.author_public_key,
+        hpke_public_key: m.hpke_public_key,
+    })
+}
+
 /// The result of an owner membership change (add/remove) — the new keyring/anchor to persist + its watermark.
 /// No handle: the owner's running core keeps its DEK and just re-reads membership via
 /// [`setMembership`](AppCoreHandle::set_membership) after the caller persists the new keyring.

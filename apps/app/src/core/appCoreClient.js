@@ -45,6 +45,11 @@ export function remoteTransport(remoteStore) {
       const tail = await remoteStore.readLog(docId, since ?? -1);
       return { entries: tail.entries.map((e) => e.payload), nextCursor: tail.nextCursor };
     },
+    // The keyring revision chain from `from` (inclusive) — for a member JOIN's genesis-walk. Returns
+    // { revisions: [{ revision, bytes }], head }; bytes = the opaque signed keyring (a MembershipEnvelope).
+    readKeyring: (treeUuid, from) => remoteStore.readKeyring(treeUuid, from),
+    // Publish a produced keyring revision (a wrapped KeyringUpdate) so peers can pull + verify it.
+    putKeyring: (treeUuid, updateBytes) => remoteStore.putKeyring(treeUuid, updateBytes),
   };
 }
 

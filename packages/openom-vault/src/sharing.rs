@@ -461,6 +461,31 @@ pub fn keyring_has_been_shared(engine: EngineKind, keyring: &[u8]) -> Result<boo
     }
 }
 
+/// A joining member's minted account (from [`provision_member`]): the KDF params (already `codec`-encoded,
+/// ready to persist) + the two OOB-shareable public keys.
+pub struct MemberAccount {
+    /// The account's KDF params, `codec`-encoded — persist locally, replay on member unlock.
+    pub kdf_params: Vec<u8>,
+    /// The Ed25519 author public key — hand to the owner for `add_member`.
+    pub author_public_key: Vec<u8>,
+    /// The X25519 HPKE public key — hand to the owner for `add_member`.
+    pub hpke_public_key: Vec<u8>,
+}
+
+/// Mint a joining member's account from their passphrase — the first step of the member flow, before the
+/// owner admits them.
+///
+/// # Errors
+/// Returns [`VaultError`] if the member secret derivation fails.
+pub fn provision_member(passphrase: &Passphrase) -> Result<MemberAccount, VaultError> {
+    let m = vault::provision_member(passphrase)?;
+    Ok(MemberAccount {
+        kdf_params: keyeo_crypto::codec::encode_kdf_params(&m.kdf_params),
+        author_public_key: m.author_public_key,
+        hpke_public_key: m.hpke_public_key,
+    })
+}
+
 /// The moderator `did:key`s (members at Maintainer+) resolved from a keyring — the set the claim engine's
 /// fold treats as authorized to remove/supersede/revoke any claim. The worker feeds these to
 /// `AppCore::set_moderators` on unlock + every keyring change. Engine-neutral over the resolved membership.
