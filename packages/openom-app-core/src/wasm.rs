@@ -407,6 +407,8 @@ impl AppCoreHandle {
 /// the DEK lives inside the handle's `SealerSet` in this module's memory. Mirrors the vault's
 /// `VaultResult`, but hands back an [`AppCoreHandle`] instead of a bare sealer.
 #[wasm_bindgen]
+// The four advisory flags are independent repair signals the worker acts on separately, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 pub struct OpenResult {
     handle: Option<AppCoreHandle>,
     keyring: Vec<u8>,
@@ -415,6 +417,7 @@ pub struct OpenResult {
     watermark: Vec<u8>,
     needs_reseal: bool,
     needs_backfill: bool,
+    needs_rrk_backfill: bool,
     write_epoch_unreachable: bool,
 }
 
@@ -464,6 +467,15 @@ impl OpenResult {
     #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
     pub fn needs_backfill(&self) -> bool {
         self.needs_backfill
+    }
+
+    /// Advisory: a retained epoch's RRK wrap doesn't bind the current recovery escrow — a rotation orphan the
+    /// owner can't read until a MEMBER re-wraps it (`backfillRrk`). Always `false` for the chain (OPE-381 / F3).
+    #[wasm_bindgen(getter, js_name = needsRrkBackfill)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn needs_rrk_backfill(&self) -> bool {
+        self.needs_rrk_backfill
     }
 
     /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, so it
@@ -523,6 +535,7 @@ pub fn provision(
         watermark: p.watermark,
         needs_reseal: false, // a fresh tree's single genesis epoch is never stale
         needs_backfill: false,
+        needs_rrk_backfill: false, // a fresh tree has no rotation orphan
         write_epoch_unreachable: false, // the founder reaches the genesis epoch via the RRK (OPE-299)
     })
 }
@@ -570,6 +583,7 @@ pub fn unlock(
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
         needs_backfill: u.needs_backfill,
+        needs_rrk_backfill: u.needs_rrk_backfill,
         write_epoch_unreachable: u.write_epoch_unreachable,
     })
 }
@@ -625,6 +639,8 @@ pub fn recover(
         watermark: r.watermark,
         needs_reseal: r.needs_reseal,
         needs_backfill: r.needs_backfill,
+        // recovery mints a fresh owner escrow, so no rotation orphan is introduced (OPE-381).
+        needs_rrk_backfill: false,
         // recovery re-wraps every DEK to the (re-derived) owner, so the write epoch is reachable (OPE-299).
         write_epoch_unreachable: false,
     })
@@ -676,8 +692,232 @@ pub fn change_passphrase(
         watermark: re.watermark,
         needs_reseal: false,
         needs_backfill: false,
+        needs_rrk_backfill: false,
         write_epoch_unreachable: false, // the DEK is unchanged, so the running core still reaches it (OPE-299)
     })
+}
+
+/// Result of [`rotate_recovery`]: the new keyring anchor to persist, the fresh recovery code, the new
+/// recovery authority to record for confirmation, and the watermark. The code is PROVISIONAL until
+/// [`rotation_confirmed`] returns `true` against the synced anchor (OPE-381 / §11.2).
+#[wasm_bindgen]
+pub struct DagRotated {
+    keyring: Vec<u8>,
+    recovery_code: String,
+    reset_authority: Vec<u8>,
+    watermark: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl DagRotated {
+    /// The rotated keyring anchor to persist.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+    /// The one-time NEW recovery code to show once — provisional until confirmed.
+    #[wasm_bindgen(getter, js_name = recoveryCode)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn recovery_code(&self) -> String {
+        self.recovery_code.clone()
+    }
+    /// The new recovery authority (RVK) to hand back to [`rotation_confirmed`] after syncing.
+    #[wasm_bindgen(getter, js_name = resetAuthority)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn reset_authority(&self) -> Vec<u8> {
+        self.reset_authority.clone()
+    }
+    /// The anti-rollback cursor to persist.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+}
+
+/// Result of [`backfill_rrk`]: the (possibly unchanged) keyring anchor + watermark to persist, and whether a
+/// heal was actually appended (`false` = no reachable orphan, an idempotent no-op).
+#[wasm_bindgen]
+pub struct DagBackfilled {
+    keyring: Vec<u8>,
+    watermark: Vec<u8>,
+    backfilled: bool,
+}
+
+#[wasm_bindgen]
+impl DagBackfilled {
+    /// The keyring anchor to persist (unchanged when `backfilled` is false).
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn keyring(&self) -> Vec<u8> {
+        self.keyring.clone()
+    }
+    /// The anti-rollback cursor to persist.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn watermark(&self) -> Vec<u8> {
+        self.watermark.clone()
+    }
+    /// Whether an RRK-backfill op was actually appended.
+    #[wasm_bindgen(getter)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn backfilled(&self) -> bool {
+        self.backfilled
+    }
+}
+
+/// Rotate the recovery authority (OPE-381): the owner retires the current recovery code for a fresh one so a
+/// holder of the old code can no longer take over. Authorized by the owner's passphrase-derived identity.
+/// Returns the rotated keyring + new code + the authority to confirm. The code is PROVISIONAL — the worker
+/// keeps the OLD code live until [`rotation_confirmed`] returns `true` against the synced anchor.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine isn't the dag keyring, the passphrase isn't the resolved owner's, or
+/// the rotation fails.
+#[wasm_bindgen(js_name = rotateRecovery)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn rotate_recovery(
+    engine: &str,
+    owner_passphrase: String,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+) -> Result<DagRotated, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let r = dag
+        .rotate_recovery(&ctx, anchor, &Passphrase::new(owner_passphrase.into_bytes()), floor)
+        .map_err(to_js)?;
+    let reset_authority = dag
+        .resolved_reset_authority(&r.anchor)
+        .map_err(to_js)?
+        .map(|a| a.to_vec())
+        .unwrap_or_default();
+    Ok(DagRotated {
+        keyring: r.anchor,
+        recovery_code: r.recovery_code.into_string(),
+        reset_authority,
+        watermark: r.watermark,
+    })
+}
+
+/// Confirm a rotation survived the merge (OPE-381 / §11.2): `expected_reset_authority` is what
+/// [`rotate_recovery`] returned; re-resolves `synced_anchor` and reports whether that authority is now the
+/// resolved one. `false` means the rotation was superseded — the new code is void and the OLD code is still
+/// live, so the worker must re-rotate.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine isn't the dag keyring, the authority isn't 32 bytes, or resolve fails.
+#[wasm_bindgen(js_name = rotationConfirmed)]
+pub fn rotation_confirmed(
+    engine: &str,
+    synced_anchor: &[u8],
+    expected_reset_authority: &[u8],
+) -> Result<bool, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    let expected: [u8; 32] = expected_reset_authority
+        .try_into()
+        .map_err(|_| JsError::new("reset authority must be 32 bytes"))?;
+    dag.rotation_confirmed(synced_anchor, &expected).map_err(to_js)
+}
+
+/// Member-side heal of a rotation-orphaned epoch (OPE-381 / F3): an active member opens an epoch the owner
+/// can't read and re-wraps its DEK to the current escrow. Authorized by the member's passphrase + account
+/// KDF. Idempotent (`backfilled=false` when no orphan is reachable) — safe to call opportunistically.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine isn't the dag keyring, the KDF params are malformed, or the heal fails.
+#[wasm_bindgen(js_name = backfillRrk)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn backfill_rrk(
+    engine: &str,
+    passphrase: String,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+) -> Result<DagBackfilled, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
+        .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
+    let (tree, member, replica) = (
+        TreeId::new(tree_id),
+        MemberId::new(member_id),
+        ReplicaId::new(replica_id),
+    );
+    let ctx = VaultContext {
+        tree_id: &tree,
+        member_id: &member,
+        replica_id: &replica,
+    };
+    let r = dag
+        .backfill_rrk(&ctx, anchor, &Passphrase::new(passphrase.into_bytes()), &kdf, floor)
+        .map_err(to_js)?;
+    Ok(DagBackfilled {
+        keyring: r.anchor,
+        watermark: r.watermark,
+        backfilled: r.backfilled,
+    })
+}
+
+/// The resolved Owner's identity key at `anchor` — recorded right after a recovery so
+/// [`recovery_confirmed`] can later check the recovery survived. Empty if the roster has no owner.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine isn't the dag keyring or resolve fails.
+#[wasm_bindgen(js_name = resolvedOwnerKey)]
+pub fn resolved_owner_key(engine: &str, anchor: &[u8]) -> Result<Vec<u8>, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    Ok(dag.resolved_owner_key(anchor).map_err(to_js)?.unwrap_or_default())
+}
+
+/// Confirm a recovery survived the merge (OPE-381 / §11.2, the superseded-recovery signal):
+/// `expected_owner_key` is what [`resolved_owner_key`] returned right after the recovery; re-resolves
+/// `synced_anchor` and reports whether that owner is still the resolved Owner. `false` means a concurrent
+/// rotation voided the recovery's `ReFound` — the owner is locked out and must recover again.
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine isn't the dag keyring or resolve fails.
+#[wasm_bindgen(js_name = recoveryConfirmed)]
+pub fn recovery_confirmed(
+    engine: &str,
+    synced_anchor: &[u8],
+    expected_owner_key: &[u8],
+) -> Result<bool, JsError> {
+    let dag = AppVault::from_kind(parse_engine(engine)?)
+        .as_dag()
+        .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
+    dag.recovery_confirmed(synced_anchor, expected_owner_key)
+        .map_err(to_js)
 }
 
 /// A joining member's freshly-minted account identity (before they claim an invite): the KDF params to
@@ -891,6 +1131,9 @@ pub fn unlock_as_member(
         watermark: u.watermark,
         needs_reseal: false,
         needs_backfill: false,
+        // The member-unlock wrapper (sharing::unlock_as_member) doesn't thread the coverage advisories through
+        // yet — the member drives backfill_rrk opportunistically (idempotent) rather than off this flag.
+        needs_rrk_backfill: false,
         // The member's own local lockout signal — the one a malicious coverage hint can't suppress (OPE-299).
         write_epoch_unreachable: u.write_epoch_unreachable,
     })

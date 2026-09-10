@@ -222,11 +222,18 @@ pub struct Provisioned {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+// The four advisory flags are independent repair signals the client acts on separately, not a state
+// machine — an enum/bitflags would obscure that each is its own out-of-band remedy.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Unlocked {
     pub sealer_id: String,
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
     pub needs_backfill: bool,
+    /// Advisory: a retained epoch's RRK wrap doesn't bind the current recovery escrow — a rotation orphan the
+    /// owner can't read until a MEMBER re-wraps it (`dag_backfill_rrk`). Dag only; chain always `false`
+    /// (OPE-381 / F3).
+    pub needs_rrk_backfill: bool,
     /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, immune to
     /// a malicious wrap that suppresses `needs_reseal`. The client responds with a forced reseal (dag only;
     /// chain/dev always `false`) (OPE-299).
@@ -333,6 +340,17 @@ const fn reseal_trigger(force: bool) -> ResealTrigger {
 pub struct Backfilled {
     pub watermark: Vec<u8>,
     pub backfilled: bool,
+}
+
+/// Result of a dag [`VaultHost::dag_rotate_recovery`]: the new watermark, the fresh recovery code, and the
+/// new recovery authority the caller records to confirm the rotation after syncing (OPE-381 / §11.2). The
+/// recovery code is PROVISIONAL until [`VaultHost::dag_rotation_confirmed`] returns `true`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagRotated {
+    pub watermark: Vec<u8>,
+    pub recovery_code: String,
+    pub reset_authority: Vec<u8>,
 }
 
 // ---------------------------------------------------------------- requests
@@ -654,6 +672,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
             needs_backfill: u.needs_backfill,
+            needs_rrk_backfill: u.needs_rrk_backfill,
             write_epoch_unreachable: u.write_epoch_unreachable,
             did_key: u.did_key.into_string(),
         })
@@ -859,6 +878,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: chain_watermark_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
             needs_reseal: false,
             needs_backfill: false,
+            needs_rrk_backfill: false,
             write_epoch_unreachable: false, // a linear chain always reaches its own write epoch (OPE-299)
             did_key: u.did_key.into_string(),
         })
@@ -1162,6 +1182,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: Vec::new(),
             needs_reseal: false,
             needs_backfill: false,
+            needs_rrk_backfill: false,
             write_epoch_unreachable: false, // dev sealer: no keyring, always reachable (OPE-299)
             did_key: String::new(), // dev sealer: no vault identity
         })
@@ -1341,6 +1362,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
             needs_backfill: u.needs_backfill,
+            needs_rrk_backfill: u.needs_rrk_backfill,
             write_epoch_unreachable: u.write_epoch_unreachable,
             did_key: u.did_key.into_string(),
         })
@@ -1518,6 +1540,160 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: r.watermark,
             backfilled: r.backfilled,
         })
+    }
+
+    /// Rotate the recovery authority (OPE-381): the owner retires the current recovery code for a fresh one so
+    /// a holder of the old code can no longer take over. Authorized by the owner's passphrase-derived identity.
+    /// Commits the rotated anchor and returns the new code + the new authority — but the code is PROVISIONAL
+    /// until [`Self::dag_rotation_confirmed`] returns `true` against the synced anchor (a concurrent rotation
+    /// could win the merge), so the caller keeps the OLD code live until then.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
+    pub fn dag_rotate_recovery(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        owner_passphrase: String,
+        owner_member_id: &str,
+    ) -> Result<DagRotated> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(owner_member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let r = dag.rotate_recovery(
+            &ctx,
+            &anchor,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &floor,
+        )?;
+        self.store
+            .commit_keyring(tree_key, &r.anchor, &r.watermark)
+            .map_err(VaultError::storage)?;
+        let reset_authority = dag
+            .resolved_reset_authority(&r.anchor)?
+            .map(|a| a.to_vec())
+            .unwrap_or_default();
+        Ok(DagRotated {
+            watermark: r.watermark,
+            recovery_code: r.recovery_code.into_string(),
+            reset_authority,
+        })
+    }
+
+    /// Confirm a rotation survived the merge (OPE-381 / §11.2): `expected_reset_authority` is the value
+    /// [`Self::dag_rotate_recovery`] returned; this re-resolves the currently-anchored (synced) keyring and
+    /// reports whether that authority is now the resolved one. `false` means the rotation was superseded — the
+    /// returned code is void, the OLD code is still live, and the caller must re-rotate.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the authority isn't 32 bytes, or the store/vault access fails.
+    pub fn dag_rotation_confirmed(
+        &self,
+        tree_key: &str,
+        expected_reset_authority: &[u8],
+    ) -> Result<bool> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let expected: [u8; 32] = expected_reset_authority.try_into().map_err(|_| {
+            VaultError::new(VaultErrorCode::BadRequest, "reset authority must be 32 bytes")
+        })?;
+        Ok(dag.rotation_confirmed(&anchor, &expected)?)
+    }
+
+    /// Member-side heal of a rotation-orphaned epoch (OPE-381 / F3): an active member opens an epoch the owner
+    /// can't read (its RRK wrap targets the retired escrow) and re-wraps its DEK to the current escrow.
+    /// Authorized by the member's passphrase + account KDF. Idempotent (`backfilled=false` when no orphan is
+    /// reachable). Driven off the `needs_rrk_backfill` unlock flag.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the vault operation or host store access fails.
+    pub fn dag_backfill_rrk(
+        &self,
+        tree_key: &str,
+        tree_id: &[u8],
+        passphrase: String,
+        member_kdf_params: &[u8],
+        member_id: &str,
+    ) -> Result<Backfilled> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        let floor = self
+            .store
+            .watermark(tree_key)
+            .map_err(VaultError::storage)?;
+        let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params).map_err(|e| {
+            VaultError::new(VaultErrorCode::BadRequest, format!("bad kdf params: {e}"))
+        })?;
+        let replica = self.fresh_replica()?;
+        let (tree, member, rep) = (
+            TreeId::new(tree_id),
+            MemberId::new(member_id),
+            ReplicaId::new(replica),
+        );
+        let ctx = VaultContext {
+            tree_id: &tree,
+            member_id: &member,
+            replica_id: &rep,
+        };
+        let r = dag.backfill_rrk(
+            &ctx,
+            &anchor,
+            &Passphrase::new(passphrase.into_bytes()),
+            &kdf,
+            &floor,
+        )?;
+        if r.backfilled {
+            self.store
+                .commit_keyring(tree_key, &r.anchor, &r.watermark)
+                .map_err(VaultError::storage)?;
+        }
+        Ok(Backfilled {
+            watermark: r.watermark,
+            backfilled: r.backfilled,
+        })
+    }
+
+    /// The resolved Owner's identity key at the currently-anchored keyring — the value a caller records right
+    /// after a recovery, to later confirm the recovery survived via [`Self::dag_recovery_confirmed`].
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the store/vault access fails.
+    pub fn dag_resolved_owner_key(&self, tree_key: &str) -> Result<Option<Vec<u8>>> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        Ok(dag.resolved_owner_key(&anchor)?)
+    }
+
+    /// Confirm a recovery survived the merge (OPE-381 / §11.2, the superseded-recovery signal):
+    /// `expected_owner_key` is the owner key the recovery established (from [`Self::dag_resolved_owner_key`]);
+    /// this re-resolves the synced keyring and reports whether that owner is still the resolved Owner. `false`
+    /// means a concurrent rotation voided the recovery's `ReFound` — the owner is locked out and must recover
+    /// again — so a superseded recovery is signalled rather than silently trusted.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the store/vault access fails.
+    pub fn dag_recovery_confirmed(
+        &self,
+        tree_key: &str,
+        expected_owner_key: &[u8],
+    ) -> Result<bool> {
+        let dag = self.dag()?;
+        let anchor = self.require_keyring(tree_key)?;
+        Ok(dag.recovery_confirmed(&anchor, expected_owner_key)?)
     }
 
     // --- internals ---

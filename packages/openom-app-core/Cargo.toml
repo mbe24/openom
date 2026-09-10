@@ -44,6 +44,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 # Recompute H(ciphertext) for the self-heal covered-set lookup (the header field is not AAD-bound — pin P1).
 sha2.workspace = true
+# Decode the member's KDF-params blob at the wasm boundary (backfill_rrk / member dag ops). Already in the
+# graph via openom-vault; a direct dep just makes the codec path nameable. No wasm-bindgen surface.
+keyeo-crypto = { path = "../keyeo-crypto" }
 
 # A hard rlib dep: the §B3 verify-on-ingest seam (Membership / verify_ingest / Chain+DagMembership) lives
 # here and gates AppCore::ingest in the core (non-wasm) build + tests, plus the rlib keyring lifecycle
@@ -78,6 +81,6 @@ optional = true
 openom-crypto = { path = "../openom-crypto" }
 openom-data-model = { path = "../openom-data-model" }
 # The §B3 share→verify integration test drives the real keyring lifecycle + sharing ops: EngineKind for the
-# engine tag, keyeo-crypto to encode the member's KDF params the way the wasm boundary does.
+# engine tag (keyeo-crypto — for encoding the member KDF params the way the wasm boundary does — is now a
+# direct dependency above).
 openom-keyring-api = { path = "../openom-keyring-api" }
-keyeo-crypto = { path = "../keyeo-crypto" }
