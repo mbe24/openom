@@ -12,28 +12,36 @@ the outermost shell differs.
 - **Domain layer** — the family-tree model, expressed as operations over the CRDT.
 - **Sealer** — the only component that holds keys; it seals and opens envelopes and never lets the data key
   cross into the webview.
-- **Keyring** — the membership and role mechanism, verified on the client.
+- **Keyring** — the membership and role mechanism, verified on the client, behind two swappable engines
+  (a linear signed chain and a sequencer-free DAG) sharing one seam.
 
 ## Crates
 
-The Rust workspace lives in `packages/`, the server in `openom/`, and the shells in `apps/`.
+The Rust workspace lives in `packages/`, the server in `openom/`, and the shells in `apps/`. This is the
+principal set; `packages/README.md` is the authoritative, per-crate map — every crate, its invariants, and
+the full dependency graph.
 
 | Crate | Role |
 | --- | --- |
 | `openom-protocol` | the wire model — protobuf, shared by client and server |
-| `openom-crypto` | symmetric primitives — AEAD seal/open, Argon2id KDF, HPKE key-wrap |
+| `openom-crypto` / `keyeo-crypto` | the proto-bound sealing layer + the generic symmetric/HPKE primitives beneath it |
+| `edsign` | the single Ed25519 edge — newtypes whose only verify is `verify_strict` |
+| `openom-data-model` | the claim envelope — content-hash id, dedup fingerprint, domain-separated sign/verify |
+| `openom-data-projection` | the read-time projection — the live claim set → a materialized read model |
+| `openom-data-crdt` | the claim model's set-union operation CRDT (`materialize` fold; no storage) |
+| `openom-data-tree` | the claim-model family-tree engine — composes `openom-data-crdt` + `openom-data-projection` |
+| `store-log` / `store-blob` | the snapshot + append-only-log `DocStore`, and the content-addressable blob store beneath it |
+| `openom-docsync` | the client sync loop — seal local deltas, merge peers' deltas back |
+| `openom-sealer` | the client seal/open DEK session (WebAssembly on web, native in Tauri) |
 | `openom-roles` | the capability→role policy — one source of truth for the server ACL and client verify |
-| `openom-keyring` | the membership mechanism — signed keyring chain + landed-entry authorship |
-| `openom-sealer` | the client seal/open session (WebAssembly on web, native in Tauri) |
+| `keyeo-chain` / `keyeo-dag` | the two generic membership engines — a linear signed chain and a sequencer-free DAG |
+| `openom-keyring-chain` / `openom-keyring-dag` | openom's roles/signing/recovery wired onto each engine, behind `openom-keyring-api` |
+| `openom-vault` | the keyring lifecycle over both engines — provision/unlock/recover + the engine-neutral sealing core |
 | `openom-vault-host` | the native key-custody host — the data key stays in Rust |
-| `openom-sync` | the client sync loop — seal local deltas, merge peers' deltas back |
-| `openom-claim` | the claim envelope — content-hash id, dedup fingerprint, domain-separated sign/verify |
-| `openom-crdt` | the claim model's set-union operation CRDT (`materialize` fold; no storage) |
-| `openom-tree` | the claim-model family-tree engine — composes `openom-crdt` + `openom-projection` |
-| `openom-projection` | the read-time projection — the live claim set → a materialized read model |
-| `journal` | a generic sync-backend store — snapshot + append-only log + compare-and-swap |
+| `openom-app-core` | the web app's single wasm worker — engine + sealer + sync + local store |
 
-`journal` carries no `openom-` prefix on purpose — it is domain-agnostic and reusable.
+The openom-free foundations (`format-jcs`, `format-edtf`, `did`, `edsign`, `keyeo-*`, `store-log`, `store-blob`,
+`docsync`) carry no `openom-` domain dependency on purpose — they are reusable and never gain that coupling.
 
 The shells are `apps/app` (the buildless web app, also served inside the Tauri webview) and `apps/src-tauri`
 (the desktop and mobile shell — window, native SQLite, key custody). The server crate `openom` is Axum on

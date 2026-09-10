@@ -38,7 +38,7 @@ Two things this app *depends on* but does not itself build:
   company policy — same reason `scripts/cargo.mjs` uses Docker/WSL2 for native crate tests), then
   run `wasm-bindgen` on the host. Run these once before `pnpm serve` if `src/vendor/{sealer,tree}/`
   is empty.
-- **`pnpm test:store`** (from `apps/`) runs `node ../scripts/cargo.mjs test -p journal -p openom`
+- **`pnpm test:store`** (from `apps/`) runs `node ../scripts/cargo.mjs test -p store-log -p openom`
   — the native-crate store-conformance suite, not this app's JS — and on Windows that cargo run
   goes through WSL2/Docker too.
 
@@ -52,10 +52,10 @@ bundles this exact same `apps/app/` tree for the desktop/mobile shell, so the bo
 would no longer be the same tree Tauri serves.
 
 It talks to the family-tree engine and the crypto sealer as **wasm modules vendored under
-`src/vendor/`** (openom-tree and openom-sealer, compiled from `packages/`) — this app owns no
+`src/vendor/`** (openom-data-tree and openom-sealer, compiled from `packages/`) — this app owns no
 domain logic in Rust and re-implements none of it in JS; `src/core/` is the JS orchestration
-*around* those wasm cores (storage, sync, sessions), not a parallel engine. openom-tree is the
-claim-model engine (an openom-crdt set-union fold + an openom-projection read model); it replaced
+*around* those wasm cores (storage, sync, sessions), not a parallel engine. openom-data-tree is the
+claim-model engine (an openom-data-crdt set-union fold + an openom-data-projection read model); it replaced
 the former treelog engine at the claim-model cutover.
 
 It is **not** a general-purpose SPA: there is no client-side router beyond the app's own
@@ -83,9 +83,9 @@ src/core/              orchestration — no UI, no rendering.
   syncedDeltaSync.js       wires SyncController together with landed-entry verification (§B3).
   replicator.js            drives a SyncStore to convergence: pull/push + the plaintext merge loop.
   remoteStore.js           DocStore over HTTP to the openom server (opaque bytes, no crypto).
-  familyTree.js            the opened tree, backed by the openom-tree claim engine (wasm). The engine
+  familyTree.js            the opened tree, backed by the openom-data-tree claim engine (wasm). The engine
                            owns a monotonic HLC and stamps each op's createdAt itself (no JS clock).
-  tree/                    the web shim over packages/openom-tree (wasm): index.js wraps the engine.
+  tree/                    the web shim over packages/openom-data-tree (wasm): index.js wraps the engine.
   tabSync.js               cross-tab convergence via BroadcastChannel (merge-the-tail on append).
   sealer/                  the crypto vault + session, see below.
   model.js                 the v2 document shape (names/events/parent+child links).
@@ -122,7 +122,7 @@ src/views/             one file per screen, composed from ui/ + core/ read helpe
                        onboarding.js, people.js, settings.js, transfer.js.
 
 src/vendor/            generated + third-party, never hand-edited.
-  vault/, tree/           wasm-bindgen output for openom-vault / openom-tree — gitignored,
+  vault/, tree/           wasm-bindgen output for openom-vault / openom-data-tree — gitignored,
                           rebuilt by scripts/build-vault.mjs / build-tree.mjs (repo root).
   sqlite/                 vendored sqlite-wasm (OPFS-SAHPool) bundle, checked in — the persistent
                           browser-SQLite spike (apps/e2e/sqlite*.e2e.ts exercises it).

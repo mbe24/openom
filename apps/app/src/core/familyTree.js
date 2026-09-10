@@ -1,4 +1,4 @@
-// The opened family tree, backed by the claim-based engine (packages/openom-tree, wasm) — the
+// The opened family tree, backed by the claim-based engine (packages/openom-data-tree, wasm) — the
 // migration target that replaces the treelog-backed FamilyTree with the SAME public surface, so the
 // views and read helpers (queries.js/detail.js/graph.js) are unchanged. State is a set of claim/anchor
 // records; every edit mints a self-contained, convergent op (assert / supersede / remove), and the read
@@ -20,7 +20,7 @@ const uuid = () => 'x_' + hex(crypto.getRandomValues(new Uint8Array(16)));
 const DEFAULT_AUTHOR = 'did:key:zLocalReplica';
 const NEW_PERSON = { given: '', surname: '', sex: 'U', custom: {} };
 
-// The core claim vocabulary the projection recognizes (packages/openom-projection). Kept here so the
+// The core claim vocabulary the projection recognizes (packages/openom-data-projection). Kept here so the
 // read mapping and the (stage-2) write mapping name the same predicates/anchor types in one place.
 export const V = {
   TYPE_CLAIM: 'openom.org/core/claim/v1',

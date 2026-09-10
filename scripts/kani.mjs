@@ -7,9 +7,9 @@
 // repeatable proof run anywhere Docker is available, while staying a no-op fast path for a local
 // install. The proof harnesses are gated behind `#[cfg(kani)]`, so they never touch the normal build.
 //
-//   node scripts/kani.mjs -p openom-claim          # verify one crate's proofs
-//   node scripts/kani.mjs -p openom-claim --harness civil_from_days_is_the_inverse_of_days_from_civil
-//   OPENOM_RUNNER=local node scripts/kani.mjs -p openom-claim   # force the host's `cargo kani`
+//   node scripts/kani.mjs -p openom-data-model          # verify one crate's proofs
+//   node scripts/kani.mjs -p openom-data-model --harness civil_from_days_is_the_inverse_of_days_from_civil
+//   OPENOM_RUNNER=local node scripts/kani.mjs -p openom-data-model   # force the host's `cargo kani`
 //
 // Runner selection — OPENOM_RUNNER = auto (default) | local | docker
 //   local  — run `cargo kani` on the host (you installed it: `cargo install --locked kani-verifier`)

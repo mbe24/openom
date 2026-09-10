@@ -2,9 +2,11 @@ name: mutants
 
 # Mutation testing (cargo-mutants) for the security-critical crates plus the pure core: it edits the
 # code in small ways (a mutant) and re-runs that crate's tests, checking each break is CAUGHT — surfacing
-# gaps a green suite hides. The default set is the four security-critical crates + the PURE crates from
-# the OPE-243 purity audit (protocol/roles/did/jcs/edtf/claim/projection) — pure means fast, deterministic,
-# no-I/O tests, so mutating them is cheap. Runs on DEFAULT features (not --all-features: the tree `wasm`
+# gaps a green suite hides. The default set is the security-critical crypto / keyring / CRDT crates
+# (edsign, openom-crypto, keyeo-crypto, openom-data-crdt, and the keyring engines keyeo-chain / keyeo-dag +
+# openom-keyring-chain / openom-keyring-dag) + the PURE crates from the OPE-243 purity audit (openom-protocol
+# / openom-roles / did / format-jcs / format-edtf / openom-data-model / openom-data-projection) — pure means
+# fast, deterministic, no-I/O tests, so mutating them is cheap. Runs on DEFAULT features (not --all-features: the tree `wasm`
 # feature needs a wasm32 target and would break the native build). Manual only: a full run re-runs the
 # suite once per mutant and is slow, so we don't gate every push on it. Dispatch it after a meaningful
 # change to the covered crates, or on a cadence, and read the surviving mutants in the uploaded report.
@@ -14,7 +16,7 @@ on:
     inputs:
       packages:
         description: 'Space-separated crates to mutate (all must already have real test coverage)'
-        default: 'openom-sign openom-crdt openom-keyring openom-crypto openom-protocol openom-roles did jcs edtf openom-claim openom-projection'
+        default: 'edsign openom-crypto keyeo-crypto openom-data-crdt keyeo-chain keyeo-dag openom-keyring-chain openom-keyring-dag openom-protocol openom-roles did format-jcs format-edtf openom-data-model openom-data-projection'
       timeout:
         description: 'Per-mutant test timeout, seconds (bounds a mutant that loops forever)'
         default: '120'

@@ -7,7 +7,7 @@
 # Build (scripts/kani.mjs does this automatically if the tag is missing):
 #   docker build -f scripts/kani.Dockerfile -t openom-kani:latest scripts
 # Run a crate's proofs:
-#   node scripts/kani.mjs -p openom-claim
+#   node scripts/kani.mjs -p openom-data-model
 #
 # The build context is `scripts/` (this file is self-contained — it copies nothing from the repo; the
 # workspace is bind-mounted at run time).
