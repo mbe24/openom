@@ -268,6 +268,37 @@ fn blob_verified_pull_reject_is_final() {
 }
 
 #[test]
+fn blob_mirror_two_local_stores_converge_through_a_remote() {
+    // The production topology: each device runs BlobSyncClient over its OWN local store; a shared remote is
+    // reached only by the mirror. Prove two replicas on SEPARATE local stores converge through the remote.
+    let local_a = Arc::new(MemoryBlob::new());
+    let local_b = Arc::new(MemoryBlob::new());
+    let remote = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(local_a.clone(), "replica-A");
+    let mut b = blob_client(local_b.clone(), "replica-B");
+
+    a.apply("x".into()).unwrap();
+    b.apply("y".into()).unwrap();
+
+    // Push each local up to the remote, then pull the remote down to each local (both directions).
+    mirror(local_a.as_ref(), remote.as_ref(), "doc").unwrap();
+    mirror(local_b.as_ref(), remote.as_ref(), "doc").unwrap();
+    mirror(remote.as_ref(), local_a.as_ref(), "doc").unwrap();
+    mirror(remote.as_ref(), local_b.as_ref(), "doc").unwrap();
+
+    // Each client now folds its own local store (which the mirror filled with the peer's entries).
+    a.pull().unwrap();
+    b.pull().unwrap();
+
+    let expected: BTreeSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(a.engine().lines, expected);
+    assert_eq!(b.engine().lines, expected, "separate local stores converge via a remote object mirror");
+
+    // Mirroring again is an idempotent no-op (everything already present).
+    assert_eq!(mirror(remote.as_ref(), local_a.as_ref(), "doc").unwrap(), 0);
+}
+
+#[test]
 fn blob_verified_pull_folds_a_cover_that_un_holds_a_delta() {
     // The self-heal case: an unattributed delta is HELD; a Cover marker blessing it folds into the caller's
     // covered set; the next drain re-classifies the delta as covered → Accept. Proves covers route through

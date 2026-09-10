@@ -843,6 +843,66 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     }
 }
 
+/// One-directional anti-entropy between two [`BlobStore`]s for one doc: copy every log object `to` lacks
+/// (per replica, `to`'s head → `from`'s head), advance `to`'s heads, and carry a snapshot `to` is missing.
+/// Immutable log objects are `IfAbsent` (idempotent), so mirroring is safe to repeat and to run both ways.
+/// Returns the number of log objects copied.
+///
+/// This is the DEVICE-LOCAL ↔ SHARED-REMOTE bridge: a device runs [`BlobSyncClient`] over its own local
+/// `BlobStore`, and this mirrors that local store against the shared remote (R2 / BYO). The decision logic
+/// (which objects to move) lives here in sync Rust; in the web worker the async remote I/O is JS, wrapping
+/// this same plan. Call `mirror(local, remote)` to push and `mirror(remote, local)` to pull.
+///
+/// # Errors
+/// Returns [`SyncError`] if a blob read/write fails.
+pub fn mirror<A: BlobStore, B: BlobStore>(
+    from: &A,
+    to: &B,
+    doc: &str,
+) -> Result<usize, SyncError> {
+    let mut copied = 0;
+    let hp = heads_prefix(doc);
+    for (head_object, _etag) in from.list(&hp)? {
+        let Some(replica) = parse_head_key(&hp, &head_object) else {
+            continue;
+        };
+        let Some((fh, _etag)) = from.get(&head_key(doc, &replica))? else {
+            continue;
+        };
+        let Some(from_head) = decode_count(&fh) else {
+            continue;
+        };
+        let to_head = to
+            .get(&head_key(doc, &replica))?
+            .and_then(|(b, _etag)| decode_count(&b))
+            .unwrap_or(0);
+        for c in to_head..from_head {
+            let key = log_key(doc, &replica, c);
+            if let Some((bytes, _etag)) = from.get(&key)? {
+                match to.put(&key, &bytes, store_blob::Precondition::IfAbsent) {
+                    Ok(_) | Err(store_blob::BlobError::PreconditionFailed) => copied += 1,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        if from_head > to_head {
+            to.put(
+                &head_key(doc, &replica),
+                &encode_count(from_head),
+                store_blob::Precondition::Any,
+            )?;
+        }
+    }
+    // Carry a snapshot the target lacks (a fuller covered-frontier reconciliation of two competing snapshots
+    // is a refinement; completeness never rests on it — a client always pulls the tail past whatever it finds).
+    if to.get(&snapshot_key(doc))?.is_none() {
+        if let Some((snap, _etag)) = from.get(&snapshot_key(doc))? {
+            to.put(&snapshot_key(doc), &snap, store_blob::Precondition::IfAbsent)?;
+        }
+    }
+    Ok(copied)
+}
+
 /// A no-crypto [`Sealer`]: frames `[covers_through_seq: u64 BE][kind: u8][plaintext]`. Enough for tests
 /// and single-project spikes; a real deployment supplies an encrypting sealer.
 #[derive(Default, Clone, Copy)]
