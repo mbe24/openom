@@ -1,11 +1,11 @@
-# cargo-fuzz targets for openom-data-claim's hashing/verify boundary. This is a DETACHED crate (its own
+# cargo-fuzz targets for openom-data-model's hashing/verify boundary. This is a DETACHED crate (its own
 # empty [workspace]) so it never touches the stable workspace build — the main crates build on
 # stable in the container; these run under nightly libFuzzer:
-#   cd packages/openom-data-claim && cargo +nightly fuzz run hash_and_verify
+#   cd packages/openom-data-model && cargo +nightly fuzz run hash_and_verify
 # The stable proptests (sign_verify_and_tamper, id_and_fingerprint_deterministic) cover the same
 # surface for CI; this is for deep, corpus-driven fuzzing.
 [package]
-name = "openom-data-claim-fuzz"
+name = "openom-data-model-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -15,7 +15,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-openom-data-claim = { path = ".." }
+openom-data-model = { path = ".." }
 serde_json = "1"
 
 [[bin]]

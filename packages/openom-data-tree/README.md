@@ -46,7 +46,7 @@ WSL2/Docker).
 
 ## Position
 
-Composes `openom-data-crdt` + `openom-data-projection` (+ `openom-data-claim` types). It depends on **no** transport
+Composes `openom-data-crdt` + `openom-data-projection` (+ `openom-data-model` types). It depends on **no** transport
 crate and holds **no** key material — edits are raw op-batch bytes the caller seals (via the existing
 sealer-worker + store stack). The `#[wasm_bindgen]` veneer (`WasmTree`) +
 `scripts/build-tree.mjs` → `apps/app/src/vendor/tree/` (gitignored) are built; next is the JS

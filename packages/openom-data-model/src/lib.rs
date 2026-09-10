@@ -1,592 +1,477 @@
 #![doc = include_str!("../README.md")]
 
-mod id;
-pub use id::*;
+use edsign::{Signature, SigningKey, VerifyingKey};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-pub mod name;
-pub use name::{Name, NameError, Part, Position, Provenance};
-
+pub mod envelope;
 #[cfg(feature = "validation")]
 pub mod schema;
+pub mod time;
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use thiserror::Error;
+pub use time::Hlc;
 
-/// A node is a person or a family (the GEDCOM INDI / FAM split). Attributes (names, events, custom
-/// fields) live in their own tables keyed by this node's id — nothing is nested on the node.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum NodeKind {
-    Person,
-    Family,
+/// Envelope field names — the frozen set the schema freeze (OPE-170) will type.
+pub const F_ID: &str = "id";
+pub const F_SIGNATURE: &str = "signature";
+pub const F_TARGET_ID: &str = "targetId";
+pub const F_PREDICATE: &str = "predicate";
+pub const F_VALUE: &str = "value";
+pub const F_CREATED_BY: &str = "createdBy";
+
+/// Domain-separation tag: a claim signature can never verify as some other Ed25519 signature
+/// elsewhere in the system (the same per-purpose domain-prefix discipline used across the crates).
+const SIGN_DOMAIN: &[u8] = b"openom-data-model-v1";
+
+/// A hashing/signing failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimError {
+    /// Canonicalization failed (non-object envelope, or a float in the content).
+    #[error("canonicalization failed: {0}")]
+    Jcs(#[from] format_jcs::JcsError),
+    /// The envelope has no string `createdBy`.
+    #[error("envelope has no string createdBy")]
+    MissingCreatedBy,
+    /// `createdBy` is not a valid `did:key`.
+    #[error("createdBy is not a valid did:key: {0}")]
+    BadCreatedBy(#[from] did::DidError),
+    /// A record has no string `type`.
+    #[error("record has no string type")]
+    MissingType,
+    /// A record whose `type` this build doesn't recognize has no non-empty string `id` — it cannot be
+    /// folded (the fold keys on `id`), so it is malformed rather than merely-unknown.
+    #[error("unknown-type record has no id")]
+    MissingId,
+    /// A record whose `type` this build doesn't recognize used a content-addressed (`sha256:…`) `id`.
+    /// Those are reserved for claims and operations; an unknown record carrying one is refused so it
+    /// can never squat a claim's content-address in the first-writer-wins fold.
+    #[error("unknown-type record uses a reserved content-addressed id: {0}")]
+    ReservedId(String),
+    /// A claim's stored `id` does not match a fresh hash of its content.
+    #[error("claim id does not match its content")]
+    IdMismatch,
+    /// A record's JSON did not match the `{0}` shape.
+    #[error("malformed {0} record: {1}")]
+    Malformed(&'static str, serde_json::Error),
+    /// Serializing a typed record to its canonical envelope failed.
+    #[error("serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
-/// Relationship carried by an edge. Extended additively over time (never renumber/reuse — see the
-/// schema-evolution rules).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum RelationshipType {
-    ParentChild,
-    Spouse,
-    Partner,
-}
-
-/// Kind of a life event. Extended additively.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum EventType {
-    Birth,
-    Death,
-    Marriage,
-    Divorce,
-    Baptism,
-    Burial,
-    Immigration,
-    Other,
-}
-
-/// A person or family. Minimal by design — the id is the durable graph key.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Node {
-    pub id: NodeId,
-    pub kind: NodeKind,
-    /// The node's names (the name model — see [`name`] / `design.data-name-mode.md`). Empty for a
-    /// family node or a person with no recorded name yet. Part of the node's canonical content hash.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub names: Vec<Name>,
-    /// RESERVED SEAM (OPE-99): an opaque subtree-scope tag for future subtree-scoped visibility
-    /// (`design.subtree-scope.md`). `None` = unscoped (the whole-tree default). No feature reads it
-    /// today; it exists so adding scoping later is not a schema break.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-}
-
-/// A directed relationship edge (`from` → `to`; e.g. parent → child). Two node ids + a type.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Edge {
-    pub id: EdgeId,
-    pub relationship: RelationshipType,
-    pub from: NodeId,
-    pub to: NodeId,
-}
-
-/// An event: a type, a primary node, an optional secondary node (e.g. the other spouse in a
-/// marriage), an optional Unix timestamp, and an optional attached media id.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Event {
-    pub id: EventId,
-    pub event_type: EventType,
-    pub primary: NodeId,
-    // Optionals are skipped when absent so canonical bytes match "absent == default" — the
-    // hash-stability rule (an entity without an optional hashes identically to an explicit-none one).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secondary: Option<NodeId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timestamp: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<MediaId>,
-}
-
-/// A shared source record (provenance; attestations and GEDCOM sources reference these).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Source {
-    pub id: SourceId,
-    pub citation: String,
-}
-
-/// A shared media record — stores the **content hash**, never the binary.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Media {
-    pub id: MediaId,
-    pub content_sha256: [u8; 32],
-}
-
-/// Merge class of a field's value.
-///
-/// RESERVED SEAM (OPE-150). `Lww` (default) = whole-value
-/// last-writer-wins; `Text` marks a free-text field (e.g. a biography) for a future sequence/text
-/// CRDT — the algorithm behind it is deferred (OPE-151). Present now so marking a field text-merged
-/// later is not a schema break.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MergeClass {
-    #[default]
-    Lww,
-    Text,
-}
-
-/// A user-created custom-field definition.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct FieldDef {
-    pub id: FieldDefId,
-    pub name: String,
-    #[serde(default)]
-    pub merge: MergeClass,
-}
-
-/// A value for a custom field, attached to a node.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct FieldValue {
-    pub id: FieldValueId,
-    pub node: NodeId,
-    pub def: FieldDefId,
-    pub value: String,
-}
-
-/// A link from a node in this tree to a node in ANOTHER tree — RESERVED SEAM (OPE-99) for future
-/// tree federation.
-///
-/// The record type exists so federation isn't a schema break; no federation
-/// behaviour (unifying projection, cross-tree resolution) is built.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct CrossTreeLink {
-    pub id: LinkId,
-    pub local: NodeId,
-    pub remote_tree: TreeId,
-    pub remote_node: NodeId,
-}
-
-/// Errors from mutations that would violate structural integrity.
-#[derive(Error, Debug, PartialEq, Eq)]
-pub enum ModelError {
-    #[error("edge references node {0} which is not in the model")]
-    DanglingNode(NodeId),
-    #[error("an edge cannot connect a node to itself")]
-    SelfLoop,
-    #[error("no event with id {0}")]
-    NoSuchEvent(EventId),
-}
-
-/// The whole tree, as flat id-keyed tables.
-///
-/// `BTreeMap` gives a deterministic iteration order
-/// (a convenience for the future canonicalization step). Node ids are namespaced by `tree` for
-/// cross-tree references (`(tree, node)`).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Model {
-    pub tree: TreeId,
-    pub nodes: BTreeMap<NodeId, Node>,
-    pub edges: BTreeMap<EdgeId, Edge>,
-    pub events: BTreeMap<EventId, Event>,
-    pub sources: BTreeMap<SourceId, Source>,
-    pub media: BTreeMap<MediaId, Media>,
-    pub field_defs: BTreeMap<FieldDefId, FieldDef>,
-    pub field_values: BTreeMap<FieldValueId, FieldValue>,
-    /// RESERVED SEAM (OPE-99): links from this tree's nodes to nodes in other trees.
-    pub cross_tree_links: BTreeMap<LinkId, CrossTreeLink>,
-}
-
-impl Model {
-    /// An empty tree.
-    #[must_use]
-    pub const fn new(tree: TreeId) -> Self {
-        Self {
-            tree,
-            nodes: BTreeMap::new(),
-            edges: BTreeMap::new(),
-            events: BTreeMap::new(),
-            sources: BTreeMap::new(),
-            media: BTreeMap::new(),
-            field_defs: BTreeMap::new(),
-            field_values: BTreeMap::new(),
-            cross_tree_links: BTreeMap::new(),
-        }
-    }
-
-    /// Reserve a cross-tree link (OPE-99 seam). Validates the local node exists; the remote endpoint
-    /// is opaque — no federation behaviour is performed.
-    ///
-    /// # Errors
-    /// Returns [`ModelError::DanglingNode`] if `local` is not a node in this model.
-    pub fn add_cross_tree_link(
-        &mut self,
-        local: NodeId,
-        remote_tree: TreeId,
-        remote_node: NodeId,
-        src: &mut impl IdSource,
-    ) -> Result<LinkId, ModelError> {
-        if !self.nodes.contains_key(&local) {
-            return Err(ModelError::DanglingNode(local));
-        }
-        let id = LinkId::generate(src);
-        self.cross_tree_links.insert(
-            id,
-            CrossTreeLink {
-                id,
-                local,
-                remote_tree,
-                remote_node,
-            },
-        );
-        Ok(id)
-    }
-
-    /// Create a node, minting a fresh opaque id.
-    pub fn create_node(&mut self, kind: NodeKind, src: &mut impl IdSource) -> NodeId {
-        let id = NodeId::generate(src);
-        self.nodes.insert(
-            id,
-            Node {
-                id,
-                kind,
-                names: Vec::new(),
-                scope: None,
-            },
-        );
-        id
-    }
-
-    /// Add a relationship edge. Rejects self-loops and edges to absent nodes.
-    ///
-    /// # Errors
-    /// Returns [`ModelError::SelfLoop`] if `from == to`, or [`ModelError::DanglingNode`] if either
-    /// endpoint is absent.
-    pub fn add_edge(
-        &mut self,
-        relationship: RelationshipType,
-        from: NodeId,
-        to: NodeId,
-        src: &mut impl IdSource,
-    ) -> Result<EdgeId, ModelError> {
-        if from == to {
-            return Err(ModelError::SelfLoop);
-        }
-        if !self.nodes.contains_key(&from) {
-            return Err(ModelError::DanglingNode(from));
-        }
-        if !self.nodes.contains_key(&to) {
-            return Err(ModelError::DanglingNode(to));
-        }
-        let id = EdgeId::generate(src);
-        self.edges.insert(
-            id,
-            Edge {
-                id,
-                relationship,
-                from,
-                to,
-            },
-        );
-        Ok(id)
-    }
-
-    /// Record an event on a node.
-    ///
-    /// # Errors
-    /// Returns [`ModelError::DanglingNode`] if `primary` is not a node in this model.
-    pub fn add_event(
-        &mut self,
-        event_type: EventType,
-        primary: NodeId,
-        timestamp: Option<i64>,
-        src: &mut impl IdSource,
-    ) -> Result<EventId, ModelError> {
-        if !self.nodes.contains_key(&primary) {
-            return Err(ModelError::DanglingNode(primary));
-        }
-        let id = EventId::generate(src);
-        self.events.insert(
-            id,
-            Event {
-                id,
-                event_type,
-                primary,
-                secondary: None,
-                timestamp,
-                image: None,
-            },
-        );
-        Ok(id)
-    }
-
-    /// Attach a name (the name model) to a node.
-    ///
-    /// # Errors
-    /// Returns [`ModelError::DanglingNode`] if `node` is not a node in this model.
-    pub fn add_name(&mut self, node: NodeId, name: Name) -> Result<(), ModelError> {
-        let n = self
-            .nodes
-            .get_mut(&node)
-            .ok_or(ModelError::DanglingNode(node))?;
-        n.names.push(name);
-        Ok(())
-    }
-
-    /// Correct an event's timestamp **in place** — the event's id (and any reference to it) is
-    /// unchanged. This is the whole point of opaque, non-derived ids: facts are mutable, identity
-    /// is not.
-    ///
-    /// # Errors
-    /// Returns [`ModelError::NoSuchEvent`] if `event` is not an event in this model.
-    pub fn correct_event_timestamp(
-        &mut self,
-        event: EventId,
-        timestamp: Option<i64>,
-    ) -> Result<(), ModelError> {
-        let e = self
-            .events
-            .get_mut(&event)
-            .ok_or(ModelError::NoSuchEvent(event))?;
-        e.timestamp = timestamp;
-        Ok(())
-    }
-}
-
-/// Canonical bytes of any serializable value — RFC 8785 (JCS)-equivalent for our data.
-///
-/// Routing
-/// through `serde_json::Value` (whose objects are a sorted `BTreeMap`) and serializing compactly
-/// yields sorted keys, no whitespace, and canonical integers. This equals JCS here because the model
-/// is float-free (JCS's ES6 number rule only bites on floats) and its keys are ASCII (byte order ==
-/// UTF-16 order). If arbitrary/float data ever needs canonicalizing, swap in a full JCS impl here.
+/// The 32-byte content hash — the basis of both the `id` and the signed message.
 ///
 /// # Errors
-/// Returns a [`serde_json::Error`] if `value` fails to serialize.
-pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&serde_json::to_value(value)?)
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
+pub fn content_hash(envelope: &Value) -> Result<[u8; 32], ClaimError> {
+    let bytes = format_jcs::canonical_excluding(envelope, &[F_ID, F_SIGNATURE])?;
+    Ok(Sha256::digest(bytes).into())
 }
 
-/// Canonical bytes of the whole model.
+/// The claim `id`: `"sha256:" + lowercase-hex(content_hash)`.
 ///
 /// # Errors
-/// Returns a [`serde_json::Error`] if the model fails to serialize.
-pub fn canonicalize(model: &Model) -> Result<Vec<u8>, serde_json::Error> {
-    canonical_json(model)
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
+pub fn claim_id(envelope: &Value) -> Result<String, ClaimError> {
+    Ok(format!(
+        "sha256:{}",
+        format_jcs::hex(&content_hash(envelope)?)
+    ))
 }
 
-/// The **per-entity canonical content hash** — the value an attestation binds to. SHA-256 over the
-/// entity's canonical bytes ([`canonical_json`]). It is:
-/// - **deterministic + identical across clients** — a pure function of the canonical form;
-/// - **stable through compaction** — it depends only on the entity's own fields, never on log
-///   position (byte-preservation through GC is enforced separately);
-/// - **high-entropy** — the entity's opaque, random id is part of the hashed bytes, so a low-entropy
-///   fact ("born 1901") can't be confirmed by guessing its fields.
-///
-/// Editing a fact changes its hash *by design*: an attestation on the old value then reads as
-/// "attested an earlier value".
+/// The dedup/refutation **fingerprint**: `sha256(JCS(targetId, predicate, value))`.
 ///
 /// # Errors
-/// Returns a [`serde_json::Error`] if `value` fails to serialize.
-pub fn content_hash<T: Serialize>(value: &T) -> Result<[u8; 32], serde_json::Error> {
-    Ok(Sha256::digest(canonical_json(value)?).into())
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
+pub fn fingerprint(envelope: &Value) -> Result<[u8; 32], ClaimError> {
+    let bytes = format_jcs::canonical_subset(envelope, &[F_TARGET_ID, F_PREDICATE, F_VALUE])?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+/// A **content reference** to an intrinsic value: `"sha256:" + hex(sha256(JCS(intrinsic)))`.
+///
+/// This is
+/// how `equivalent_to` / `derived_from` / `preferred.contentRef` point at *what a claim says* (§4.1)
+/// rather than at a minted id — a reference stable across authors and unaffected by unrelated fields.
+/// The caller supplies the intrinsic (for a name that is its parts+script+culture; otherwise the
+/// whole `value`).
+///
+/// # Errors
+/// Returns a [`ClaimError`] if `intrinsic` can't be canonicalized.
+pub fn content_ref(intrinsic: &Value) -> Result<String, ClaimError> {
+    Ok(format!(
+        "sha256:{}",
+        format_jcs::hex256(&format_jcs::to_canonical_value(intrinsic)?)
+    ))
+}
+
+/// Sign an envelope with the author's Ed25519 key (must be the key behind `createdBy`). The signature
+/// is over `DOMAIN‖content_hash` and is excluded from the id + fingerprint.
+///
+/// # Errors
+/// Returns a [`ClaimError`] if the envelope can't be canonicalized.
+pub fn sign(envelope: &Value, key: &SigningKey) -> Result<[u8; 64], ClaimError> {
+    let ch = content_hash(envelope)?;
+    Ok(key.sign(&signing_message(&ch)).to_bytes())
+}
+
+/// The outcome of a low-level signature check (see [`verify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigCheck {
+    /// Valid for this content under the key behind `createdBy`.
+    Valid,
+    /// Does not verify — tampered content, wrong key, or a malformed signature.
+    Bad,
+}
+
+/// The authorship judgment for a claim's embedded signature ([`envelope::Claim::verify`]).
+///
+/// Unlike a `bool` or `Result<Option<_>>`, this makes the dangerous case a variant the caller MUST
+/// match: there is no `is_ok()` / `is_some()` that silently accepts a bad signature. It is
+/// **fail-closed** — anything that is not a present, valid signature over this content under
+/// `createdBy` is [`Forged`](Authorship::Forged).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authorship {
+    /// No signature is present — authorship is not asserted (the V1 communal-DEK model).
+    Unsigned,
+    /// A signature is present and verifies for this content under `createdBy`.
+    Verified,
+    /// A signature is present but does NOT verify — tampered content, wrong key, a malformed
+    /// signature string, or an undecodable `createdBy`. Never trust the claim's authorship.
+    Forged,
+}
+
+/// Verify `sig` against the envelope's content and the public key behind its `createdBy` `did:key`.
+/// Pure cryptography — no keyring/role authority check (that is a higher layer).
+///
+/// # Errors
+/// Returns a [`ClaimError`] if `createdBy` is missing or not a decodable `did:key`, or the content
+/// can't be canonicalized. (A signature that simply fails to verify is `Ok(SigCheck::Bad)`.)
+pub fn verify(envelope: &Value, sig: &[u8; 64]) -> Result<SigCheck, ClaimError> {
+    let did = envelope
+        .get(F_CREATED_BY)
+        .and_then(Value::as_str)
+        .ok_or(ClaimError::MissingCreatedBy)?;
+    let pk = did::decode_ed25519(did)?;
+    let Ok(vk) = VerifyingKey::from_bytes(&pk) else {
+        return Ok(SigCheck::Bad);
+    };
+    let ch = content_hash(envelope)?;
+    // The seam's verify is verify_strict — additionally rejecting small-order keys / torsion components
+    // (defence in depth for a load-bearing signature); the weaker plain verify is not reachable here.
+    Ok(
+        match vk.verify(&signing_message(&ch), &Signature::from_bytes(sig)) {
+            Ok(()) => SigCheck::Valid,
+            Err(_) => SigCheck::Bad,
+        },
+    )
+}
+
+fn signing_message(content_hash: &[u8; 32]) -> Vec<u8> {
+    [SIGN_DOMAIN, content_hash.as_slice()].concat()
+}
+
+/// A value whose `id` is the hash of its own content.
+///
+/// Every enveloped record — [`envelope::Claim`] and
+/// the operations channel's `Op` — derives its id through the one canonicalization path here (JCS,
+/// excluding the top-level `id` and `signature`), so there is never a second hashing implementation.
+///
+/// It is **not** blanket-implemented over [`Serialize`]: the excluded fields live at a *specific* depth
+/// (the top level), so a type that *embeds* another record (an op embedding a [`envelope::Record`])
+/// overrides [`hash_envelope`](ContentAddressed::hash_envelope) to strip the nested record's
+/// `signature` before hashing — otherwise signing the inner record would shift the enclosing id. Each
+/// type implements the trait explicitly.
+pub trait ContentAddressed: serde::Serialize {
+    /// The JSON to hash, normalized so anything excluded from the hash below the top level is already
+    /// removed. Default = the plain serialization (correct for a flat envelope like [`envelope::Claim`]).
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if `self` can't be serialized to JSON.
+    fn hash_envelope(&self) -> Result<Value, ClaimError> {
+        Ok(serde_json::to_value(self)?)
+    }
+
+    /// The content-hash id: `"sha256:" + hex(sha256(JCS(hash_envelope − id − signature)))`.
+    ///
+    /// # Errors
+    /// Returns a [`ClaimError`] if the envelope can't be serialized or canonicalized.
+    fn content_id(&self) -> Result<String, ClaimError> {
+        claim_id(&self.hash_envelope()?)
+    }
+}
+
+impl ContentAddressed for envelope::Claim {}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use edsign::SigningKey;
+    use proptest::prelude::*;
+
+    /// Arbitrary float-free JSON objects for a claim's `value`.
+    fn arb_obj() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|n| Value::Number(n.into())),
+            ".*".prop_map(Value::String),
+        ];
+        prop::collection::hash_map("[a-z]{1,6}", leaf, 0..6)
+            .prop_map(|m| Value::Object(m.into_iter().collect()))
+    }
+
+    proptest! {
+        // A claim signed by its createdBy key verifies; any content change flips it to Bad.
+        #[test]
+        fn sign_verify_and_tamper(seed in any::<[u8; 32]>(), value in arb_obj()) {
+            let key = SigningKey::from_seed(&seed);
+            let did = did::encode_ed25519(&key.verifying_key().to_bytes());
+            let mut c = envelope::Claim::new("t", "openom.org/core/name/v1", value, &did, Hlc::new(1, 0));
+            c.compute_id().unwrap();
+            let v = c.to_value();
+            let sig = sign(&v, &key).unwrap();
+            prop_assert_eq!(verify(&v, &sig).unwrap(), SigCheck::Valid);
+
+            let mut tampered = c.clone();
+            tampered.created_at = Hlc::new(2, 0);
+            prop_assert_eq!(verify(&tampered.to_value(), &sig).unwrap(), SigCheck::Bad);
+        }
+
+        // id and fingerprint are pure functions of the envelope.
+        #[test]
+        fn id_and_fingerprint_deterministic(value in arb_obj()) {
+            let v = envelope::Claim::new("t", "openom.org/core/name/v1", value, "did:key:z6MkX", Hlc::new(1, 0)).to_value();
+            prop_assert_eq!(claim_id(&v).unwrap(), claim_id(&v).unwrap());
+            prop_assert_eq!(fingerprint(&v).unwrap(), fingerprint(&v).unwrap());
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn seeded() -> SeededIdSource {
-        SeededIdSource::new(0xC0FFEE)
+    // The registry of per-purpose Ed25519 signing-domain tags across the crates. Every signed message is
+    // prefixed with one so a signature in one context can never verify in another. `SIGN_DOMAIN` is this
+    // crate's real constant; the rest are the literals used at their signing sites (openom-protocol's
+    // author_signing_bytes, the openom-keyring-chain chain) — keep this list in sync when adding a signed
+    // message type. No tag may equal or be a prefix of another (a prefix would let a longer domain's
+    // signature be truncated-replayed against the shorter one).
+    #[test]
+    fn ed25519_signing_domains_are_pairwise_distinct_and_non_prefixing() {
+        let domains: &[&[u8]] = &[
+            SIGN_DOMAIN,         // openom-data-model: claim signatures ("openom-data-model-v1")
+            b"openom:author:v1", // openom-protocol::aad::author_signing_bytes (shared-tree entries)
+            b"openom:keyring",   // openom-keyring-chain: keyring-chain signatures
+        ];
+        for (i, a) in domains.iter().enumerate() {
+            for (j, b) in domains.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert_ne!(a, b, "signing-domain tags must be distinct");
+                assert!(
+                    !b.starts_with(a),
+                    "no signing-domain tag may prefix another: {a:?} prefixes {b:?}",
+                );
+            }
+        }
+    }
+
+    // A representative name claim on a person, authored by `author`'s did:key.
+    fn claim(author_did: &str) -> Value {
+        json!({
+            "id": "sha256:PLACEHOLDER",
+            "type": "openom.org/core/claim/v1",
+            "targetId": "per_uuid",
+            "predicate": "openom.org/core/name/v1",
+            "value": { "parts": { "given": "Ada", "family": "Lovelace" } },
+            "citation": { "sourceId": "src_hash", "locator": {}, "extract": "…" },
+            "createdAt": "2026-02-22T13:10:00.000000Z",
+            "createdBy": author_did,
+        })
+    }
+
+    fn signer(seed: u8) -> (SigningKey, String) {
+        let key = SigningKey::from_seed(&[seed; 32]);
+        let did = did::encode_ed25519(&key.verifying_key().to_bytes());
+        (key, did)
     }
 
     #[test]
-    fn edit_preserves_id_and_edges() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
+    fn id_excludes_id_and_signature_but_covers_value() {
+        let (_, did) = signer(1);
+        let c = claim(&did);
+        let base = claim_id(&c).unwrap();
+        assert!(base.starts_with("sha256:") && base.len() == 7 + 64);
 
-        let parent = m.create_node(NodeKind::Person, &mut src);
-        let child = m.create_node(NodeKind::Person, &mut src);
-        let edge = m
-            .add_edge(RelationshipType::ParentChild, parent, child, &mut src)
-            .unwrap();
-        let birth = m
-            .add_event(EventType::Birth, child, Some(1900), &mut src)
-            .unwrap();
+        // Changing the id field or attaching a signature must not move the id.
+        let mut c2 = c.clone();
+        c2["id"] = json!("sha256:something-else");
+        c2["signature"] = json!("AAAA");
+        assert_eq!(claim_id(&c2).unwrap(), base);
 
-        // Correct a wrong birth year — a real edit.
-        m.correct_event_timestamp(birth, Some(1901)).unwrap();
-
-        // The id never moved, the corrected value is there, and the edge still resolves.
-        assert_eq!(m.events[&birth].timestamp, Some(1901));
-        assert_eq!(m.events[&birth].id, birth);
-        let e = &m.edges[&edge];
-        assert_eq!(e.from, parent);
-        assert_eq!(e.to, child);
-        assert!(m.nodes.contains_key(&e.from) && m.nodes.contains_key(&e.to));
+        // Changing the asserted value must move it.
+        let mut c3 = c.clone();
+        c3["value"]["parts"]["given"] = json!("Augusta");
+        assert_ne!(claim_id(&c3).unwrap(), base);
     }
 
     #[test]
-    fn edge_validation() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let a = m.create_node(NodeKind::Person, &mut src);
+    fn fingerprint_excludes_author_and_citation_but_not_value() {
+        let (_, did_a) = signer(1);
+        let (_, did_b) = signer(2);
+        let fp = |v: &Value| fingerprint(v).unwrap();
 
-        // Self-loop (the "own parent" paradox).
-        assert_eq!(
-            m.add_edge(RelationshipType::ParentChild, a, a, &mut src),
-            Err(ModelError::SelfLoop)
-        );
+        let a = claim(&did_a);
+        // Same fact, different author → same fingerprint (but different id).
+        let b = claim(&did_b);
+        assert_eq!(fp(&a), fp(&b));
+        assert_ne!(claim_id(&a).unwrap(), claim_id(&b).unwrap());
 
-        // Edge to a node that isn't in the model.
-        let ghost = NodeId::generate(&mut src);
-        assert_eq!(
-            m.add_edge(RelationshipType::Spouse, a, ghost, &mut src),
-            Err(ModelError::DanglingNode(ghost))
-        );
+        // Same fact, different citation → same fingerprint.
+        let mut c = claim(&did_a);
+        c["citation"] = json!({ "sourceId": "other_src", "locator": {}, "extract": "x" });
+        assert_eq!(fp(&a), fp(&c));
+
+        // Different value → different fingerprint.
+        let mut d = claim(&did_a);
+        d["value"]["parts"]["family"] = json!("Byron");
+        assert_ne!(fp(&a), fp(&d));
     }
 
     #[test]
-    fn round_trip_preserves_ids_and_structure() {
-        // A serialize → deserialize round-trip stands in for a compaction/snapshot fold: the
-        // stored ids and the whole structure come back byte-for-byte-equivalent.
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let p = m.create_node(NodeKind::Person, &mut src);
-        let f = m.create_node(NodeKind::Family, &mut src);
-        m.add_edge(RelationshipType::ParentChild, f, p, &mut src)
-            .unwrap();
-        m.add_event(EventType::Birth, p, Some(2000), &mut src)
-            .unwrap();
-
-        let json = serde_json::to_string(&m).unwrap();
-        let back: Model = serde_json::from_str(&json).unwrap();
-        assert_eq!(m, back);
+    fn fingerprint_is_key_order_independent() {
+        let (_, did) = signer(1);
+        let a = claim(&did);
+        let mut b = claim(&did);
+        // Re-insert value with the parts in a different textual order — JCS must canonicalize both.
+        b["value"] = json!({ "parts": { "family": "Lovelace", "given": "Ada" } });
+        assert_eq!(fingerprint(&a).unwrap(), fingerprint(&b).unwrap());
     }
 
     #[test]
-    fn reserved_seams_scope_link_merge() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let a = m.create_node(NodeKind::Person, &mut src);
+    fn sign_and_verify_roundtrip() {
+        let (key, did) = signer(7);
+        let c = claim(&did);
+        let sig = sign(&c, &key).unwrap();
+        assert_eq!(verify(&c, &sig).unwrap(), SigCheck::Valid);
+    }
 
-        // OPE-99: an opaque subtree-scope tag on a node.
-        m.nodes.get_mut(&a).unwrap().scope = Some("branch:paternal".into());
-        assert_eq!(m.nodes[&a].scope.as_deref(), Some("branch:paternal"));
+    #[test]
+    fn tampered_content_fails_verification() {
+        let (key, did) = signer(7);
+        let c = claim(&did);
+        let sig = sign(&c, &key).unwrap();
+        let mut tampered = c.clone();
+        tampered["value"]["parts"]["given"] = json!("Mallory");
+        assert_eq!(verify(&tampered, &sig).unwrap(), SigCheck::Bad);
+    }
 
-        // OPE-99: a cross-tree link record (federation seam).
-        let other_tree = TreeId::generate(&mut src);
-        let other_node = NodeId::generate(&mut src);
-        let link = m
-            .add_cross_tree_link(a, other_tree, other_node, &mut src)
-            .unwrap();
-        assert_eq!(m.cross_tree_links[&link].remote_node, other_node);
+    #[test]
+    fn signature_from_a_key_other_than_created_by_fails() {
+        let (wrong_key, _) = signer(9);
+        let (_, did) = signer(7); // envelope claims author 7…
+        let c = claim(&did);
+        let sig = sign(&c, &wrong_key).unwrap(); // …but 9 signed it
+        assert_eq!(verify(&c, &sig).unwrap(), SigCheck::Bad);
+    }
 
-        // OPE-150: the field merge-class marker — default Lww, Text opt-in.
-        assert_eq!(MergeClass::default(), MergeClass::Lww);
-        let def = FieldDef {
-            id: FieldDefId::generate(&mut src),
-            name: "biography".into(),
-            merge: MergeClass::Text,
+    #[test]
+    fn attaching_the_signature_does_not_change_the_id() {
+        let (key, did) = signer(7);
+        let c = claim(&did);
+        let before = claim_id(&c).unwrap();
+        let sig = sign(&c, &key).unwrap();
+        let mut signed = c.clone();
+        signed["signature"] = json!(format_jcs::hex(&sig));
+        assert_eq!(claim_id(&signed).unwrap(), before);
+        // …and the signature still verifies with the field present.
+        assert_eq!(verify(&signed, &sig).unwrap(), SigCheck::Valid);
+    }
+
+    #[test]
+    fn id_covers_every_content_field() {
+        let (_, did) = signer(1);
+        let base = claim_id(&claim(&did)).unwrap();
+        let moved = |mutate: &dyn Fn(&mut Value)| {
+            let mut m = claim(&did);
+            mutate(&mut m);
+            claim_id(&m).unwrap() != base
         };
-        assert_eq!(def.merge, MergeClass::Text);
-
-        // Round-trip still holds with the new reserved fields.
-        let json = serde_json::to_string(&m).unwrap();
-        assert_eq!(m, serde_json::from_str::<Model>(&json).unwrap());
+        assert!(moved(&|m| m["predicate"] = json!("openom.org/core/sex/v1")));
+        assert!(moved(&|m| m["targetId"] = json!("per_other")));
+        assert!(moved(&|m| m["createdAt"] = json!("2026-02-22T13:10:00.000001Z")));
+        assert!(moved(&|m| m["createdBy"] = json!(signer(2).1)));
+        assert!(moved(&|m| m["citation"] = json!({ "sourceId": "other" })));
     }
 
     #[test]
-    fn canonicalize_is_deterministic_and_sorted() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let p = m.create_node(NodeKind::Person, &mut src);
-        m.add_event(EventType::Birth, p, Some(1990), &mut src)
-            .unwrap();
-
-        // Stable across a serialize → parse round-trip: same materialized state → identical bytes.
-        let a = canonicalize(&m).unwrap();
-        let reparsed: Model = serde_json::from_slice(&serde_json::to_vec(&m).unwrap()).unwrap();
-        assert_eq!(a, canonicalize(&reparsed).unwrap());
-
-        // Object keys are emitted in sorted (JCS) order: `cross_tree_links` precedes `tree`.
-        let s = String::from_utf8(a).unwrap();
-        assert!(s.find("cross_tree_links").unwrap() < s.find("\"tree\"").unwrap());
+    fn fingerprint_covers_target_and_predicate() {
+        let (_, did) = signer(1);
+        let base = fingerprint(&claim(&did)).unwrap();
+        let mut t = claim(&did);
+        t["targetId"] = json!("per_other");
+        assert_ne!(fingerprint(&t).unwrap(), base);
+        let mut p = claim(&did);
+        p["predicate"] = json!("openom.org/core/sex/v1");
+        assert_ne!(fingerprint(&p).unwrap(), base);
     }
 
     #[test]
-    fn content_hash_binds_to_the_fact_not_the_tree() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let a = m.create_node(NodeKind::Person, &mut src);
-        let b = m.create_node(NodeKind::Person, &mut src);
-        let ea = m
-            .add_event(EventType::Birth, a, Some(1901), &mut src)
-            .unwrap();
-        let eb = m
-            .add_event(EventType::Death, b, Some(1980), &mut src)
-            .unwrap();
-
-        let h = content_hash(&m.events[&ea]).unwrap();
-
-        // Editing ANOTHER fact leaves this fact's hash untouched (binds to the fact, not the tree).
-        m.correct_event_timestamp(eb, Some(1981)).unwrap();
-        assert_eq!(content_hash(&m.events[&ea]).unwrap(), h);
-
-        // Editing THIS fact changes its hash — the "attested an earlier value" behaviour.
-        m.correct_event_timestamp(ea, Some(1902)).unwrap();
-        assert_ne!(content_hash(&m.events[&ea]).unwrap(), h);
-    }
-
-    #[test]
-    fn content_hash_is_deterministic_and_high_entropy() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let p = m.create_node(NodeKind::Person, &mut src);
-        let e = m
-            .add_event(EventType::Birth, p, Some(2000), &mut src)
-            .unwrap();
-
-        // Pure function of the canonical bytes: a re-parse hashes identically (cross-client stable).
-        let ev = m.events[&e];
-        let reparsed: Event = serde_json::from_slice(&serde_json::to_vec(&ev).unwrap()).unwrap();
-        assert_eq!(content_hash(&reparsed).unwrap(), content_hash(&ev).unwrap());
-
-        // Two facts with identical fields but different random ids hash differently — the id is the
-        // high-entropy component, so the fields alone can't be confirmed by guessing.
-        let e1 = m
-            .add_event(EventType::Birth, p, Some(1901), &mut src)
-            .unwrap();
-        let e2 = m
-            .add_event(EventType::Birth, p, Some(1901), &mut src)
-            .unwrap();
+    fn content_ref_is_stable_and_field_selective() {
+        let a = json!({ "parts": { "given": "Ada" }, "script": "Latn" });
+        let r1 = content_ref(&a).unwrap();
+        assert!(r1.starts_with("sha256:") && r1.len() == 7 + 64);
+        // JCS canonicalizes, so key order doesn't move the reference…
+        let b = json!({ "script": "Latn", "parts": { "given": "Ada" } });
+        assert_eq!(content_ref(&b).unwrap(), r1);
+        // …but different intrinsic content does.
         assert_ne!(
-            content_hash(&m.events[&e1]).unwrap(),
-            content_hash(&m.events[&e2]).unwrap()
+            content_ref(&json!({ "parts": { "given": "Augusta" } })).unwrap(),
+            r1
         );
     }
 
     #[test]
-    fn node_embeds_the_name_model() {
-        let mut src = seeded();
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let p = m.create_node(NodeKind::Person, &mut src);
-        m.add_name(
-            p,
-            Name {
-                id: NameId::generate(&mut src),
-                role: Some("birth".into()),
-                borrows_from: None,
-                equivalent_to: Vec::new(),
-                provenance: None,
-                primary: true,
-                script: Some("Latn".into()),
-                culture: Some("en-GB".into()),
-                parts: vec![Part::new("given", "Jane"), Part::new("family", "Austen")],
-            },
-        )
-        .unwrap();
-        assert_eq!(m.nodes[&p].names.len(), 1);
+    fn a_did_encoding_a_non_curve_point_is_bad_not_error() {
+        // A syntactically valid did:key (right multicodec + 32 bytes) whose bytes are not a valid
+        // Ed25519 point must make verify() return Bad, never Err.
+        let did = did::encode_ed25519(&[0xff; 32]);
+        let mut c = claim(&did);
+        c["createdBy"] = json!(did);
+        assert_eq!(verify(&c, &[0u8; 64]).unwrap(), SigCheck::Bad);
+    }
 
-        // Round-trips with the embedded name.
-        let json = serde_json::to_vec(&m).unwrap();
-        assert_eq!(m, serde_json::from_slice::<Model>(&json).unwrap());
+    #[test]
+    fn content_addressed_matches_the_claim_id_seam() {
+        use crate::ContentAddressed;
+        let (_, did) = signer(1);
+        let c: crate::envelope::Claim = serde_json::from_value(claim(&did)).unwrap();
+        assert_eq!(
+            c.content_id().unwrap(),
+            crate::claim_id(&c.to_value()).unwrap()
+        );
+    }
 
-        // Names are part of the node's content hash — adding one changes it.
-        let h = content_hash(&m.nodes[&p]).unwrap();
-        m.add_name(
-            p,
-            Name {
-                id: NameId::generate(&mut src),
-                role: Some("nickname".into()),
-                borrows_from: None,
-                equivalent_to: Vec::new(),
-                provenance: None,
-                primary: false,
-                script: None,
-                culture: None,
-                parts: vec![Part::new("given", "Jenny")],
-            },
-        )
-        .unwrap();
-        assert_ne!(content_hash(&m.nodes[&p]).unwrap(), h);
+    #[test]
+    fn verify_reports_errors_for_a_missing_or_bad_created_by() {
+        let (key, did) = signer(7);
+        let sig = sign(&claim(&did), &key).unwrap();
+
+        let mut no_author = claim(&did);
+        no_author.as_object_mut().unwrap().remove("createdBy");
+        assert!(matches!(
+            verify(&no_author, &sig),
+            Err(ClaimError::MissingCreatedBy)
+        ));
+
+        let mut bad_author = claim(&did);
+        bad_author["createdBy"] = json!("did:web:example.com");
+        assert!(matches!(
+            verify(&bad_author, &sig),
+            Err(ClaimError::BadCreatedBy(_))
+        ));
     }
 }

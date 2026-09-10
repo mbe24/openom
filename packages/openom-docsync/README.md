@@ -45,7 +45,7 @@ WSL2/Docker).
 
 ```rust
 use store_log::memory::MemoryStore;
-use openom_data_claim::envelope::Record;
+use openom_data_model::envelope::Record;
 use openom_data_crdt::ChannelItem;
 use openom_crypto::generate_dek;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};

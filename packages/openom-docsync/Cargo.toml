@@ -21,7 +21,7 @@ serde_json.workspace = true
 [dev-dependencies]
 openom-crypto = { path = "../openom-crypto" }
 # The tests build Claim/Record/Hlc fixtures.
-openom-data-claim = { path = "../openom-data-claim" }
+openom-data-model = { path = "../openom-data-model" }
 
 [lints]
 workspace = true

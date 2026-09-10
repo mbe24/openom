@@ -30,7 +30,7 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-openom-data-claim.workspace = true
+openom-data-model.workspace = true
 openom-data-crdt.workspace = true
 openom-data-projection.workspace = true
 

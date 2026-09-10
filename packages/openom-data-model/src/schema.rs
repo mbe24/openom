@@ -1,49 +1,40 @@
-//! JSON Schema validation of a serialized canonical model.
+//! JSON Schema (Draft 2020-12) validation of a serialized record against the frozen shape.
+//!
+//! Behind the `validation` feature and off the default/wasm build, so `jsonschema` never bloats the
+//! browser bundle. The schema is the frozen contract; Rust re-derives
+//! and checks the id/fingerprint/signature separately (the crate-root seam), since a JSON Schema can
+//! constrain shape but not verify a content hash.
 
 use serde_json::Value;
 
-/// A compiled validator for the canonical model against **JSON Schema — Draft 2020-12**
-/// (<https://json-schema.org/draft/2020-12/schema>).
-///
-/// This type is the single place that dialect is
-/// pinned in Rust; the schema documents declare the same dialect through their `$schema` keyword. It
-/// sits behind the `validation` feature and off the default/wasm build so `jsonschema` never bloats
-/// the browser bundle.
-pub struct ModelSchema {
+/// A compiled validator for `record.schema.json` (Draft 2020-12).
+pub struct RecordSchema {
     validator: jsonschema::Validator,
 }
 
-impl ModelSchema {
-    /// Compile the checked-in canonical-model schema.
+impl RecordSchema {
+    /// Compile the checked-in record schema.
     ///
     /// # Panics
     /// Never in practice: the checked-in schema JSON is valid and compiles.
     #[must_use]
     pub fn new() -> Self {
-        let model: Value = serde_json::from_str(include_str!("../schema/model.schema.json"))
-            .expect("model.schema.json is valid JSON");
-        let name: Value = serde_json::from_str(include_str!("../schema/name.schema.json"))
-            .expect("name.schema.json is valid JSON");
-        // Register the name fragment so the model's `$ref` to it (by $id) resolves.
+        let schema: Value = serde_json::from_str(include_str!("../schema/record.schema.json"))
+            .expect("record.schema.json is valid JSON");
         let validator = jsonschema::options()
-            .with_resource(
-                "https://openom.dev/schema/name.schema.json",
-                jsonschema::Resource::from_contents(name)
-                    .expect("name.schema.json is a valid schema resource"),
-            )
-            .build(&model)
-            .expect("model.schema.json is a valid schema");
+            .build(&schema)
+            .expect("record.schema.json is a valid schema");
         Self { validator }
     }
 
-    /// Does `instance` satisfy the schema?
+    /// Does `instance` satisfy the schema (is it a valid Anchor or Claim)?
     #[must_use]
     pub fn is_valid(&self, instance: &Value) -> bool {
         self.validator.is_valid(instance)
     }
 }
 
-impl Default for ModelSchema {
+impl Default for RecordSchema {
     fn default() -> Self {
         Self::new()
     }
@@ -52,59 +43,95 @@ impl Default for ModelSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
+    use crate::envelope::{AttestTarget, Claim, Verdict, TYPE_PERSON};
+    use crate::Hlc;
+    use edsign::SigningKey;
+    use serde_json::json;
+
+    fn did() -> String {
+        let key = SigningKey::from_seed(&[3u8; 32]);
+        did::encode_ed25519(&key.verifying_key().to_bytes())
+    }
+
+    /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
+    fn hlc(ms: i64) -> Hlc {
+        Hlc::new(ms, 0)
+    }
 
     #[test]
-    fn real_model_satisfies_schema_and_junk_does_not() {
-        let s = ModelSchema::new();
+    fn a_real_claim_and_anchor_validate() {
+        let s = RecordSchema::new();
+        let d = did();
 
-        let mut src = SeededIdSource::new(11);
-        let mut m = Model::new(TreeId::generate(&mut src));
-        let p = m.create_node(NodeKind::Person, &mut src);
-        let f = m.create_node(NodeKind::Family, &mut src);
-        m.add_edge(RelationshipType::ParentChild, f, p, &mut src)
-            .unwrap();
-        m.add_event(EventType::Birth, p, Some(2000), &mut src)
-            .unwrap();
-        // An embedded name exercises the cross-schema $ref into name.schema.json.
-        m.add_name(
-            p,
-            Name {
-                id: NameId::generate(&mut src),
-                role: Some("birth".into()),
-                borrows_from: None,
-                equivalent_to: Vec::new(),
-                provenance: None,
-                primary: true,
-                script: None,
-                culture: None,
-                parts: vec![Part::new("given", "Ada"), Part::new("family", "Lovelace")],
-            },
-        )
-        .unwrap();
-
-        let v = serde_json::to_value(&m).unwrap();
-        assert!(
-            s.is_valid(&v),
-            "a real serialized Model (with an embedded name) must satisfy the schema"
+        let mut c = Claim::new(
+            "b3d3f6b0-0000-4000-8000-000000000001",
+            "openom.org/core/name/v1",
+            json!({ "parts": { "given": "Ada", "family": "Lovelace" } }),
+            &d,
+            hlc(1771765800000),
         );
+        c.compute_id().unwrap();
+        assert!(s.is_valid(&c.to_value()), "a real name claim must validate");
 
-        // Missing the required tables → invalid.
-        assert!(!s.is_valid(&serde_json::json!({})));
+        let anchor = json!({
+            "id": "b3d3f6b0-0000-4000-8000-000000000002",
+            "type": TYPE_PERSON,
+            "createdAt": hlc(1771765800000).to_string(),
+            "createdBy": d,
+        });
+        assert!(s.is_valid(&anchor), "a person anchor must validate");
+    }
 
-        // An illegal enum value → invalid.
-        let mut bad = v.clone();
-        let nodes = bad.get_mut("nodes").unwrap().as_object_mut().unwrap();
-        let first = nodes.keys().next().unwrap().clone();
-        nodes
-            .get_mut(&first)
-            .unwrap()
-            .as_object_mut()
-            .unwrap()
-            .insert("kind".into(), serde_json::json!("Alien"));
+    #[test]
+    fn attestation_value_is_constrained() {
+        let s = RecordSchema::new();
+        let d = did();
+
+        let mut good = Claim::attestation(&AttestTarget::Claim("sha256:aa".into()), Verdict::Support, None, &d, hlc(1));
+        good.compute_id().unwrap();
+        assert!(s.is_valid(&good.to_value()));
+
+        // A bad verdict is rejected by the attest refinement.
+        let mut bad = good.clone();
+        bad.value = json!({ "verdict": "maybe" });
+        bad.compute_id().unwrap();
         assert!(
-            !s.is_valid(&bad),
-            "an illegal node kind must fail validation"
+            !s.is_valid(&bad.to_value()),
+            "verdict must be support|reject"
         );
+    }
+
+    #[test]
+    fn junk_and_malformed_ids_are_rejected() {
+        let s = RecordSchema::new();
+        let d = did();
+        assert!(!s.is_valid(&json!({})));
+
+        // A claim with a non-sha256 id fails the pattern.
+        let mut c = Claim::new("t", "openom.org/core/name/v1", json!({}), &d, hlc(1));
+        c.compute_id().unwrap();
+        let mut bad_id = c.to_value();
+        bad_id["id"] = json!("not-a-hash");
+        assert!(!s.is_valid(&bad_id));
+
+        // A claim with the wrong `type` const fails.
+        let mut bad_type = c.to_value();
+        bad_type["type"] = json!("openom.org/core/person/v1");
+        assert!(!s.is_valid(&bad_type));
+
+        // A non-did createdBy fails the pattern.
+        let mut bad_author = c.to_value();
+        bad_author["createdBy"] = json!("alice");
+        assert!(!s.is_valid(&bad_author));
+
+        // An anchor with a malformed uuid id fails (pattern enforced, not just the `format` annotation).
+        assert!(!s.is_valid(&json!({
+            "id": "not-a-uuid", "type": TYPE_PERSON, "createdAt": hlc(1).to_string(), "createdBy": d
+        })));
+
+        // A claim with a non-hex signature fails the signature pattern.
+        let mut bad_sig = c.to_value();
+        bad_sig["signature"] = json!("nothex");
+        assert!(!s.is_valid(&bad_sig));
     }
 }

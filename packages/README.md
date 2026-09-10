@@ -10,7 +10,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 
 - **Family-tree data vs. operations.** The canonical family-tree is a set of **claims** — facts
   *and* epistemic assertions (`same_as`, `attest`, `preferred`, …) — materialized as flat JSON. Its
-  crates are **`openom-data-claim`** (envelope + hashing) and **`openom-data-projection`** (read model).
+  crates are **`openom-data-model`** (envelope + hashing) and **`openom-data-projection`** (read model).
   **Deletion, edit-supersession, and merge metadata are operations, a *separate* channel — never
   claims** (design.data-model-claims.v1.md §8.2 / principle 6). The projection reads the **live
   claim set** and does epistemic resolution only; it does **not** process deletion or supersession —
@@ -18,11 +18,10 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **Substrate vs. domain.** The foundations (`format-jcs`, `did`, `format-edtf`,
   `openom-crypto`, `openom-protocol`) know nothing about family trees and must never gain a domain
   dependency. Dependencies point **downward** only.
-- **The engine (pre-release, zero users).** The app runs on the **claim model**: `openom-data-claim` /
+- **The engine (pre-release, zero users).** The app runs on the **claim model**: `openom-data-model` /
   `openom-data-projection` (data) + `openom-data-crdt` / `openom-data-tree` (operations + engine) over an operations
   channel. The former treelog engine (`openom-treelog`) and its op-CRDT (`commute` / `commute-format`)
-  have been **removed**. `openom-data-model` (the older flat model) remains as legacy. A crate's `Status`
-  line says where it stands.
+  have been **removed**. A crate's `Status` line says where it stands.
 
 ## The crates, by layer
 
@@ -37,9 +36,8 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **edsign** — the single Ed25519 dependency edge: newtypes whose only verify is `verify_strict`, so the weak path is uncallable elsewhere (compile-time signature-verification policy). openom-free.
 
 **Family-tree data model**
-- **openom-data-claim** — claim-envelope hashing + signing: content-hash `id`, dedup `fingerprint`, domain-separated Ed25519 sign/verify. *(claim model — the direction)*
+- **openom-data-model** — claim-envelope hashing + signing: content-hash `id`, dedup `fingerprint`, domain-separated Ed25519 sign/verify. *(claim model — the direction)*
 - **openom-data-projection** — read-time projection: the claim record set → a materialized read model, a pure function of the records. *(claim model)*
-- **openom-data-model** — the older canonical flat id-keyed model + JSON-Schema validator. *(legacy — superseded by the claim model)*
 
 **Operations / CRDT** (how changes converge)
 - **openom-data-crdt** — the claim model's convergent operation layer (a CRDT): the operation types + their set-union merge (`materialize`) folding a set of ops into the live record set (add / remove / supersede / revoke, same-author observed-remove). Not a log — owns no storage. Domain-agnostic, clock-free. *(claim model)*

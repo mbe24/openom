@@ -316,8 +316,8 @@ mod tests {
     use super::SyncClient;
     use store_log::memory::MemoryStore;
     use store_log::DocStore;
-    use openom_data_claim::envelope::{Claim, Record};
-    use openom_data_claim::Hlc;
+    use openom_data_model::envelope::{Claim, Record};
+    use openom_data_model::Hlc;
     use openom_data_crdt::{ChannelItem, Op, OpKind};
     use openom_crypto::{generate_dek, Dek};
     use openom_protocol::ids::{KeyId, ReplicaId, TreeId};

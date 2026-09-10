@@ -247,7 +247,7 @@ fn b58_decode(input: &str) -> Result<Vec<u8>, DidError> {
 // carrying `% 58` / `/ 58` on symbolic `u32`, and a global `#[kani::unwind]` must clear the 58-element
 // `ALPHABET` position search, so CBMC bit-blasts a division-heavy circuit unrolled ~60× regardless of
 // input size — runs were killed unconverged at both 32 bytes (18 min) and a 4-byte input (6 min). The
-// same modular arithmetic verifies instantly in `openom-data-claim`'s Hlc math because there it is
+// same modular arithmetic verifies instantly in `openom-data-model`'s Hlc math because there it is
 // branch-free and O(1); it's the LOOP multiplier that blows up. base58's bijection stays covered by
 // the proptest `did_key_roundtrips_for_any_pubkey` + the external W3C did:key vector below; deep
 // coverage-guided fuzzing (cargo-fuzz) is the right heavier tool here, not model checking.

@@ -13,12 +13,11 @@ members = [
     "packages/openom-roles",
     "packages/openom-keyring-chain",
     "packages/openom-keyring-api",
-    "packages/openom-data-model",
     "packages/format-jcs",
     "packages/did",
     "packages/edsign",
     "packages/format-edtf",
-    "packages/openom-data-claim",
+    "packages/openom-data-model",
     "packages/openom-data-projection",
     "packages/openom-data-crdt",
     "packages/openom-data-tree",
@@ -81,7 +80,7 @@ format-jcs = { path = "packages/format-jcs" }
 did = { path = "packages/did" }
 edsign = { path = "packages/edsign" }
 format-edtf = { path = "packages/format-edtf" }
-openom-data-claim = { path = "packages/openom-data-claim" }
+openom-data-model = { path = "packages/openom-data-model" }
 openom-data-projection = { path = "packages/openom-data-projection" }
 openom-data-crdt = { path = "packages/openom-data-crdt" }
 openom-data-tree = { path = "packages/openom-data-tree" }

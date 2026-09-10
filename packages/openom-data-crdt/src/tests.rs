@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use openom_data_claim::envelope::{Claim, Record};
-use openom_data_claim::Hlc;
+use openom_data_model::envelope::{Claim, Record};
+use openom_data_model::Hlc;
 use proptest::prelude::*;
 use serde_json::{json, Value};
 
@@ -298,7 +298,7 @@ fn duplicate_items_are_idempotent() {
 #[test]
 fn op_id_is_stable_when_the_embedded_replacement_is_signed() {
     // Signing the replacement record must not shift the enclosing op id (the embedded signature is
-    // excluded from the op hash). Mirrors openom-data-claim's attaching-the-signature-does-not-change-id.
+    // excluded from the op hash). Mirrors openom-data-model's attaching-the-signature-does-not-change-id.
     let old = name_claim("pA", "Ada", &did(1), 1);
     let replacement = name_claim("pA", "Ada Lovelace", &did(1), 2);
     let unsigned = supersede(&old, replacement.clone(), &did(1));
@@ -425,7 +425,7 @@ proptest! {
 
 // --- forward-compatibility: unknown types are opaque data, not vocabulary (OPE-212a) ----------
 //
-// The mechanism (this crate + openom-data-claim) treats a record's `type` and a claim's `predicate`/`value`
+// The mechanism (this crate + openom-data-model) treats a record's `type` and a claim's `predicate`/`value`
 // as SHAPE, never VOCABULARY: the fold keys on id + author + op-kind and must never read what a type or
 // predicate *means*. These tests lock that in so a future data-model type (e.g. `recipe`) flows through
 // an older client untouched instead of being dropped or halting the batch.

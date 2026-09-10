@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openom.dev/schema/record.schema.json",
   "title": "openom claim-model record",
-  "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). An attestation IS a Claim, discriminated by `predicate` (there is no targetType); deletion/edit-supersession are operations, NOT claims. Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the core `attest` meta-predicate additionally constrains `value`. camelCase field names match openom-claim's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-claim), not here. Bump x-openom-bounds-version when a bound widens.",
+  "$comment": "One frozen shape for every synced record: an Anchor (pure identity) or a Claim (the universal envelope). An attestation IS a Claim, discriminated by `predicate` (there is no targetType); deletion/edit-supersession are operations, NOT claims. Extension-by-predicate: an unknown predicate is permitted and its `value` is opaque; the core `attest` meta-predicate additionally constrains `value`. camelCase field names match openom-data-model's serialization. ids/hashes/signatures are re-derived and checked in Rust (openom-data-model), not here. Bump x-openom-bounds-version when a bound widens.",
   "x-openom-bounds-version": 2,
   "oneOf": [
     { "$ref": "#/$defs/anchor" },

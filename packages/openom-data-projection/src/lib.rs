@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use openom_data_claim::envelope::Record;
-use openom_data_claim::envelope::{Citations, Claim};
+pub use openom_data_model::envelope::Record;
+use openom_data_model::envelope::{Citations, Claim};
 use serde_json::Value;
 
 const TYPE_PERSON: &str = "openom.org/core/person/v1";
@@ -106,7 +106,7 @@ pub struct Person {
 }
 
 /// A live claim whose `predicate` this build doesn't recognize — the read-model counterpart of the
-/// mechanism's opaque [`Record::Unknown`](openom_data_claim::envelope::Record::Unknown) (OPE-212a).
+/// mechanism's opaque [`Record::Unknown`](openom_data_model::envelope::Record::Unknown) (OPE-212a).
 ///
 /// Carried
 /// verbatim (an unknown predicate has no known semantics to corroborate) so new vocabulary shows up in
@@ -1412,7 +1412,7 @@ fn fingerprint_str(c: &Claim) -> Option<String> {
         "predicate": c.predicate,
         "value": c.value,
     });
-    openom_data_claim::fingerprint(&subset)
+    openom_data_model::fingerprint(&subset)
         .ok()
         .map(|h| format!("sha256:{}", format_jcs::hex(&h)))
 }
@@ -1454,7 +1454,7 @@ fn name_ref(name_value: &Value) -> Option<String> {
             intrinsic.insert(k.to_string(), v.clone());
         }
     }
-    openom_data_claim::content_ref(&Value::Object(intrinsic)).ok()
+    openom_data_model::content_ref(&Value::Object(intrinsic)).ok()
 }
 
 /// Group a person's names into equivalence classes over `equivalent_to` (§6). Each name's class label

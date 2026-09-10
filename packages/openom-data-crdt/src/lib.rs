@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use openom_data_claim::envelope::Record;
-use openom_data_claim::{ClaimError, ContentAddressed, Hlc};
+use openom_data_model::envelope::Record;
+use openom_data_model::{ClaimError, ContentAddressed, Hlc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,8 +11,8 @@ use serde_json::Value;
 /// rather than a [`Record`], and part of the op's hash preimage (domain separation inside the hash).
 pub const OP_TYPE: &str = "openom.org/core/op/v1";
 
-/// Domain-separation prefix for operation signatures, distinct from `openom-data-claim`'s
-/// `openom-data-claim-v1` so a claim signature and an op signature can never be mistaken for one another.
+/// Domain-separation prefix for operation signatures, distinct from `openom-data-model`'s
+/// `openom-data-model-v1` so a claim signature and an op signature can never be mistaken for one another.
 ///
 /// Reserved for the deferred op-signing step (see the module docs).
 pub const SIGN_DOMAIN: &[u8] = b"openom-op-v1";

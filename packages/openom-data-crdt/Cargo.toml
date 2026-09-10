@@ -18,9 +18,9 @@ rust-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# The records an operation asserts/supersedes are openom-data-claim Records; ContentAddressed is the shared
+# The records an operation asserts/supersedes are openom-data-model Records; ContentAddressed is the shared
 # hashing seam so an Op computes its id through the exact same JCS path a Claim does.
-openom-data-claim.workspace = true
+openom-data-model.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

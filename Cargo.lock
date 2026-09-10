@@ -3630,8 +3630,8 @@ dependencies = [
  "js-sys",
  "keyeo-crypto",
  "openom-crypto",
- "openom-data-claim",
  "openom-data-crdt",
+ "openom-data-model",
  "openom-data-tree",
  "openom-docsync",
  "openom-keyring-api",
@@ -3665,7 +3665,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-data-claim"
+name = "openom-data-crdt"
+version = "0.1.0"
+dependencies = [
+ "openom-data-model",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "openom-data-model"
 version = "0.1.0"
 dependencies = [
  "did",
@@ -3680,35 +3691,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "openom-data-crdt"
-version = "0.1.0"
-dependencies = [
- "openom-data-claim",
- "proptest",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "openom-data-model"
-version = "0.1.0"
-dependencies = [
- "jsonschema",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "uuid",
-]
-
-[[package]]
 name = "openom-data-projection"
 version = "0.1.0"
 dependencies = [
  "format-edtf",
  "format-jcs",
- "openom-data-claim",
+ "openom-data-model",
  "proptest",
  "serde",
  "serde_json",
@@ -3719,8 +3707,8 @@ name = "openom-data-tree"
 version = "0.1.0"
 dependencies = [
  "js-sys",
- "openom-data-claim",
  "openom-data-crdt",
+ "openom-data-model",
  "openom-data-projection",
  "serde",
  "serde_json",
@@ -3734,8 +3722,8 @@ version = "0.1.0"
 dependencies = [
  "docsync",
  "openom-crypto",
- "openom-data-claim",
  "openom-data-crdt",
+ "openom-data-model",
  "openom-data-tree",
  "openom-protocol",
  "openom-sealer",

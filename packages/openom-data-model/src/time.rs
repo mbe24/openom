@@ -195,7 +195,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// Kani proof harnesses — bit-precise model checking (CBMC backend). Compiled ONLY under `cargo kani`
 /// (which sets `--cfg kani`); the normal build and `cargo test` never see them, so there is no `kani`
-/// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p openom-data-claim` (Docker image or a
+/// dependency in `Cargo.toml`. Run them with `node scripts/kani.mjs -p openom-data-model` (Docker image or a
 /// local Kani install). These are the workspace's first proofs — deliberately the simplest high-value
 /// target: branch-free integer arithmetic over primitive inputs (no loops → no unwind bounds).
 #[cfg(kani)]

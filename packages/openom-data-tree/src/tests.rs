@@ -219,7 +219,7 @@ fn live_claims_of_any_returns_every_predicate_including_unrecognized() {
         all.iter().filter_map(|c| c["predicate"].as_str()).collect();
     assert!(preds.contains(NAME));
     assert!(preds.contains("openom.org/x/occupation/v1"));
-    assert!(preds.contains(openom_data_claim::envelope::PREDICATE_EXISTENCE));
+    assert!(preds.contains(openom_data_model::envelope::PREDICATE_EXISTENCE));
 
     assert!(a.live_claims_of_any("nope").is_empty());
 }

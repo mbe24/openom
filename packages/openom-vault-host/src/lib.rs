@@ -458,7 +458,7 @@ impl Registry {
 ///
 /// [`OsEntropy`] (the OS/browser CSPRNG) is the source for real data in dev AND prod; tests
 /// inject a seeded `SeededEntropy` (test-only) for determinism. Entropy is a security property, not a
-/// dev/prod toggle — mirrors `openom_data_model::id::IdSource`. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
+/// dev/prod toggle. Behind `&self` (a CSPRNG is stateless; a seeded impl uses
 /// interior mutability), so the host's methods stay `&self`.
 pub trait HostEntropy: Send + Sync {
     /// 128 fresh random bits. Errs only if the OS/browser entropy source fails.

@@ -8,7 +8,7 @@
 
 ## What it is — and is not
 
-The **data** channel (`openom-data-claim` / `openom-data-projection`) carries *facts* — a grow-only set of
+The **data** channel (`openom-data-model` / `openom-data-projection`) carries *facts* — a grow-only set of
 records whose *disagreements* the projection resolves. This crate carries the orthogonal thing: the
 *lifecycle* of those records. "Every change is an operation" (design §8.2) — a record is **added**,
 **deleted**, **edited** (superseded), or a delete is **undone** (revoked). Those operations form their
@@ -28,7 +28,7 @@ channels stay structurally separate: nothing in the read model can name an `Op`.
 
 It is the claim-model replacement for `commute`'s **merge**, minus the Lamport ordering — convergence
 is by set-union — and the domain composition `openom-treelog` used to bundle now lives in
-`openom-data-claim` (the record types) and `openom-data-projection` (the epistemic read model).
+`openom-data-model` (the record types) and `openom-data-projection` (the epistemic read model).
 
 ## Shape
 
@@ -63,8 +63,8 @@ WSL2/Docker).
 
 ```rust
 use std::collections::BTreeSet;
-use openom_data_claim::envelope::{Claim, Record};
-use openom_data_claim::Hlc;
+use openom_data_model::envelope::{Claim, Record};
+use openom_data_model::Hlc;
 use openom_data_crdt::{materialize, ChannelItem, Op, OpKind};
 
 let author = "did:key:z6MkA";
@@ -72,7 +72,7 @@ let author = "did:key:z6MkA";
 // may remove or supersede. An op by anyone else folds to a no-op.
 let moderators: BTreeSet<String> = [author.to_string()].into_iter().collect();
 
-// Add a name claim (an add IS the record). createdAt is a Hybrid Logical Clock (see openom_data_claim::Hlc).
+// Add a name claim (an add IS the record). createdAt is a Hybrid Logical Clock (see openom_data_model::Hlc).
 let mut name = Claim::new("pA", "openom.org/core/name/v1", serde_json::json!({ "given": "Ada" }), author, Hlc::new(1, 0));
 name.compute_id().unwrap();
 let name = Record::Claim(name);
@@ -93,7 +93,7 @@ assert_eq!(live[0].id(), better_id); // the edited record won; the prior is gone
 
 Entry points: `materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record>` (the
 role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types);
-`ContentAddressed` (re-used from `openom-data-claim`) for the op id.
+`ContentAddressed` (re-used from `openom-data-model`) for the op id.
 
 ## Deferred (tracked elsewhere, deliberately not here)
 
@@ -113,7 +113,7 @@ role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (th
 
 ## Position
 
-Sits in the family-tree operations layer, on top of `openom-data-claim` (whose `Record` it folds and whose
+Sits in the family-tree operations layer, on top of `openom-data-model` (whose `Record` it folds and whose
 `ContentAddressed` seam it re-uses for the op id). It depends on **no** transport, CRDT, or projection
 crate. Not yet wired into the app (the in-wasm claim engine that will host the fold, and the transport
 `EntryKind` that wraps each item with the idempotency dot, are separate tasks). Full dependency graph:

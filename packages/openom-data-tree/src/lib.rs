@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use openom_data_claim::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
-use openom_data_claim::Hlc;
+use openom_data_model::envelope::{Anchor, Claim, Record, PREDICATE_EXISTENCE};
+use openom_data_model::Hlc;
 use openom_data_crdt::{codec, materialize, ChannelItem, Op, OpKind};
 use openom_data_projection::{project, Policy, Projection};
 use serde::Serialize;
@@ -127,7 +127,7 @@ mod clock_verification {
 pub enum TreeError {
     /// Building or hashing a claim/record failed.
     #[error(transparent)]
-    Claim(#[from] openom_data_claim::ClaimError),
+    Claim(#[from] openom_data_model::ClaimError),
     /// Minting or ingesting an operation failed.
     #[error(transparent)]
     Crdt(#[from] openom_data_crdt::CrdtError),

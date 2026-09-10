@@ -1,5 +1,5 @@
 use super::*;
-use openom_data_claim::envelope::TYPE_CLAIM;
+use openom_data_model::envelope::TYPE_CLAIM;
 use proptest::prelude::*;
 use serde_json::json;
 
@@ -120,7 +120,7 @@ fn preferred(id: &str, person: &str, for_pred: &str, claim_ref: &str, author: &s
 }
 // The content-ref of a name whose only intrinsic is its given part — matches the projection's name_ref.
 fn given_ref(given: &str) -> String {
-    openom_data_claim::content_ref(&json!({ "parts": { "given": given } })).unwrap()
+    openom_data_model::content_ref(&json!({ "parts": { "given": given } })).unwrap()
 }
 fn parent(id: &str, child: &str, parent_person: &str, kind: &str, author: &str) -> Record {
     claim(
@@ -563,7 +563,7 @@ fn attestation_by_fingerprint_counts() {
     let sa = same_as("s1", "pA", "pB", "did:key:z6MkA");
     let fp = format!(
         "sha256:{}",
-        format_jcs::hex(&openom_data_claim::fingerprint(&sa.to_value()).unwrap())
+        format_jcs::hex(&openom_data_model::fingerprint(&sa.to_value()).unwrap())
     );
     let recs = vec![
         person("pA"),

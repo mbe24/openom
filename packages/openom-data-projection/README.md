@@ -46,13 +46,13 @@ WSL2/Docker).
 ## Usage
 
 ```rust
-use openom_data_claim::envelope::{Claim, Record};
-use openom_data_claim::Hlc;
+use openom_data_model::envelope::{Claim, Record};
+use openom_data_model::Hlc;
 use openom_data_projection::{project, Policy};
 use serde_json::json;
 
 // Anchor ids are opaque (a Person/Event/Place UUID) — `Record::try_from` doesn't hash-verify them, only
-// a Claim's content-hash id. `createdAt` is a canonical HLC string (see `openom_data_claim::Hlc`).
+// a Claim's content-hash id. `createdAt` is a canonical HLC string (see `openom_data_model::Hlc`).
 let pa = Record::try_from(json!({
     "id": "pA", "type": "openom.org/core/person/v1",
     "createdAt": Hlc::new(1, 0).to_string(), "createdBy": "did:key:z6MkA"
@@ -84,13 +84,13 @@ assert!(view.conflicts.is_empty());
 ```
 
 Entry point: `project(records: &[Record], policy: &Policy) -> Projection`, where `Record` (from
-`openom-data-claim`) is either a pure-identity `Anchor` or a `Claim`. `Policy` carries the per-relation score
+`openom-data-model`) is either a pure-identity `Anchor` or a `Claim`. `Policy` carries the per-relation score
 thresholds; `Projection` exposes `people`, `parent_child`, `partnerships`, `unions`, `events`, and
 `conflicts`.
 
 ## Position
 
-Sits in the family-tree data-model layer, on top of `openom-data-claim` (whose records it reads and whose
+Sits in the family-tree data-model layer, on top of `openom-data-model` (whose records it reads and whose
 `fingerprint` it recomputes via `jcs` to match attestations) and `edtf` (event/place date
 bounds). It depends on **no** operations, CRDT, or transport crate — it is a pure read model. Not yet
 wired into the app (the in-wasm claim engine that will host it is a separate task). Full dependency
