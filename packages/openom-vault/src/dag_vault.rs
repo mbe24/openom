@@ -166,8 +166,9 @@ fn finalize_sealing(
     tagged.retain(|(e, _, _)| e.ordinal < minting_ops);
 
     // The resolved membership as keyeo coverage descriptors (each ordinary member key-bound to their current
-    // key; the RRK addressed to the owner id), built once for the winner's coverage + the backfill check.
-    let (required, rrk) = coverage_descriptors(members);
+    // key; the RRK key-bound to the CURRENT escrow public key), built once for the winner's coverage + the
+    // backfill check.
+    let (required, rrk) = coverage_descriptors(members, &escrow.public_key);
 
     // The write epoch is the deterministic winner among ELIGIBLE epochs — genesis/remove are always
     // eligible (the legitimate baseline), a reseal only if it COVERS the resolved membership, so a
@@ -387,11 +388,15 @@ fn covering_reseal_sealing(
 /// The resolved membership as keyeo coverage descriptors. `required` = every ordinary member (the owner is
 /// excluded — reached via the RRK — and empty-hpke-key members are excluded), each KEY-BOUND to their
 /// CURRENT hpke key (`expected_key = Some`), which is the OPE-290 stale-key guard: a wrap on a member's old
-/// key doesn't count toward coverage. `rrk` = the owner id with no key binding (the RRK wrap is checked by
-/// presence at the owner id). Fed to keyeo `covers_exact` (winner coverage / `needs_reseal`) and `missing`
-/// (backfill). Replaces the hand-rolled `epoch_covers` / `any_epoch_missing_a_member`.
+/// key doesn't count toward coverage. `rrk` = the owner id, KEY-BOUND to the CURRENT escrow public key
+/// (`rrk_public_key`): an RRK wrap addressing a STALE recovery key — e.g. a Reseal that raced an RRK rotation
+/// and re-wrapped the old escrow — no longer counts as coverage, so it is flagged `needs_reseal` rather than
+/// silently leaving the recovery root reachable only via a revoked key (OPE-298). Fed to keyeo `covers_exact`
+/// (winner coverage / `needs_reseal`) and `missing` (backfill). Replaces the hand-rolled `epoch_covers` /
+/// `any_epoch_missing_a_member`.
 fn coverage_descriptors(
     members: &MembershipView,
+    rrk_public_key: &[u8],
 ) -> (
     Vec<RecipientDescriptor<String>>,
     RecipientDescriptor<String>,
@@ -410,7 +415,7 @@ fn coverage_descriptors(
             .owner()
             .map(|o| o.member_id.clone())
             .unwrap_or_default(),
-        expected_key: None,
+        expected_key: X25519PublicKey::try_from(rrk_public_key).ok(),
     };
     (required, rrk)
 }
@@ -1445,12 +1450,23 @@ mod tests {
             ciphertext: placeholder_ct(),
         }
     }
+    /// The recovery escrow's X25519 public key — the recipient the epoch's `RrkHpke` wrap targets. Kept in
+    /// sync with `rrk_wrap` (and `escrow`) so coverage's RRK key-binding (OPE-298) resolves against a real
+    /// key rather than falling back to presence-only.
+    fn escrow_key() -> Vec<u8> {
+        x25519(&hpke_key("owner")).to_bytes().to_vec()
+    }
     fn rrk_wrap() -> keyeo_crypto::Wrap<String> {
+        rrk_wrap_keyed(&hpke_key("owner"))
+    }
+    /// An `RrkHpke` wrap addressed to an explicit escrow key — pass a non-current key to model a STALE RRK
+    /// wrap left after a recovery-authority rotation (OPE-298).
+    fn rrk_wrap_keyed(recipient: &[u8]) -> keyeo_crypto::Wrap<String> {
         keyeo_crypto::Wrap {
             recipient: "owner".to_string(),
             method: KeyeoWrapMethod::RrkHpke {
                 encapped: placeholder_encapped(),
-                recipient_key: x25519(&hpke_key("owner")),
+                recipient_key: x25519(recipient),
             },
             ciphertext: placeholder_ct(),
         }
@@ -1480,7 +1496,7 @@ mod tests {
     }
     fn escrow() -> RecoveryEscrow {
         RecoveryEscrow {
-            public_key: vec![1],
+            public_key: escrow_key(),
             member_id: "owner".into(),
             wraps: vec![],
             recovery_verifying_key: vec![2],
@@ -1490,7 +1506,7 @@ mod tests {
     /// Test lens over the production coverage: does this epoch cover the resolved membership exactly (the
     /// winner/`needs_reseal` predicate)? Mirrors `finalize_sealing`'s use of `covers_exact`.
     fn epoch_covers(ep: &keyeo_crypto::Epoch<String>, members: &MembershipView) -> bool {
-        let (required, rrk) = coverage_descriptors(members);
+        let (required, rrk) = coverage_descriptors(members, &escrow_key());
         covers_exact(ep, &required, &rrk)
     }
     /// Test lens over the `needs_backfill` check: does any epoch lock a resolved MEMBER out (owner/RRK
@@ -1499,7 +1515,7 @@ mod tests {
         epochs: &[keyeo_crypto::Epoch<String>],
         members: &MembershipView,
     ) -> bool {
-        let (required, rrk) = coverage_descriptors(members);
+        let (required, rrk) = coverage_descriptors(members, &escrow_key());
         epochs
             .iter()
             .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id))
@@ -1706,6 +1722,41 @@ mod tests {
         assert!(
             !folded.needs_reseal,
             "the covering genesis epoch is the clean winner"
+        );
+    }
+
+    /// Coverage key-binds the RRK wrap to the CURRENT recovery escrow key (OPE-298). An epoch whose `RrkHpke`
+    /// wrap still targets a rotated-away escrow key does NOT cover — presence of an owner-addressed RRK wrap
+    /// is not enough, the key must be current — so a stale-authority epoch is forced to reseal even though its
+    /// member wraps are fine. The control (binding to the stale key itself) shows it is the key-binding, not
+    /// some unrelated gap, that fails coverage.
+    #[test]
+    fn coverage_binds_the_rrk_recipient_key() {
+        let members = membership("owner", &["bob"]);
+        let stale = hpke_key("rotated-away-escrow"); // a since-rotated recovery-authority key
+
+        // An epoch covering {bob@current, RRK@stale}: member wraps are current, only the RRK wrap is stale.
+        let ep = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k0".to_vec()),
+            ordinal: 0,
+            wraps: vec![rrk_wrap_keyed(&stale), member_wrap("bob")],
+        };
+
+        // Bound to the CURRENT escrow key → the stale RRK wrap fails coverage → the epoch must reseal.
+        let (required, rrk) = coverage_descriptors(&members, &escrow_key());
+        assert!(
+            !covers_exact(&ep, &required, &rrk),
+            "a stale-key RRK wrap must not count as coverage"
+        );
+        // …and keyeo reports the RRK id (owner) as the sole missing recipient (the members are covered).
+        assert_eq!(missing(&ep, &required, &rrk), vec!["owner".to_string()]);
+
+        // Control: bound to the STALE key, the same epoch covers — proving the key-binding is the pivot.
+        let stale_key = x25519(&stale).to_bytes();
+        let (required_s, rrk_s) = coverage_descriptors(&members, &stale_key);
+        assert!(
+            covers_exact(&ep, &required_s, &rrk_s),
+            "against the matching (stale) key it covers"
         );
     }
 
