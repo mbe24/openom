@@ -385,6 +385,18 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
     }
 }
 
+/// A classifier's decision on a fetched peer delta (the caller's §B3 verify/attribution gate lives here —
+/// `docsync` stays ignorant of what "valid" means; the client opens the envelope and passes the classifier
+/// both the raw envelope, for attribution, and the opened plaintext). `Accept` merges it; `Hold` keeps the
+/// dot for a later retry (e.g. its author isn't a known member YET) WITHOUT blocking the frontier; `Reject`
+/// drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Accept,
+    Hold,
+    Reject,
+}
+
 /// A per-replica sync FRONTIER: `replica_id -> the count of that replica's log entries` — i.e. the next
 /// counter to pull from it. Exclusive / next-uncovered (the OPE-76 convention): entry `n` from a replica is
 /// covered iff `n < frontier[replica]`. This replaces the scalar `pull_cursor: Option<u64>` — there is no
@@ -493,6 +505,9 @@ pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     prev_hash: Vec<u8>,
     /// Per-replica inbound frontier (next counter to pull from each replica, including self).
     pull_frontier: Frontier,
+    /// Dots the classifier said to HOLD (couldn't verify yet) — retried each verified pull without blocking
+    /// the frontier, so a later-arriving membership op can un-hold them (the §B3 hold/drain, OPE-382).
+    held: std::collections::BTreeSet<(String, u64)>,
     quarantined: usize,
 }
 
@@ -513,6 +528,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             next_counter: 0,
             prev_hash: Vec::new(),
             pull_frontier: Frontier::new(),
+            held: std::collections::BTreeSet::new(),
             quarantined: 0,
         }
     }
@@ -523,6 +539,33 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
 
     pub const fn engine_mut(&mut self) -> &mut E {
         &mut self.engine
+    }
+
+    /// Mutable access to the sealer — for caller-specific key-material operations docsync doesn't generalize
+    /// (e.g. splicing a newly-reachable epoch DEK into a running member's set after a rotation).
+    pub const fn sealer_mut(&mut self) -> &mut K {
+        &mut self.sealer
+    }
+
+    /// Open a `Delta` envelope to its plaintext WITHOUT merging — for a caller that must inspect an entry
+    /// (e.g. §B3 author verification) before accepting it.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the sealer can't open the envelope.
+    pub fn try_open_delta(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
+        self.sealer
+            .open(EntryKind::Delta, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
+    /// Open a `Cover` envelope (the self-heal marker) to its plaintext without merging.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the sealer can't open the envelope.
+    pub fn try_open_cover(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
+        self.sealer
+            .open(EntryKind::Cover, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
     }
 
     /// Apply a local edit and push the delta it produced.
@@ -620,6 +663,96 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             self.pull_frontier.insert(replica, c);
         }
         Ok(merged)
+    }
+
+    /// Like [`pull`](Self::pull), but each fetched peer delta passes through the caller's `classify` gate
+    /// (the §B3 verify/attribution decision — `docsync` stays ignorant of it). The client opens the envelope
+    /// and hands `classify` the raw envelope (for the author/attribution) + the opened plaintext + the dot;
+    /// `classify` returns [`Verdict`]. `Accept` merges; `Reject` drops; `Hold` parks the dot in a held set,
+    /// retried on every later `pull_verified` WITHOUT blocking the frontier — so a membership op that arrives
+    /// after a delta can un-hold it (the OPE-382 hold/drain). An un-openable envelope is quarantined (the
+    /// classifier never sees it). Returns the count merged this call (drained + fresh).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read fails.
+    pub fn pull_verified(
+        &mut self,
+        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+    ) -> Result<usize, SyncError> {
+        let mut merged = 0;
+
+        // 1. Drain: retry every held dot (a membership op since may now un-hold it). Held dots sit BELOW the
+        //    frontier, so the fresh scan below never double-processes them.
+        for (replica, counter) in self.held.iter().cloned().collect::<Vec<_>>() {
+            let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, counter))? else {
+                self.held.remove(&(replica, counter)); // vanished — unrecoverable
+                continue;
+            };
+            let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
+                self.quarantined += 1;
+                self.held.remove(&(replica, counter)); // un-openable: stop retrying it
+                continue;
+            };
+            match classify(&env, &pt, &replica, counter) {
+                Verdict::Accept => {
+                    match self.engine.merge(&pt) {
+                        Ok(()) => merged += 1,
+                        Err(_) => self.quarantined += 1,
+                    }
+                    self.held.remove(&(replica, counter));
+                }
+                Verdict::Reject => {
+                    self.held.remove(&(replica, counter));
+                }
+                Verdict::Hold => {} // stays held for the next drain
+            }
+        }
+
+        // 2. Fresh scan: each replica's gap past the frontier.
+        let hp = heads_prefix(&self.doc);
+        let mut replicas: Vec<String> = self
+            .store
+            .list(&hp)?
+            .into_iter()
+            .filter_map(|(k, _etag)| parse_head_key(&hp, &k))
+            .collect();
+        replicas.sort();
+        for replica in replicas {
+            let Some((hb, _etag)) = self.store.get(&head_key(&self.doc, &replica))? else {
+                continue;
+            };
+            let Some(head) = decode_count(&hb) else {
+                self.quarantined += 1;
+                continue;
+            };
+            let mut c = self.pull_frontier.get(&replica).copied().unwrap_or(0);
+            while c < head {
+                let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
+                    break;
+                };
+                match self.sealer.open(EntryKind::Delta, &env) {
+                    Ok(pt) => match classify(&env, &pt, &replica, c) {
+                        Verdict::Accept => match self.engine.merge(&pt) {
+                            Ok(()) => merged += 1,
+                            Err(_) => self.quarantined += 1,
+                        },
+                        Verdict::Hold => {
+                            self.held.insert((replica.clone(), c));
+                        }
+                        Verdict::Reject => {}
+                    },
+                    Err(_) => self.quarantined += 1,
+                }
+                c += 1;
+            }
+            self.pull_frontier.insert(replica, c);
+        }
+        Ok(merged)
+    }
+
+    /// How many peer dots are currently HELD (classified un-verifiable, awaiting a retry).
+    pub fn held_count(&self) -> usize {
+        self.held.len()
     }
 
     /// Total objects `pull` has quarantined (skipped as un-openable / un-mergeable) over this client's life.

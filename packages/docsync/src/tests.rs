@@ -213,3 +213,49 @@ fn blob_bootstrap_covers_multiple_replicas() {
     assert_eq!(c.frontier().get("replica-A").copied(), Some(1));
     assert_eq!(c.frontier().get("replica-B").copied(), Some(2));
 }
+
+#[test]
+fn blob_verified_pull_holds_then_drains() {
+    // The §B3 crux: a peer delta the classifier can't verify YET is HELD (not merged, frontier still
+    // advances), then folded on a later pull once it verifies — e.g. after the author's membership op lands.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("secret".into()).unwrap();
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    let merged = b
+        .pull_verified(|_env, _pt, replica, _c| {
+            if replica == "replica-A" { Verdict::Hold } else { Verdict::Accept }
+        })
+        .unwrap();
+    assert_eq!(merged, 0, "the held delta is not merged");
+    assert_eq!(b.held_count(), 1, "it is parked as held");
+    assert!(!b.engine().lines.contains("secret"), "not folded while held");
+    assert_eq!(b.frontier().get("replica-A").copied(), Some(1), "the frontier still advanced past it");
+
+    // A membership op has since arrived → the same dot now verifies; the drain folds it.
+    let merged = b.pull_verified(|_env, _pt, _replica, _c| Verdict::Accept).unwrap();
+    assert_eq!(merged, 1, "the drain merges the un-held delta");
+    assert_eq!(b.held_count(), 0);
+    assert!(b.engine().lines.contains("secret"), "folded after un-hold");
+}
+
+#[test]
+fn blob_verified_pull_reject_is_final() {
+    // A rejected (forged / unattributed) delta is dropped, not held, and the frontier advances past it — a
+    // later accept-all pull never re-offers it.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("forged".into()).unwrap();
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    assert_eq!(b.pull_verified(|_e, _p, _r, _c| Verdict::Reject).unwrap(), 0);
+    assert_eq!(b.held_count(), 0, "rejected, not held");
+    assert!(!b.engine().lines.contains("forged"));
+    assert_eq!(
+        b.pull_verified(|_e, _p, _r, _c| Verdict::Accept).unwrap(),
+        0,
+        "a reject is final — the frontier advanced, so it is not re-offered"
+    );
+    assert!(!b.engine().lines.contains("forged"));
+}
