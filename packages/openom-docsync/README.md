@@ -44,45 +44,46 @@ WSL2/Docker).
 ## Usage
 
 ```rust
-use store_log::memory::MemoryStore;
+use store_blob::MemoryBlob;
 use openom_data_model::envelope::Record;
 use openom_data_crdt::ChannelItem;
 use openom_crypto::generate_dek;
 use openom_protocol::ids::{KeyId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
 use openom_docsync::SyncClient;
+use docsync::Verdict;
 use serde_json::json;
 use std::sync::Arc;
 
-let store = Arc::new(MemoryStore::new());
+let store = Arc::new(MemoryBlob::new());
 let dek = generate_dek().unwrap();
 
 let sealer_a = Sealer::from_unwrapped(
     1, dek.clone().into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-a".to_vec()),
 );
-let mut a = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_a), store.clone(), "tree");
+let mut a = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_a), store.clone(), "tree", "replica-a");
 
 let sealer_b = Sealer::from_unwrapped(
     1, dek.into_inner(), TreeId::new(b"tree-uuid-16byte".to_vec()),
     KeyId::new(b"epoch-0".to_vec()), ReplicaId::new(b"replica-b".to_vec()),
 );
-let mut b = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_b), store.clone(), "tree");
+let mut b = SyncClient::new("did:key:z6MkDevice", SealerSet::single(sealer_b), store.clone(), "tree", "replica-b");
 
 let person = ChannelItem::Assert(Record::try_from(json!({
     "id": "pA", "type": "openom.org/core/person/v1",
     "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": "did:key:z6MkA",
 })).unwrap());
 
-a.push_claims(&[person]).unwrap(); // sealed + pushed to the shared log
-b.pull_claims().unwrap();          // opened + folded into b's set
+a.push_claims(&[person]).unwrap(); // sealed + written as a blob object
+// Pull + fold, accepting every peer delta (the §B3 gate is the caller's classify).
+b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, |_e, _b, _r, _c| {}).unwrap();
 
 assert_eq!(a.live_records().unwrap().len(), b.live_records().unwrap().len());
 ```
 
-Entry points: `SyncClient::new`, `push_claims` (edit + push), `pull_claims`, `live_records` /
-`tree` (the read model + the wrapped `openom-data-tree` engine), `flush` / `pending_count` (the write-ahead
-queue), and `compact_claims` / `bootstrap_claims` (snapshot compaction).
+Entry points: `SyncClient::new`, `push_claims` (edit + push) / `push_cover`, `pull_verified` (fold with the
+caller's §B3 gate), `live_records` / `tree` (the read model + the wrapped `openom-data-tree` engine).
 
 ## Position
 

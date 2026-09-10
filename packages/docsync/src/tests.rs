@@ -222,7 +222,7 @@ fn blob_verified_pull_holds_then_drains() {
     let mut a = blob_client(store.clone(), "replica-A");
     a.apply("secret".into()).unwrap();
 
-    let no_cover = |_b: &[u8], _r: &str, _c: u64| {};
+    let no_cover = |_e: &[u8], _b: &[u8], _r: &str, _c: u64| {};
     let mut b = blob_client(store.clone(), "replica-B");
     let merged = b
         .pull_verified(
@@ -254,7 +254,7 @@ fn blob_verified_pull_reject_is_final() {
     let mut a = blob_client(store.clone(), "replica-A");
     a.apply("forged".into()).unwrap();
 
-    let no_cover = |_b: &[u8], _r: &str, _c: u64| {};
+    let no_cover = |_e: &[u8], _b: &[u8], _r: &str, _c: u64| {};
     let mut b = blob_client(store.clone(), "replica-B");
     assert_eq!(b.pull_verified(|_e, _p, _r, _c| Verdict::Reject, no_cover).unwrap(), 0);
     assert_eq!(b.held_count(), 0, "rejected, not held");
@@ -313,7 +313,7 @@ fn blob_verified_pull_folds_a_cover_that_un_holds_a_delta() {
         // Hold the "blessed" delta until a cover for it has folded; accept anything else.
         if pt == b"blessed" && !*covered.borrow() { Verdict::Hold } else { Verdict::Accept }
     };
-    let fold_cover = |body: &[u8], _r: &str, _c: u64| {
+    let fold_cover = |_env: &[u8], body: &[u8], _r: &str, _c: u64| {
         if body == b"cover-for-blessed" {
             *covered.borrow_mut() = true;
         }

@@ -694,7 +694,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     pub fn pull_verified(
         &mut self,
         mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
-        mut fold_cover: impl FnMut(&[u8], &str, u64),
+        mut fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
     ) -> Result<usize, SyncError> {
         let mut merged = 0;
 
@@ -751,7 +751,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 // Delta goes through the §B3 classify gate. `open` is kind-strict, so a delta fails the Cover
                 // open and falls through. (A delta held before its cover un-holds on a later drain.)
                 if let Ok(cover_body) = self.sealer.open(EntryKind::Cover, &env) {
-                    fold_cover(&cover_body, &replica, c);
+                    fold_cover(&env, &cover_body, &replica, c);
                 } else {
                     match self.sealer.open(EntryKind::Delta, &env) {
                         Ok(pt) => match classify(&env, &pt, &replica, c) {

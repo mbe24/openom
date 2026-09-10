@@ -10,7 +10,8 @@ rust-version.workspace = true
 # The generic push/pull/compact/bootstrap loop; this crate is the claim-model binding on top of it.
 docsync = { path = "../docsync" }
 openom-sealer = { path = "../openom-sealer" }
-store-log = { path = "../store-log" }
+# The storage swap seam the data channel now runs over (docsync::BlobSyncClient is generic over it).
+store-blob = { path = "../store-blob" }
 openom-protocol = { path = "../openom-protocol" }
 # The op-batch codec (ChannelItem encode/decode), shared with openom-data-tree so both emit byte-identical bytes.
 openom-data-crdt = { path = "../openom-data-crdt" }
@@ -22,8 +23,6 @@ serde_json.workspace = true
 openom-crypto = { path = "../openom-crypto" }
 # The tests build Claim/Record/Hlc fixtures.
 openom-data-model = { path = "../openom-data-model" }
-# The BlobStore-native path (docsync::BlobSyncClient) is proven over a local MemoryBlob in the tests.
-store-blob = { path = "../store-blob" }
 
 [lints]
 workspace = true

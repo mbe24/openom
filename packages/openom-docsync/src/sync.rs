@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use store_log::DocStore;
+use store_blob::BlobStore;
 use openom_data_crdt::ChannelItem;
 use openom_protocol::v1::{Compression, Envelope, Format};
 use openom_protocol::Message;
@@ -143,25 +143,28 @@ impl docsync::Sealer for SealerAdapter {
 ///
 /// Preserves the claim-model API (`push_claims` / `pull_claims` / `compact_claims` / `bootstrap_claims` /
 /// `set_moderators`), and exposes the wrapped [`Tree`] for the app's mint + projection paths.
-pub struct SyncClient<S: DocStore> {
-    inner: docsync::SyncClient<SyncTree, SealerAdapter, S>,
+pub struct SyncClient<S: BlobStore> {
+    inner: docsync::BlobSyncClient<SyncTree, SealerAdapter, S>,
 }
 
-impl<S: DocStore> SyncClient<S> {
-    /// Wrap a freshly-unlocked claim tree. `created_by` is this device's author `did:key` (the [`Tree`]'s
-    /// mint author); `doc` is the store key for this tree's log.
+impl<S: BlobStore> SyncClient<S> {
+    /// Wrap a freshly-unlocked claim tree over the Blob seam. `created_by` is this device's author `did:key`
+    /// (the [`Tree`]'s mint author); `doc` is the tree's keyspace prefix; `replica` is this device's stable
+    /// replica id (the first coordinate of the per-replica dot / the keyspace it owns).
     pub fn new(
         created_by: impl Into<String>,
         sealer: SealerSet,
         store: S,
         doc: impl Into<String>,
+        replica: impl Into<String>,
     ) -> Self {
         Self {
-            inner: docsync::SyncClient::new(
+            inner: docsync::BlobSyncClient::new(
                 SyncTree(Tree::new(created_by)),
                 SealerAdapter(sealer),
                 store,
                 doc,
+                replica,
             ),
         }
     }
@@ -226,28 +229,37 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.push_delta(batch)
     }
 
-    /// Append every queued sealed envelope, oldest first. A failed append leaves it (and the rest) queued;
-    /// call again to retry — a re-appended entry dedups on the dot and re-folds idempotently.
+    /// Seal a self-heal `Cover` marker as this replica's next log object (OPE-382) — a peer routes it to its
+    /// cover-fold on [`pull_verified`](Self::pull_verified) rather than merging it as a claim. Unlike the old
+    /// remote model, the cover is WRITTEN here (the object IS the publish); the caller no longer pushes it.
     ///
     /// # Errors
-    /// Returns an error if the store push fails (the entry stays queued for a later retry).
-    pub fn flush(&mut self) -> Result<()> {
-        self.inner.flush()
+    /// Returns an error if sealing or the blob write fails.
+    pub fn push_cover(&mut self, plaintext: &[u8]) -> Result<()> {
+        self.inner.push_cover(plaintext)
     }
 
-    /// How many sealed batches are queued but not yet confirmed appended (0 == fully synced up).
+    /// Always 0 — a `BlobSyncClient` writes each entry immediately (no seal queue). Kept for the app's
+    /// diagnostic surface.
+    #[must_use]
     pub const fn pending_count(&self) -> usize {
-        self.inner.pending_count()
+        0
     }
 
-    /// How many log entries have been quarantined (skipped as un-openable / un-mergeable) — a corrupt
-    /// or wrong-key entry that would otherwise wedge the pull. A caller surfaces a non-zero count.
+    /// How many log entries have been quarantined (skipped as un-openable / un-mergeable).
+    #[must_use]
     pub const fn quarantined_count(&self) -> usize {
         self.inner.quarantined_count()
     }
 
-    /// Open a `Delta` envelope to its plaintext without merging — for §B3 author verification before
-    /// the entry is accepted into the store.
+    /// How many peer dots are currently HELD (classified un-verifiable, awaiting a re-verify on a later
+    /// [`pull_verified`](Self::pull_verified)).
+    #[must_use]
+    pub fn held_count(&self) -> usize {
+        self.inner.held_count()
+    }
+
+    /// Open a `Delta` envelope to its plaintext without merging — for §B3 author verification.
     ///
     /// # Errors
     /// Returns an error if the sealer can't open the envelope.
@@ -255,8 +267,7 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.try_open_delta(envelope)
     }
 
-    /// Open a `Cover` (self-heal marker) envelope to its plaintext without merging — to verify + fold its
-    /// body into the covered set.
+    /// Open a `Cover` (self-heal marker) envelope to its plaintext without merging.
     ///
     /// # Errors
     /// Returns an error if the sealer can't open the envelope.
@@ -264,58 +275,33 @@ impl<S: DocStore> SyncClient<S> {
         self.inner.try_open_cover(envelope)
     }
 
-    /// Seal a self-heal `Cover` marker (advancing this replica's chain, not stored locally) — the caller
-    /// pushes the returned envelope to the server's log.
+    /// Pull + fold every log object past the inbound frontier (across replicas): each peer `Delta` is gated
+    /// by the caller's `classify` (§B3 attribution — `docsync` stays ignorant of it), each `Cover` is routed
+    /// to `fold_cover`. A held delta is retried on every later call so a later membership/cover un-holds it,
+    /// without blocking the frontier. Returns how many entries folded this call. See
+    /// [`docsync::BlobSyncClient::pull_verified`].
     ///
     /// # Errors
-    /// Returns an error if sealing fails.
-    pub fn seal_cover(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        self.inner.seal_cover(plaintext)
-    }
-
-    /// Pull every log entry newer than the last pull, decode each into channel items, and merge them.
-    /// Returns how many **log entries** were pulled. Idempotent — re-reading our own or a duplicate entry
-    /// re-inserts by id. From a fresh client this replays the whole log (the journal is authority).
-    ///
-    /// # Errors
-    /// Returns an error if the store read or a decode fails.
-    pub fn pull_claims(&mut self) -> Result<usize> {
-        self.inner.pull()
-    }
-
-    /// Publish a snapshot of the live record set (the byte-preserving fold), CAS'd on the prior snapshot
-    /// version and stamped with the log seq it covers. Pull first so the snapshot reflects the whole log.
-    /// Returns the covered seq.
-    ///
-    /// # Errors
-    /// Returns an error if snapshotting or the store write fails.
-    pub fn compact_claims(&mut self) -> Result<u64> {
-        self.inner.compact()
-    }
-
-    /// Bring a fresh client up to date: load the stored snapshot (if any) into the set, then pull only the
-    /// ops after the seq it covers. Falls back to a full log replay when there is no snapshot.
-    ///
-    /// # Errors
-    /// Returns an error if the store read or a decode fails.
-    pub fn bootstrap_claims(&mut self) -> Result<()> {
-        self.inner.bootstrap()
+    /// Returns an error if a blob read fails.
+    pub fn pull_verified(
+        &mut self,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+    ) -> Result<usize> {
+        self.inner.pull_verified(classify, fold_cover)
     }
 }
 
-impl<S: DocStore> std::fmt::Debug for SyncClient<S> {
+impl<S: BlobStore> std::fmt::Debug for SyncClient<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncClient")
-            .field("pending", &self.inner.pending_count())
+            .field("held", &self.inner.held_count())
             .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SyncClient;
-    use store_log::memory::MemoryStore;
-    use store_log::DocStore;
     use openom_data_model::envelope::{Claim, Record};
     use openom_data_model::Hlc;
     use openom_data_crdt::{ChannelItem, Op, OpKind};
@@ -326,9 +312,20 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
     // The BlobStore-native path (docsync::BlobSyncClient) over a local MemoryBlob.
-    use docsync::BlobSyncClient;
+    use docsync::{BlobSyncClient, Verdict};
     use openom_data_tree::Tree;
     use store_blob::MemoryBlob;
+
+    /// Pull with no §B3 gate (accept every peer delta; ignore covers) — the trusted-DEK path used where a
+    /// facade test isn't exercising membership verification (that lives in the app-core tests).
+    fn pull_all(c: &mut BlobClient) -> usize {
+        c.pull_verified(|_e, _p, _r, _c| Verdict::Accept, |_e, _b, _r, _c| {})
+            .unwrap()
+    }
+
+    fn blob_empty(c: &BlobClient) -> bool {
+        c.engine().0.live_records().unwrap().is_empty()
+    }
 
     type BlobClient = BlobSyncClient<super::SyncTree, super::SealerAdapter, Arc<MemoryBlob>>;
 
@@ -362,17 +359,6 @@ mod tests {
     // The Tree's `created_by` is this device's author did:key. It is irrelevant to these tests: they push
     // PRE-BUILT items that carry their own explicit `createdBy`, so the device author never authors anything.
     const DEVICE: &str = "did:key:z6MkDevice";
-
-    fn client(replica: &[u8], dek: Dek, store: Arc<MemoryStore>) -> SyncClient<Arc<MemoryStore>> {
-        let sealer = Sealer::from_unwrapped(
-            1,
-            dek.into_inner(),
-            TreeId::new(b"tree-uuid-16byte".to_vec()),
-            KeyId::new(b"epoch-0".to_vec()),
-            ReplicaId::new(replica.to_vec()),
-        );
-        SyncClient::new(DEVICE, SealerSet::single(sealer), store, "tree")
-    }
 
     /// A logical-counter-zero HLC at `ms` epoch-milliseconds, for test fixtures.
     fn hlc(ms: i64) -> Hlc {
@@ -414,41 +400,8 @@ mod tests {
         )
     }
 
-    /// The live record ids after the fold — read through the wrapped Tree.
-    fn live(c: &SyncClient<Arc<MemoryStore>>) -> BTreeSet<String> {
-        c.live_records()
-            .unwrap()
-            .into_iter()
-            .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_owned))
-            .collect()
-    }
-
-    fn empty(c: &SyncClient<Arc<MemoryStore>>) -> bool {
-        c.live_records().unwrap().is_empty()
-    }
-
     fn set(items: &[&ChannelItem]) -> BTreeSet<String> {
         items.iter().map(|i| i.id().to_owned()).collect()
-    }
-
-    #[test]
-    fn two_devices_converge_through_the_claim_stack() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        let mut b = client(b"replica-b", dek, store.clone());
-
-        let pa = person("pA", "did:key:z6MkA");
-        let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        let nb = name_claim("pA", "Ada Lovelace", "did:key:z6MkB", 2);
-
-        a.push_claims(&[pa.clone(), na.clone()]).unwrap();
-        b.push_claims(std::slice::from_ref(&nb)).unwrap();
-        a.pull_claims().unwrap();
-        b.pull_claims().unwrap();
-
-        assert_eq!(live(&a), live(&b), "both devices converge");
-        assert_eq!(live(&a), set(&[&pa, &na, &nb]));
     }
 
     #[test]
@@ -475,144 +428,41 @@ mod tests {
     }
 
     #[test]
-    fn pull_is_idempotent() {
-        let store = Arc::new(MemoryStore::new());
+    fn blob_a_moderator_remove_syncs_and_drops_the_record() {
+        let store = Arc::new(MemoryBlob::new());
         let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        a.push_claims(&[name_claim("pA", "Ada", "did:key:z6MkA", 1)])
-            .unwrap();
-
-        let mut b = client(b"replica-b", dek, store.clone());
-        assert_eq!(b.pull_claims().unwrap(), 1);
-        let before = live(&b);
-        assert_eq!(b.pull_claims().unwrap(), 0, "nothing new the second time");
-        assert_eq!(live(&b), before);
-    }
-
-    #[test]
-    fn a_moderator_remove_syncs_and_drops_the_record() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        let mut b = client(b"replica-b", dek, store.clone());
+        let mut a = blob_client(b"replica-a", dek.clone(), store.clone());
+        let mut b = blob_client(b"replica-b", dek, store.clone());
         let mods = BTreeSet::from(["did:key:z6MkA".to_string()]);
-        a.set_moderators(mods.clone());
-        b.set_moderators(mods);
+        a.engine_mut().0.set_moderators(mods.clone());
+        b.engine_mut().0.set_moderators(mods);
 
         let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        a.push_claims(std::slice::from_ref(&na)).unwrap();
-        b.pull_claims().unwrap();
-        assert_eq!(live(&b), set(&[&na]));
+        a.apply(vec![na.clone()]).unwrap();
+        pull_all(&mut b);
+        assert_eq!(blob_live(&b), set(&[&na]));
 
-        a.push_claims(&[remove(&na, "did:key:z6MkA")]).unwrap();
-        b.pull_claims().unwrap();
-        assert!(empty(&b), "the remove propagated");
-        assert!(empty(&a));
+        a.apply(vec![remove(&na, "did:key:z6MkA")]).unwrap();
+        pull_all(&mut b);
+        assert!(blob_empty(&b), "the remove propagated");
+        assert!(blob_empty(&a));
     }
 
     #[test]
-    fn a_crashed_client_rebuilds_from_the_durable_log() {
-        let store = Arc::new(MemoryStore::new());
+    fn blob_a_wrong_key_quarantines_instead_of_wedging() {
+        let store = Arc::new(MemoryBlob::new());
         let dek = generate_dek().unwrap();
-        let pa = person("pA", "did:key:z6MkA");
-        let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        {
-            let mut a = client(b"replica-a", dek.clone(), store.clone());
-            a.push_claims(&[pa.clone(), na.clone()]).unwrap();
-            // a drops here — the crash. Nothing pushed is lost; it's in the durable log.
-        }
-        let mut restarted = client(b"replica-a", dek, store.clone());
-        restarted.pull_claims().unwrap(); // replays the whole log
-        assert_eq!(live(&restarted), set(&[&pa, &na]));
-    }
+        let mut a = blob_client(b"replica-a", dek, store.clone());
+        a.apply(vec![name_claim("pA", "Ada", "did:key:z6MkA", 1)]).unwrap();
 
-    #[test]
-    fn a_duplicate_appended_entry_is_harmless() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        a.push_claims(std::slice::from_ref(&na)).unwrap();
-        // A lost-ack retry lands the same sealed entry twice.
-        let (updates, _) = store.read_updates("tree", None).unwrap();
-        store.append("tree", &updates).unwrap();
-
-        let mut b = client(b"replica-b", dek, store.clone());
-        b.pull_claims().unwrap();
-        assert_eq!(live(&b), set(&[&na]), "the duplicate must not double the record");
-    }
-
-    #[test]
-    fn a_wrong_key_quarantines_the_log_instead_of_wedging() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek, store.clone());
-        a.push_claims(&[name_claim("pA", "Ada", "did:key:z6MkA", 1)])
-            .unwrap();
-
-        // A wrong DEK reveals nothing — and, crucially, does not wedge the pull: the unopenable entry
-        // is quarantined and counted, not returned as a fatal error (one bad entry can't brick sync).
+        // A wrong DEK reveals nothing and does not wedge: the unopenable object is quarantined + counted.
         let wrong = generate_dek().unwrap();
-        let mut intruder = client(b"replica-x", wrong, store.clone());
-        assert_eq!(intruder.pull_claims().unwrap(), 0, "a wrong DEK merges nothing");
-        assert!(empty(&intruder), "the wrong key reveals no data");
+        let mut intruder = blob_client(b"replica-x", wrong, store.clone());
+        assert_eq!(pull_all(&mut intruder), 0, "a wrong DEK merges nothing");
+        assert!(blob_empty(&intruder), "the wrong key reveals no data");
         assert!(
             intruder.quarantined_count() >= 1,
-            "the unopenable entry is quarantined, not fatal"
+            "the unopenable object is quarantined, not fatal"
         );
-    }
-
-    #[test]
-    fn a_fresh_client_bootstraps_from_a_snapshot_plus_the_tail() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-
-        let pa = person("pA", "did:key:z6MkA");
-        let pb = person("pB", "did:key:z6MkA");
-        a.push_claims(&[pa.clone(), pb.clone()]).unwrap();
-        a.compact_claims().unwrap(); // snapshot covers the two people
-        let na = name_claim("pA", "Ada", "did:key:z6MkA", 2); // a tail op after the snapshot
-        a.push_claims(std::slice::from_ref(&na)).unwrap();
-
-        let mut c = client(b"replica-c", dek, store.clone());
-        c.bootstrap_claims().unwrap(); // snapshot (two people) + only the tail (the name)
-        assert_eq!(live(&c), live(&a));
-        assert_eq!(live(&c), set(&[&pa, &pb, &na]));
-    }
-
-    #[test]
-    fn bootstrap_without_a_snapshot_replays_the_whole_log() {
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        let pa = person("pA", "did:key:z6MkA");
-        a.push_claims(std::slice::from_ref(&pa)).unwrap();
-
-        let mut c = client(b"replica-c", dek, store.clone());
-        c.bootstrap_claims().unwrap(); // no snapshot → full log replay
-        assert_eq!(live(&c), set(&[&pa]));
-    }
-
-    #[test]
-    fn compaction_folds_out_removed_records() {
-        // The snapshot is the live set: a moderator-removed record is folded out and never reaches a
-        // bootstrapping client (the structural GC horizon — the compaction horizon the owner accepted),
-        // while a live record survives.
-        let store = Arc::new(MemoryStore::new());
-        let dek = generate_dek().unwrap();
-        let mut a = client(b"replica-a", dek.clone(), store.clone());
-        a.set_moderators(BTreeSet::from(["did:key:z6MkA".to_string()]));
-        let keep = name_claim("pA", "Ada", "did:key:z6MkA", 1);
-        let gone = name_claim("pB", "Zzz", "did:key:z6MkA", 1);
-        a.push_claims(&[keep.clone(), gone.clone()]).unwrap();
-        a.push_claims(&[remove(&gone, "did:key:z6MkA")]).unwrap();
-        a.compact_claims().unwrap();
-
-        // A fresh client bootstraps only from the snapshot (the tail is empty) — the removed record is
-        // absent, and the record it never touched survives.
-        let mut c = client(b"replica-c", dek, store.clone());
-        c.bootstrap_claims().unwrap();
-        assert_eq!(live(&c), set(&[&keep]), "removed record folded out of the snapshot");
     }
 }
