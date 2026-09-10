@@ -124,6 +124,12 @@ pub(crate) struct Checkpoint {
     pub prev_snapshot: Option<[u8; 32]>,
     /// Monotone shared-marker, carried because the sharing `Add` is pruned below the cut.
     pub has_been_shared: bool,
+    /// The resolved recovery authority (RVK) at the cut. Carried in the SIGNED body (OPE-381): a
+    /// `RotateRecoveryAuthority`'s only effect is to change `reset_authority`, so if the rotate op is pruned
+    /// below the cut and this isn't preserved, the checkpoint base would fall back to the genesis authority —
+    /// silently reverting the rotation (a retired recovery code would work again, and the owner's new one
+    /// would not). `None` = a group with no recovery authority.
+    pub reset_authority: Option<[u8; 32]>,
     /// The preserved folded sealing — the retained epochs + escrow, re-expressed as synthetic `SealingEntry`s
     /// (fold order preserved). The vault authors this by folding to completion (merging any `added_wraps` into
     /// the epochs) and emitting one entry per surviving epoch, so a below-cut joiner's wrap is NOT dropped. The
@@ -148,7 +154,7 @@ impl CanonicalBytes for Checkpoint {
     fn write_canonical(&self, out: &mut Vec<u8>) {
         // Exhaustive destructure (no `..`): a new checkpoint field is a compile error until it is encoded here,
         // so nothing trust-relevant can slip out of the signed bytes.
-        let Self { frontier_depths, state, prev_snapshot, has_been_shared, sealing, minting_ops_baseline, author } = self;
+        let Self { frontier_depths, state, prev_snapshot, has_been_shared, reset_authority, sealing, minting_ops_baseline, author } = self;
         out.extend_from_slice(b"openom:checkpoint:v1");
         // frontier_depths — sorted, length-prefixed. The (op-id) keys ARE the dominating cut; the paired depths
         // seed the strong-remove tiebreak across the prune.
@@ -173,6 +179,15 @@ impl CanonicalBytes for Checkpoint {
             None => out.push(0),
         }
         out.push(u8::from(*has_been_shared));
+        // reset_authority (OPE-381) — the resolved RVK at the cut, in the signed bytes. Tagged Option like
+        // prev_snapshot: 1 ‖ 32 bytes when present, 0 when absent.
+        match reset_authority {
+            Some(k) => {
+                out.push(1);
+                out.extend_from_slice(k);
+            }
+            None => out.push(0),
+        }
         // sealing — ORDERED (the fold order is part of what's signed), length-prefixed; each entry is
         // op_id ‖ origin-tag ‖ length-prefixed opaque bytes.
         out.extend_from_slice(&(sealing.len() as u64).to_le_bytes());
@@ -242,6 +257,7 @@ mod tests {
             state: GroupStateView::of(&sample_state()),
             prev_snapshot: Some([9u8; 32]),
             has_been_shared: true,
+            reset_authority: Some([7u8; 32]),
             sealing: vec![SealingEntry { op_id: [8u8; 32], origin: SealingOrigin::Genesis, bytes: vec![1, 2, 3] }],
             minting_ops_baseline: 2,
             author: "owner".into(),
@@ -281,6 +297,9 @@ mod tests {
         let mut t = base.clone();
         t.has_been_shared = false;
         assert_ne!(canon(&t), baseline, "has_been_shared is signed");
+        let mut t = base.clone();
+        t.reset_authority = None;
+        assert_ne!(canon(&t), baseline, "reset_authority is signed");
         let mut t = base.clone();
         t.author = "mallory".into();
         assert_ne!(canon(&t), baseline, "author is signed");

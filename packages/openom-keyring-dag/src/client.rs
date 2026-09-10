@@ -314,10 +314,28 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         let cp = signed_cp
             .verify()
             .ok_or_else(|| ClientError::Malformed("checkpoint signature does not verify".into()))?;
+        // Seed the base's recovery authority from the CHECKPOINT (which carries the resolved value at the cut,
+        // reflecting any below-cut rotation), NOT the anchor-level genesis pin — otherwise a rotation pruned
+        // below the cut would silently revert (OPE-381).
         let base = cp.state.clone().into_state(
             keyeo_dag::GroupId::new(anchor.group_id.clone()),
-            anchor.reset_authority,
+            cp.reset_authority,
         );
+        // Checkpoint-adoption authority (OPE-381): `Signed::verify` proves AUTHORSHIP, not AUTHORITY. A
+        // checkpoint asserts the membership base + reset_authority WHOLESALE, so require its signer to be the
+        // resolved OWNER at the cut — else a signer could launder a fabricated roster/authority into an
+        // adopting replica. Today `merge()` never imports a peer's checkpoint and `verify_anchor` rejects
+        // checkpoint-bearing anchors (H3), so this is reached only on a self-authored local compaction; the
+        // check makes the invariant explicit and guards any future cross-member checkpoint adoption.
+        if !base
+            .members
+            .get(&cp.author)
+            .is_some_and(|m| m.role.is_owner() && &m.author_public_key == signed_cp.signer())
+        {
+            return Err(ClientError::Malformed(
+                "checkpoint author is not the resolved Owner (or its signer is not that Owner's key)".into(),
+            ));
+        }
         let base_frontier_depths: HashMap<[u8; 32], usize> = cp
             .frontier_depths
             .iter()
@@ -732,6 +750,9 @@ pub fn compact_to_checkpoint(
         state: crate::checkpoint::GroupStateView::of(engine.state()),
         prev_snapshot,
         has_been_shared: engine.has_been_shared(),
+        // Capture the RESOLVED recovery authority at the cut (reflects any below-cut rotation), so it survives
+        // the prune inside the signed body instead of falling back to the genesis pin on resolve (OPE-381).
+        reset_authority: engine.state().reset_authority,
         sealing: segment,
         minting_ops_baseline: baseline,
         author,
@@ -989,6 +1010,30 @@ pub fn append_backfill(
         sealing,
         signing_key,
     )
+}
+
+/// Append a `RotateRecoveryAuthority` op (OPE-381) — the Owner rotates the group's recovery root, retiring
+/// the current authority for a fresh one. `new_reset_authority` is the NEW recovery verifying key (RVK); the
+/// re-escrow rides the opaque `sealing`.
+///
+/// Signed by the OWNER'S CURRENT IDENTITY key (`owner_signing_key`) — NOT the recovery key. The engine gates
+/// a rotation on the author's registered member key (unlike `ReFound`, which is recovery-key-gated), so a
+/// holder of a leaked recovery secret cannot mint a competing rotation to seize the authority. Parents = the
+/// current frontier. Returns the new anchor bytes.
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
+pub fn append_rotate_recovery(
+    anchor_bytes: &[u8],
+    owner_id: &str,
+    new_reset_authority: edsign::VerifyingKey,
+    sealing: Vec<u8>,
+    owner_signing_key: &edsign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let action = MembershipAction::RotateRecoveryAuthority {
+        new_reset_authority: new_reset_authority.to_bytes(),
+    };
+    append(anchor_bytes, owner_id, action, sealing, owner_signing_key)
 }
 
 #[cfg(test)]
@@ -1361,6 +1406,67 @@ mod tests {
         assert!(
             !out.prune.is_empty(),
             "history below the head frontier is prunable"
+        );
+    }
+
+    /// F1 (OPE-381): a recovery-authority rotation SURVIVES compaction. After rotating rvk1 → rvk2 and then
+    /// compacting PAST the rotate op, the resolved authority must still be rvk2 (carried in the signed
+    /// checkpoint), not the genesis rvk1 — else the retired code would work again and the new one would not.
+    /// Proven via authorization: on the compacted anchor a ReFound signed by rvk2 (the rotated-in authority)
+    /// takes effect, while one signed by rvk1 (the retired genesis authority) does not.
+    #[test]
+    fn a_rotation_survives_compaction() {
+        let rvk1 = recovery::derive_rvk(&[42u8; 32]);
+        let rvk2 = recovery::derive_rvk(&[43u8; 32]);
+        let a0 = provision_anchor(
+            b"tree-cp-rot",
+            "founder",
+            vpk(1),
+            xpk(1),
+            rvk1.verifying_key().to_bytes(),
+            b"g".to_vec(),
+            &sk(1),
+        );
+        // Owner rotates the recovery authority to rvk2 (authorized by the owner's identity key sk(1)).
+        let a1 =
+            append_rotate_recovery(&a0, "founder", rvk2.verifying_key(), b"re".to_vec(), &sk(1)).unwrap();
+        let rotate_tip: [u8; 32] = watermark(&a1).unwrap().try_into().unwrap();
+        // A benign op ABOVE the cut, so the retained frontier is non-empty (later appends parent on it).
+        let a2 = append_reseal(&a1, "founder", b"x".to_vec(), &sk(1)).unwrap();
+        // Compact with the cut AT the rotation: genesis + the rotate op are pruned below it, the reseal is
+        // retained above it. The rotation's effect (reset_authority == rvk2) survives only via the checkpoint.
+        let a3 = compact_to_checkpoint(&a2, &[rotate_tip], None, "founder".into(), &sk(1), |pre| {
+            Ok((pre.to_vec(), 0))
+        })
+        .unwrap();
+
+        let founder_key = |anchor: &[u8]| {
+            resolve(anchor)
+                .unwrap()
+                .members
+                .members
+                .into_iter()
+                .find(|m| m.member_id == "founder")
+                .unwrap()
+                .author_public_key
+        };
+
+        // A ReFound signed by rvk2 (the rotated-in authority) is authorized → founder retargeted: proof that
+        // reset_authority == rvk2 survived the prune.
+        let a4 = append_refound(&a3, "founder", vpk(7), xpk(7), 1, b"rf".to_vec(), &rvk2).unwrap();
+        assert_eq!(
+            founder_key(&a4),
+            vk(7).to_vec(),
+            "the rotated-in authority (rvk2) still governs after compaction"
+        );
+
+        // A ReFound signed by rvk1 (the RETIRED genesis authority) has NO effect — the rotation was not
+        // reverted by compaction.
+        let a5 = append_refound(&a3, "founder", vpk(8), xpk(8), 1, b"rf".to_vec(), &rvk1).unwrap();
+        assert_eq!(
+            founder_key(&a5),
+            vk(1).to_vec(),
+            "the retired genesis authority (rvk1) cannot recover post-compaction"
         );
     }
 }
