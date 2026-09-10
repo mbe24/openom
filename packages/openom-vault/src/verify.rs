@@ -390,6 +390,7 @@ mod tests {
         codec::encode_epochs(&[KeyeoEpoch::<String> {
             key_id: KeyId::new(key_id.to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![],
         }])
     }

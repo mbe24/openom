@@ -287,8 +287,8 @@ fn wrap_complete(epochs: &[Epoch<String>], members: &[Member]) -> bool {
 /// golden-bytes + per-field signature-fails tests here) they must extend.
 #[allow(dead_code)]
 const fn _key_material_fields_are_exhaustively_accounted_for(epoch: &Epoch<String>, wrap: &Wrap<String>) {
-    let Epoch { key_id, ordinal, wraps } = epoch;
-    let _ = (key_id, ordinal, wraps);
+    let Epoch { key_id, ordinal, dek_commitment, wraps } = epoch;
+    let _ = (key_id, ordinal, dek_commitment, wraps);
     let Wrap { recipient, method, ciphertext } = wrap;
     let _ = (recipient, ciphertext);
     match method {

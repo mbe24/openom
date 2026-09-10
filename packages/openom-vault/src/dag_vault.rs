@@ -372,6 +372,7 @@ fn covering_reseal_sealing(
         new_epochs: vec![keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(new_key_id),
             ordinal: new_ordinal,
+            dek_commitment: keyeo_crypto::dek_commitment(&new_dek),
             wraps,
         }],
         added_wraps: vec![],
@@ -512,6 +513,7 @@ impl KeyringLifecycle for DagVault {
         let epoch0 = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(key_id.clone()),
             ordinal: 0,
+            dek_commitment: keyeo_crypto::dek_commitment(&dek),
             wraps: vec![rrk_wrap],
         };
         let escrow = build_recovery_escrow(&rrk_secret, &rrk_public, tree_id, member_id, &secrets)?;
@@ -1174,6 +1176,7 @@ impl DagVault {
             new_epochs: vec![keyeo_crypto::Epoch {
                 key_id: KeyeoKeyId::new(new_key_id),
                 ordinal: new_ordinal,
+                dek_commitment: keyeo_crypto::dek_commitment(&new_dek),
                 wraps,
             }],
             added_wraps: vec![],
@@ -1630,6 +1633,8 @@ mod tests {
             new_epochs: vec![keyeo_crypto::Epoch {
                 key_id: KeyeoKeyId::new(key_id.to_vec()),
                 ordinal,
+                // Fold/coverage fixtures use placeholder wraps that never open, so the commitment is unused.
+                dek_commitment: [0u8; 32],
                 wraps,
             }],
             added_wraps: vec![],
@@ -1735,6 +1740,7 @@ mod tests {
                 new_epochs: vec![keyeo_crypto::Epoch {
                     key_id: KeyeoKeyId::new(key.to_vec()),
                     ordinal: ord,
+                    dek_commitment: [0u8; 32],
                     wraps: vec![],
                 }],
                 added_wraps: vec![],
@@ -1886,6 +1892,7 @@ mod tests {
         let ep = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k0".to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![rrk_wrap_keyed(&stale), member_wrap("bob")],
         };
 
@@ -2077,6 +2084,7 @@ mod tests {
         let ok = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![rrk_wrap(), member_wrap("bob")],
         };
         assert!(
@@ -2087,6 +2095,7 @@ mod tests {
         let stale = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![rrk_wrap(), member_wrap_keyed("bob", b"old-key")],
         };
         assert!(
@@ -2097,6 +2106,7 @@ mod tests {
         let both = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![
                 rrk_wrap(),
                 member_wrap_keyed("bob", b"old-key"),
@@ -2148,6 +2158,7 @@ mod tests {
         let ep = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"k".to_vec()),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![rrk_wrap()],
         };
         assert!(
@@ -2182,6 +2193,7 @@ mod tests {
         let ep = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(key_id.to_vec()),
             ordinal: 0,
+            dek_commitment: keyeo_crypto::dek_commitment(&dek),
             wraps: vec![dead, live],
         };
         let deks = member_epoch_deks(&[ep], tree, member, &root.hpke_secret);
@@ -2204,12 +2216,14 @@ mod tests {
         let good = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"good".to_vec()),
             ordinal: 0,
+            dek_commitment: keyeo_crypto::dek_commitment(&dek),
             wraps: vec![rrk_wrap_keyeo(&public, &dek, tree, "owner", b"good").unwrap()],
         };
         // A garbage epoch: an RRK-method wrap the owner's RRK secret cannot open (well-formed bytes, junk DEK).
         let garbage = keyeo_crypto::Epoch {
             key_id: KeyeoKeyId::new(b"evil".to_vec()),
             ordinal: 1,
+            dek_commitment: [0u8; 32],
             wraps: vec![keyeo_crypto::Wrap {
                 recipient: "owner".into(),
                 method: KeyeoWrapMethod::RrkHpke {
@@ -2229,6 +2243,48 @@ mod tests {
             deks[0].0,
             b"good".to_vec(),
             "the legitimate epoch still opens"
+        );
+    }
+
+    /// OPE-381 / F3: the DEK commitment rejects a wrap that OPENS but reproduces the WRONG DEK — not just an
+    /// un-decryptable one. A hostile member (who holds the current escrow key, so their RRK wrap decrypts for
+    /// the owner) plants a well-formed RRK wrap of a BOGUS DEK on an epoch committed to the real one. Without
+    /// the commitment the owner would accept that DEK and read garbage / be censored; with it, the bogus wrap
+    /// is skipped and the owner still reaches the real DEK from a legitimate wrap on the same epoch.
+    #[test]
+    fn open_epoch_dek_rejects_a_wrap_that_opens_to_the_wrong_dek() {
+        let tree: &[u8] = b"tree-uuid-16byte";
+        let HpkeKeypair { secret, public } = generate_hpke_keypair().unwrap();
+        let rrk_secret = RrkSecret::from(secret);
+        let real = generate_dek().unwrap();
+        let bogus = generate_dek().unwrap();
+        // The epoch commits to `real`; both wraps open under the owner's RRK secret (same recipient key), but
+        // one carries `bogus`. Order the bogus wrap FIRST to prove try-all keeps looking past it.
+        let ep = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k0".to_vec()),
+            ordinal: 0,
+            dek_commitment: keyeo_crypto::dek_commitment(&real),
+            wraps: vec![
+                rrk_wrap_keyeo(&public, &bogus, tree, "owner", b"k0").unwrap(),
+                rrk_wrap_keyeo(&public, &real, tree, "owner", b"k0").unwrap(),
+            ],
+        };
+        let dek = open_epoch_dek(&ep, tree, "owner", &rrk_secret).unwrap();
+        assert!(
+            ep.dek_matches_commitment(&dek),
+            "open returns the committed (real) DEK, skipping the bogus wrap"
+        );
+
+        // With ONLY the bogus wrap, open must FAIL closed rather than hand back the wrong DEK.
+        let bogus_only = keyeo_crypto::Epoch {
+            key_id: KeyeoKeyId::new(b"k0".to_vec()),
+            ordinal: 0,
+            dek_commitment: keyeo_crypto::dek_commitment(&real),
+            wraps: vec![rrk_wrap_keyeo(&public, &bogus, tree, "owner", b"k0").unwrap()],
+        };
+        assert!(
+            open_epoch_dek(&bogus_only, tree, "owner", &rrk_secret).is_err(),
+            "a wrap that opens to a non-committed DEK is rejected, not accepted"
         );
     }
 

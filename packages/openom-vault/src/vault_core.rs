@@ -271,7 +271,12 @@ pub(crate) fn open_epoch_dek(
             let mut w = w.clone();
             // Bind the AAD to the founder (the wrap's recipient IS the founder; explicit matches wrap time).
             w.recipient = founder_id.to_string();
-            keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id)).ok()
+            keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id))
+                .ok()
+                // Verify the decrypted DEK against the epoch's commitment (OPE-381 / F3): reject a wrap
+                // that opens but doesn't reproduce the committed DEK, so a hostile member can't censor the
+                // owner's read by flooding the epoch with junk RRK wraps of a bogus DEK.
+                .filter(|dek| epoch.dek_matches_commitment(dek))
         })
         .ok_or_else(|| VaultError::BadKeyring("epoch has no rrk wrap openable by this secret".into()))
 }
@@ -334,6 +339,8 @@ pub(crate) fn rewrap_epochs_to_new_rrk(
             Ok(KeyeoEpoch {
                 key_id: ep.key_id.clone(),
                 ordinal: ep.ordinal,
+                // The DEK is unchanged (only its RRK wrap moves), so the commitment carries over verbatim.
+                dek_commitment: ep.dek_commitment,
                 wraps,
             })
         })
@@ -364,7 +371,11 @@ pub(crate) fn member_epoch_deks(
                 w.recipient == member_id && matches!(w.method, KeyeoWrapMethod::MemberHpke { .. })
             })
             .find_map(|w| {
-                keyeo_unwrap_dek(w, hpke_secret.expose(), &epoch_ctx(&group_id, &ep.key_id)).ok()
+                keyeo_unwrap_dek(w, hpke_secret.expose(), &epoch_ctx(&group_id, &ep.key_id))
+                    .ok()
+                    // Same DEK-commitment gate as the RRK path (OPE-381 / F3): a member wrap that opens to
+                    // the wrong DEK (a corrupt backfill by another member) is skipped, not trusted.
+                    .filter(|dek| ep.dek_matches_commitment(dek))
             });
         if let Some(dek) = dek {
             out.push((ep.key_id.as_bytes().to_vec(), ep.ordinal, dek));

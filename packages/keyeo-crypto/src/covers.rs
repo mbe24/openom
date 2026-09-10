@@ -128,6 +128,7 @@ mod tests {
         Epoch {
             key_id: KeyId::new(vec![1]),
             ordinal: 1,
+            dek_commitment: [0u8; 32],
             wraps,
         }
     }

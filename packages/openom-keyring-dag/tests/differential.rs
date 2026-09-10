@@ -96,7 +96,7 @@ fn chain_genesis(cast: &[Cast]) -> Keyring {
         members,
         signatures: vec![],
         recovery_keys: vec![],
-        epochs: codec::encode_epochs(&[KeyeoEpoch { key_id: KeyId::new(vec![0]), ordinal: 0, wraps }]),
+        epochs: codec::encode_epochs(&[KeyeoEpoch { key_id: KeyId::new(vec![0]), ordinal: 0, dek_commitment: [0u8; 32], wraps }]),
         ..Default::default()
     };
     sign_keyring(&mut g, &sk(cast[0].seed)); // founder signs genesis

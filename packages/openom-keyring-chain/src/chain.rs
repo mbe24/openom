@@ -469,6 +469,7 @@ mod tests {
             epochs: codec::encode_epochs(&[KeyeoEpoch {
                 key_id: KeyId::new(vec![0]),
                 ordinal: 0,
+                dek_commitment: [0u8; 32],
                 wraps,
             }]),
             ..Default::default()
@@ -1154,6 +1155,7 @@ mod tests {
             epochs: codec::encode_epochs(&[KeyeoEpoch {
                 key_id: KeyId::new(vec![0]),
                 ordinal: 0,
+                dek_commitment: [0u8; 32],
                 wraps,
             }]),
             ..Default::default()

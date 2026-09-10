@@ -67,7 +67,7 @@ let mut genesis = Keyring {
     }],
     signatures: vec![],
     recovery_keys: vec![],
-    epochs: codec::encode_epochs(&[Epoch { key_id: KeyId::new(vec![0]), ordinal: 0, wraps: vec![wrap("owner", WRAP_RRK_HPKE)] }]),
+    epochs: codec::encode_epochs(&[Epoch { key_id: KeyId::new(vec![0]), ordinal: 0, dek_commitment: [0u8; 32], wraps: vec![wrap("owner", WRAP_RRK_HPKE)] }]),
     ..Default::default()
 };
 sign_keyring(&mut genesis, &founder);

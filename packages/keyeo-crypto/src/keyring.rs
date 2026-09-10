@@ -9,9 +9,22 @@ use std::hash::Hash;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{GroupId, KeyId};
+use crate::{Dek, GroupId, KeyId};
 use crate::KdfParams;
 use crate::{EncappedKey, Nonce, WrappedDek, X25519PublicKey};
+
+/// The per-epoch DEK commitment: SHA-256 over the raw 32-byte DEK.
+///
+/// The same hash the chain watermark binds as `H(DEK)`, so the two agree. It lets an opener verify that a
+/// wrap decrypted to the epoch's *real* DEK and reject a forged one: an append-only log can add wraps to an
+/// epoch (a member backfill, a rotation) but can never change the epoch's committed hash — set once by the
+/// minter, inside the signed op. So a hostile member flooding an epoch with junk `RrkHpke` wraps of a bogus
+/// DEK can't censor the owner's read: every junk wrap fails this check and is skipped (OPE-381 / F3).
+#[must_use]
+pub fn dek_commitment(dek: &Dek) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(dek.expose()).into()
+}
 
 /// The group-at-an-epoch binding context (the MLS `GroupContext` role): the two coordinates a DEK wrap is
 /// bound to, so a wrap can't be transplanted across groups or epochs.
@@ -132,8 +145,20 @@ pub struct Epoch<Id: RecipientId> {
     pub key_id: KeyId,
     /// A monotone generation counter (bumped on each rewrap).
     pub ordinal: u64,
+    /// SHA-256 of the epoch DEK ([`dek_commitment`]) — set by the minter, immutable thereafter. An opener
+    /// checks a decrypted wrap against it and drops a wrap that doesn't reproduce the committed DEK.
+    pub dek_commitment: [u8; 32],
     /// The DEK wrapped once per recipient.
     pub wraps: Vec<Wrap<Id>>,
+}
+
+impl<Id: RecipientId> Epoch<Id> {
+    /// True iff `dek` reproduces this epoch's committed DEK hash — the gate an opener applies to a decrypted
+    /// wrap before trusting it (see [`dek_commitment`]).
+    #[must_use]
+    pub fn dek_matches_commitment(&self, dek: &Dek) -> bool {
+        dek_commitment(dek) == self.dek_commitment
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +169,7 @@ mod tests {
         Epoch {
             key_id: KeyId::new(vec![1, 2, 3, 4]),
             ordinal: 7,
+            dek_commitment: [8u8; 32],
             wraps: vec![
                 Wrap {
                     recipient: "alice".to_string(),
@@ -179,6 +205,20 @@ mod tests {
         let bytes = postcard::to_allocvec(&epoch).unwrap();
         let back: Epoch<String> = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(epoch, back);
+    }
+
+    #[test]
+    fn dek_commitment_matches_only_the_committed_dek() {
+        let dek = Dek::new([42u8; 32]);
+        let other = Dek::new([43u8; 32]);
+        let epoch = Epoch::<String> {
+            key_id: KeyId::new(vec![1]),
+            ordinal: 0,
+            dek_commitment: dek_commitment(&dek),
+            wraps: vec![],
+        };
+        assert!(epoch.dek_matches_commitment(&dek));
+        assert!(!epoch.dek_matches_commitment(&other));
     }
 
     #[test]

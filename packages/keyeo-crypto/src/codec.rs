@@ -105,6 +105,7 @@ mod tests {
         vec![Epoch {
             key_id: KeyId::new(vec![1, 2, 3, 4]),
             ordinal: 9,
+            dek_commitment: [7u8; 32],
             wraps: vec![
                 Wrap {
                     recipient: "alice".to_string(),
@@ -171,7 +172,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(encode_epochs(&sample_epochs()));
         let hex = data_encoding::HEXLOWER.encode(&digest);
-        assert_eq!(hex, "8b123b9ec9bd377b812b503cc39d5a1a3e7346949732cd2f73ab610308768501");
+        assert_eq!(hex, "306c4100ddb9c85f3cfc9f22838db7be84914f55c988351f2ee76a727cdd0260");
     }
 
     #[test]
@@ -216,6 +217,7 @@ mod tests {
         // Epoch-level fields.
         assert_ne!(base, mutate(&|e| e.key_id = KeyId::new(vec![9, 9])));
         assert_ne!(base, mutate(&|e| e.ordinal = 100));
+        assert_ne!(base, mutate(&|e| e.dek_commitment = [0xAB; 32]));
         // Wrap-level + MemberHpke variant fields.
         assert_ne!(base, mutate(&|e| e.wraps[0].recipient = "zzz".into()));
         assert_ne!(base, mutate(&|e| e.wraps[0].ciphertext = WrappedDek::from_bytes([99u8; 48])));

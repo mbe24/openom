@@ -114,6 +114,7 @@ mod tests {
         vec![KeyeoEpoch {
             key_id: KeyId::new(vec![1, 2, 3]),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps: vec![KeyeoWrap {
                 recipient: "acct-1".into(),
                 method: WrapMethod::MemberHpke {

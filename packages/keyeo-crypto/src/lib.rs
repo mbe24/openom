@@ -49,7 +49,7 @@ pub use ids::KeyId;
 // GroupId is the shared keyeo-core type; re-exported because it's a public wrap parameter (kek_wrap /
 // unwrap_kek take &GroupId) so this crate's callers can name it.
 pub use keyeo_core::GroupId;
-pub use keyring::{Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
+pub use keyring::{dek_commitment, Epoch, GroupContext, KekKind, RecipientId, Wrap, WrapMethod};
 pub use wrap_ops::{member_wrap, rrk_wrap, unwrap_dek};
 pub use kdf::{
     derive_kek, generate_dek, generate_salt, KdfBounds, KdfParams, DEFAULT_ARGON2_ITERATIONS,

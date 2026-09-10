@@ -179,6 +179,7 @@ pub fn provision(
     let epoch0 = KeyeoEpoch {
         key_id: KeyeoKeyId::new(key_id.clone()),
         ordinal: 0,
+        dek_commitment: keyeo_crypto::dek_commitment(&dek),
         wraps: vec![rrk_wrap_keyeo(
             &rrk_public,
             &dek,
@@ -1620,6 +1621,7 @@ fn do_remove_member(
     epochs.push(KeyeoEpoch {
         key_id: KeyeoKeyId::new(new_key_id.clone()),
         ordinal: new_epoch,
+        dek_commitment: keyeo_crypto::dek_commitment(&new_dek),
         wraps,
     });
     // Removing the member removes them from the derived signer set too (no separate roster to retain).
