@@ -107,3 +107,70 @@ fn snapshot_policy_triggers_compaction_by_length() {
     let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
     assert_eq!(c.engine().lines, expected, "bootstrap from the policy-made snapshot");
 }
+
+// --- BlobSyncClient (OPE-397): the BlobStore-native, per-replica-frontier delta path ---
+
+use store_blob::MemoryBlob;
+
+fn blob_client(
+    store: Arc<MemoryBlob>,
+    replica: &str,
+) -> BlobSyncClient<GrowSet, PassthroughSealer, Arc<MemoryBlob>> {
+    BlobSyncClient::new(GrowSet::default(), PassthroughSealer, store, "doc", replica)
+}
+
+#[test]
+fn blob_two_replicas_converge_over_one_store_no_server() {
+    // Two SyncClients over ONE shared MemoryBlob — the contract-freezing proof, no server present.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    let mut b = blob_client(store.clone(), "replica-B");
+
+    // Concurrent edits on two replicas, interleaved pulls.
+    a.apply("alpha".into()).unwrap();
+    b.apply("beta".into()).unwrap();
+    a.pull().unwrap();
+    b.pull().unwrap();
+    a.apply("gamma".into()).unwrap();
+    a.pull().unwrap();
+    b.pull().unwrap();
+
+    let expected: BTreeSet<String> =
+        ["alpha", "beta", "gamma"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(a.engine().lines, expected);
+    assert_eq!(b.engine().lines, expected, "two replicas converge over the blob store, no server");
+
+    // The inbound frontier reflects both replicas' entry counts (A: alpha+gamma=2, B: beta=1).
+    assert_eq!(b.frontier().get("replica-A").copied(), Some(2));
+    assert_eq!(b.frontier().get("replica-B").copied(), Some(1));
+}
+
+#[test]
+fn blob_fresh_replica_pulls_all_history() {
+    // A third replica with an empty frontier pulls the whole per-replica keyspace and converges.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    let mut b = blob_client(store.clone(), "replica-B");
+    a.apply("one".into()).unwrap();
+    b.apply("two".into()).unwrap();
+    a.apply("three".into()).unwrap();
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.pull().unwrap();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(c.engine().lines, expected, "a fresh replica pulls all history from the keyspace");
+
+    // Re-pulling is an idempotent no-op — nothing past the advanced frontier.
+    assert_eq!(c.pull().unwrap(), 0, "re-pull merges nothing new");
+}
+
+#[test]
+fn blob_own_pushes_are_not_refetched() {
+    // Pushing advances the self-frontier, so pull() never re-merges this replica's own deltas.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("x".into()).unwrap();
+    a.apply("y".into()).unwrap();
+    assert_eq!(a.pull().unwrap(), 0, "own entries are already seen");
+    assert_eq!(a.frontier().get("replica-A").copied(), Some(2));
+}

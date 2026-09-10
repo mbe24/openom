@@ -11,6 +11,7 @@ description = "Generic local-first client sync loop (push/pull/compact/bootstrap
 
 [dependencies]
 store-log = { path = "../store-log" }
+store-blob = { path = "../store-blob" }
 thiserror = "2"
 
 [lints]

@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+use store_blob::BlobStore;
 use store_log::{DocStore, StoreError};
 
 /// Kind of a sealed log entry.
@@ -112,6 +113,9 @@ impl SnapshotPolicy for NeverCompact {
 pub enum SyncError {
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// A blob-store transport failure (the [`BlobSyncClient`] path).
+    #[error("blob store: {0}")]
+    Blob(#[from] store_blob::BlobError),
     #[error("engine: {0}")]
     Engine(Box<dyn std::error::Error + Send + Sync>),
     #[error("sealer: {0}")]
@@ -378,6 +382,176 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
         }
         self.pull()?;
         Ok(())
+    }
+}
+
+/// A per-replica sync FRONTIER: `replica_id -> the count of that replica's log entries` — i.e. the next
+/// counter to pull from it. Exclusive / next-uncovered (the OPE-76 convention): entry `n` from a replica is
+/// covered iff `n < frontier[replica]`. This replaces the scalar `pull_cursor: Option<u64>` — there is no
+/// store-assigned global order to count, only each replica's own client-assigned counter.
+pub type Frontier = std::collections::BTreeMap<String, u64>;
+
+/// `{doc}/log/` — the prefix every replica's delta objects live under.
+fn log_prefix(doc: &str) -> String {
+    format!("{doc}/log/")
+}
+
+/// `{doc}/log/{replica}/{counter}` — one immutable delta object (the per-replica dot is the delta identity).
+fn log_key(doc: &str, replica: &str, counter: u64) -> String {
+    format!("{doc}/log/{replica}/{counter}")
+}
+
+/// Parse a `{doc}/log/{replica}/{counter}` key (given the `{doc}/log/` prefix) back to `(replica, counter)`.
+/// Returns `None` for a key that isn't a well-formed delta object under this doc.
+fn parse_log_key(prefix: &str, key: &str) -> Option<(String, u64)> {
+    let rest = key.strip_prefix(prefix)?;
+    let (replica, counter) = rest.rsplit_once('/')?;
+    if replica.is_empty() || replica.contains('/') {
+        return None; // a nested/malformed key, not a direct {replica}/{counter}
+    }
+    Some((replica.to_string(), counter.parse().ok()?))
+}
+
+/// The `BlobStore`-native sync core (OPE-397): one document, one local [`Engine`] + [`Sealer`], over a
+/// swappable [`BlobStore`]. Each replica APPENDS immutable delta objects under `{doc}/log/{replica}/{counter}`
+/// with `IfAbsent` — contention is intra-replica only (a crash/retry), never inter-replica, so an append needs
+/// no coordination and no store-assigned global order. The inbound cursor is a per-replica [`Frontier`], not a
+/// scalar: `pull` discovers every replica's objects, fetches only the gap past the frontier, merges, and
+/// advances it. Order-independent set-union merge means the fetch order doesn't matter.
+///
+/// This increment covers DELTA sync (the contract-freezing two-replica convergence). Snapshot / compaction /
+/// bootstrap over a covered-frontier snapshot are the next increment; the existing [`SyncClient`] keeps the
+/// `DocStore` path until consumers migrate onto this one.
+pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
+    engine: E,
+    sealer: K,
+    store: S,
+    doc: String,
+    /// THIS replica's stable id — the first coordinate of the delta dot, and the keyspace it owns.
+    replica: String,
+    /// This replica's next outbound log counter.
+    next_counter: u64,
+    prev_hash: Vec<u8>,
+    /// Per-replica inbound frontier (next counter to pull from each replica, including self).
+    pull_frontier: Frontier,
+    quarantined: usize,
+}
+
+impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
+    pub fn new(
+        engine: E,
+        sealer: K,
+        store: S,
+        doc: impl Into<String>,
+        replica: impl Into<String>,
+    ) -> Self {
+        Self {
+            engine,
+            sealer,
+            store,
+            doc: doc.into(),
+            replica: replica.into(),
+            next_counter: 0,
+            prev_hash: Vec::new(),
+            pull_frontier: Frontier::new(),
+            quarantined: 0,
+        }
+    }
+
+    pub const fn engine(&self) -> &E {
+        &self.engine
+    }
+
+    pub const fn engine_mut(&mut self) -> &mut E {
+        &mut self.engine
+    }
+
+    /// Apply a local edit and push the delta it produced.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the edit cannot be sealed or written.
+    pub fn apply(&mut self, edit: E::Edit) -> Result<(), SyncError> {
+        let delta = self.engine.apply_local(edit);
+        self.push_delta(&delta)
+    }
+
+    /// Seal an already-encoded delta payload and append it as this replica's next log object. Empty ⇒ no-op.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if sealing or the blob write fails.
+    pub fn push_delta(&mut self, plaintext: &[u8]) -> Result<(), SyncError> {
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let ctx = SealCtx {
+            kind: EntryKind::Delta,
+            replica_counter: self.next_counter,
+            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
+            covers_through_seq: 0, // deltas carry no covered marker; only snapshots do
+        };
+        let out = self
+            .sealer
+            .seal(&ctx, plaintext)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+        let key = log_key(&self.doc, &self.replica, self.next_counter);
+        // IfAbsent: the object is immutable. A crash-retry of the same counter finds it already present
+        // (PreconditionFailed) — idempotent, so treat that as success and advance, rather than failing.
+        match self.store.put(&key, &out.envelope, store_blob::Precondition::IfAbsent) {
+            Ok(_) | Err(store_blob::BlobError::PreconditionFailed) => {}
+            Err(e) => return Err(e.into()),
+        }
+        self.next_counter += 1;
+        self.prev_hash = out.ciphertext_hash;
+        // We have, by definition, "seen" our own entry — advance the frontier so `pull` doesn't refetch it.
+        let f = self.pull_frontier.entry(self.replica.clone()).or_insert(0);
+        *f = (*f).max(self.next_counter);
+        Ok(())
+    }
+
+    /// Pull + merge every delta object newer than the inbound frontier, across all replicas, then advance the
+    /// frontier. Returns the count merged. Per-entry fault isolation: an un-openable / un-mergeable object is
+    /// quarantined and the frontier still advances past it, so one bad object can't wedge sync.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read fails (a broken backend, as opposed to one bad object).
+    pub fn pull(&mut self) -> Result<usize, SyncError> {
+        let prefix = log_prefix(&self.doc);
+        let mut fresh: Vec<(String, u64, String)> = self
+            .store
+            .list(&prefix)?
+            .into_iter()
+            .filter_map(|(k, _etag)| parse_log_key(&prefix, &k).map(|(r, c)| (r, c, k)))
+            .filter(|(r, c, _)| *c >= self.pull_frontier.get(r).copied().unwrap_or(0))
+            .collect();
+        // Deterministic (replica, counter) order — set-union is order-independent, but a stable order keeps
+        // the chain-hash / quarantine behaviour reproducible across replicas.
+        fresh.sort();
+        let mut merged = 0;
+        for (replica, counter, key) in fresh {
+            let Some((bytes, _etag)) = self.store.get(&key)? else {
+                continue; // listed then vanished (a concurrent delete) — skip
+            };
+            match self.sealer.open(EntryKind::Delta, &bytes) {
+                Ok(pt) => match self.engine.merge(&pt) {
+                    Ok(()) => merged += 1,
+                    Err(_) => self.quarantined += 1,
+                },
+                Err(_) => self.quarantined += 1,
+            }
+            let f = self.pull_frontier.entry(replica).or_insert(0);
+            *f = (*f).max(counter + 1);
+        }
+        Ok(merged)
+    }
+
+    /// Total objects `pull` has quarantined (skipped as un-openable / un-mergeable) over this client's life.
+    pub const fn quarantined_count(&self) -> usize {
+        self.quarantined
+    }
+
+    /// This replica's inbound frontier — the next counter it will pull from each replica.
+    pub const fn frontier(&self) -> &Frontier {
+        &self.pull_frontier
     }
 }
 
