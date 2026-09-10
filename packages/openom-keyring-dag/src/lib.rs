@@ -769,9 +769,10 @@ mod tests {
 
     #[test]
     fn rotating_the_recovery_authority_revokes_the_old_rvk() {
-        // The only genuine revoke-prior-holder path. After rotating the pinned authority from rvk1 to
-        // rvk2 (signed by the CURRENT authority rvk1), the old rvk1 can no longer authorize a recovery,
-        // but the new rvk2 can.
+        // The only genuine revoke-prior-holder path. The rotation from rvk1 to rvk2 is authorized by the
+        // OWNER'S CURRENT IDENTITY KEY (sk(1)), NOT the recovery key (OPE-381 — gating a rotation on the
+        // recovery secret would let any leaked-RVK holder mint a competing rotation). After it, the old rvk1
+        // can no longer authorize a recovery, but the new rvk2 can.
         let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
         let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
         let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
@@ -790,7 +791,7 @@ mod tests {
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: rvk2.verifying_key().to_bytes(),
             },
-            &rvk1,
+            &sk(1), // the owner's identity key authorizes the rotation (OPE-381), not the old RVK
         ))
         .unwrap();
         // the rotated-out authority can't recover any more...
@@ -812,9 +813,12 @@ mod tests {
     }
 
     #[test]
-    fn a_rotation_not_signed_by_the_current_authority_is_rejected() {
-        // Gating on the OLD authority is what makes rotation safe: a rotation not signed by the current
-        // recovery key (here mallory's own key) has no effect, so it can't seize recovery power.
+    fn the_recovery_key_can_no_longer_authorize_a_rotation() {
+        // OPE-381: a rotation is gated on the OWNER'S IDENTITY key, NOT the recovery key — so a holder of a
+        // leaked recovery secret (rvk1) can no longer mint a rotation to install their own authority. A
+        // rotation signed by rvk1 (which was valid pre-OPE-381) is now unauthorized and has NO EFFECT; the
+        // pinned authority is unchanged, so rvk1 still governs recovery. (The identity-gated owner path is
+        // exercised by `rotating_the_recovery_authority_revokes_the_old_rvk`.)
         let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
         let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
         let mut k = engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
@@ -833,7 +837,7 @@ mod tests {
             MembershipAction::RotateRecoveryAuthority {
                 new_reset_authority: rvk2.verifying_key().to_bytes(),
             },
-            &sk(9), // NOT the current authority
+            &rvk1, // the RECOVERY key — no longer authorizes a rotation (OPE-381)
         ))
         .unwrap();
         k.apply(sign_op([3; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk2))
@@ -841,14 +845,79 @@ mod tests {
         assert_eq!(
             k.state().members.get("founder").unwrap().author_public_key,
             vk(1),
-            "the forged rotation had no effect — rvk2 is still not the authority"
+            "the rvk-signed rotation had no effect — rvk2 is still not the authority"
         );
         k.apply(sign_op([4; 32], vec![[2; 32]], "founder", refound("founder", 7, 1), &rvk1))
             .unwrap();
         assert_eq!(
             k.state().members.get("founder").unwrap().author_public_key,
             vk(7),
-            "the original authority still governs recovery"
+            "rvk1 still governs recovery — the attempted rotation was rejected"
+        );
+    }
+
+    /// OPE-381 takeover defense — the full round-2 attack, defeated. An attacker holding ONLY the leaked
+    /// recovery key `rvk1` cannot take over even by laundering their key through a recovery: (F) a concurrent
+    /// `ReFound` retargeting the founder to the attacker's key, then (R_att) a child rotation signed by that
+    /// just-registered key. The owner's identity-gated rotation `R` (rule (a)) survives and voids the
+    /// concurrent `ReFound` F (rule (b)); the key-provenance taint then voids R_att (its key-registrar is the
+    /// voided F). Net: the owner's authority stands, the founder key is unchanged, the attacker gets nothing.
+    #[test]
+    fn a_concurrent_refound_ladder_cannot_hijack_a_rotation() {
+        let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]); // the leaked recovery key the attacker holds
+        let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]); // the owner's fresh authority
+        let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]); // the authority the attacker tries to install
+        let mut k =
+            engine_with_rvk(&[minit("founder", KeyringRole::OWNER, 1)], rvk1.verifying_key().to_bytes());
+        k.apply(sign_op(
+            [1; 32],
+            vec![],
+            "founder",
+            MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+            &sk(1),
+        ))
+        .unwrap();
+        // R — the owner's identity-gated rotation to rvk2 (signed by the owner's member key sk(1)).
+        k.apply(sign_op(
+            [2; 32],
+            vec![[1; 32]],
+            "founder",
+            MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
+            &sk(1),
+        ))
+        .unwrap();
+        // F — the attacker's ReFound, CONCURRENT with R (also childed on [1]), retargeting the founder to the
+        // attacker's key vk(9), signed by the leaked recovery key rvk1 (authorized at F's position).
+        k.apply(sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1))
+            .unwrap();
+        // R_att — the attacker's child rotation to rvk_att, authored as "founder" and signed by vk(9)=sk(9)
+        // (the key F just registered) — the ladder that defeated the round-2 design.
+        k.apply(sign_op(
+            [4; 32],
+            vec![[3; 32]],
+            "founder",
+            MembershipAction::RotateRecoveryAuthority {
+                new_reset_authority: rvk_att.verifying_key().to_bytes(),
+            },
+            &sk(9),
+        ))
+        .unwrap();
+
+        // The owner wins: founder key unchanged (F voided), authority is rvk2 (R applied, R_att taint-voided).
+        assert_eq!(
+            k.state().members.get("founder").unwrap().author_public_key,
+            vk(1),
+            "the attacker's concurrent ReFound is voided by the owner's rotation — founder key unchanged"
+        );
+        assert_eq!(
+            k.state().reset_authority,
+            Some(rvk2.verifying_key().to_bytes()),
+            "the owner's rotation stands; the attacker's ladder rotation R_att is voided by the key taint"
+        );
+        assert_ne!(
+            k.state().reset_authority,
+            Some(rvk_att.verifying_key().to_bytes()),
+            "the attacker never installs their own recovery authority"
         );
     }
 

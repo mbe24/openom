@@ -286,16 +286,24 @@ where
     match op.action() {
         MembershipAction::Create { .. } => true,
         MembershipAction::Add { member, .. } if member == op.author() => true,
-        // The recovery-authorized ops — a re-founding (ReFound) and a rotation of the authority itself
-        // (RotateRecoveryAuthority) — are authorized by the pinned recovery key, not a member
-        // registration: valid only when signed by the group's CURRENT `reset_authority` (openom: the RVK).
-        // This is the engine-side half of the "distinguish a legitimate recovery from a hostile one" gate —
-        // a branch a replica can't verify against the founded-with (or currently-pinned) authority is
-        // unauthorized, hence ignored, hence never merged. Rotating gated by the OLD authority is exactly
-        // what lets it revoke a prior holder. (Domain shape — Owner target/author — is AccessControl's.)
-        MembershipAction::ReFound { .. } | MembershipAction::RotateRecoveryAuthority { .. } => {
+        // A re-founding (ReFound) is authorized by the pinned recovery key, not a member registration: valid
+        // only when signed by the group's CURRENT `reset_authority` (openom: the RVK). This is the engine-side
+        // half of the "distinguish a legitimate recovery from a hostile one" gate — a branch a replica can't
+        // verify against the currently-pinned authority is unauthorized, hence ignored, hence never merged.
+        // (Domain shape — Owner target — is AccessControl's.)
+        MembershipAction::ReFound { .. } => {
             state.reset_authority.as_ref() == Some(op.author_public_key())
         }
+        // A `RotateRecoveryAuthority` is authorized by the author's CURRENT REGISTERED MEMBER KEY (the `_`
+        // arm below), NOT the recovery key — deliberately UNLIKE ReFound. Gating a rotation on the recovery
+        // secret would let any holder of a leaked recovery key mint a COMPETING rotation (author = the public
+        // Owner id, key = the leaked authority) and grind the deterministic tiebreak to install their own
+        // authority. Requiring the owner's registered identity makes rotation an authenticated-owner op that a
+        // recovery-secret-only attacker cannot author (the domain layer AND's `is_owner`). An owner with total
+        // identity loss recovers via ReFound first, then rotates — rotation revokes a maybe-leaked code while
+        // the owner still controls their account. This member-key gate is load-bearing for the OPE-381
+        // takeover defense and must ship together with the reset-merge carve-out's rotation rules + the
+        // key-provenance taint (see keyeo-dag strong_remove.rs). (OPE-381.)
         _ => state
             .members
             .get(op.author())

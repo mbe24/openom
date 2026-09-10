@@ -149,7 +149,22 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         let carved = reset_merge_carveout(ops, graph, genesis_state, ac, &authorized, &depth, &invalid);
         invalid.extend(carved);
 
-        state.ignore = strong_remove_fixpoint(ops, graph, &depth, &genesis, &removes, invalid);
+        // Key-provenance taint (OPE-381) + strong-remove, iterated to a mutual fixpoint. The taint voids the
+        // descendants of any voided key-registration (a voided recovery ReFound's child, signed by the key
+        // that ReFound registered — the OPE-381 ladder); the strong-remove rules can in turn void a key-setter
+        // (a Retarget/Add by a removed/absent author), whose descendants the taint must then propagate from.
+        // Both only GROW `invalid`, so the loop converges (bounded by |ops|). The taint alone, before the
+        // fixpoint, already suffices for the OPE-381 attack; interleaving keeps it robust to any rule that
+        // voids a key-setter.
+        loop {
+            let before = invalid.len();
+            propagate_key_taint(ops, graph, &authorized, &depth, &mut invalid);
+            invalid = strong_remove_fixpoint(ops, graph, &depth, &genesis, &removes, invalid);
+            if invalid.len() == before {
+                break;
+            }
+        }
+        state.ignore = invalid;
         Ok(state)
     }
 
@@ -158,14 +173,23 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
     }
 }
 
-/// Rule 5 — reset-merge carve-out (OPE-269). If a recovery re-founding is present, the single
-/// highest-ranked authorized `ReFound` `R*` (by `(depth, id)`) is the effective recovery: the fold's Kahn
-/// ordering applies it last among any concurrent resets, so its key deterministically wins with no separate
-/// election. Any PRIVILEGED op concurrent with `R*` — a signer/governance change, or a losing competing
-/// reset, plausibly the very escalation the recovery defends against — is voided; ordinary member edits are
-/// not privileged and so auto-merge across the recovery. `R*`'s author is the Owner, who cannot be removed
-/// or presence-invalidated, so `R*` is a stable pivot — its selection depends only on the fixed `authorized`
-/// map, never on the growing ignore set. Returns the ops to void (empty if there is no authorized `ReFound`).
+/// Rule 5 — reset-merge carve-out (OPE-269 + OPE-381). Two parts:
+///
+/// **(b) rotation-vs-recovery (OPE-381).** An authorized `RotateRecoveryAuthority` `R` retires the authority
+/// `A_old` resolved just before it; EVERY authorized `ReFound` `F` concurrent with `R` and signed by `A_old`
+/// (its carried key == `A_old`) is voided. This is an UNCONDITIONAL pairwise scan, deliberately NOT routed
+/// through the single `rstar` pivot below — a buried-ancestor `ReFound` chain (a deeper sibling wins `rstar`
+/// while its own ancestor, being an ancestor, is not "concurrent with `rstar`") would otherwise slip through.
+/// It is what lets an owner's identity-gated rotation beat a concurrent holder of a leaked recovery secret;
+/// a legitimate old-code recovery concurrent with a rotation is voided the same way — a shared recoverable
+/// secret cannot be arbitrated between holders (the accepted, documented residual).
+///
+/// **(OPE-269 + rule (a)) the classic carve-out.** The highest-ranked authorized `ReFound` NOT already voided
+/// by (b) is the effective recovery `R*` (by `(depth, id)`); any PRIVILEGED op concurrent with `R*` — a
+/// signer/governance change, or a losing competing reset — is voided, EXCEPT a `RotateRecoveryAuthority`
+/// (rule (a): a rotation is never voided by a concurrent recovery, so the owner's rotation stands). Electing
+/// `R*` among the non-(b)-voided `ReFound`s stops a rotation-superseded recovery from still exerting voiding
+/// power. Selection depends only on the fixed `authorized` map, never the growing ignore set.
 fn reset_merge_carveout<OId, R, S, Op>(
     ops: &HashMap<OId, Op>,
     graph: &Graph<OId>,
@@ -181,25 +205,145 @@ where
     S: SignatureScheme,
     Op: SignedOp<OpId = OId, R = R, S = S>,
 {
-    let Some(rstar) = ops
+    let is_rotation =
+        |op: &Op| matches!(op.action(), MembershipAction::RotateRecoveryAuthority { .. });
+    let is_refound = |op: &Op| matches!(op.action(), MembershipAction::ReFound { .. });
+    let auth = |id: &OId| authorized.get(id).copied().unwrap_or(false);
+
+    let mut voided: Vec<OId> = Vec::new();
+
+    // Part (b): each authorized rotation R voids every authorized ReFound F concurrent with R signed by the
+    // authority R retires (`A_old` = reset_authority resolved just before R).
+    for r_id in ops
         .iter()
-        .filter(|(id, op)| {
-            matches!(op.action(), MembershipAction::ReFound { .. })
-                && authorized.get(*id).copied().unwrap_or(false)
-        })
+        .filter(|(id, op)| is_rotation(op) && auth(id))
+        .map(|(id, _)| *id)
+    {
+        let Some(a_old) =
+            resolved_state_before(r_id, genesis_state, graph, ops, authorized, depth).reset_authority
+        else {
+            continue;
+        };
+        for (f_id, f_op) in ops.iter().filter(|(id, op)| is_refound(op) && auth(id)) {
+            if graph.is_concurrent(*f_id, r_id) && f_op.author_public_key() == &a_old {
+                voided.push(*f_id);
+            }
+        }
+    }
+    let voided_set: HashSet<OId> = voided.iter().copied().collect();
+
+    // The classic carve-out, with rule (a): elect R* among the non-(b)-voided authorized ReFounds, then void
+    // its concurrent PRIVILEGED ops — but never a rotation (rule (a)).
+    if let Some(rstar) = ops
+        .iter()
+        .filter(|(id, op)| is_refound(op) && auth(id) && !voided_set.contains(id))
         .map(|(id, _)| *id)
         .max_by_key(|id| (*depth.get(id).unwrap_or(&0), *id))
-    else {
-        return Vec::new();
-    };
-    ops.iter()
-        .filter(|(o, _)| **o != rstar && !invalid.contains(*o) && graph.is_concurrent(**o, rstar))
-        .filter(|(o, op)| {
-            let st = resolved_state_before(**o, genesis_state, graph, ops, authorized, depth);
-            ac.is_privileged(&st, op.action())
+    {
+        for (o, op) in ops {
+            if *o == rstar
+                || invalid.contains(o)
+                || voided_set.contains(o)
+                || is_rotation(op)
+                || !graph.is_concurrent(*o, rstar)
+            {
+                continue;
+            }
+            let st = resolved_state_before(*o, genesis_state, graph, ops, authorized, depth);
+            if ac.is_privileged(&st, op.action()) {
+                voided.push(*o);
+            }
+        }
+    }
+    voided
+}
+
+/// Does `action` register or retarget `member`'s author (signing) key — i.e. could it be the `registrar`
+/// (below) of an op authored by `member`? The four key-setting actions: a `Create` seeding `member` as a
+/// founder, an `Add` of `member`, a recovery `ReFound` of `member`, or `member`'s own `Retarget`. (OPE-381.)
+fn sets_member_key<Id, R, S>(action: &MembershipAction<Id, R, S>, member: &Id) -> bool
+where
+    Id: crate::dag::resolver::MemberId,
+    R: Role,
+    S: SignatureScheme,
+{
+    match action {
+        MembershipAction::Create { initial_members } => {
+            initial_members.iter().any(|m| m.id == *member)
+        }
+        MembershipAction::Add { member: m, .. }
+        | MembershipAction::ReFound { member: m, .. }
+        | MembershipAction::Retarget { member: m, .. } => m == member,
+        _ => false,
+    }
+}
+
+/// The `registrar` of op `O`: the op that set `O`'s author's CURRENT registered signing key — the
+/// max-`(depth, id)` AUTHORIZED ancestor of `O` whose action sets that author's key (last-write-wins, the
+/// same fold order `authorized_at` uses). `None` if the author's key traces to the genesis base (no op set
+/// it — a trusted founder key). Because `O` is authorized, `key_matches_registration` held against the
+/// authorized-ancestor fold, so this registrar's produced key IS `O`'s carried key. (OPE-381.)
+fn registrar<OId, R, S, Op>(
+    o_id: OId,
+    graph: &Graph<OId>,
+    ops: &HashMap<OId, Op>,
+    authorized: &HashMap<OId, bool>,
+    depth: &HashMap<OId, usize>,
+) -> Option<OId>
+where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    let author = ops[&o_id].author();
+    ops.keys()
+        .copied()
+        .filter(|a| {
+            *a != o_id
+                && graph.has_path(*a, o_id)
+                && authorized.get(a).copied().unwrap_or(false)
+                && sets_member_key(ops[a].action(), author)
         })
-        .map(|(o, _)| *o)
-        .collect()
+        .max_by_key(|a| (*depth.get(a).unwrap_or(&0), *a))
+}
+
+/// Key-provenance taint (OPE-381) — the descendant half of the rotation defense. An op whose `registrar` is
+/// itself `invalid` had its key-authorization decided against a registration that was rolled back (voided),
+/// so it must not stay effective: propagate voidings forward over the registrar relation to a fixpoint.
+/// Without this a voided recovery `ReFound`'s descendant (signed by the key that `ReFound` registered) would
+/// remain authorized + effective, reinstalling the attacker's authority through a two-op ladder. Monotone
+/// (`invalid` only grows) and replica-independent (keys only on the fixed `authorized` map, the graph, and
+/// registrations), so it converges to a well-defined, order-independent result. A `ReFound` is never tainted
+/// (its authorization is the recovery-authority branch, so it has no member registrar) — its voiding is the
+/// carve-out's job, not the taint's.
+fn propagate_key_taint<OId, R, S, Op>(
+    ops: &HashMap<OId, Op>,
+    graph: &Graph<OId>,
+    authorized: &HashMap<OId, bool>,
+    depth: &HashMap<OId, usize>,
+    invalid: &mut HashSet<OId>,
+) where
+    OId: OpId,
+    R: Role,
+    S: SignatureScheme,
+    Op: SignedOp<OpId = OId, R = R, S = S>,
+{
+    loop {
+        let newly: Vec<OId> = ops
+            .keys()
+            .copied()
+            .filter(|id| !invalid.contains(id) && authorized.get(id).copied().unwrap_or(false))
+            .filter(|id| {
+                registrar::<OId, R, S, Op>(*id, graph, ops, authorized, depth)
+                    .is_some_and(|reg| invalid.contains(&reg))
+            })
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        invalid.extend(newly);
+    }
 }
 
 /// Strong-remove fixpoint (rules 1–4) over the seeded `invalid` set, returning the final ignore set. Every
