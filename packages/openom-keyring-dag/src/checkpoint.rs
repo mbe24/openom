@@ -193,18 +193,21 @@ impl CanonicalBytes for Checkpoint {
         // replayed for a different recovery authority. Same tagged-Option encoding as prev_snapshot.
         push_opt_hash(out, reset_authority.as_ref());
         // sealing — ORDERED (the fold order is part of what's signed), length-prefixed; each entry is
-        // op_id ‖ origin-tag ‖ length-prefixed opaque bytes.
+        // op_id ‖ origin-tag ‖ length-prefixed opaque bytes ‖ length-prefixed author.
         out.extend_from_slice(&(sealing.len() as u64).to_le_bytes());
         for e in sealing {
-            out.extend_from_slice(&e.op_id);
-            out.push(match e.origin {
+            let SealingEntry { op_id, origin, author, bytes } = e;
+            out.extend_from_slice(op_id);
+            out.push(match origin {
                 SealingOrigin::Genesis => 0,
                 SealingOrigin::Remove => 1,
                 SealingOrigin::Reseal => 2,
                 SealingOrigin::Other => 3,
             });
-            out.extend_from_slice(&(e.bytes.len() as u64).to_le_bytes());
-            out.extend_from_slice(&e.bytes);
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(&(author.len() as u64).to_le_bytes());
+            out.extend_from_slice(author.as_bytes());
         }
         out.extend_from_slice(&minting_ops_baseline.to_le_bytes());
         let a = author.as_bytes();
@@ -297,7 +300,7 @@ mod tests {
             prev_snapshot: Some([9u8; 32]),
             has_been_shared: true,
             reset_authority: Some([7u8; 32]),
-            sealing: vec![SealingEntry { op_id: [8u8; 32], origin: SealingOrigin::Genesis, bytes: vec![1, 2, 3] }],
+            sealing: vec![SealingEntry { op_id: [8u8; 32], origin: SealingOrigin::Genesis, author: "owner".into(), bytes: vec![1, 2, 3] }],
             minting_ops_baseline: 2,
             author: "owner".into(),
         }

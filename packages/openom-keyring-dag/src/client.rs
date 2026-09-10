@@ -274,6 +274,11 @@ pub struct Resolved {
 pub struct SealingEntry {
     pub op_id: [u8; 32],
     pub origin: SealingOrigin,
+    /// The op's author (member id). Attached at resolve time — like `op_id`/`origin`, it lives here rather
+    /// than inside the opaque sealing because keyeo authenticates the op, not its sealing. Lets the sealer
+    /// attribute added wraps to an author (the F3 per-author RRK-wrap `DoS` bound, OPE-381) without keyeo ever
+    /// interpreting the sealing.
+    pub author: String,
     pub bytes: Vec<u8>,
 }
 
@@ -399,6 +404,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             sealing.push(SealingEntry {
                 op_id: anchor.genesis_op_id,
                 origin: SealingOrigin::Genesis,
+                author: genesis_op.author.clone(),
                 bytes: genesis_op.sealing.clone(),
             });
         }
@@ -412,6 +418,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
                 sealing.push(SealingEntry {
                     op_id,
                     origin: origin_of(&op.action),
+                    author: op.author.clone(),
                     bytes: op.sealing.clone(),
                 });
             }
@@ -722,6 +729,7 @@ pub fn compact_to_checkpoint(
             pre_sealing.push(SealingEntry {
                 op_id: anchor.genesis_op_id,
                 origin: SealingOrigin::Genesis,
+                author: g.author.clone(),
                 bytes: g.sealing.clone(),
             });
         }
@@ -735,6 +743,7 @@ pub fn compact_to_checkpoint(
                 pre_sealing.push(SealingEntry {
                     op_id,
                     origin: origin_of(&op.action),
+                    author: op.author.clone(),
                     bytes: op.sealing.clone(),
                 });
             }

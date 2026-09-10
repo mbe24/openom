@@ -94,10 +94,19 @@ struct FoldState {
         keyeo_crypto::Epoch<String>,
         dag_client::SealingOrigin,
         [u8; 32],
+        String,
     )>,
     escrow: Option<RecoveryEscrow>,
     minting_ops: u64,
 }
+
+/// The most `RrkHpke` wraps ANY single author may add to ONE epoch via `added_wraps` (OPE-381 / F3). An
+/// honest author adds one per rotation/backfill of that epoch; the excess is a junk flood, dropped here so a
+/// hostile member can't inflate the owner's per-unlock HPKE work by piling wraps onto an orphaned epoch. The
+/// epoch's own minted RRK wrap (in `new_epochs`, not an added wrap) is never counted, so this can't strip an
+/// epoch's baseline recovery access. The cap is generous — many rotations before it bites — while still
+/// bounding total junk to cap × (#authors).
+const MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH: usize = 8;
 
 /// Fold a run of sealing entries into `state`. `count_minting` = whether these entries increment the minting-op
 /// count: `true` for real ops; `false` for a checkpoint segment whose mints are already reflected in the seeded
@@ -108,6 +117,11 @@ fn fold_into(
     count_minting: bool,
 ) -> Result<(), VaultError> {
     use dag_client::SealingOrigin;
+    use std::collections::HashMap;
+    // Per-(epoch, author) tally of RrkHpke wraps added THIS fold, for the F3 flood bound. Fold-local: a
+    // checkpoint's below-cut wraps are already merged (and were capped below the cut), so an author gets a
+    // fresh budget above each compaction — still bounded, and compaction is owner-gated.
+    let mut rrk_added_by: HashMap<(Vec<u8>, String), usize> = HashMap::new();
     for entry in sealing {
         let payload: SealingPayload = serde_json::from_slice(&entry.bytes)
             .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
@@ -123,17 +137,28 @@ fn fold_into(
         }
         for e in payload.new_epochs {
             if mints {
-                state.tagged.push((e, entry.origin, entry.op_id));
+                state.tagged.push((e, entry.origin, entry.op_id, entry.author.clone()));
             }
         }
         // added_wraps attach a member's wrap to an EXISTING epoch (an add-member's joiner wraps ride an
         // Other-origin Add op — legitimate, unlike minting) — applied during the fold so coverage sees them.
+        // RrkHpke added wraps are capped per (epoch, author) to bound a junk-flood DoS (F3); Member/Kek wraps
+        // are uncapped (a member wrap is per-member idempotent and keyeo's coverage dedups them).
         for aw in payload.added_wraps {
-            if let Some((ep, _, _)) = state
+            if let Some((ep, _, _, _)) = state
                 .tagged
                 .iter_mut()
-                .find(|(e, _, _)| e.key_id.as_bytes() == aw.key_id.as_slice())
+                .find(|(e, _, _, _)| e.key_id.as_bytes() == aw.key_id.as_slice())
             {
+                if matches!(aw.wrap.method, keyeo_crypto::WrapMethod::RrkHpke { .. }) {
+                    let n = rrk_added_by
+                        .entry((aw.key_id.clone(), entry.author.clone()))
+                        .or_insert(0);
+                    if *n >= MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH {
+                        continue; // this author's flood bound for this epoch is reached — drop the excess
+                    }
+                    *n += 1;
+                }
                 ep.wraps.push(aw.wrap);
             }
         }
@@ -164,7 +189,7 @@ fn finalize_sealing(
     // future `max()+1` re-epoch with RevisionOverflow, a permanent DoS, and (b) permanently win the
     // write-epoch race. The bound never drops an honest epoch (its ordinal is always < M) and caps a hostile
     // one at M-1, so `checked_add` can only overflow after ~4e9 real ops.
-    tagged.retain(|(e, _, _)| e.ordinal < minting_ops);
+    tagged.retain(|(e, _, _, _)| e.ordinal < minting_ops);
 
     // The resolved membership as keyeo coverage descriptors (each ordinary member key-bound to their current
     // key; the RRK key-bound to the CURRENT escrow public key), built once for the winner's coverage + the
@@ -176,7 +201,7 @@ fn finalize_sealing(
     // self-only or wrong-set reseal can never win regardless of ordinal grinding. Among eligible, the
     // greatest (ordinal, op-id). `needs_reseal` = the winner's wrap set is stale vs the resolved membership.
     let mut winner: Option<(u64, [u8; 32], Vec<u8>, bool)> = None;
-    for (ep, origin, op_id) in &tagged {
+    for (ep, origin, op_id, _author) in &tagged {
         let covers = covers_exact(ep, &required, &rrk);
         let eligible = match origin {
             SealingOrigin::Genesis | SealingOrigin::Remove => true,
@@ -193,19 +218,27 @@ fn finalize_sealing(
     }
     let (_, _, write_key_id, winner_covers) = winner.ok_or(VaultError::MissingWrap)?;
 
-    let epochs: Vec<keyeo_crypto::Epoch<String>> = tagged.into_iter().map(|(e, _, _)| e).collect();
+    let epochs: Vec<keyeo_crypto::Epoch<String>> =
+        tagged.into_iter().map(|(e, _, _, _)| e).collect();
     // needs_backfill: some retained epoch lacks a current-key wrap for a resolved MEMBER. The owner/RRK is
     // reached via the RRK wrap (no per-epoch member wrap), so filter the rrk id out of keyeo's `missing`,
     // which otherwise reports it whenever an epoch's RRK wrap is absent.
     let needs_backfill = epochs
         .iter()
         .any(|ep| missing(ep, &required, &rrk).iter().any(|id| *id != rrk.id));
+    // The complement: an epoch whose RRK wrap doesn't reach the CURRENT escrow key — a rotation orphan the
+    // owner can't open. `missing` reports the rrk id exactly then (rrk_covers is key-bound to the current
+    // escrow), so this is the same predicate the member-side `backfill_rrk` heals.
+    let needs_rrk_backfill = epochs
+        .iter()
+        .any(|ep| missing(ep, &required, &rrk).contains(&rrk.id));
     Ok(FoldedSealing {
         epochs,
         escrow,
         write_key_id,
         needs_reseal: !winner_covers,
         needs_backfill,
+        needs_rrk_backfill,
     })
 }
 
@@ -236,23 +269,29 @@ fn author_checkpoint_sealing(
     })?;
 
     let mut segment = Vec::with_capacity(state.tagged.len() + 1);
-    for (epoch, origin, op_id) in state.tagged {
+    for (epoch, origin, op_id, author) in state.tagged {
         let payload = SealingPayload {
             new_epochs: vec![epoch],
             added_wraps: vec![],
             escrow: None,
         };
+        // The synthetic entry carries the minting op's author. Its wraps are already merged (and were F3-capped
+        // below the cut), and on re-fold it is a minting entry with no `added_wraps`, so the cap never re-touches
+        // it — the author is preserved for fidelity, not re-bounding.
         segment.push(dag_client::SealingEntry {
             op_id,
             origin,
+            author,
             bytes: payload.to_bytes(),
         });
     }
     // The escrow rides one Other-origin entry (mint-INELIGIBLE + not counted): last-wins folds it in, and a
-    // retained recover/change_passphrase escrow op still overrides it.
+    // retained recover/change_passphrase escrow op still overrides it. Authored by the escrow's owner.
+    let escrow_author = escrow.member_id.clone();
     segment.push(dag_client::SealingEntry {
         op_id: [0u8; 32],
         origin: dag_client::SealingOrigin::Other,
+        author: escrow_author,
         bytes: SealingPayload::escrow_only(escrow).to_bytes(),
     });
     // A count past u32::MAX is unreachable; saturate rather than truncate.
@@ -433,6 +472,12 @@ struct FoldedSealing {
     /// Some retained epoch lacks a wrap for a resolved member — they can't read that slice of history until
     /// the owner backfills it (OPE-288). Orthogonal to `needs_reseal` (a write-epoch/forward-secrecy issue).
     needs_backfill: bool,
+    /// Some retained epoch's RRK wrap does not bind the CURRENT escrow key — an epoch minted concurrently
+    /// with a recovery rotation, which the rotation (that re-wrapped every epoch it saw to the new RRK)
+    /// never reached (OPE-381 / F3). The owner can't open it post-rotation (no old secret), but any member
+    /// holding a wrap can re-wrap its DEK to the current RRK via `backfill_rrk`. The inverse of
+    /// `needs_backfill`: an OWNER-read gap a MEMBER heals, not a member gap the owner heals.
+    needs_rrk_backfill: bool,
 }
 
 /// When a [`DagVault::reseal`] / [`DagVault::reseal_as_member`] actually mints a covering epoch.
@@ -575,6 +620,9 @@ impl KeyringLifecycle for DagVault {
             write_key_id,
             needs_reseal,
             needs_backfill,
+            // `needs_rrk_backfill` (a rotation orphan) surfaces up through unlock in Phase D; the heal is
+            // the member-side `backfill_rrk`.
+            ..
         } = fold_resolved(&resolved)?;
 
         // The RRK is wrapped under the passphrase KEK: derive it via that wrap's KDF.
@@ -662,6 +710,9 @@ impl KeyringLifecycle for DagVault {
             write_key_id,
             needs_reseal,
             needs_backfill,
+            // Surfacing the rotation-orphan signal up through the unlock results is Phase D (OPE-381);
+            // the heal itself is `backfill_rrk`, driven off the fold-level flag.
+            ..
         } = fold_resolved(&resolved)?;
         let (rec_kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::RecoveryCode)?;
         let entropy = parse_recovery_code(recovery_code)?;
@@ -1378,6 +1429,122 @@ impl DagVault {
         })
     }
 
+    /// Member-side heal of a rotation-orphaned epoch (OPE-381 / F3). A recovery rotation re-wraps every epoch
+    /// it resolves to the new recovery root, but an epoch minted CONCURRENTLY (a remove/reseal racing the
+    /// rotation) is missed: its only RRK wrap targets the retired escrow key, so the owner — who no longer
+    /// holds the old recovery secret — can't open it, and coverage reports `needs_rrk_backfill`. Any active
+    /// member still holds a per-epoch member wrap, so they open the DEK and add a fresh RRK wrap to the
+    /// CURRENT escrow public key, restoring the owner's cross-epoch read. Authorizes via the member's
+    /// `passphrase` + account `member_kdf` (their identity signs the op; Reseal-class, any active member may
+    /// author it), exactly like [`Self::reseal_as_member`]. Tolerant: an orphan this member can't open is left
+    /// for another member. Idempotent (`backfilled = false` when no orphan is reachable) + floor-enforced.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the member can't be authorized or the anchor is malformed.
+    pub fn backfill_rrk(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        passphrase: &Passphrase,
+        member_kdf: &KeyeoKdfParams,
+        floor: &[u8],
+    ) -> Result<Backfilled, VaultError> {
+        let tree_id = ctx.tree_id.as_bytes();
+        let member_id = ctx.member_id.as_str();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let owner_id = resolved
+            .members
+            .owner()
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?
+            .member_id
+            .clone();
+        let me = resolved
+            .members
+            .members
+            .iter()
+            .find(|m| m.member_id == member_id)
+            .ok_or_else(|| VaultError::BadKeyring("not a member of this tree".into()))?;
+        let FoldedSealing {
+            epochs,
+            escrow,
+            needs_rrk_backfill,
+            ..
+        } = fold_resolved(&resolved)?;
+
+        let unchanged = || -> Result<Backfilled, VaultError> {
+            Ok(Backfilled {
+                watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
+                anchor: anchor.to_vec(),
+                backfilled: false,
+            })
+        };
+        // Idempotent: no epoch is orphaned from the current recovery root → nothing to do.
+        if !needs_rrk_backfill {
+            return unchanged();
+        }
+
+        // The member authorizes via their passphrase + account kdf-derived identity (anti-substitution vs
+        // their resolved key), and that same derivation yields the HPKE secret they open epochs with.
+        validate_kdf(member_kdf)?;
+        let root = derive_root(passphrase.expose(), member_kdf)?;
+        if root.identity.verifying_key().to_bytes().as_slice() != me.author_public_key.as_slice() {
+            return Err(CryptoError::Signature.into());
+        }
+
+        // Open every epoch this member can reach; for each whose RRK wrap does NOT bind the current escrow
+        // key, add a fresh RRK wrap of its DEK to the current escrow. `member_epoch_deks` verifies each DEK
+        // against the epoch commitment (F3), so a member can only ever backfill a wrap of the epoch's REAL
+        // DEK — a corrupt member wrap would fail to open and be skipped, never re-wrapped.
+        let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret);
+        let mut added_wraps: Vec<AddedWrap> = Vec::new();
+        for (key_id, _ordinal, dek) in &deks {
+            let epoch_wraps = epochs
+                .iter()
+                .find(|e| e.key_id.as_bytes() == key_id.as_slice())
+                .map_or(&[][..], |e| e.wraps.as_slice());
+            // Already covered = an RrkHpke wrap addressed to the owner AND bound to the CURRENT escrow key.
+            let covered = epoch_wraps.iter().any(|w| {
+                w.recipient == owner_id
+                    && matches!(&w.method,
+                        KeyeoWrapMethod::RrkHpke { recipient_key, .. }
+                            if recipient_key.as_ref() == escrow.public_key.as_slice())
+            });
+            if covered {
+                continue;
+            }
+            let wrap = rrk_wrap_keyeo(&escrow.public_key, dek, tree_id, &owner_id, key_id)?;
+            added_wraps.push(AddedWrap {
+                key_id: key_id.clone(),
+                wrap,
+            });
+        }
+
+        // Every orphan was un-openable by this member (skipped) → nothing we can repair here; another member
+        // with a wrap heals it. No-op rather than an empty op.
+        if added_wraps.is_empty() {
+            return unchanged();
+        }
+
+        let sealing = SealingPayload {
+            new_epochs: vec![],
+            added_wraps,
+            escrow: None,
+        }
+        .to_bytes();
+        let new_anchor = dag_client::append_backfill(anchor, member_id, sealing, &root.identity)
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        Ok(Backfilled {
+            anchor: new_anchor,
+            watermark,
+            backfilled: true,
+        })
+    }
+
     /// Backfill historical READ access (OPE-288). A member added on one branch has no wrap for epochs minted
     /// concurrently on another branch before the merge, so after resolution they can't read history sealed
     /// under those epochs. The owner — who reaches every DEK via the RRK — re-wraps each retained epoch for
@@ -1643,6 +1810,7 @@ mod tests {
         dag_client::SealingEntry {
             op_id: [op_id; 32],
             origin,
+            author: "owner".into(),
             bytes: payload.to_bytes(),
         }
     }
@@ -2491,6 +2659,188 @@ mod tests {
                 )
                 .is_err(),
             "the pre-rotation recovery code is retired — it can neither open the new escrow nor sign a ReFound"
+        );
+    }
+
+    /// OPE-381 / F3 end-to-end: a reseal authored CONCURRENTLY with a recovery rotation mints an epoch the
+    /// rotation never re-wraps, so its only RRK wrap targets the retired escrow — the owner (holding only the
+    /// new recovery secret) can't read it. A MEMBER who still holds a per-epoch wrap heals it with
+    /// `backfill_rrk`, adding an RRK wrap to the current escrow and restoring the owner's read. Built with a
+    /// real DAG fork (owner-rotation ∥ member-reseal) merged back together.
+    #[test]
+    fn dag_backfill_rrk_heals_a_rotation_orphaned_epoch_for_the_owner() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let owner_pass = Passphrase::new(b"correct horse");
+
+        // Provision + admit bob (he gets a wrap on epoch 0). `base` is the frontier both branches fork from.
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &owner_pass)
+            .unwrap();
+        let bob_pass = Passphrase::new(b"bobs own passphrase");
+        let bob = new_owner_secrets(bob_pass.expose()).unwrap();
+        let bob_id = "acct-bob";
+        let base = DagVault
+            .add_member(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &owner_pass,
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new(bob_id),
+                    KeyringRole::EDITOR,
+                    &bob.root.identity.verifying_key().to_bytes(),
+                    &bob.root.hpke_public,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let base_floor = dag_client::watermark(&base).unwrap();
+
+        // Branch A: the owner rotates the recovery authority (escrow A → B; epoch 0 re-wrapped to B).
+        let rot = DagVault
+            .rotate_recovery(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
+                &base,
+                &owner_pass,
+                &base_floor,
+            )
+            .unwrap();
+
+        // Branch B (CONCURRENT, from the same base → still escrow A): bob force-reseals, minting epoch 1
+        // wrapped to {escrow-A RRK, bob}. Its RRK wrap targets the about-to-be-retired escrow.
+        let bob_mid = MemberId::new(bob_id);
+        let bob_rid = ReplicaId::new(b"rb");
+        let bob_ctx = ctx(&tree, &bob_mid, &bob_rid);
+        let resealed = DagVault
+            .reseal_as_member(
+                &bob_ctx,
+                &base,
+                &bob_pass,
+                &bob.pass_kdf,
+                &base_floor,
+                ResealTrigger::Force,
+            )
+            .unwrap();
+        assert!(resealed.resealed, "bob's concurrent reseal minted epoch 1");
+
+        // bob seals data under epoch 1 (the write epoch he just minted).
+        let (bob_u, _hp) = DagVault
+            .unlock_as_member(&bob_ctx, &resealed.anchor, &bob_pass, &bob.pass_kdf)
+            .unwrap();
+        let data1 = bob_u
+            .sealer
+            .seal_entry(
+                &SealContext::snapshot(1, Vec::new(), 0),
+                b"epoch-1 under old escrow",
+            )
+            .unwrap()
+            .envelope;
+
+        // Merge the branches: epoch 1 is now an orphan — its only RRK wrap targets the retired escrow A while
+        // the resolved escrow is B.
+        let merged = dag_client::merge(&rot.anchor, &resealed.anchor).unwrap();
+        assert!(
+            fold_resolved(&dag_client::resolve(&merged).unwrap())
+                .unwrap()
+                .needs_rrk_backfill,
+            "the concurrently-minted epoch is flagged as a rotation orphan"
+        );
+
+        // The owner unlocks (new escrow B) but CANNOT open epoch 1 — the rotation never reached it.
+        let u_before = DagVault
+            .unlock(&ctx(&tree, &owner, &ReplicaId::new(b"r2")), &merged, &owner_pass)
+            .unwrap();
+        assert!(
+            u_before
+                .sealer
+                .open_entry(EntryKind::Snapshot, &data1)
+                .is_err(),
+            "before the heal, the owner can't read the orphaned epoch"
+        );
+
+        // bob heals it: opens epoch 1 via his member wrap, adds an RRK wrap to the CURRENT escrow (B).
+        let merged_floor = dag_client::watermark(&merged).unwrap();
+        let healed = DagVault
+            .backfill_rrk(&bob_ctx, &merged, &bob_pass, &bob.pass_kdf, &merged_floor)
+            .unwrap();
+        assert!(
+            healed.backfilled,
+            "the member backfilled the orphaned epoch's RRK wrap"
+        );
+        assert!(
+            !fold_resolved(&dag_client::resolve(&healed.anchor).unwrap())
+                .unwrap()
+                .needs_rrk_backfill,
+            "the orphan signal clears after the heal"
+        );
+
+        // Now the owner reaches epoch 1 via the freshly-added RRK wrap.
+        let u_after = DagVault
+            .unlock(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r3")),
+                &healed.anchor,
+                &owner_pass,
+            )
+            .unwrap();
+        assert_eq!(
+            u_after
+                .sealer
+                .open_entry(EntryKind::Snapshot, &data1)
+                .unwrap(),
+            b"epoch-1 under old escrow",
+            "after the member heal, the owner reads the once-orphaned epoch"
+        );
+    }
+
+    /// OPE-381 / F3 DoS bound: one author may add at most `MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH` RrkHpke
+    /// wraps to a single epoch. A hostile member piling junk RRK wraps onto an epoch (to inflate the owner's
+    /// per-unlock HPKE work) is capped at fold time; the epoch's OWN minted RRK wrap is never counted, so the
+    /// baseline recovery access is untouched.
+    #[test]
+    fn fold_caps_rrk_added_wraps_per_author_per_epoch() {
+        let members = membership("owner", &["bob"]);
+        // Genesis epoch k0 with its minted RRK wrap + bob's member wrap.
+        let genesis = sealing_entry(
+            0,
+            b"k0",
+            0,
+            dag_client::SealingOrigin::Genesis,
+            vec![rrk_wrap(), member_wrap("bob")],
+            Some(escrow()),
+        );
+        // A single hostile op by "bob" piling on far more RRK wraps than the cap.
+        let flood_count = MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH * 3;
+        let flood = dag_client::SealingEntry {
+            op_id: [5u8; 32],
+            origin: dag_client::SealingOrigin::Other,
+            author: "bob".into(),
+            bytes: SealingPayload {
+                new_epochs: vec![],
+                added_wraps: (0..flood_count)
+                    .map(|_| AddedWrap {
+                        key_id: b"k0".to_vec(),
+                        wrap: rrk_wrap(),
+                    })
+                    .collect(),
+                escrow: None,
+            }
+            .to_bytes(),
+        };
+        let folded = fold_sealing(&[genesis, flood], &members).unwrap();
+        let k0 = folded
+            .epochs
+            .iter()
+            .find(|e| e.key_id.as_bytes() == b"k0")
+            .unwrap();
+        let rrk_wraps = k0
+            .wraps
+            .iter()
+            .filter(|w| matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
+            .count();
+        assert_eq!(
+            rrk_wraps,
+            1 + MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH,
+            "the genesis RRK wrap plus bob's capped flood — the excess is dropped"
         );
     }
 
