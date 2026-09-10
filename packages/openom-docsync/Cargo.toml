@@ -22,6 +22,8 @@ serde_json.workspace = true
 openom-crypto = { path = "../openom-crypto" }
 # The tests build Claim/Record/Hlc fixtures.
 openom-data-model = { path = "../openom-data-model" }
+# The BlobStore-native path (docsync::BlobSyncClient) is proven over a local MemoryBlob in the tests.
+store-blob = { path = "../store-blob" }
 
 [lints]
 workspace = true

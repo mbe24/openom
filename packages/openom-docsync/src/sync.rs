@@ -325,6 +325,39 @@ mod tests {
     use serde_json::json;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+    // The BlobStore-native path (docsync::BlobSyncClient) over a local MemoryBlob.
+    use docsync::BlobSyncClient;
+    use openom_data_tree::Tree;
+    use store_blob::MemoryBlob;
+
+    type BlobClient = BlobSyncClient<super::SyncTree, super::SealerAdapter, Arc<MemoryBlob>>;
+
+    fn blob_client(replica: &[u8], dek: Dek, store: Arc<MemoryBlob>) -> BlobClient {
+        let sealer = Sealer::from_unwrapped(
+            1,
+            dek.into_inner(),
+            TreeId::new(b"tree-uuid-16byte".to_vec()),
+            KeyId::new(b"epoch-0".to_vec()),
+            ReplicaId::new(replica.to_vec()),
+        );
+        BlobSyncClient::new(
+            super::SyncTree(Tree::new(DEVICE)),
+            super::SealerAdapter(SealerSet::single(sealer)),
+            store,
+            "tree",
+            String::from_utf8_lossy(replica).into_owned(),
+        )
+    }
+
+    fn blob_live(c: &BlobClient) -> BTreeSet<String> {
+        c.engine()
+            .0
+            .live_records()
+            .unwrap()
+            .into_iter()
+            .filter_map(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_owned))
+            .collect()
+    }
 
     // The Tree's `created_by` is this device's author did:key. It is irrelevant to these tests: they push
     // PRE-BUILT items that carry their own explicit `createdBy`, so the device author never authors anything.
@@ -416,6 +449,29 @@ mod tests {
 
         assert_eq!(live(&a), live(&b), "both devices converge");
         assert_eq!(live(&a), set(&[&pa, &na, &nb]));
+    }
+
+    #[test]
+    fn blob_two_devices_converge_through_the_claim_stack() {
+        // The SAME convergence, but the REAL claim stack (Tree engine + real DEK SealerAdapter + real
+        // ChannelItems) over docsync::BlobSyncClient on the Blob seam — proving the binding, not just the
+        // GrowSet/Passthrough spikes.
+        let store = Arc::new(MemoryBlob::new());
+        let dek = generate_dek().unwrap();
+        let mut a = blob_client(b"replica-a", dek.clone(), store.clone());
+        let mut b = blob_client(b"replica-b", dek, store.clone());
+
+        let pa = person("pA", "did:key:z6MkA");
+        let na = name_claim("pA", "Ada", "did:key:z6MkA", 1);
+        let nb = name_claim("pA", "Ada Lovelace", "did:key:z6MkB", 2);
+
+        a.apply(vec![pa.clone(), na.clone()]).unwrap();
+        b.apply(vec![nb.clone()]).unwrap();
+        a.pull().unwrap();
+        b.pull().unwrap();
+
+        assert_eq!(blob_live(&a), blob_live(&b), "both devices converge over the blob seam");
+        assert_eq!(blob_live(&a), set(&[&pa, &na, &nb]));
     }
 
     #[test]
