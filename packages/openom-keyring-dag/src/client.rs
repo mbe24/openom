@@ -321,16 +321,20 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
             keyeo_dag::GroupId::new(anchor.group_id.clone()),
             cp.reset_authority,
         );
-        // Checkpoint-adoption authority (OPE-381): `Signed::verify` proves AUTHORSHIP, not AUTHORITY. A
-        // checkpoint asserts the membership base + reset_authority WHOLESALE, so require its signer to be the
-        // resolved OWNER at the cut — else a signer could launder a fabricated roster/authority into an
-        // adopting replica. Today `merge()` never imports a peer's checkpoint and `verify_anchor` rejects
-        // checkpoint-bearing anchors (H3), so this is reached only on a self-authored local compaction; the
-        // check makes the invariant explicit and guards any future cross-member checkpoint adoption.
+        // Checkpoint sanity (OPE-381): `Signed::verify` proves AUTHORSHIP, not AUTHORITY. On the self-authored
+        // local-compaction path — the ONLY path that reaches here today (`merge()` never imports a peer's
+        // checkpoint, and `verify_anchor` rejects checkpoint-bearing anchors, H3) — require the checkpoint's
+        // signer to be an ACTIVE OWNER in the checkpoint's own resolved state. This catches a MALFORMED
+        // self-authored checkpoint (author / signer / role mismatch) before its `reset_authority` + roster are
+        // trusted wholesale. It is deliberately NOT sufficient for CROSS-MEMBER checkpoint adoption: the base
+        // it checks against is the checkpoint's OWN claim, so a fabricated checkpoint could self-declare its
+        // signer as Owner. Adopting a PEER's checkpoint must additionally validate continuity against an
+        // independently-trusted root (the pinned genesis + a `prev_snapshot` chain) — a follow-up for when
+        // that feature lands; this check alone must not be relied on for it.
         if !base
             .members
             .get(&cp.author)
-            .is_some_and(|m| m.role.is_owner() && &m.author_public_key == signed_cp.signer())
+            .is_some_and(|m| m.is_active() && m.role.is_owner() && &m.author_public_key == signed_cp.signer())
         {
             return Err(ClientError::Malformed(
                 "checkpoint author is not the resolved Owner (or its signer is not that Owner's key)".into(),

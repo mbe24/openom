@@ -991,6 +991,86 @@ mod tests {
                 "attacker never installs its authority, for any op-id assignment"
             );
         }
+
+        /// OPE-381 determinism (the design's K2 obligation, at the openom layer): the takeover defense is
+        /// order-INDEPENDENT and holds for a DEEPER ladder. The op set is the owner's rotation `R`, the
+        /// attacker's concurrent `ReFound` `F`, and a THREE-level ladder off `F` — `G` (a self-`Retarget`
+        /// signed by the key `F` registered) then `H` (a rotation signed by the key `G` registered). Applied
+        /// in ANY arrival order (out-of-order ops buffer, then `flush`), the resolved state is identical and
+        /// the attacker loses: `F` is voided by rule (b), and the taint fixpoint voids `G` (registrar `F`) and
+        /// `H` (registrar `G`). This exercises the new carve-out + taint under order-shuffling, which the
+        /// generic BEC-convergence proptest (Remove/Add only) does not.
+        #[test]
+        fn the_ladder_defense_is_order_independent(
+            order in Just((0..5usize).collect::<Vec<usize>>()).prop_shuffle(),
+        ) {
+            let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
+            let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
+            let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]);
+            let ops = [
+                sign_op(
+                    [1; 32],
+                    vec![],
+                    "founder",
+                    MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+                    &sk(1),
+                ),
+                // R — owner rotation to rvk2, identity-signed.
+                sign_op(
+                    [2; 32],
+                    vec![[1; 32]],
+                    "founder",
+                    MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
+                    &sk(1),
+                ),
+                // F — attacker ReFound (founder → vk(9)), concurrent with R, signed by leaked rvk1.
+                sign_op([3; 32], vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1),
+                // G — attacker self-Retarget (founder → vk(10)), signed by vk(9)=sk(9), child of F.
+                sign_op(
+                    [4; 32],
+                    vec![[3; 32]],
+                    "founder",
+                    MembershipAction::Retarget {
+                        member: "founder".to_string(),
+                        new_author_public_key: vk(10),
+                        new_hpke_public_key: [10; 32],
+                    },
+                    &sk(9),
+                ),
+                // H — attacker rotation to rvk_att, signed by vk(10)=sk(10), child of G.
+                sign_op(
+                    [5; 32],
+                    vec![[4; 32]],
+                    "founder",
+                    MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk_att.verifying_key().to_bytes() },
+                    &sk(10),
+                ),
+            ];
+            let mut k = engine_with_rvk(
+                &[minit("founder", KeyringRole::OWNER, 1)],
+                rvk1.verifying_key().to_bytes(),
+            );
+            for &i in &order {
+                let _ = k.apply(ops[i].clone());
+            }
+            let _ = k.flush();
+
+            prop_assert_eq!(
+                k.state().members.get("founder").unwrap().author_public_key,
+                vk(1),
+                "founder key is owner-controlled under every arrival order"
+            );
+            prop_assert_eq!(
+                k.state().reset_authority,
+                Some(rvk2.verifying_key().to_bytes()),
+                "the owner's rotation stands under every arrival order (3-level ladder voided)"
+            );
+            prop_assert_ne!(
+                k.state().reset_authority,
+                Some(rvk_att.verifying_key().to_bytes()),
+                "the attacker's ladder never installs its authority under any order"
+            );
+        }
     }
 
     // ---- bounded fork-merge horizon (OPE-270) ----

@@ -224,11 +224,14 @@ mod verification {
     /// recovery authority — the compaction-survival mechanism (F1) is tamper-evident, not just preserved.
     ///
     /// Scope, honestly: this proves the pure, symbolically-verifiable CORE. The full "every checkpoint field
-    /// is in the signed bytes" guarantee — and the resolver-level rotation-takeover defense — are covered by
-    /// the `write_canonical` unit tests, the `a_rotation_survives_compaction` integration test, and the
-    /// `no_op_id_lets_the_rotation_ladder_win` / BEC-convergence proptests (the op-DAG resolver is not
-    /// symbolically tractable; kani here stays on the pure logic, as elsewhere in the workspace). Proven for
-    /// every pair of distinct `Option<[u8; 32]>` values.
+    /// is in the signed bytes" guarantee is covered by the `write_canonical` unit tests; F1's end-to-end
+    /// survival by `a_rotation_survives_compaction`; and the resolver-level rotation-takeover defense by the
+    /// `a_concurrent_refound_ladder_cannot_hijack_a_rotation` attack test plus the
+    /// `no_op_id_lets_the_rotation_ladder_win` (op-id grinding) and `the_ladder_defense_is_order_independent`
+    /// (arrival-order + 3-level ladder) proptests. (The generic keyeo-dag BEC proptest covers Remove/Add only,
+    /// NOT rotation, so it is not evidence for this defense.) The op-DAG resolver is not symbolically
+    /// tractable, so kani here stays on the pure logic, as elsewhere in the workspace. Proven for every pair
+    /// of distinct `Option<[u8; 32]>` values.
     // A 2-byte key keeps the byte-vec comparison bounded (the encoding is generic over the key length and its
     // injectivity does not depend on it, so this generalises to the checkpoint's 32-byte `reset_authority`).
     #[kani::proof]
