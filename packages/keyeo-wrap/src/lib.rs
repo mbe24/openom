@@ -1,15 +1,4 @@
-//! Fixed-size crypto-material newtypes — the wrap byte-strings whose lengths the pinned suite fixes.
-//!
-//! The suite (frozen): DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + `ChaCha20Poly1305` for HPKE, and
-//! XChaCha20-Poly1305 for the symmetric KEK wrap. So an X25519 point is 32 bytes and a sealed 32-byte
-//! secret is 48 (32 + a 16-byte AEAD tag). Encoding those lengths in the *type* makes a wrong-length key
-//! or ciphertext unconstructable (illegal states unrepresentable) and removes a heap allocation per field
-//! (a `[u8; N]` is inline; a `Vec<u8>` for a 32-byte key is an alloc + a pointer chase).
-//!
-//! These live in their OWN crate (not `keyeo-crypto`) so a consumer can name a typed public key without
-//! pulling in the AEAD / Argon2 / HPKE machinery — the same isolation `edsign` gives the Ed25519 key
-//! types. `keyeo-crypto` re-exports them (they are part of its public wrap/HPKE API). The length-checked
-//! `TryFrom<&[u8]>` yields the std [`core::array::TryFromSliceError`], so this crate stays error-domain-free.
+#![doc = include_str!("../README.md")]
 
 use core::array::TryFromSliceError;
 

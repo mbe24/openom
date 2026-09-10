@@ -3,7 +3,7 @@
 > EDTF (ISO 8601-2) date parser/normalizer — every fuzzy genealogy date reduced to sortable
 > `[min, max]` day bounds.
 
-**Status:** built · foundation, pure, load-bearing (consumed by `openom-projection`) · design.data-model-claims.v1.md §10.1
+**Status:** built · foundation, pure, load-bearing (consumed by `openom-data-projection`) · design.data-model-claims.v1.md §10.1
 **Last updated:** 2026-08-25
 
 ## What it is — and is not
@@ -71,5 +71,5 @@ Entry point: `parse(&str) -> Result<Edtf, EdtfError>`. `Edtf` carries `min`/`max
 ## Position
 
 A foundation crate: no dependency on any other openom crate, and no domain knowledge of claims or
-projections. `openom-projection` is its one current consumer — normalizing `core/date/v1` values and
+projections. `openom-data-projection` is its one current consumer — normalizing `core/date/v1` values and
 place `validRange`s into sortable bounds. Full dependency graph: see `packages/README.md`.

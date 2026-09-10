@@ -1,10 +1,10 @@
 # openom-vault
 
 > The keyring **vault** layer — the passphrase-driven lifecycle (provision / unlock / recover /
-> change-passphrase / author membership) over a keyring, for both engines, plus the wasm veneer.
+> change-passphrase / author membership) over a keyring, for both engines.
 
 **Status:** built · key-custody lifecycle · openom-coupled by design · design keyring-dag/design.dag-vault.md (OPE-273/279)
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-10
 
 ## What it is — and is not
 
@@ -15,7 +15,9 @@ promote/demote a co-owner. [`AppVault`] dispatches each call to the right engine
 `openom-keyring-chain` or [`DagVault`] over `openom-keyring-dag` — on the tree's bound [`openom_keyring_api::EngineKind`], so one binary
 serves both. Underneath sits the engine-neutral **sealing core** (`vault_core`: DEK / epoch / RRK / KDF /
 recovery-code / `SealerSet` machinery), extracted so both engines share one implementation of the
-security-critical crypto path. The browser `wasm` cdylib veneer lives here too. Two engine-neutral
+security-critical crypto path. This crate is an **rlib only** — the single browser wasm surface is
+`openom-app-core` (which consumes this vault as a plain dependency); the legacy `wasm` veneer that once
+lived here was retired (OPE-389). Two engine-neutral
 membership helpers also live here, both typed against `openom-keyring-api`'s `MembershipView` (so they
 read the folded view, never an engine's raw wire): `attribution::verify_entry` (authorize a landed entry
 by its kind + author against the governing view — moved off the chain crate in OPE-333) and
@@ -40,8 +42,7 @@ coupling is load-bearing, not incidental (see `packages/openom-crypto` and OPE-2
 | **VAULT-6** | Absurd KDF params are rejected before Argon2id runs; the member's `did:key` is the founder key and stable across unlock. | A malicious keyring can't `DoS` via KDF cost, and the claim-author id is deterministic. | `vault::tests::absurd_kdf_params_are_rejected_before_running_argon2id`, `dag_vault::tests::did_key_is_the_founder_key_and_stable_across_unlock` |
 | **VAULT-7** | The vault's provisioning RVK (`openom_crypto::derive_rvk`) and the dag engine's verifying RVK (`openom_keyring_dag::recovery`) are byte-identical. | A tree recovered by one is verifiable by the other — the two derivations live in different crates and must not drift. | `dag_vault::tests::vault_and_engine_derive_the_same_recovery_key` |
 
-Run: `node scripts/cargo.mjs test -p openom-vault` (from the repo root). The wasm veneer is built via
-`node scripts/build-vault.mjs` → `apps/app/src/vendor/vault/`.
+Run: `node scripts/cargo.mjs test -p openom-vault` (from the repo root).
 
 ## Usage
 
@@ -57,8 +58,9 @@ let session     = vault.unlock(&ctx, &keyring_bytes, &passphrase)?; // another d
 ```
 
 Entry points: `AppVault` (engine dispatch), the `KeyringLifecycle` trait, `ChainVault` / `DagVault`,
-`VaultContext`, `VaultError`, the `attribution` / `membership` modules (landed-entry authorization +
-the moderator set over a `MembershipView`), and the `wasm` module (browser veneer, `wasm` feature).
+`VaultContext`, `VaultError`, the `sharing` module (the engine-neutral distribution + member epoch-adopt
+marshalling `openom-app-core`'s worker calls), and the `attribution` / `membership` modules (landed-entry
+authorization + the moderator set over a `MembershipView`).
 
 ## Position
 

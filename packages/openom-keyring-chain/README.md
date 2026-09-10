@@ -22,7 +22,7 @@ can't forge an Ed25519 signature — so every guarantee is a client-side check o
 It is **openom-domain-specific but openom-dependency-free** (like `openom-keyring-dag`): it depends on the
 generic `keyeo-chain` engine (which re-exports the `keyeo-core` seam types, so this crate names them via
 `keyeo_chain::` and needs no direct `keyeo-core` dep), `openom-keyring-api` (the engine seam), `edsign`, and
-the substrate crates (`prost`/`sha2`/`blobstore`) plus `keyeo-crypto` (the shared key-material types), but on
+the substrate crates (`prost`/`sha2`/`store-blob`) plus `keyeo-crypto` (the shared key-material types), but on
 **no `openom-*` crate**. The structural keyring wire, formerly in `openom-protocol`, now lives here in
 `wire.rs` (`Keyring` / `Member` / `RecoveryKey` / `KeyringSignature`); the DEK epochs and the recovery
 escrow's KEK wraps ride as `keyeo_crypto::{Epoch, Wrap}` in their canonical `codec` bytes inside `Keyring`.
@@ -101,7 +101,7 @@ Entry points: `bootstrap_from_genesis` / `bootstrap_from_oob` (first-sight trust
 recovery/provision writer's self-check), and `sign_keyring` / `verify_keyring` / `verify_keyring_any` /
 `keyring_hash` (the signing layer underneath; `generate_identity` is a `test-util`-gated helper). The
 `ChainVerifier` (in `verifier`) is the keyless server-side `KeyringVerifier` seam; `blob_sync` is the
-`blobstore` transport.
+`store-blob` transport.
 
 Run: `node scripts/cargo.mjs test -p openom-keyring-chain` (from the repo root; on Windows cargo runs under
 WSL2/Docker).

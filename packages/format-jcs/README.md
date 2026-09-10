@@ -65,5 +65,5 @@ raw 32-byte hash), and `hex` / `hex256`.
 ## Position
 
 The bottom of the content-addressing stack: it depends on no other openom crate, and everything that
-computes an id, fingerprint, or content reference sits on top of it — directly `openom-claim` and
-`openom-projection`. Full dependency graph: see `packages/README.md`.
+computes an id, fingerprint, or content reference sits on top of it — directly `openom-data-claim` and
+`openom-data-projection`. Full dependency graph: see `packages/README.md`.

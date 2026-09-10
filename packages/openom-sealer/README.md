@@ -14,7 +14,7 @@ The client-side DEK session: a stateful sealer holding the *unlocked* DEK, turni
 wire-ready `Envelope` bytes and back (`Sealer` / `SealerSet`). It wraps `openom-crypto` — the
 AEAD/KDF/HPKE primitives — with the scope binding and chain-state threading those primitives don't
 know about. **This crate is engine-free** (no keyring dependency), so envelope-only consumers like
-`openom-sync` don't transitively rebuild the keyring engines.
+`openom-docsync` don't transitively rebuild the keyring engines.
 
 The passphrase-driven keyring lifecycle that PRODUCES an unlocked DEK — `vault` (provision, unlock,
 recover, `change_passphrase`, add/remove member, promote/demote co-owner), both engines' vaults, the
@@ -89,6 +89,6 @@ Entry points: `Sealer` / `SealerSet` (seal/open one scope, or every reachable ke
 Sits directly above the two foundation crates it wraps: `openom-crypto` (AEAD/KDF/HPKE primitives) and
 `openom-protocol` (the envelope + id types). It is **engine-free** — it carries no keyring dependency
 (`openom-keyring-chain` is a `test-util` dev-dependency only, to mint author identities in tests), so
-envelope-only consumers like `openom-sync` don't transitively rebuild the keyring engines. The keyring
-vault + wasm veneer that consume it live in `openom-vault`. Full dependency graph: see
-`packages/README.md`.
+envelope-only consumers like `openom-docsync` don't transitively rebuild the keyring engines. The keyring
+vault that consumes it lives in `openom-vault`; the single wasm surface is `openom-app-core`. Full
+dependency graph: see `packages/README.md`.

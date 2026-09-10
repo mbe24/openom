@@ -1,13 +1,13 @@
 # openom-docsync
 
-> openom's binding of the generic `docsync` loop — seal local claim-op deltas to the store, merge peers' deltas back. Drives `docsync` over `openom-tree` (the claim engine) + `openom-sealer`.
+> openom's binding of the generic `docsync` loop — seal local claim-op deltas to the store, merge peers' deltas back. Drives `docsync` over `openom-data-tree` (the claim engine) + `openom-sealer`.
 
 **Status:** built · client orchestration, load-bearing · E2EE multi-device sync
 **Last updated:** 2026-08-27
 
 ## What it is — and is not
 
-It ties three layers that each deliberately know nothing of the others: `openom-crdt` produces and
+It ties three layers that each deliberately know nothing of the others: `openom-data-crdt` produces and
 consumes op batches (`ChannelItem`s); `openom-sealer` seals those bytes into E2EE envelopes; a
 `store_log::DocStore` persists opaque envelopes as an append log. `SyncClient::push_claims` seals a
 local batch and pushes it; `pull_claims` opens and merges every new log entry into the accumulated op
@@ -81,11 +81,11 @@ assert_eq!(a.live_records().unwrap().len(), b.live_records().unwrap().len());
 ```
 
 Entry points: `SyncClient::new`, `push_claims` (edit + push), `pull_claims`, `live_records` /
-`tree` (the read model + the wrapped `openom-tree` engine), `flush` / `pending_count` (the write-ahead
+`tree` (the read model + the wrapped `openom-data-tree` engine), `flush` / `pending_count` (the write-ahead
 queue), and `compact_claims` / `bootstrap_claims` (snapshot compaction).
 
 ## Position
 
-Sits above `journal` (the opaque byte store) and `openom-sealer` (E2EE sealing), and drives
-`openom-crdt` op batches through `openom-protocol` envelopes. Full dependency graph: see
+Sits above `store-log` (the opaque byte store) and `openom-sealer` (E2EE sealing), and drives
+`openom-data-crdt` op batches through `openom-protocol` envelopes. Full dependency graph: see
 `packages/README.md`.

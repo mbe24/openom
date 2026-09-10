@@ -61,5 +61,5 @@ A new backend implements [`BlobStore`] and proves itself with
 ## Position
 
 The bottom of the storage stack, **below** `store_log::DocStore`. It depends on no openom crate
-(`sha2` + `data-encoding` + `thiserror` only); `journal`, `openom-sync`, and the keyring engines' blob
+(`sha2` + `data-encoding` + `thiserror` only); `store-log`, `openom-docsync`, and the keyring engines' blob
 sync sit above it. Full dependency graph: see `packages/README.md`.

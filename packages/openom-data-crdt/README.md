@@ -1,4 +1,4 @@
-# openom-crdt
+# openom-data-crdt
 
 > The claim model's convergent operation layer — a CRDT: the operation types + their set-union merge
 > (`materialize`) that folds a set of ops into the live record set. Not a log (it owns no storage).
@@ -8,7 +8,7 @@
 
 ## What it is — and is not
 
-The **data** channel (`openom-claim` / `openom-projection`) carries *facts* — a grow-only set of
+The **data** channel (`openom-data-claim` / `openom-data-projection`) carries *facts* — a grow-only set of
 records whose *disagreements* the projection resolves. This crate carries the orthogonal thing: the
 *lifecycle* of those records. "Every change is an operation" (design §8.2) — a record is **added**,
 **deleted**, **edited** (superseded), or a delete is **undone** (revoked). Those operations form their
@@ -17,10 +17,10 @@ compute the same live record set, with no shared clock. `materialize` is the fol
 live records` — and its output is the **snapshot** the projection reads.
 
 It is a **CRDT, not a log**: it holds the operation *types* and their *merge* (`materialize`), but owns
-no storage and appends nothing — the durable log lives in `journal`, and the decoded in-memory op set
-in `openom-sync` / `openom-tree` (each rebuilt by replaying the journal). It is **domain-agnostic**: it
+no storage and appends nothing — the durable log lives in `store-log`, and the decoded in-memory op set
+in `openom-docsync` / `openom-data-tree` (each rebuilt by replaying the journal). It is **domain-agnostic**: it
 folds opaque records by id and tracks their liveness; it never interprets what a claim *means* (that is
-`openom-projection`). It holds **no** transport concern — the
+`openom-data-projection`). It holds **no** transport concern — the
 `(replica_id, replica_counter)` idempotency dot rides the journal entry that *wraps* an item, never
 inside the content-addressed `Op` (a dot in the hash would make the same logical op hash differently
 per device and defeat dedup). And the projection depends on **no** operations crate, so the two
@@ -28,7 +28,7 @@ channels stay structurally separate: nothing in the read model can name an `Op`.
 
 It is the claim-model replacement for `commute`'s **merge**, minus the Lamport ordering — convergence
 is by set-union — and the domain composition `openom-treelog` used to bundle now lives in
-`openom-claim` (the record types) and `openom-projection` (the epistemic read model).
+`openom-data-claim` (the record types) and `openom-data-projection` (the epistemic read model).
 
 ## Shape
 
@@ -93,7 +93,7 @@ assert_eq!(live[0].id(), better_id); // the edited record won; the prior is gone
 
 Entry points: `materialize(items: &[ChannelItem], moderators: &BTreeSet<String>) -> Vec<Record>` (the
 role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (the operation types);
-`ContentAddressed` (re-used from `openom-claim`) for the op id.
+`ContentAddressed` (re-used from `openom-data-claim`) for the op id.
 
 ## Deferred (tracked elsewhere, deliberately not here)
 
@@ -113,7 +113,7 @@ role-based fold that produces the snapshot); `ChannelItem` / `Op` / `OpKind` (th
 
 ## Position
 
-Sits in the family-tree operations layer, on top of `openom-claim` (whose `Record` it folds and whose
+Sits in the family-tree operations layer, on top of `openom-data-claim` (whose `Record` it folds and whose
 `ContentAddressed` seam it re-uses for the op id). It depends on **no** transport, CRDT, or projection
 crate. Not yet wired into the app (the in-wasm claim engine that will host the fold, and the transport
 `EntryKind` that wraps each item with the idempotency dot, are separate tasks). Full dependency graph:

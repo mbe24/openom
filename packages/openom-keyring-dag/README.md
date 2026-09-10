@@ -60,5 +60,5 @@ Entry points: the type aliases (`KeyringAction` / `KeyringOp` / `KeyringState` /
 ## Position
 
 Layer 2 — one of the two keyring engines, over `keyeo-dag` (Layer 0) and behind `openom-keyring-api` (Layer 1). Above
-it sits `openom-vault` (the lifecycle). Non-dev deps: `keyeo-dag`, `openom-keyring-api`, `edsign`, `blobstore`, serde.
+it sits `openom-vault` (the lifecycle). Non-dev deps: `keyeo-dag`, `openom-keyring-api`, `edsign`, `store-blob`, serde.
 Full dependency graph: see `packages/README.md`.

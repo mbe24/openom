@@ -56,5 +56,5 @@ cd packages/openom-protocol/proto && buf generate
 
 A foundation crate (no domain knowledge, depends on nothing above it): everything that seals, syncs,
 or administers a tree sits on top of its wire types and canonical byte strings — directly
-`openom-crypto`, `openom-roles`, `openom-sealer`, `openom-sync`, `openom-vault`, `openom-vault-host`,
+`openom-crypto`, `openom-roles`, `openom-sealer`, `openom-docsync`, `openom-vault`, `openom-vault-host`,
 and the server crate. Full dependency graph: see `packages/README.md`.

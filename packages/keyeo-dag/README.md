@@ -22,7 +22,7 @@ It is **not** openom, and knows nothing about family trees, protobuf, roles-as-`
 sealer. It is generic over the op id, member id, **role**, and signature-scheme types — the openom
 bindings (the concrete role model, the Ed25519 seam, the authority + quorum policy) all live one layer up
 in `openom-keyring-dag`. It owns **no storage** and assigns no total order: it consumes ops and produces resolved
-state; persistence and transport are the caller's (a `blobstore` above it). It has no openom dependency
+state; persistence and transport are the caller's (a `store-blob` above it). It has no openom dependency
 and is publishable on its own.
 
 ## Invariants

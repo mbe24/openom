@@ -86,6 +86,6 @@ Entry points: `claim_id` / `content_hash` (the id primitive), `fingerprint` (ded
 ## Position
 
 Sits directly on `jcs` (canonical bytes, the hash input) and `did` (`did:key` ⇄ Ed25519 key
-resolution) — nothing else sits beneath it. `openom-projection`, the claim-model read model, sits on top,
+resolution) — nothing else sits beneath it. `openom-data-projection`, the claim-model read model, sits on top,
 consuming committed, signed claims by `id` and `fingerprint`. Full dependency graph: see
 `packages/README.md`.

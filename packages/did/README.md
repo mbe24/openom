@@ -19,7 +19,7 @@ It is **not** a DID resolver or a general multicodec/multibase library: it suppo
 method (`did:key`) and exactly one key type (Ed25519, multicodec `0xed01`) — any other prefix or
 codec is a hard error, never guessed or silently widened. It does not cryptographically vet the
 decoded bytes as a valid Ed25519 curve point — `did:key` format-checks, it doesn't validate the
-key. It does no signing or verification itself (that's `openom-claim` / `openom-crypto`), no I/O,
+key. It does no signing or verification itself (that's `openom-data-claim` / `openom-crypto`), no I/O,
 and **depends on no other openom crate** — nothing may sit beneath it. base58btc is implemented
 in-crate (~40 lines) so the whole codec can be audited in one file and compiles to wasm with no
 extra surface.
@@ -65,6 +65,6 @@ its `MemberDirectory` implementation (the `member_id ⇄ did:key` seam).
 
 ## Position
 
-A foundation crate: it depends on no other openom crate, and sits under `openom-claim` (the
+A foundation crate: it depends on no other openom crate, and sits under `openom-data-claim` (the
 `createdBy` byte-format) and the keyring's member resolution. Full dependency graph: see
 `packages/README.md`.

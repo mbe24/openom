@@ -21,13 +21,13 @@ The embedded name model (`name`, composition + equivalence) lives here too, carr
 because it does not depend on which model owns the surrounding node/edge tables.
 
 It is **not** the direction of travel. The canonical family-tree model going forward is the
-**claim model** (`openom-claim` + `openom-projection`): facts and epistemic assertions as a flat
-claim set, not this crate's node/edge tables. Nothing in the workspace depends on `openom-model` —
+**claim model** (`openom-data-claim` + `openom-data-projection`): facts and epistemic assertions as a flat
+claim set, not this crate's node/edge tables. Nothing in the workspace depends on `openom-data-model` —
 it is not wired into any app or crate today — and the repo is pre-release with zero users, so there
 is no migration cost to retiring it once the claim model lands. Do not build new work against this
 crate; treat it as read-only history until it is deleted. It also does no I/O and no signing: the
 `content_hash` here is a per-entity content-hash for attestation binding, not the claim model's
-id/fingerprint scheme (that lives in `jcs` + `openom-claim`).
+id/fingerprint scheme (that lives in `jcs` + `openom-data-claim`).
 
 ## Invariants
 
@@ -81,6 +81,6 @@ the wasm bundle.
 
 ## Position
 
-Sits in the family-tree data-model layer next to `openom-claim` / `openom-projection`, but on the
-losing side of the transition: nothing in the workspace depends on `openom-model`, and it is being
+Sits in the family-tree data-model layer next to `openom-data-claim` / `openom-data-projection`, but on the
+losing side of the transition: nothing in the workspace depends on `openom-data-model`, and it is being
 superseded, not extended. Full dependency graph: see `packages/README.md`.

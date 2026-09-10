@@ -53,5 +53,5 @@ Entry points: `SyncClient` (`new` / `apply` / `flush` / `pull` / `compact` / `ma
 ## Position
 
 The transport layer: it sits over `store_log::DocStore` and under a caller's CRDT + crypto (which it never
-names). Its only openom-relevant dependency is `journal`; the concrete `Engine`/`Sealer` impls live in the
+names). Its only openom-relevant dependency is `store-log`; the concrete `Engine`/`Sealer` impls live in the
 consumer. Full dependency graph: see `packages/README.md`.

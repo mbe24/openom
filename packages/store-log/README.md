@@ -1,4 +1,4 @@
-# journal
+# store-log
 
 > A local-first sync backend: per-document snapshot + append-only update-log with compare-and-swap and capability negotiation, over opaque bytes.
 
@@ -18,14 +18,14 @@ backend. Two backends ship today — `MemoryStore` (volatile; tests and in-proce
 (a future file store, S3, or a zero-knowledge server) only has to pass that suite to be a safe drop-in.
 This is deliberately the generic storage/transport substrate underneath sync: the claim engine's
 sealed op deltas + snapshots ride it, and any future channel rides exactly this same contract,
-unchanged — `journal` doesn't know or care which.
+unchanged — `store-log` doesn't know or care which.
 
 It is **not** domain- or crypto-aware: `Update` is `Vec<u8>` and `Snapshot::bytes` is `Vec<u8>` —
 opaque blobs the caller seals and interprets. Metadata a caller might want (device id, Lamport clock,
 op count) lives *inside* that ciphertext, never in a store column, so this crate has **no `openom-*`
 dependency** and nothing may be added to its schema without breaking that promise. It is not a sync
 *client*: it does not seal, retry, or merge peers' deltas, or decide when to sync — that orchestration
-is `openom-sync`, one layer up. It is not a server: the network endpoints, auth, and protocol framing a
+is `openom-docsync`, one layer up. It is not a server: the network endpoints, auth, and protocol framing a
 real remote implementation of this contract needs live above it too (today the JS `RemoteStore`; a
 possible future native `openom-store`). And `Caps::durable` is not yet wired to distinguish backends —
 both `MemoryStore` and `SqliteStore` report `durable: false` today, even though `SqliteStore::open` is
@@ -36,11 +36,11 @@ durability from `caps()` alone.
 
 | id | guarantee | why it matters | verified by |
 |----|-----------|-----------------|-------------|
-| **JOURNAL-1** | `put_snapshot` is compare-and-swap: it writes only when the caller's `expected` version matches the one currently stored (including "no snapshot yet" as `None`); any mismatch — stale version, wrong string, or a write that already moved — fails closed with `StoreError::Conflict`, never a silent overwrite. | Two writers racing to snapshot the same document can never clobber each other; the loser gets a typed error, not corruption. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::stores_agree_on_conflict_semantics` |
-| **JOURNAL-2** | The update log is append-only and cursor-addressed: `read_updates(doc, since)` returns exactly the entries with `seq > since`, in order, and a document that was never written reads as empty (`(vec![], 0)`), never an error. | A sync loop can always ask "what's new since my last cursor" and get a precise, gap-free tail — the basic incremental-sync primitive. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms` |
-| **JOURNAL-3** | One conformance suite — empty-store reads, append/read-back, CAS accept/reject, delete — runs unmodified against every backend, and every backend passes it identically. | A new backend (file, S3, a zero-knowledge server) only has to pass the same suite to be a safe drop-in; the two shipped backends can never quietly diverge in behavior. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::stores_agree_on_conflict_semantics` |
-| **JOURNAL-4** | `SqliteStore::open` is durable across a process restart: updates appended and a snapshot written before the connection is dropped are both still there, byte-for-byte, after reopening the same file. | The property a local-first client actually needs — a confirmed local commit must survive a crash or restart, not just live in RAM. | `tests::sqlite_open_survives_a_reopen` |
-| **JOURNAL-5** | Update and snapshot bytes are stored and returned exactly as given — no reinterpretation, re-encoding, or mutation anywhere in the write or read path. | The whole opacity contract: metadata the caller cares about lives inside those bytes, so the store must never touch them. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::sqlite_open_survives_a_reopen` |
+| **LOG-1** | `put_snapshot` is compare-and-swap: it writes only when the caller's `expected` version matches the one currently stored (including "no snapshot yet" as `None`); any mismatch — stale version, wrong string, or a write that already moved — fails closed with `StoreError::Conflict`, never a silent overwrite. | Two writers racing to snapshot the same document can never clobber each other; the loser gets a typed error, not corruption. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::stores_agree_on_conflict_semantics` |
+| **LOG-2** | The update log is append-only and cursor-addressed: `read_updates(doc, since)` returns exactly the entries with `seq > since`, in order, and a document that was never written reads as empty (`(vec![], 0)`), never an error. | A sync loop can always ask "what's new since my last cursor" and get a precise, gap-free tail — the basic incremental-sync primitive. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms` |
+| **LOG-3** | One conformance suite — empty-store reads, append/read-back, CAS accept/reject, delete — runs unmodified against every backend, and every backend passes it identically. | A new backend (file, S3, a zero-knowledge server) only has to pass the same suite to be a safe drop-in; the two shipped backends can never quietly diverge in behavior. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::stores_agree_on_conflict_semantics` |
+| **LOG-4** | `SqliteStore::open` is durable across a process restart: updates appended and a snapshot written before the connection is dropped are both still there, byte-for-byte, after reopening the same file. | The property a local-first client actually needs — a confirmed local commit must survive a crash or restart, not just live in RAM. | `tests::sqlite_open_survives_a_reopen` |
+| **LOG-5** | Update and snapshot bytes are stored and returned exactly as given — no reinterpretation, re-encoding, or mutation anywhere in the write or read path. | The whole opacity contract: metadata the caller cares about lives inside those bytes, so the store must never touch them. | `tests::memory_store_conforms`, `tests::sqlite_store_conforms`, `tests::sqlite_open_survives_a_reopen` |
 
 Run: `node scripts/cargo.mjs test -p store-log` (from the repo root; on Windows cargo runs under
 WSL2/Docker).
@@ -54,7 +54,7 @@ use store_log::{DocStore, StoreError};
 let store = MemoryStore::new();
 let doc = "family-tree-1";
 
-// Append opaque update bytes — journal never looks inside them.
+// Append opaque update bytes — the store never looks inside them.
 store
     .append(doc, &[b"update-1".to_vec(), b"update-2".to_vec()])
     .unwrap();
@@ -82,7 +82,7 @@ Entry points: `DocStore` — the trait every backend implements (`list`, `read_s
 
 ## Position
 
-The storage/sync layer: generic and content-agnostic, sitting below `openom-sync` (the client sync
+The storage/sync layer: generic and content-agnostic, sitting below `openom-docsync` (the client sync
 loop that seals deltas into `Update`s and merges peers' deltas back) and below any concrete remote
 implementation of this contract (today the JS `RemoteStore`; a possible future native `openom-store`).
 It carries the claim engine's op deltas + snapshots, opaque to it. Full dependency graph: see
