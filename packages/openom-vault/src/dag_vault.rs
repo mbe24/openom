@@ -873,6 +873,12 @@ impl DagVault {
     ///
     /// Enforces the anti-rollback `floor`; returns the new anchor + watermark + the fresh recovery code.
     ///
+    /// **The returned recovery code is PROVISIONAL until the rotation is confirmed.** On the append-only log a
+    /// concurrent rotation from another device could win the merge, so the caller MUST keep treating the OLD
+    /// code as live until [`Self::rotation_confirmed`] returns `true` against the synced anchor (two-phase
+    /// gate, §11.2). Read [`Self::resolved_reset_authority`] on the returned anchor to capture the authority to
+    /// confirm.
+    ///
     /// # Errors
     /// Returns [`VaultError`] if the floor check fails, the anchor is malformed, the passphrase is wrong (not
     /// the resolved Owner), or the re-wrap / authoring fails.
@@ -966,6 +972,40 @@ impl DagVault {
             recovery_code: secrets.recovery_code,
             watermark,
         })
+    }
+
+    /// The resolved recovery authority (RVK) at `anchor`'s frontier — `None` for a group with no recovery
+    /// authority. The observable half of the two-phase rotation gate ([`Self::rotation_confirmed`]): a caller
+    /// reads this on the rotation's OWN anchor to learn the authority it established, then re-reads it on the
+    /// synced anchor to confirm the rotation survived the merge.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed.
+    pub fn resolved_reset_authority(&self, anchor: &[u8]) -> Result<Option<[u8; 32]>, VaultError> {
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        Ok(resolved.reset_authority)
+    }
+
+    /// Two-phase rotation confirmation (OPE-381 / §11.2). A [`Self::rotate_recovery`] is COMPLETE only once
+    /// its new authority is observed in the MERGED/synced anchor. The append-only log admits a concurrent
+    /// rotation (or, in the loser's frame, a superseding one): two rotations forked from the same frontier
+    /// merge to a single deterministic winner, so the LOSER's freshly-minted recovery code never becomes the
+    /// resolved authority. So the caller records the authority its rotation established — from the rotation's
+    /// own anchor via [`Self::resolved_reset_authority`] — and, after syncing, calls this against the synced
+    /// anchor. `false` means the rotation did NOT survive the merge: the returned recovery code is void and
+    /// the caller must re-rotate, and — critically — must keep treating the OLD code as live until a rotation
+    /// it authored is confirmed. `true` means the new code is now the sole recovery authority. Until this
+    /// returns `true` the recovery code from `rotate_recovery` is PROVISIONAL.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed.
+    pub fn rotation_confirmed(
+        &self,
+        synced_anchor: &[u8],
+        expected: &[u8; 32],
+    ) -> Result<bool, VaultError> {
+        Ok(self.resolved_reset_authority(synced_anchor)? == Some(*expected))
     }
 
     /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
@@ -2841,6 +2881,75 @@ mod tests {
             rrk_wraps,
             1 + MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH,
             "the genesis RRK wrap plus bob's capped flood — the excess is dropped"
+        );
+    }
+
+    /// OPE-381 / §11.2 two-phase confirm: a rotation is complete only once its authority is observed in the
+    /// synced anchor. Two rotations forked from the same frontier merge to a single deterministic winner, so
+    /// the loser's freshly-minted code never becomes the resolved authority — `rotation_confirmed` catches
+    /// that, so the losing device keeps the OLD code live instead of trusting a superseded one.
+    #[test]
+    fn dag_rotation_confirmed_catches_a_superseded_concurrent_rotation() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"correct horse");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
+            .unwrap();
+        let base_floor = dag_client::watermark(&p.anchor).unwrap();
+
+        // Two concurrent rotations from the same base (two devices), each minting its OWN new authority.
+        let rot_a = DagVault
+            .rotate_recovery(
+                &ctx(&tree, &owner, &ReplicaId::new(b"ra")),
+                &p.anchor,
+                &pass,
+                &base_floor,
+            )
+            .unwrap();
+        let rot_b = DagVault
+            .rotate_recovery(
+                &ctx(&tree, &owner, &ReplicaId::new(b"rb")),
+                &p.anchor,
+                &pass,
+                &base_floor,
+            )
+            .unwrap();
+
+        let auth_a = DagVault
+            .resolved_reset_authority(&rot_a.anchor)
+            .unwrap()
+            .expect("rotation A set an authority");
+        let auth_b = DagVault
+            .resolved_reset_authority(&rot_b.anchor)
+            .unwrap()
+            .expect("rotation B set an authority");
+        assert_ne!(auth_a, auth_b, "each rotation mints a distinct recovery authority");
+
+        // Each device confirms its OWN rotation on its OWN anchor; the pre-rotation base confirms neither.
+        assert!(DagVault.rotation_confirmed(&rot_a.anchor, &auth_a).unwrap());
+        assert!(DagVault.rotation_confirmed(&rot_b.anchor, &auth_b).unwrap());
+        assert!(
+            !DagVault.rotation_confirmed(&p.anchor, &auth_a).unwrap(),
+            "the pre-rotation anchor confirms neither new authority"
+        );
+
+        // Merge the two branches: exactly ONE rotation wins the deterministic tiebreak.
+        let merged = dag_client::merge(&rot_a.anchor, &rot_b.anchor).unwrap();
+        let a_won = DagVault.rotation_confirmed(&merged, &auth_a).unwrap();
+        let b_won = DagVault.rotation_confirmed(&merged, &auth_b).unwrap();
+        assert!(
+            a_won ^ b_won,
+            "exactly one rotation survives the merge — the loser's code is provisional-void"
+        );
+        let winner = DagVault
+            .resolved_reset_authority(&merged)
+            .unwrap()
+            .expect("the merged anchor has a resolved authority");
+        assert!(
+            winner == auth_a || winner == auth_b,
+            "the resolved authority is one of the two rotations'"
         );
     }
 

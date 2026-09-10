@@ -261,6 +261,11 @@ pub struct Resolved {
     /// uses this two ways: the READER (pin P6) covered-accepts a data entry only if its author is here, so a
     /// voided thief's entries are never blessed; the WRITER binds the author's key into the cover it mints.
     pub ever_members: std::collections::BTreeMap<String, Vec<u8>>,
+    /// The resolved recovery authority (RVK) at this frontier. `None` on a group with no recovery authority.
+    /// Lets a caller confirm a `RotateRecoveryAuthority` actually took effect once it has synced — the
+    /// two-phase "rotate then confirm the resolved authority" gate (OPE-381 / §11.2), so a rotation
+    /// superseded by a concurrent recovery is observable rather than silently assumed complete.
+    pub reset_authority: Option<[u8; 32]>,
 }
 
 /// One effective op's opaque `sealing` payload, tagged with the content-addressed id of the op that minted
@@ -430,6 +435,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
     // NOT carve-out-voided Adds (they aren't effective). So a legitimately-removed member's history can be
     // covered-accepted, while a voided thief's cannot.
     let ever_members = collect_ever_members(&members, engine.effective_ops(), &by_id);
+    let reset_authority = engine.state().reset_authority;
     Ok(Resolved {
         members,
         sealing,
@@ -437,6 +443,7 @@ pub fn resolve(anchor_bytes: &[u8]) -> Result<Resolved, ClientError> {
         checkpoint_sealing,
         minting_ops_baseline,
         ever_members,
+        reset_authority,
     })
 }
 
