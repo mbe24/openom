@@ -585,11 +585,27 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         if plaintext.is_empty() {
             return Ok(());
         }
+        self.append_entry(EntryKind::Delta, plaintext)
+    }
+
+    /// Seal a self-heal `Cover` marker and append it as this replica's next log object — a peer routes it to
+    /// its cover-fold on [`pull_verified`](Self::pull_verified) instead of merging it as a claim (OPE-382).
+    /// A cover consumes a counter in this replica's chain, exactly like a delta.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if sealing or the blob write fails.
+    pub fn push_cover(&mut self, plaintext: &[u8]) -> Result<(), SyncError> {
+        self.append_entry(EntryKind::Cover, plaintext)
+    }
+
+    /// Seal `plaintext` under `kind` and append it as this replica's next immutable log object, advancing the
+    /// counter, chain hash, head pointer, and self-frontier. The one write path for a delta or a cover.
+    fn append_entry(&mut self, kind: EntryKind, plaintext: &[u8]) -> Result<(), SyncError> {
         let ctx = SealCtx {
-            kind: EntryKind::Delta,
+            kind,
             replica_counter: self.next_counter,
             prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
-            covers_through_seq: 0, // deltas carry no covered marker; only snapshots do
+            covers_through_seq: 0, // deltas/covers carry no covered marker; only snapshots do
         };
         let out = self
             .sealer
@@ -605,9 +621,9 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         }
         self.next_counter += 1;
         self.prev_hash = out.ciphertext_hash;
-        // Advance our head pointer LAST (delta first, then head): a crash between leaves the head lagging,
-        // so a peer just doesn't see the newest delta until the next push — a delay, never corruption. Only
-        // this replica writes its own head, so an unconditional overwrite is safe.
+        // Advance the head pointer LAST (entry first, then head): a crash between leaves the head lagging, so
+        // a peer just doesn't see the newest entry until the next push — a delay, never corruption. Only this
+        // replica writes its own head, so an unconditional overwrite is safe.
         self.store.put(
             &head_key(&self.doc, &self.replica),
             &encode_count(self.next_counter),
@@ -678,6 +694,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     pub fn pull_verified(
         &mut self,
         mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        mut fold_cover: impl FnMut(&[u8], &str, u64),
     ) -> Result<usize, SyncError> {
         let mut merged = 0;
 
@@ -730,18 +747,25 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
                     break;
                 };
-                match self.sealer.open(EntryKind::Delta, &env) {
-                    Ok(pt) => match classify(&env, &pt, &replica, c) {
-                        Verdict::Accept => match self.engine.merge(&pt) {
-                            Ok(()) => merged += 1,
-                            Err(_) => self.quarantined += 1,
+                // Route by kind: a Cover folds into the caller's covered set (never merged, never held); a
+                // Delta goes through the §B3 classify gate. `open` is kind-strict, so a delta fails the Cover
+                // open and falls through. (A delta held before its cover un-holds on a later drain.)
+                if let Ok(cover_body) = self.sealer.open(EntryKind::Cover, &env) {
+                    fold_cover(&cover_body, &replica, c);
+                } else {
+                    match self.sealer.open(EntryKind::Delta, &env) {
+                        Ok(pt) => match classify(&env, &pt, &replica, c) {
+                            Verdict::Accept => match self.engine.merge(&pt) {
+                                Ok(()) => merged += 1,
+                                Err(_) => self.quarantined += 1,
+                            },
+                            Verdict::Hold => {
+                                self.held.insert((replica.clone(), c));
+                            }
+                            Verdict::Reject => {}
                         },
-                        Verdict::Hold => {
-                            self.held.insert((replica.clone(), c));
-                        }
-                        Verdict::Reject => {}
-                    },
-                    Err(_) => self.quarantined += 1,
+                        Err(_) => self.quarantined += 1,
+                    }
                 }
                 c += 1;
             }
@@ -824,17 +848,35 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
 #[derive(Default, Clone, Copy)]
 pub struct PassthroughSealer;
 
+/// [`PassthroughSealer::open`] was asked for a kind that doesn't match the envelope's — mirrors a real
+/// sealer rejecting a `Delta` open of a `Cover` envelope (what lets [`BlobSyncClient::pull_verified`] route
+/// covers vs deltas by trying each kind).
+#[derive(Debug)]
+pub struct WrongKind;
+
+impl std::fmt::Display for WrongKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("envelope kind does not match the requested kind")
+    }
+}
+
+impl std::error::Error for WrongKind {}
+
+fn kind_tag(kind: EntryKind) -> u8 {
+    match kind {
+        EntryKind::Delta => 0,
+        EntryKind::Snapshot => 1,
+        EntryKind::Cover => 2,
+    }
+}
+
 impl Sealer for PassthroughSealer {
-    type Error = std::convert::Infallible;
+    type Error = WrongKind;
 
     fn seal(&mut self, ctx: &SealCtx, plaintext: &[u8]) -> std::result::Result<Sealed, Self::Error> {
         let mut env = Vec::with_capacity(9 + plaintext.len());
         env.extend_from_slice(&ctx.covers_through_seq.to_be_bytes());
-        env.push(match ctx.kind {
-            EntryKind::Delta => 0,
-            EntryKind::Snapshot => 1,
-            EntryKind::Cover => 2,
-        });
+        env.push(kind_tag(ctx.kind));
         env.extend_from_slice(plaintext);
         Ok(Sealed {
             envelope: env,
@@ -842,8 +884,14 @@ impl Sealer for PassthroughSealer {
         })
     }
 
-    fn open(&self, _kind: EntryKind, envelope: &[u8]) -> std::result::Result<Vec<u8>, Self::Error> {
-        Ok(envelope.get(9..).unwrap_or(&[]).to_vec())
+    fn open(&self, kind: EntryKind, envelope: &[u8]) -> std::result::Result<Vec<u8>, Self::Error> {
+        // Kind-strict, like the real sealer: an open of the wrong kind fails, so a caller can distinguish a
+        // Cover from a Delta by which open succeeds.
+        if envelope.get(8) == Some(&kind_tag(kind)) {
+            Ok(envelope.get(9..).unwrap_or(&[]).to_vec())
+        } else {
+            Err(WrongKind)
+        }
     }
 
     fn covers_through_seq(&self, envelope: &[u8]) -> u64 {

@@ -222,11 +222,15 @@ fn blob_verified_pull_holds_then_drains() {
     let mut a = blob_client(store.clone(), "replica-A");
     a.apply("secret".into()).unwrap();
 
+    let no_cover = |_b: &[u8], _r: &str, _c: u64| {};
     let mut b = blob_client(store.clone(), "replica-B");
     let merged = b
-        .pull_verified(|_env, _pt, replica, _c| {
-            if replica == "replica-A" { Verdict::Hold } else { Verdict::Accept }
-        })
+        .pull_verified(
+            |_env, _pt, replica, _c| {
+                if replica == "replica-A" { Verdict::Hold } else { Verdict::Accept }
+            },
+            no_cover,
+        )
         .unwrap();
     assert_eq!(merged, 0, "the held delta is not merged");
     assert_eq!(b.held_count(), 1, "it is parked as held");
@@ -234,7 +238,9 @@ fn blob_verified_pull_holds_then_drains() {
     assert_eq!(b.frontier().get("replica-A").copied(), Some(1), "the frontier still advanced past it");
 
     // A membership op has since arrived → the same dot now verifies; the drain folds it.
-    let merged = b.pull_verified(|_env, _pt, _replica, _c| Verdict::Accept).unwrap();
+    let merged = b
+        .pull_verified(|_env, _pt, _replica, _c| Verdict::Accept, no_cover)
+        .unwrap();
     assert_eq!(merged, 1, "the drain merges the un-held delta");
     assert_eq!(b.held_count(), 0);
     assert!(b.engine().lines.contains("secret"), "folded after un-hold");
@@ -248,14 +254,51 @@ fn blob_verified_pull_reject_is_final() {
     let mut a = blob_client(store.clone(), "replica-A");
     a.apply("forged".into()).unwrap();
 
+    let no_cover = |_b: &[u8], _r: &str, _c: u64| {};
     let mut b = blob_client(store.clone(), "replica-B");
-    assert_eq!(b.pull_verified(|_e, _p, _r, _c| Verdict::Reject).unwrap(), 0);
+    assert_eq!(b.pull_verified(|_e, _p, _r, _c| Verdict::Reject, no_cover).unwrap(), 0);
     assert_eq!(b.held_count(), 0, "rejected, not held");
     assert!(!b.engine().lines.contains("forged"));
     assert_eq!(
-        b.pull_verified(|_e, _p, _r, _c| Verdict::Accept).unwrap(),
+        b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, no_cover).unwrap(),
         0,
         "a reject is final — the frontier advanced, so it is not re-offered"
     );
     assert!(!b.engine().lines.contains("forged"));
+}
+
+#[test]
+fn blob_verified_pull_folds_a_cover_that_un_holds_a_delta() {
+    // The self-heal case: an unattributed delta is HELD; a Cover marker blessing it folds into the caller's
+    // covered set; the next drain re-classifies the delta as covered → Accept. Proves covers route through
+    // pull_verified (never merged as claims, never held) and drive the hold/drain the same way membership does.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("blessed".into()).unwrap(); // A:0 — an (initially) unattributed delta
+    a.push_cover(b"cover-for-blessed").unwrap(); // A:1 — a cover blessing it
+
+    let covered = std::cell::RefCell::new(false);
+    let classify = |_env: &[u8], pt: &[u8], _r: &str, _c: u64| {
+        // Hold the "blessed" delta until a cover for it has folded; accept anything else.
+        if pt == b"blessed" && !*covered.borrow() { Verdict::Hold } else { Verdict::Accept }
+    };
+    let fold_cover = |body: &[u8], _r: &str, _c: u64| {
+        if body == b"cover-for-blessed" {
+            *covered.borrow_mut() = true;
+        }
+    };
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    // Pass 1: the delta is scanned before its cover, so it holds; the cover then folds (covered = true).
+    let merged = b.pull_verified(classify, fold_cover).unwrap();
+    assert_eq!(merged, 0, "the unattributed delta holds this tick");
+    assert_eq!(b.held_count(), 1);
+    assert!(*covered.borrow(), "the cover folded (routed, not merged, not held)");
+    assert!(!b.engine().lines.contains("blessed"));
+
+    // Pass 2: the drain re-classifies the held delta — now covered → Accept.
+    let merged = b.pull_verified(classify, fold_cover).unwrap();
+    assert_eq!(merged, 1, "the cover un-holds the delta on the next drain");
+    assert_eq!(b.held_count(), 0);
+    assert!(b.engine().lines.contains("blessed"), "the blessed delta is folded once covered");
 }
