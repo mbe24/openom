@@ -391,25 +391,42 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
 /// store-assigned global order to count, only each replica's own client-assigned counter.
 pub type Frontier = std::collections::BTreeMap<String, u64>;
 
-/// `{doc}/log/` — the prefix every replica's delta objects live under.
-fn log_prefix(doc: &str) -> String {
-    format!("{doc}/log/")
-}
-
 /// `{doc}/log/{replica}/{counter}` — one immutable delta object (the per-replica dot is the delta identity).
 fn log_key(doc: &str, replica: &str, counter: u64) -> String {
     format!("{doc}/log/{replica}/{counter}")
 }
 
-/// Parse a `{doc}/log/{replica}/{counter}` key (given the `{doc}/log/` prefix) back to `(replica, counter)`.
-/// Returns `None` for a key that isn't a well-formed delta object under this doc.
-fn parse_log_key(prefix: &str, key: &str) -> Option<(String, u64)> {
-    let rest = key.strip_prefix(prefix)?;
-    let (replica, counter) = rest.rsplit_once('/')?;
+/// `{doc}/heads/` — the prefix holding one tiny CAS'd pointer per replica. Listing THIS is O(members), not
+/// O(all deltas), so a pull discovers who has written + how far without scanning the whole log — the same
+/// head-pointer model the keyring port uses. It is what keeps a managed backend efficient WITHOUT any
+/// index-in-the-API: the shape works identically on R2 and a dumb folder store, and a managed backend can
+/// still accelerate the head-list + gap-gets below the seam.
+fn heads_prefix(doc: &str) -> String {
+    format!("{doc}/heads/")
+}
+
+/// `{doc}/heads/{replica}` — a replica's head pointer, holding its entry count (its exclusive frontier).
+fn head_key(doc: &str, replica: &str) -> String {
+    format!("{doc}/heads/{replica}")
+}
+
+/// Recover the `replica` id from a `{doc}/heads/{replica}` key (given the `{doc}/heads/` prefix).
+fn parse_head_key(prefix: &str, key: &str) -> Option<String> {
+    let replica = key.strip_prefix(prefix)?;
     if replica.is_empty() || replica.contains('/') {
-        return None; // a nested/malformed key, not a direct {replica}/{counter}
+        return None;
     }
-    Some((replica.to_string(), counter.parse().ok()?))
+    Some(replica.to_string())
+}
+
+/// A head pointer's value is its replica's entry count, as ASCII decimal (small, human-debuggable, and
+/// order-preserving enough for the tiny pointer object).
+fn encode_count(n: u64) -> Vec<u8> {
+    n.to_string().into_bytes()
+}
+
+fn decode_count(bytes: &[u8]) -> Option<u64> {
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 /// The `BlobStore`-native sync core (OPE-397): one document, one local [`Engine`] + [`Sealer`], over a
@@ -496,12 +513,21 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         let key = log_key(&self.doc, &self.replica, self.next_counter);
         // IfAbsent: the object is immutable. A crash-retry of the same counter finds it already present
         // (PreconditionFailed) — idempotent, so treat that as success and advance, rather than failing.
+        // (A replica id is fresh per open, so no two live clients ever share this keyspace.)
         match self.store.put(&key, &out.envelope, store_blob::Precondition::IfAbsent) {
             Ok(_) | Err(store_blob::BlobError::PreconditionFailed) => {}
             Err(e) => return Err(e.into()),
         }
         self.next_counter += 1;
         self.prev_hash = out.ciphertext_hash;
+        // Advance our head pointer LAST (delta first, then head): a crash between leaves the head lagging,
+        // so a peer just doesn't see the newest delta until the next push — a delay, never corruption. Only
+        // this replica writes its own head, so an unconditional overwrite is safe.
+        self.store.put(
+            &head_key(&self.doc, &self.replica),
+            &encode_count(self.next_counter),
+            store_blob::Precondition::Any,
+        )?;
         // We have, by definition, "seen" our own entry — advance the frontier so `pull` doesn't refetch it.
         let f = self.pull_frontier.entry(self.replica.clone()).or_insert(0);
         *f = (*f).max(self.next_counter);
@@ -515,31 +541,41 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// # Errors
     /// Returns [`SyncError`] if a blob read fails (a broken backend, as opposed to one bad object).
     pub fn pull(&mut self) -> Result<usize, SyncError> {
-        let prefix = log_prefix(&self.doc);
-        let mut fresh: Vec<(String, u64, String)> = self
+        let hp = heads_prefix(&self.doc);
+        // O(members): list only the head pointers, not the whole log.
+        let mut replicas: Vec<String> = self
             .store
-            .list(&prefix)?
+            .list(&hp)?
             .into_iter()
-            .filter_map(|(k, _etag)| parse_log_key(&prefix, &k).map(|(r, c)| (r, c, k)))
-            .filter(|(r, c, _)| *c >= self.pull_frontier.get(r).copied().unwrap_or(0))
+            .filter_map(|(k, _etag)| parse_head_key(&hp, &k))
             .collect();
-        // Deterministic (replica, counter) order — set-union is order-independent, but a stable order keeps
-        // the chain-hash / quarantine behaviour reproducible across replicas.
-        fresh.sort();
+        replicas.sort(); // deterministic order (set-union is order-independent; stable keeps it reproducible)
+
         let mut merged = 0;
-        for (replica, counter, key) in fresh {
-            let Some((bytes, _etag)) = self.store.get(&key)? else {
-                continue; // listed then vanished (a concurrent delete) — skip
+        for replica in replicas {
+            let Some((hb, _etag)) = self.store.get(&head_key(&self.doc, &replica))? else {
+                continue; // head vanished (a concurrent delete) — skip
             };
-            match self.sealer.open(EntryKind::Delta, &bytes) {
-                Ok(pt) => match self.engine.merge(&pt) {
-                    Ok(()) => merged += 1,
+            let Some(head) = decode_count(&hb) else {
+                self.quarantined += 1; // a malformed head pointer — skip this replica this tick
+                continue;
+            };
+            // Fetch only this replica's gap: [frontier .. head).
+            let mut c = self.pull_frontier.get(&replica).copied().unwrap_or(0);
+            while c < head {
+                let Some((bytes, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
+                    break; // the head ran ahead of a not-yet-written delta — stop; retry next pull
+                };
+                match self.sealer.open(EntryKind::Delta, &bytes) {
+                    Ok(pt) => match self.engine.merge(&pt) {
+                        Ok(()) => merged += 1,
+                        Err(_) => self.quarantined += 1,
+                    },
                     Err(_) => self.quarantined += 1,
-                },
-                Err(_) => self.quarantined += 1,
+                }
+                c += 1;
             }
-            let f = self.pull_frontier.entry(replica).or_insert(0);
-            *f = (*f).max(counter + 1);
+            self.pull_frontier.insert(replica, c);
         }
         Ok(merged)
     }
