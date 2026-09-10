@@ -2,7 +2,7 @@
 //!
 //! The `tracing` macros stay the *only* instrumentation API the app ever touches —
 //! this module just turns their spans into OTLP when `OPENOM_OTEL` is set, pointed
-//! at grafana/otel-lgtm (dev) or Better Stack (prod) by config. Everything here is
+//! at grafana/otel-lgtm (dev) or Axiom (prod) by config. Everything here is
 //! inert unless [`build_tracer_provider`] returns `Some`, so a plain local run pays
 //! nothing. Export is HTTP/protobuf over reqwest+rustls — no gRPC/tonic, no OpenSSL.
 
@@ -60,7 +60,7 @@ fn traces_endpoint(base: &str) -> String {
     }
 }
 
-/// Parse `k1=v1,k2=v2` OTLP headers (e.g. a Better Stack source token). Values are
+/// Parse `k1=v1,k2=v2` OTLP headers (e.g. an Axiom API token + dataset). Values are
 /// secret and never logged.
 fn parse_headers(raw: &str) -> HashMap<String, String> {
     raw.split(',')
