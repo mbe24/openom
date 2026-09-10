@@ -614,6 +614,10 @@ pub struct MemberUnlock {
     /// a shared tree by definition), so it is non-optional — the running core holds it to splice a later
     /// (post-removal) epoch into its sealer on sync without a passphrase.
     pub epoch_secret: MemberEpochSecret,
+    /// Advisory: this member's own DEK bag didn't reach the current write epoch — a locally-derived lockout
+    /// signal, immune to the unauthenticated coverage hint a malicious wrap can forge. The running core
+    /// responds with a forced `reseal_as_member` (dag only; chain always `false`) (OPE-299).
+    pub write_epoch_unreachable: bool,
 }
 
 /// A member's retained epoch-adopt capability (OPE-393): the HPKE secret plus the context
@@ -885,6 +889,7 @@ pub fn unlock_as_member(
                 did_key: u.did_key.into_string(),
                 watermark: chain_wm_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
                 epoch_secret: epoch_secret(EngineKind::Chain, hpke_secret),
+                write_epoch_unreachable: false, // a linear chain always reaches its own write epoch (OPE-299)
             })
         }
         EngineKind::Dag => {
@@ -900,6 +905,7 @@ pub fn unlock_as_member(
                 did_key: u.did_key.into_string(),
                 watermark: u.watermark,
                 epoch_secret: epoch_secret(EngineKind::Dag, hpke_secret),
+                write_epoch_unreachable: u.write_epoch_unreachable,
             })
         }
     }

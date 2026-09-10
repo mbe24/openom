@@ -10,7 +10,7 @@ pub mod lifecycle;
 pub use lifecycle::{ChainVault, KeyringLifecycle, VaultContext};
 
 pub mod dag_vault;
-pub use dag_vault::{Backfilled, DagVault, Resealed};
+pub use dag_vault::{Backfilled, DagVault, Resealed, ResealTrigger};
 
 // Re-exported: the dag membership methods take a KeyringRole, so callers name it through openom-vault
 // without a direct openom-keyring-dag dependency.

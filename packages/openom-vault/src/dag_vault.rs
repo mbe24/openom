@@ -433,6 +433,23 @@ struct FoldedSealing {
     needs_backfill: bool,
 }
 
+/// When a [`DagVault::reseal`] / [`DagVault::reseal_as_member`] actually mints a covering epoch.
+///
+/// `WhenStale` is the ordinary idempotent self-heal — reseal iff the resolved keyring `needs_reseal`, else a
+/// no-op — so racing devices converge. `Force` mints unconditionally, past that gate. The force path exists
+/// because `needs_reseal` is derived from the author-DECLARED recipient key, which is UNAUTHENTICATED: a
+/// malicious op can wrap the DEK to garbage while declaring the victim's real current key, so coverage
+/// reports "clean" and the automatic repair is suppressed. A member/owner who unlocks and finds they can't
+/// actually reach the write epoch ([`Unlocked::write_epoch_unreachable`]) forces a covering reseal regardless
+/// of what the hint claims — repairing the lockout the coverage signal can't see (OPE-299).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResealTrigger {
+    /// Reseal only if the resolved keyring is stale (`needs_reseal`); otherwise a no-op. The idempotent path.
+    WhenStale,
+    /// Reseal unconditionally, past the `needs_reseal` gate — the local-write-unreachability escape hatch.
+    Force,
+}
+
 /// The result of [`DagVault::reseal`]: the (possibly unchanged) anchor to publish + its watermark, and
 /// whether a repair was actually appended (`false` = nothing was stale, a no-op).
 pub struct Resealed {
@@ -579,6 +596,11 @@ impl KeyringLifecycle for DagVault {
             KekKind::Passphrase,
         )?;
         let deks = epoch_deks(&epochs, tree_id, member_id, &rrk_secret);
+        // Local reachability (OPE-299): did our own DEK bag actually reach the winning write epoch? Derived
+        // here, not from the author-declared coverage hint, so a malicious wrap-to-garbage that suppresses
+        // `needs_reseal` can't hide the lockout. The owner reaches epochs via the RRK, so this trips only on a
+        // genuinely unopenable write epoch.
+        let write_epoch_unreachable = !deks.iter().any(|(k, _, _)| *k == write_key_id);
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
 
         let owner_key: [u8; 32] = founder
@@ -603,6 +625,7 @@ impl KeyringLifecycle for DagVault {
             did_key: DidKey::from_public_key(&owner_key),
             needs_reseal,
             needs_backfill,
+            write_epoch_unreachable,
         })
     }
 
@@ -905,6 +928,10 @@ impl DagVault {
         }
 
         let deks = member_epoch_deks(&epochs, tree_id, member_id, &root.hpke_secret);
+        // Local reachability (OPE-299): did our per-member wraps actually reach the winning write epoch? See
+        // the owner path — this is the local, author-declaration-independent lockout signal that un-gates a
+        // forced reseal when a malicious wrap suppresses `needs_reseal`.
+        let write_epoch_unreachable = !deks.iter().any(|(k, _, _)| *k == write_key_id);
         let mut sealer = sealer_set_from_deks(tree_id, replica_id, deks, write_key_id);
         let my_key: [u8; 32] = me
             .author_public_key
@@ -930,6 +957,7 @@ impl DagVault {
                 did_key: DidKey::from_public_key(&my_key),
                 needs_reseal,
                 needs_backfill,
+                write_epoch_unreachable,
             },
             root.hpke_secret,
         ))
@@ -1057,6 +1085,7 @@ impl DagVault {
         anchor: &[u8],
         owner_passphrase: &Passphrase,
         floor: &[u8],
+        trigger: ResealTrigger,
     ) -> Result<Resealed, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
 
@@ -1075,8 +1104,9 @@ impl DagVault {
             ..
         } = fold_resolved(&resolved)?;
 
-        // Idempotent: nothing stale → return the anchor unchanged, no op appended.
-        if !needs_reseal {
+        // Idempotent: nothing stale → return the anchor unchanged, no op appended. `Force` bypasses this gate
+        // for the local-write-unreachability self-heal, where the coverage signal is untrustworthy (OPE-299).
+        if trigger == ResealTrigger::WhenStale && !needs_reseal {
             return Ok(Resealed {
                 watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
                 anchor: anchor.to_vec(),
@@ -1171,6 +1201,7 @@ impl DagVault {
         passphrase: &Passphrase,
         member_kdf: &KeyeoKdfParams,
         floor: &[u8],
+        trigger: ResealTrigger,
     ) -> Result<Resealed, VaultError> {
         let tree_id = ctx.tree_id.as_bytes();
         let member_id = ctx.member_id.as_str();
@@ -1198,8 +1229,9 @@ impl DagVault {
             ..
         } = fold_resolved(&resolved)?;
 
-        // Idempotent: nothing stale → return the anchor unchanged, no op appended.
-        if !needs_reseal {
+        // Idempotent: nothing stale → return the anchor unchanged, no op appended. `Force` bypasses this gate
+        // for the local-write-unreachability self-heal, where the coverage signal is untrustworthy (OPE-299).
+        if trigger == ResealTrigger::WhenStale && !needs_reseal {
             return Ok(Resealed {
                 watermark: dag_client::watermark(anchor).map_err(map_floor_err)?,
                 anchor: anchor.to_vec(),
@@ -2794,6 +2826,7 @@ mod tests {
                 &merged,
                 &owner_pass,
                 &[],
+                ResealTrigger::WhenStale,
             )
             .unwrap();
         assert!(r.resealed, "a stale write epoch is repaired");
@@ -2825,9 +2858,34 @@ mod tests {
                 &r.anchor,
                 &owner_pass,
                 &[],
+                ResealTrigger::WhenStale,
             )
             .unwrap();
         assert!(!r2.resealed, "nothing stale -> reseal is a no-op");
+
+        // Force: past the idempotent gate a covering reseal still fires (the local-unreachability escape
+        // hatch, OPE-299) — nothing is stale, yet Force mints a fresh covering epoch the owner can write under.
+        let r3 = DagVault
+            .reseal(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
+                &r.anchor,
+                &owner_pass,
+                &[],
+                ResealTrigger::Force,
+            )
+            .unwrap();
+        assert!(r3.resealed, "Force reseals even when nothing is stale");
+        let u3 = DagVault
+            .unlock(
+                &ctx(&tree, &owner, &ReplicaId::new(b"r2")),
+                &r3.anchor,
+                &owner_pass,
+            )
+            .unwrap();
+        assert!(
+            !u3.needs_reseal && !u3.write_epoch_unreachable,
+            "the forced reseal leaves a clean, locally-reachable write epoch"
+        );
     }
 
     #[test]

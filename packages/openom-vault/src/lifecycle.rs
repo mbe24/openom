@@ -79,6 +79,14 @@ pub struct Unlocked {
     /// read that slice of history until the owner backfills it (dag only; chain is always `false`). Never
     /// blocks unlock; the OWNER repairs it out-of-band (only the RRK opens the old DEKs) (OPE-288).
     pub needs_backfill: bool,
+    /// Advisory: this unlocker's own DEK bag did NOT reach the current write epoch — locally derived, so it
+    /// holds regardless of what the (unauthenticated) coverage hint claims. `needs_reseal` is computed from
+    /// the author-DECLARED recipient key, so a malicious op that wraps the DEK to garbage while declaring the
+    /// victim's real key reports "clean" and suppresses the automatic repair; this signal is immune to that.
+    /// The caller responds by forcing a reseal ([`crate::dag_vault::ResealTrigger::Force`]) past the
+    /// `needs_reseal` gate (dag only; chain is always `false` — a linear chain always reaches its write
+    /// epoch) (OPE-299).
+    pub write_epoch_unreachable: bool,
 }
 
 /// Result of [`KeyringLifecycle::recover`]: a new `anchor` + a NEW recovery code (both to publish/show),
@@ -244,6 +252,7 @@ impl KeyringLifecycle for ChainVault {
             did_key: u.did_key,
             needs_reseal: false, // a linear chain has no concurrent-merge stale epoch
             needs_backfill: false, // nor a concurrent-add historical-read gap (OPE-288)
+            write_epoch_unreachable: false, // a linear chain always reaches its own write epoch (OPE-299)
         })
     }
 

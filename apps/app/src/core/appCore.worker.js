@@ -248,6 +248,7 @@ const api = {
         didKey: res.didKey,
         needsReseal: res.needsReseal,
         needsBackfill: res.needsBackfill,
+        writeEpochUnreachable: res.writeEpochUnreachable,
       };
     } finally {
       res.free();
@@ -271,7 +272,7 @@ const api = {
       await hydrate(core); // load the persisted log + bootstrap
       await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
       cores.set(docId, core);
-      return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
+      return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
       res.free();
     }
@@ -298,7 +299,7 @@ const api = {
       await hydrate(core);
       await installMembership(core, docId, eng, res.keyring); // a recovered shared tree keeps verifying
       cores.set(docId, core);
-      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill };
+      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
       res.free();
     }

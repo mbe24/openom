@@ -14,7 +14,7 @@ use openom_protocol::v1::{Compression, Format, MemberRole};
 use openom_protocol::Message;
 use openom_sealer::{EntryKind, SealContext, Sealer, SealerError, SealerSet};
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_vault::{vault, AppVault, DagVault, KeyringRole};
+use openom_vault::{vault, AppVault, DagVault, KeyringRole, ResealTrigger};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "sqlite")]
@@ -227,6 +227,10 @@ pub struct Unlocked {
     pub watermark: Vec<u8>,
     pub needs_reseal: bool,
     pub needs_backfill: bool,
+    /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, immune to
+    /// a malicious wrap that suppresses `needs_reseal`. The client responds with a forced reseal (dag only;
+    /// chain/dev always `false`) (OPE-299).
+    pub write_epoch_unreachable: bool,
     /// The member's stable author id — a `did:key` over their public identity key (the claim
     /// `createdBy`), stable across tabs/reloads.
     pub did_key: String,
@@ -307,6 +311,16 @@ pub struct AcceptedKeyring {
 pub struct Resealed {
     pub watermark: Vec<u8>,
     pub resealed: bool,
+}
+
+/// Map the wire `force` flag onto the vault's reseal trigger: `true` forces a covering reseal past the
+/// `needs_reseal` gate (the local-write-unreachability self-heal, OPE-299), `false` keeps the idempotent path.
+const fn reseal_trigger(force: bool) -> ResealTrigger {
+    if force {
+        ResealTrigger::Force
+    } else {
+        ResealTrigger::WhenStale
+    }
 }
 
 /// Result of a dag [`VaultHost::dag_backfill`].
@@ -640,6 +654,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
             needs_backfill: u.needs_backfill,
+            write_epoch_unreachable: u.write_epoch_unreachable,
             did_key: u.did_key.into_string(),
         })
     }
@@ -844,6 +859,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: chain_watermark_pinned(u.revision, &u.write_key_id, &u.write_dek_hash),
             needs_reseal: false,
             needs_backfill: false,
+            write_epoch_unreachable: false, // a linear chain always reaches its own write epoch (OPE-299)
             did_key: u.did_key.into_string(),
         })
     }
@@ -1146,6 +1162,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: Vec::new(),
             needs_reseal: false,
             needs_backfill: false,
+            write_epoch_unreachable: false, // dev sealer: no keyring, always reachable (OPE-299)
             did_key: String::new(), // dev sealer: no vault identity
         })
     }
@@ -1324,6 +1341,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             watermark: u.watermark,
             needs_reseal: u.needs_reseal,
             needs_backfill: u.needs_backfill,
+            write_epoch_unreachable: u.write_epoch_unreachable,
             did_key: u.did_key.into_string(),
         })
     }
@@ -1362,6 +1380,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         tree_id: &[u8],
         owner_passphrase: String,
         owner_member_id: &str,
+        force: bool,
     ) -> Result<Resealed> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
@@ -1385,6 +1404,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &anchor,
             &Passphrase::new(owner_passphrase.into_bytes()),
             &floor,
+            reseal_trigger(force),
         )?;
         if r.resealed {
             self.store
@@ -1411,6 +1431,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
         passphrase: String,
         member_kdf_params: &[u8],
         member_id: &str,
+        force: bool,
     ) -> Result<Resealed> {
         let dag = self.dag()?;
         let anchor = self.require_keyring(tree_key)?;
@@ -1438,6 +1459,7 @@ impl<S: VaultStore, E: HostEntropy> VaultHost<S, E> {
             &Passphrase::new(passphrase.into_bytes()),
             &kdf,
             &floor,
+            reseal_trigger(force),
         )?;
         if r.resealed {
             self.store
@@ -2316,12 +2338,16 @@ mod tests {
         a.lock(&u.sealer_id);
 
         // Reseal repairs it; the flag clears and the owner seals a post-merge entry under the covering epoch.
-        let re = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let re = a.dag_reseal(KEY, TREE, owner.into(), MEMBER, false).unwrap();
         assert!(re.resealed, "a stale write epoch is repaired");
         let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(
             !u2.needs_reseal,
             "after reseal the write epoch covers the resolved membership"
+        );
+        assert!(
+            !u2.write_epoch_unreachable,
+            "the owner locally reaches the covering write epoch (OPE-299 signal)"
         );
         let post = seal(&a, &u2.sealer_id, b"after the merge");
 
@@ -2351,8 +2377,13 @@ mod tests {
         );
 
         // A second reseal is an idempotent no-op — the replicas have converged.
-        let re2 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        let re2 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER, false).unwrap();
         assert!(!re2.resealed, "nothing stale -> reseal is a no-op");
+
+        // Force (OPE-299): the escape hatch reseals even with nothing stale — the client's response to a
+        // locally-unreachable write epoch, past the (untrustworthy) coverage gate.
+        let re3 = a.dag_reseal(KEY, TREE, owner.into(), MEMBER, true).unwrap();
+        assert!(re3.resealed, "force reseals past the idempotent gate");
     }
 
     #[test]
@@ -2426,6 +2457,7 @@ mod tests {
                 "carol pass".into(),
                 &carol.kdf_params,
                 "acct-carol",
+                false,
             )
             .unwrap();
         assert!(re.resealed, "a member reseals a stale write epoch herself");
@@ -2462,7 +2494,8 @@ mod tests {
                 TREE,
                 "carol pass".into(),
                 &carol.kdf_params,
-                "acct-carol"
+                "acct-carol",
+                false
             )
             .unwrap()
             .resealed,
@@ -2531,7 +2564,7 @@ mod tests {
         a.lock(&u.sealer_id);
 
         // Reseal → a fresh covering epoch so carol can unlock; but she STILL can't read A's epoch-1 history.
-        a.dag_reseal(KEY, TREE, owner.into(), MEMBER).unwrap();
+        a.dag_reseal(KEY, TREE, owner.into(), MEMBER, false).unwrap();
         let u2 = a.unlock(KEY, TREE, owner.into(), MEMBER).unwrap();
         assert!(!u2.needs_reseal, "reseal covers the write epoch");
         assert!(

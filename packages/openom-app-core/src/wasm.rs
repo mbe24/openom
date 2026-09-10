@@ -415,6 +415,7 @@ pub struct OpenResult {
     watermark: Vec<u8>,
     needs_reseal: bool,
     needs_backfill: bool,
+    write_epoch_unreachable: bool,
 }
 
 #[wasm_bindgen]
@@ -465,6 +466,16 @@ impl OpenResult {
         self.needs_backfill
     }
 
+    /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, so it
+    /// holds even when a malicious wrap forges the (unauthenticated) `needsReseal` coverage hint. The worker
+    /// responds with a forced reseal (always `false` for the chain / a fresh tree) (OPE-299).
+    #[wasm_bindgen(getter, js_name = writeEpochUnreachable)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
+    pub fn write_epoch_unreachable(&self) -> bool {
+        self.write_epoch_unreachable
+    }
+
     /// Take the ready core out to the worker (once).
     #[wasm_bindgen(js_name = takeHandle)]
     #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
@@ -512,6 +523,7 @@ pub fn provision(
         watermark: p.watermark,
         needs_reseal: false, // a fresh tree's single genesis epoch is never stale
         needs_backfill: false,
+        write_epoch_unreachable: false, // the founder reaches the genesis epoch via the RRK (OPE-299)
     })
 }
 
@@ -558,6 +570,7 @@ pub fn unlock(
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
         needs_backfill: u.needs_backfill,
+        write_epoch_unreachable: u.write_epoch_unreachable,
     })
 }
 
@@ -612,6 +625,8 @@ pub fn recover(
         watermark: r.watermark,
         needs_reseal: r.needs_reseal,
         needs_backfill: r.needs_backfill,
+        // recovery re-wraps every DEK to the (re-derived) owner, so the write epoch is reachable (OPE-299).
+        write_epoch_unreachable: false,
     })
 }
 
@@ -661,6 +676,7 @@ pub fn change_passphrase(
         watermark: re.watermark,
         needs_reseal: false,
         needs_backfill: false,
+        write_epoch_unreachable: false, // the DEK is unchanged, so the running core still reaches it (OPE-299)
     })
 }
 
@@ -875,6 +891,8 @@ pub fn unlock_as_member(
         watermark: u.watermark,
         needs_reseal: false,
         needs_backfill: false,
+        // The member's own local lockout signal — the one a malicious coverage hint can't suppress (OPE-299).
+        write_epoch_unreachable: u.write_epoch_unreachable,
     })
 }
 
