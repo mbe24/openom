@@ -30,6 +30,11 @@ import init, {
   acceptRemoteDagAnchor as wasmAcceptRemoteDagAnchor,
   wrapDagKeyringUpdate as wasmWrapDagKeyringUpdate,
   unwrapDagKeyring as wasmUnwrapDagKeyring,
+  rotateRecovery as wasmRotateRecovery,
+  rotationConfirmed as wasmRotationConfirmed,
+  backfillRrk as wasmBackfillRrk,
+  resolvedOwnerKey as wasmResolvedOwnerKey,
+  recoveryConfirmed as wasmRecoveryConfirmed,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -248,6 +253,7 @@ const api = {
         didKey: res.didKey,
         needsReseal: res.needsReseal,
         needsBackfill: res.needsBackfill,
+        needsRrkBackfill: res.needsRrkBackfill,
         writeEpochUnreachable: res.writeEpochUnreachable,
       };
     } finally {
@@ -272,7 +278,7 @@ const api = {
       await hydrate(core); // load the persisted log + bootstrap
       await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
       cores.set(docId, core);
-      return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
+      return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
       res.free();
     }
@@ -299,7 +305,7 @@ const api = {
       await hydrate(core);
       await installMembership(core, docId, eng, res.keyring); // a recovered shared tree keeps verifying
       cores.set(docId, core);
-      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
+      return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
       res.free();
     }
@@ -325,6 +331,92 @@ const api = {
     } finally {
       res.free();
     }
+  },
+
+  /**
+   * Rotate the recovery authority (DAG only, OPE-381): retire the current recovery code for a fresh one so a
+   * holder of the OLD code can no longer take over the tree. The DEK is unchanged, so a running core keeps
+   * working (no new core). Persists the rotated keyring and returns the NEW code + the `resetAuthority` to
+   * confirm. The code is PROVISIONAL: on the append-only log a concurrent rotation could win the merge, so
+   * keep the OLD code live until `confirmRotationCore` returns true against the synced keyring.
+   * `opts`: { passphrase, treeId, memberId, docId, engine? }.
+   */
+  async rotateRecoveryCore({ passphrase, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const eng = head.engine || engine;
+    const floor = await loadWatermark(docId);
+    const res = wasmRotateRecovery(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, floor);
+    try {
+      await keyringStore().saveHead(docId, eng, res.keyring);
+      await saveWatermark(docId, res.watermark);
+      return { recoveryCode: res.recoveryCode, resetAuthority: res.resetAuthority };
+    } finally {
+      res.free();
+    }
+  },
+
+  /**
+   * Confirm a rotation survived the merge (DAG only, the two-phase gate): pass the `resetAuthority` from
+   * `rotateRecoveryCore`. Returns true iff it is the authority resolved on the CURRENT (synced) keyring — so
+   * sync the keyring before calling. False → the rotation was superseded: the new code is void, the OLD code
+   * is still live, and the caller must re-rotate. `opts`: { docId, resetAuthority, engine? }.
+   */
+  async confirmRotationCore({ docId, resetAuthority, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    return wasmRotationConfirmed(head.engine || engine, head.bytes, resetAuthority);
+  },
+
+  /**
+   * Member-side heal of a rotation-orphaned epoch (DAG only, OPE-381 / F3): open an epoch the owner can't
+   * read (its RRK wrap targets the retired escrow) and re-wrap its DEK to the current escrow. Idempotent
+   * (`backfilled` false when there is nothing to heal) — safe to call whenever `needsRrkBackfill` is set.
+   * `opts`: { passphrase, memberKdf: Uint8Array, treeId, memberId, docId, engine? }.
+   */
+  async backfillRrkCore({ passphrase, memberKdf, treeId, memberId, docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const eng = head.engine || engine;
+    const floor = await loadWatermark(docId);
+    const res = wasmBackfillRrk(eng, passphrase, memberKdf, treeId, memberId, freshReplica(), head.bytes, floor);
+    try {
+      if (res.backfilled) {
+        await keyringStore().saveHead(docId, eng, res.keyring);
+        await saveWatermark(docId, res.watermark);
+      }
+      return { backfilled: res.backfilled };
+    } finally {
+      res.free();
+    }
+  },
+
+  /**
+   * The resolved owner identity key on the current keyring (DAG only) — capture it right after a recovery so
+   * `confirmRecoveryCore` can later check the recovery survived. Returns a Uint8Array (empty if no owner).
+   * `opts`: { docId, engine? }.
+   */
+  async resolvedOwnerKeyCore({ docId, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    return wasmResolvedOwnerKey(head.engine || engine, head.bytes);
+  },
+
+  /**
+   * Confirm a recovery survived the merge (DAG only, the superseded-recovery signal): pass the owner key
+   * captured via `resolvedOwnerKeyCore` right after recovering. Returns true iff that owner is still the
+   * resolved owner on the synced keyring. False → a concurrent rotation voided the recovery, so the owner is
+   * locked out and must recover again. `opts`: { docId, ownerKey: Uint8Array, engine? }.
+   */
+  async confirmRecoveryCore({ docId, ownerKey, engine = KEYRING_ENGINE }) {
+    await ensureInit();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    return wasmRecoveryConfirmed(head.engine || engine, head.bytes, ownerKey);
   },
 
   /** Whether a keyring has been provisioned for `docId` (→ show unlock vs. welcome at the gate). */
