@@ -32,8 +32,9 @@ use serde::{Deserialize, Serialize};
 use crate::lifecycle::{KeyringLifecycle, Provisioned, Recovered, Rekeyed, Unlocked, VaultContext};
 use crate::vault_core::{
     build_recovery_escrow, epoch_deks, escrow_kek_wrap, member_epoch_deks, member_wrap_keyeo,
-    new_owner_secrets, open_rrk_secret, rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf,
-    validated_kdf, write_epoch_by_ordinal, RecoveryEscrow,
+    new_owner_secrets, open_epoch_dek, open_rrk_secret, owner_secrets_reusing_pass_kdf,
+    rrk_wrap_keyeo, sealer_set_from_deks, validate_kdf, validated_kdf, write_epoch_by_ordinal,
+    RecoveryEscrow,
 };
 // The dag persists keyeo's native key-material: an epoch's DEK wraps ARE keyeo `Epoch`/`Wrap`, and coverage
 // is keyeo's `covers_exact` / `missing` over `RecipientDescriptor`s (the shared key-material layer the
@@ -798,6 +799,120 @@ impl DagVault {
     /// Returns [`VaultError`] if either anchor is malformed.
     pub fn merge(&self, local: &[u8], remote: &[u8]) -> Result<Vec<u8>, VaultError> {
         dag_client::merge(local, remote).map_err(|e| VaultError::BadKeyring(e.to_string()))
+    }
+
+    /// Rotate the recovery authority (OPE-381) — the Owner retires the current recovery root for a fresh one,
+    /// so a holder of the OLD recovery secret can no longer take over the tree. Authorized by the Owner's
+    /// PASSPHRASE-derived IDENTITY key: it both anti-substitutes against the resolved Owner AND is the signing
+    /// key the engine gates the rotation on (NOT the recovery key — so a leaked-recovery-secret holder cannot
+    /// mint a competing rotation, the OPE-381 defense). An owner with total identity loss recovers (`ReFound`)
+    /// first, then rotates.
+    ///
+    /// **Divergence from the chain, by construction.** The anchor is an APPEND-ONLY op-log, so — unlike the
+    /// chain, which rewrites the keyring and re-wraps every epoch onto the new root — this cannot re-lock
+    /// already-written epochs. It APPENDS a fresh RRK wrap (to the new root) to every openable epoch via
+    /// `added_wraps` so the NEW authority can open them; the stale wrap remains (append-only), so the OLD
+    /// secret keeps decrypting HISTORICAL epochs (the same limitation as removing a member — you can't un-share
+    /// DAG history). Forward secrecy still holds: every FUTURE epoch (reseal/remove) wraps only to the new root,
+    /// and the old authority is engine-revoked from ever signing a recovery. A fresh recovery code is minted;
+    /// the founder identity + passphrase are UNCHANGED (only the recovery root moves — the pass KDF is reused
+    /// and the DEKs are untouched, so no re-seal is needed).
+    ///
+    /// Enforces the anti-rollback `floor`; returns the new anchor + watermark + the fresh recovery code.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the floor check fails, the anchor is malformed, the passphrase is wrong (not
+    /// the resolved Owner), or the re-wrap / authoring fails.
+    pub fn rotate_recovery(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        owner_passphrase: &Passphrase,
+        floor: &[u8],
+    ) -> Result<Rekeyed, VaultError> {
+        let tree_id = ctx.tree_id.as_bytes();
+
+        dag_client::check_floor(anchor, floor).map_err(map_floor_err)?;
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+        let owner_id = founder.member_id.clone();
+        let FoldedSealing { epochs, escrow, .. } = fold_resolved(&resolved)?;
+
+        // Unwrap the OLD RRK via the passphrase, checking the derived identity is the resolved Owner. Reuse the
+        // SAME pass KDF for the new secrets so the founder identity + passphrase KEK are unchanged.
+        let (kdf, rrk_nonce, rrk_ct) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
+        let pass_kdf = validated_kdf(kdf)?;
+        let root = derive_root(owner_passphrase.expose(), &pass_kdf)?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
+        {
+            return Err(CryptoError::Signature.into());
+        }
+        let old_rrk = open_rrk_secret(
+            &root.kek,
+            rrk_nonce,
+            rrk_ct,
+            tree_id,
+            &owner_id,
+            KekKind::Passphrase,
+        )?;
+
+        // Mint a fresh RRK (its derived RVK is the new authority); keep the founder + passphrase (reuse KDF),
+        // mint a fresh recovery code to escrow the new RRK under.
+        let HpkeKeypair {
+            secret: new_secret,
+            public: new_rrk_public,
+        } = generate_hpke_keypair()?;
+        let new_rrk = RrkSecret::from(new_secret);
+        let secrets = owner_secrets_reusing_pass_kdf(owner_passphrase.expose(), pass_kdf)?;
+
+        // Append a fresh RRK wrap (to the NEW root) to every OPENABLE epoch so the new authority can open them.
+        // Rides `added_wraps` (attached to existing epochs by the fold), NOT `new_epochs` — a rotate is a
+        // non-minting (`Other`-origin) op whose new_epochs the fold drops (OPE-289). TOLERANT (OPE-287): an
+        // epoch the old RRK can't open (a junk/orphan epoch a hostile member may have planted, which the owner
+        // couldn't reach anyway) is SKIPPED, not fatal — one bad epoch must not brick the whole rotation.
+        let mut added_wraps = Vec::new();
+        for ep in &epochs {
+            let Ok(dek) = open_epoch_dek(ep, tree_id, &owner_id, &old_rrk) else {
+                continue;
+            };
+            let wrap =
+                rrk_wrap_keyeo(&new_rrk_public, &dek, tree_id, &owner_id, ep.key_id.as_bytes())?;
+            added_wraps.push(AddedWrap {
+                key_id: ep.key_id.as_bytes().to_vec(),
+                wrap,
+            });
+        }
+        let new_escrow =
+            build_recovery_escrow(&new_rrk, &new_rrk_public, tree_id, &owner_id, &secrets)?;
+        let sealing = SealingPayload {
+            new_epochs: vec![],
+            added_wraps,
+            escrow: Some(new_escrow),
+        }
+        .to_bytes();
+
+        // Sign with the Owner's CURRENT IDENTITY key (the OPE-381 gate), NOT the old RVK — the engine
+        // authorizes a rotation by the author's registered member key + `is_owner`.
+        let new_anchor = dag_client::append_rotate_recovery(
+            anchor,
+            &owner_id,
+            derive_rvk(new_rrk.expose()).verifying_key(),
+            sealing,
+            &root.identity,
+        )
+        .map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+
+        let watermark = dag_client::watermark(&new_anchor).map_err(map_floor_err)?;
+        Ok(Rekeyed {
+            anchor: new_anchor,
+            recovery_code: secrets.recovery_code,
+            watermark,
+        })
     }
 
     /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
@@ -2218,6 +2333,108 @@ mod tests {
                 )
                 .is_err(),
             "the pre-recovery passphrase is retired"
+        );
+    }
+
+    /// Rotate the recovery authority (OPE-381): the OLD recovery code can no longer recover (takeover
+    /// protection), a fresh code does, the founder's passphrase is UNCHANGED, and the owner still reaches
+    /// EVERY epoch afterward — the rotation appends a new RRK wrap to each of the two epochs (genesis + a
+    /// forced reseal), so both open under the new recovery root.
+    #[test]
+    fn dag_rotate_recovery_retires_the_old_code_keeps_owner_and_reaches_every_epoch() {
+        let tree = TreeId::new(TREE);
+        let member = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"correct horse");
+
+        // Provision + seal under epoch 0.
+        let p = DagVault
+            .provision(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &pass)
+            .unwrap();
+        let data0 = p
+            .sealer
+            .seal_entry(&SealContext::snapshot(0, Vec::new(), 0), b"epoch-0 heirloom")
+            .unwrap()
+            .envelope;
+
+        // Force a reseal so there are TWO epochs to re-wrap; seal fresh data under the new write epoch.
+        let re = DagVault
+            .reseal(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &p.anchor,
+                &pass,
+                &[],
+                ResealTrigger::Force,
+            )
+            .unwrap();
+        assert!(re.resealed, "the forced reseal minted a second epoch");
+        let u1 = DagVault
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r1")), &re.anchor, &pass)
+            .unwrap();
+        let data1 = u1
+            .sealer
+            .seal_entry(&SealContext::snapshot(1, Vec::new(), 0), b"epoch-1 sequel")
+            .unwrap()
+            .envelope;
+
+        // Rotate the recovery authority. The passphrase is UNCHANGED (the founder is kept), only the recovery
+        // root moves; a fresh recovery code is minted.
+        let rot = DagVault
+            .rotate_recovery(
+                &ctx(&tree, &member, &ReplicaId::new(b"r1")),
+                &re.anchor,
+                &pass,
+                &re.watermark,
+            )
+            .unwrap();
+
+        // The owner still unlocks with the SAME passphrase and reaches BOTH epochs — the new RRK wrap was
+        // appended to each, and coverage stays clean (no spurious reseal, write epoch locally reachable).
+        let u2 = DagVault
+            .unlock(&ctx(&tree, &member, &ReplicaId::new(b"r2")), &rot.anchor, &pass)
+            .unwrap();
+        assert!(
+            !u2.needs_reseal && !u2.write_epoch_unreachable,
+            "rotation leaves a clean, locally-reachable keyring"
+        );
+        assert_eq!(
+            u2.sealer.open_entry(EntryKind::Snapshot, &data0).unwrap(),
+            b"epoch-0 heirloom",
+            "the owner reaches epoch 0 via the appended new RRK wrap"
+        );
+        assert_eq!(
+            u2.sealer.open_entry(EntryKind::Snapshot, &data1).unwrap(),
+            b"epoch-1 sequel",
+            "and epoch 1 too"
+        );
+
+        // Recovery works with the NEW code (a fresh owner identity) and opens pre-rotation data.
+        let rec = DagVault
+            .recover(
+                &ctx(&tree, &member, &ReplicaId::new(b"r3")),
+                &rot.anchor,
+                &rot.recovery_code,
+                &Passphrase::new(b"post-rotation passphrase"),
+                &rot.watermark,
+            )
+            .unwrap();
+        assert_eq!(
+            rec.sealer.open_entry(EntryKind::Snapshot, &data0).unwrap(),
+            b"epoch-0 heirloom",
+            "the new recovery code re-establishes access and opens pre-rotation data"
+        );
+
+        // The OLD (retired) recovery code can no longer recover — the takeover-protection guarantee.
+        assert!(
+            DagVault
+                .recover(
+                    &ctx(&tree, &member, &ReplicaId::new(b"r4")),
+                    &rot.anchor,
+                    &p.recovery_code,
+                    &Passphrase::new(b"does not matter"),
+                    &rot.watermark,
+                )
+                .is_err(),
+            "the pre-rotation recovery code is retired — it can neither open the new escrow nor sign a ReFound"
         );
     }
 

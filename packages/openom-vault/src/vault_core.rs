@@ -257,20 +257,23 @@ pub(crate) fn open_epoch_dek(
     founder_id: &str,
     rrk_secret: &RrkSecret,
 ) -> Result<Dek, VaultError> {
-    let mut w = epoch
+    let group_id = KeyeoGroupId::new(tree_id.to_vec());
+    // Try EVERY RRK wrap, not just the first. An RRK rotation (OPE-381) APPENDS a fresh RrkHpke wrap (to the
+    // new recovery root) alongside the existing one — an append-only log can't remove the stale wrap — so a
+    // rotated epoch carries two. First-match could land on the wrap for the OTHER root and wrongly fail; take
+    // the first that actually unwraps under this secret. (Mirrors `member_epoch_deks`'s try-all over the
+    // stale/current duplicate member wraps a rekey race leaves, OPE-290.)
+    epoch
         .wraps
         .iter()
-        .find(|w| matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
-        .cloned()
-        .ok_or_else(|| VaultError::BadKeyring("epoch missing rrk wrap".into()))?;
-    let group_id = KeyeoGroupId::new(tree_id.to_vec());
-    // Bind the AAD to the founder (the wrap's recipient IS the founder; making it explicit matches wrap time).
-    w.recipient = founder_id.to_string();
-    Ok(keyeo_unwrap_dek(
-        &w,
-        rrk_secret.expose(),
-        &epoch_ctx(&group_id, &epoch.key_id),
-    )?)
+        .filter(|w| matches!(w.method, KeyeoWrapMethod::RrkHpke { .. }))
+        .find_map(|w| {
+            let mut w = w.clone();
+            // Bind the AAD to the founder (the wrap's recipient IS the founder; explicit matches wrap time).
+            w.recipient = founder_id.to_string();
+            keyeo_unwrap_dek(&w, rrk_secret.expose(), &epoch_ctx(&group_id, &epoch.key_id)).ok()
+        })
+        .ok_or_else(|| VaultError::BadKeyring("epoch has no rrk wrap openable by this secret".into()))
 }
 
 /// Every epoch's `(key_id, epoch, DEK)`, opened via the founder's recovery root secret.
