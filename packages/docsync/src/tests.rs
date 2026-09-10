@@ -174,3 +174,42 @@ fn blob_own_pushes_are_not_refetched() {
     assert_eq!(a.pull().unwrap(), 0, "own entries are already seen");
     assert_eq!(a.frontier().get("replica-A").copied(), Some(2));
 }
+
+#[test]
+fn blob_bootstrap_from_snapshot_plus_tail() {
+    // A snapshot covers a per-replica FRONTIER (carried inside the sealed body); a fresh replica adopts it
+    // and pulls only the tail past it.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("one".into()).unwrap();
+    a.apply("two".into()).unwrap();
+    a.compact().unwrap(); // snapshot covers {replica-A: 2}
+    a.apply("three".into()).unwrap(); // tail delta A:2, past the snapshot
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.bootstrap().unwrap();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(c.engine().lines, expected, "bootstrap = snapshot + tail");
+    // The covered frontier (A:2) was adopted, then the tail (A:2) pulled → A:3.
+    assert_eq!(c.frontier().get("replica-A").copied(), Some(3));
+}
+
+#[test]
+fn blob_bootstrap_covers_multiple_replicas() {
+    // The covered frontier spans every replica the snapshotting client had folded.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    let mut b = blob_client(store.clone(), "replica-B");
+    a.apply("a1".into()).unwrap();
+    b.apply("b1".into()).unwrap();
+    a.pull().unwrap(); // a now holds {A:1, B:1}
+    a.compact().unwrap(); // snapshot covers {A:1, B:1}
+    b.apply("b2".into()).unwrap(); // tail past the snapshot
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.bootstrap().unwrap();
+    let expected: BTreeSet<String> = ["a1", "b1", "b2"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(c.engine().lines, expected, "bootstrap adopts a multi-replica covered frontier + tail");
+    assert_eq!(c.frontier().get("replica-A").copied(), Some(1));
+    assert_eq!(c.frontier().get("replica-B").copied(), Some(2));
+}

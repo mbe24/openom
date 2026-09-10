@@ -429,6 +429,48 @@ fn decode_count(bytes: &[u8]) -> Option<u64> {
     std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
+/// `{doc}/snapshot` — the single CAS'd snapshot object (a fold of state up to a covered frontier).
+fn snapshot_key(doc: &str) -> String {
+    format!("{doc}/snapshot")
+}
+
+/// A snapshot body is `encode_frontier(covered) ‖ engine.snapshot()` — the covered frontier travels INSIDE
+/// the sealed plaintext, so the sealer authenticates it for free (a tampered marker fails to open / is
+/// detected) with NO change to the `Sealer` seam. Layout: `[u32 n]{ [u32 rlen][replica][u64 counter] }*`.
+fn encode_frontier(f: &Frontier) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&u32::try_from(f.len()).unwrap_or(u32::MAX).to_be_bytes());
+    for (replica, counter) in f {
+        out.extend_from_slice(&u32::try_from(replica.len()).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(replica.as_bytes());
+        out.extend_from_slice(&counter.to_be_bytes());
+    }
+    out
+}
+
+/// Split a snapshot body back into `(covered_frontier, engine_snapshot_bytes)`. `None` on a malformed body.
+fn decode_frontier(bytes: &[u8]) -> Option<(Frontier, &[u8])> {
+    // Bite `n` bytes off the front of `rest`, advancing it; `None` if short.
+    fn bite<'a>(rest: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        if rest.len() < n {
+            return None;
+        }
+        let (head, tail) = rest.split_at(n);
+        *rest = tail;
+        Some(head)
+    }
+    let mut rest = bytes;
+    let count = u32::from_be_bytes(bite(&mut rest, 4)?.try_into().ok()?);
+    let mut frontier = Frontier::new();
+    for _ in 0..count {
+        let rlen = u32::from_be_bytes(bite(&mut rest, 4)?.try_into().ok()?) as usize;
+        let replica = std::str::from_utf8(bite(&mut rest, rlen)?).ok()?.to_string();
+        let counter = u64::from_be_bytes(bite(&mut rest, 8)?.try_into().ok()?);
+        frontier.insert(replica, counter);
+    }
+    Some((frontier, rest))
+}
+
 /// The `BlobStore`-native sync core (OPE-397): one document, one local [`Engine`] + [`Sealer`], over a
 /// swappable [`BlobStore`]. Each replica APPENDS immutable delta objects under `{doc}/log/{replica}/{counter}`
 /// with `IfAbsent` — contention is intra-replica only (a crash/retry), never inter-replica, so an append needs
@@ -588,6 +630,59 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// This replica's inbound frontier — the next counter it will pull from each replica.
     pub const fn frontier(&self) -> &Frontier {
         &self.pull_frontier
+    }
+
+    /// Fold current state into a snapshot covering this client's frontier, and CAS it to `{doc}/snapshot`.
+    /// The covered frontier rides inside the sealed body, so it is authenticated with the state. A snapshot
+    /// is out-of-band (not a log entry), so it consumes no replica counter. Concurrent compactions last-win;
+    /// completeness is unaffected because [`bootstrap`](Self::bootstrap) always pulls the tail past whatever
+    /// snapshot it finds.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if sealing or the blob write fails.
+    pub fn compact(&mut self) -> Result<(), SyncError> {
+        let mut body = encode_frontier(&self.pull_frontier);
+        body.extend_from_slice(&self.engine.snapshot());
+        let ctx = SealCtx {
+            kind: EntryKind::Snapshot,
+            replica_counter: self.next_counter,
+            prev_ciphertext_hash: self.prev_hash.clone(),
+            covers_through_seq: 0, // the covered marker is the frontier inside `body`, not this scalar
+        };
+        let out = self
+            .sealer
+            .seal(&ctx, &body)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+        self.store
+            .put(&snapshot_key(&self.doc), &out.envelope, store_blob::Precondition::Any)?;
+        Ok(())
+    }
+
+    /// Bring a fresh client current: load `{doc}/snapshot` if present (adopting its covered frontier as the
+    /// pull baseline), then [`pull`](Self::pull) only the tail past it. Idempotent — an already-current
+    /// client re-runs it harmlessly (the snapshot merges idempotently, the tail is empty).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
+    pub fn bootstrap(&mut self) -> Result<(), SyncError> {
+        if let Some((env, _etag)) = self.store.get(&snapshot_key(&self.doc))? {
+            let body = self
+                .sealer
+                .open(EntryKind::Snapshot, &env)
+                .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+            if let Some((covered, engine_bytes)) = decode_frontier(&body) {
+                self.engine
+                    .merge_snapshot(engine_bytes)
+                    .map_err(|e| SyncError::Engine(Box::new(e)))?;
+                // Adopt the covered frontier as our baseline (max — we may already hold more from a prior pull).
+                for (replica, counter) in covered {
+                    let f = self.pull_frontier.entry(replica).or_insert(0);
+                    *f = (*f).max(counter);
+                }
+            }
+        }
+        self.pull()?;
+        Ok(())
     }
 }
 
