@@ -1412,7 +1412,7 @@ mod tests {
     /// F1 (OPE-381): a recovery-authority rotation SURVIVES compaction. After rotating rvk1 → rvk2 and then
     /// compacting PAST the rotate op, the resolved authority must still be rvk2 (carried in the signed
     /// checkpoint), not the genesis rvk1 — else the retired code would work again and the new one would not.
-    /// Proven via authorization: on the compacted anchor a ReFound signed by rvk2 (the rotated-in authority)
+    /// Proven via authorization: on the compacted anchor a `ReFound` signed by rvk2 (the rotated-in authority)
     /// takes effect, while one signed by rvk1 (the retired genesis authority) does not.
     #[test]
     fn a_rotation_survives_compaction() {

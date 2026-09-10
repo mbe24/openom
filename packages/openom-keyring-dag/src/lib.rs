@@ -386,6 +386,7 @@ impl QuorumPolicy<String, KeyringRole, Ed25519> for KeyringQuorum {
 mod tests {
     use super::*;
     use keyeo_dag::{ApplyOutcome, Keyeo, StrongRemove};
+    use proptest::prelude::*;
 
     fn sk(seed: u8) -> edsign::SigningKey {
         edsign::SigningKey::from_seed(&[seed; 32])
@@ -858,9 +859,9 @@ mod tests {
 
     /// OPE-381 takeover defense — the full round-2 attack, defeated. An attacker holding ONLY the leaked
     /// recovery key `rvk1` cannot take over even by laundering their key through a recovery: (F) a concurrent
-    /// `ReFound` retargeting the founder to the attacker's key, then (R_att) a child rotation signed by that
+    /// `ReFound` retargeting the founder to the attacker's key, then (`R_att`) a child rotation signed by that
     /// just-registered key. The owner's identity-gated rotation `R` (rule (a)) survives and voids the
-    /// concurrent `ReFound` F (rule (b)); the key-provenance taint then voids R_att (its key-registrar is the
+    /// concurrent `ReFound` `F` (rule (b)); the key-provenance taint then voids `R_att` (its key-registrar is the
     /// voided F). Net: the owner's authority stands, the founder key is unchanged, the attacker gets nothing.
     #[test]
     fn a_concurrent_refound_ladder_cannot_hijack_a_rotation() {
@@ -919,6 +920,77 @@ mod tests {
             Some(rvk_att.verifying_key().to_bytes()),
             "the attacker never installs their own recovery authority"
         );
+    }
+
+    proptest! {
+        /// OPE-381 grinding resistance. The resolver's winner tiebreak is `(depth, op-id)`, and an attacker
+        /// fully controls their ops' content-ids (grinding the opaque `sealing`). Prove that NO assignment of
+        /// op-ids lets the concurrent competing-rotation + ReFound-ladder attack win: for every distinct
+        /// `(R, F, R_att)` id triple, the owner's identity-gated rotation stands and the attacker installs
+        /// neither the founder key nor the recovery authority. (The generic BEC-convergence proptest lives in
+        /// keyeo-dag; this one fuzzes the OPE-381 attack over the openom access semantics.)
+        #[test]
+        fn no_op_id_lets_the_rotation_ladder_win(
+            r_id in any::<[u8; 32]>(),
+            f_id in any::<[u8; 32]>(),
+            ratt_id in any::<[u8; 32]>(),
+        ) {
+            prop_assume!(r_id != f_id && r_id != ratt_id && f_id != ratt_id);
+            prop_assume!(r_id != [1u8; 32] && f_id != [1u8; 32] && ratt_id != [1u8; 32]);
+
+            let rvk1 = crate::recovery::derive_rvk(&[42u8; 32]);
+            let rvk2 = crate::recovery::derive_rvk(&[43u8; 32]);
+            let rvk_att = crate::recovery::derive_rvk(&[44u8; 32]);
+            let mut k = engine_with_rvk(
+                &[minit("founder", KeyringRole::OWNER, 1)],
+                rvk1.verifying_key().to_bytes(),
+            );
+            k.apply(sign_op(
+                [1; 32],
+                vec![],
+                "founder",
+                MembershipAction::Create { initial_members: vec![minit("founder", KeyringRole::OWNER, 1)] },
+                &sk(1),
+            ))
+            .unwrap();
+            // R (owner rotation, identity-signed) and F (attacker ReFound → vk(9), signed by leaked rvk1),
+            // concurrent (both childed on the genesis op).
+            k.apply(sign_op(
+                r_id,
+                vec![[1; 32]],
+                "founder",
+                MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk2.verifying_key().to_bytes() },
+                &sk(1),
+            ))
+            .unwrap();
+            k.apply(sign_op(f_id, vec![[1; 32]], "founder", refound("founder", 9, 1), &rvk1))
+                .unwrap();
+            // R_att (attacker ladder rotation, signed by vk(9)=sk(9), the key F registered), child of F.
+            k.apply(sign_op(
+                ratt_id,
+                vec![f_id],
+                "founder",
+                MembershipAction::RotateRecoveryAuthority { new_reset_authority: rvk_att.verifying_key().to_bytes() },
+                &sk(9),
+            ))
+            .unwrap();
+
+            prop_assert_eq!(
+                k.state().members.get("founder").unwrap().author_public_key,
+                vk(1),
+                "attacker never captures the founder key, for any op-id assignment"
+            );
+            prop_assert_eq!(
+                k.state().reset_authority,
+                Some(rvk2.verifying_key().to_bytes()),
+                "the owner's rotation stands, for any op-id assignment"
+            );
+            prop_assert_ne!(
+                k.state().reset_authority,
+                Some(rvk_att.verifying_key().to_bytes()),
+                "attacker never installs its authority, for any op-id assignment"
+            );
+        }
     }
 
     // ---- bounded fork-merge horizon (OPE-270) ----
