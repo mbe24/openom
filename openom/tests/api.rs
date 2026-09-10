@@ -314,6 +314,7 @@ fn build_keyring(
         epochs: keyeo_crypto::codec::encode_epochs(&[keyeo_crypto::Epoch {
             key_id: keyeo_crypto::KeyId::new(vec![0]),
             ordinal: 0,
+            dek_commitment: [0u8; 32],
             wraps,
         }]),
         ..Default::default()
