@@ -620,8 +620,7 @@ impl KeyringLifecycle for DagVault {
             write_key_id,
             needs_reseal,
             needs_backfill,
-            // `needs_rrk_backfill` (a rotation orphan) surfaces up through unlock in Phase D; the heal is
-            // the member-side `backfill_rrk`.
+            needs_rrk_backfill,
             ..
         } = fold_resolved(&resolved)?;
 
@@ -676,6 +675,7 @@ impl KeyringLifecycle for DagVault {
             did_key: DidKey::from_public_key(&owner_key),
             needs_reseal,
             needs_backfill,
+            needs_rrk_backfill,
             write_epoch_unreachable,
         })
     }
@@ -1008,6 +1008,40 @@ impl DagVault {
         Ok(self.resolved_reset_authority(synced_anchor)? == Some(*expected))
     }
 
+    /// The resolved Owner's identity key at `anchor`'s frontier — `None` on a malformed roster with no owner.
+    /// The observable half of the superseded-recovery signal ([`Self::recovery_confirmed`]).
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed.
+    pub fn resolved_owner_key(&self, anchor: &[u8]) -> Result<Option<Vec<u8>>, VaultError> {
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        Ok(resolved
+            .members
+            .owner()
+            .map(|o| o.author_public_key.clone()))
+    }
+
+    /// The superseded-recovery signal (OPE-381 / §11.2), symmetric to [`Self::rotation_confirmed`]. A
+    /// [`KeyringLifecycle::recover`] establishes a NEW owner identity via a `ReFound`, but a rotation — or
+    /// another recovery — concurrent with it VOIDS that `ReFound` on merge (the resolver's carve-out can't
+    /// arbitrate a shared old code between two holders), reverting the owner key. So the recovering owner's
+    /// new access can be silently superseded. The caller records the owner key its recovery established (from
+    /// the recovery's own anchor via [`Self::resolved_owner_key`], or its returned `did_key`) and, after
+    /// syncing, calls this against the synced anchor. `false` means the recovery did NOT survive — the owner
+    /// is no longer the resolved Owner and must recover again — so a locked-out owner gets a signal instead of
+    /// believing they are in control. Until it returns `true`, a recovery is PROVISIONAL, like a rotation.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] if the anchor is malformed.
+    pub fn recovery_confirmed(
+        &self,
+        synced_anchor: &[u8],
+        expected_owner_key: &[u8],
+    ) -> Result<bool, VaultError> {
+        Ok(self.resolved_owner_key(synced_anchor)?.as_deref() == Some(expected_owner_key))
+    }
+
     /// The anchor's opaque anti-rollback watermark (its frontier op-id set) — the cursor the host persists
     /// alongside the anchor and passes back as the floor on the next mutation. Opaque bytes to every caller.
     ///
@@ -1126,6 +1160,7 @@ impl DagVault {
             write_key_id,
             needs_reseal,
             needs_backfill,
+            needs_rrk_backfill,
             ..
         } = fold_resolved(&resolved)?;
 
@@ -1165,6 +1200,7 @@ impl DagVault {
                 did_key: DidKey::from_public_key(&my_key),
                 needs_reseal,
                 needs_backfill,
+                needs_rrk_backfill,
                 write_epoch_unreachable,
             },
             root.hpke_secret,
@@ -2950,6 +2986,69 @@ mod tests {
         assert!(
             winner == auth_a || winner == auth_b,
             "the resolved authority is one of the two rotations'"
+        );
+    }
+
+    /// OPE-381 / §11.2 superseded-recovery signal: an owner who recovers with the OLD code on one device
+    /// concurrently with a rotation on another finds, on merge, that rule (b) voids their `ReFound` — the
+    /// recovery is superseded and the resolved Owner reverts. `recovery_confirmed` catches it so the
+    /// recovering owner learns they are NOT in control instead of silently believing they are.
+    #[test]
+    fn dag_recovery_confirmed_catches_a_recovery_superseded_by_a_concurrent_rotation() {
+        let tree = TreeId::new(TREE);
+        let owner = MemberId::new(MEMBER);
+        let pass = Passphrase::new(b"correct horse");
+
+        let p = DagVault
+            .provision(&ctx(&tree, &owner, &ReplicaId::new(b"r1")), &pass)
+            .unwrap();
+        let base_floor = dag_client::watermark(&p.anchor).unwrap();
+
+        // Branch A: the owner rotates the recovery authority (retiring the current code).
+        let rot = DagVault
+            .rotate_recovery(
+                &ctx(&tree, &owner, &ReplicaId::new(b"ra")),
+                &p.anchor,
+                &pass,
+                &base_floor,
+            )
+            .unwrap();
+
+        // Branch B (CONCURRENT): the owner recovers with the OLD code on another device — a fresh identity.
+        let rec = DagVault
+            .recover(
+                &ctx(&tree, &owner, &ReplicaId::new(b"rb")),
+                &p.anchor,
+                &p.recovery_code,
+                &Passphrase::new(b"post-recovery pass"),
+                &base_floor,
+            )
+            .unwrap();
+        let recovered_owner = DagVault
+            .resolved_owner_key(&rec.anchor)
+            .unwrap()
+            .expect("the recovery established an owner");
+
+        // On device B alone the recovery is in force.
+        assert!(DagVault
+            .recovery_confirmed(&rec.anchor, &recovered_owner)
+            .unwrap());
+
+        // Merge: rule (b) voids the old-code ReFound concurrent with the rotation — recovery SUPERSEDED.
+        let merged = dag_client::merge(&rot.anchor, &rec.anchor).unwrap();
+        assert!(
+            !DagVault
+                .recovery_confirmed(&merged, &recovered_owner)
+                .unwrap(),
+            "the concurrent rotation supersedes the recovery — the recovering owner is not the resolved owner"
+        );
+        let rot_auth = DagVault
+            .resolved_reset_authority(&rot.anchor)
+            .unwrap()
+            .expect("the rotation set an authority");
+        assert!(
+            DagVault.rotation_confirmed(&merged, &rot_auth).unwrap(),
+            "the rotation stands"
         );
     }
 

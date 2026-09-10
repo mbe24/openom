@@ -66,6 +66,10 @@ pub struct Provisioned {
 
 /// Result of [`KeyringLifecycle::unlock`]: the sealer plus the opaque anti-rollback `watermark` the caller
 /// must persist (never interpret).
+// The four advisory flags are INDEPENDENT repair signals a caller acts on separately (reseal / member
+// backfill / rrk backfill / forced reseal), not a state machine — a bitflags/enum would obscure that each
+// is its own out-of-band remedy, so keep them as named bools.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Unlocked {
     pub sealer: SealerSet,
     /// The engine-opaque anti-rollback cursor to persist (chain: the keyring revision, as bytes).
@@ -79,6 +83,12 @@ pub struct Unlocked {
     /// read that slice of history until the owner backfills it (dag only; chain is always `false`). Never
     /// blocks unlock; the OWNER repairs it out-of-band (only the RRK opens the old DEKs) (OPE-288).
     pub needs_backfill: bool,
+    /// Advisory: some RETAINED epoch's RRK wrap doesn't bind the CURRENT recovery escrow — a rotation orphan
+    /// (an epoch minted concurrently with a recovery rotation, which the rotation never re-wrapped), so the
+    /// owner can't read it until a MEMBER re-wraps its DEK to the current escrow
+    /// ([`crate::dag_vault::DagVault::backfill_rrk`]). The inverse of `needs_backfill` — an owner-read gap a
+    /// member heals, not a member gap the owner heals (dag only; chain is always `false`) (OPE-381 / F3).
+    pub needs_rrk_backfill: bool,
     /// Advisory: this unlocker's own DEK bag did NOT reach the current write epoch — locally derived, so it
     /// holds regardless of what the (unauthenticated) coverage hint claims. `needs_reseal` is computed from
     /// the author-DECLARED recipient key, so a malicious op that wraps the DEK to garbage while declaring the
@@ -252,6 +262,7 @@ impl KeyringLifecycle for ChainVault {
             did_key: u.did_key,
             needs_reseal: false, // a linear chain has no concurrent-merge stale epoch
             needs_backfill: false, // nor a concurrent-add historical-read gap (OPE-288)
+            needs_rrk_backfill: false, // nor a concurrent-rotation orphan (OPE-381) — rotation is total on the chain
             write_epoch_unreachable: false, // a linear chain always reaches its own write epoch (OPE-299)
         })
     }
