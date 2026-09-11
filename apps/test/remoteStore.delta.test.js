@@ -24,7 +24,7 @@ describe('RemoteStore delta-log surface', () => {
     const seq = await rs.appendLog('t1', new Uint8Array([1, 2, 3]));
     expect(seq).toBe(7);
     expect(seen.method).toBe('POST');
-    expect(seen.url).toBe('http://x/trees/t1/log');
+    expect(seen.url).toBe('http://x/v1/trees/t1/log');
     expect(seen.body).toEqual(new Uint8Array([1, 2, 3]));
   });
 
@@ -32,7 +32,7 @@ describe('RemoteStore delta-log surface', () => {
     const rs = new RemoteStore({
       baseUrl: 'http://x',
       fetch: async (url) => {
-        expect(url).toBe('http://x/trees/t1/log?since=-1');
+        expect(url).toBe('http://x/v1/trees/t1/log?since=-1');
         return res(200, {
           entries: [{ seq: 0, member: 'm', replica: 'cmVw', counter: 0, time: '2026-01-01', payload: b64([9, 8, 7]) }],
           next_cursor: 0,

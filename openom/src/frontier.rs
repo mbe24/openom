@@ -37,14 +37,14 @@ fn internal(e: sqlx::Error) -> ApiError {
 }
 
 #[derive(Deserialize)]
-pub struct SeenBody {
+pub struct FrontierBody {
     /// `replica -> counter`, the caller's own `Frontier` (`docsync/src/lib.rs:400-404`): the next,
     /// exclusive counter this replica's log entries are covered up to, from the reporting member's point
     /// of view.
     frontier: BTreeMap<String, u64>,
 }
 
-/// `PUT /trees/{tree_id}/seen` — upsert the caller's own reported frontier, one row per replica.
+/// `PUT /v1/trees/{tree_id}/frontier` — upsert the caller's own reported frontier, one row per replica.
 ///
 /// **Flagged gate choice** (not specified by the design beyond "same shape as `access.rs`"): `Access::Read`
 /// — any current member may self-report their own pull progress. Unlike `access.rs`'s membership summary
@@ -53,13 +53,13 @@ pub struct SeenBody {
 ///
 /// # Errors
 /// Returns [`ApiError`] if the caller isn't authorized, the report is oversized, or the store access fails.
-pub async fn put_seen(
+pub async fn put_frontier(
     State(state): State<AppState>,
     identity: Identity,
     Path(tree_id): Path<Uuid>,
-    Json(body): Json<SeenBody>,
+    Json(body): Json<FrontierBody>,
 ) -> Result<Response, ApiError> {
-    let _p = crate::prof::span("seen.put");
+    let _p = crate::prof::span("frontier.put");
     if body.frontier.len() > MAX_REPLICAS || body.frontier.keys().any(|r| r.len() > MAX_REPLICA_LEN) {
         return Err(ApiError::BadRequest(
             "frontier exceeds the size limit".into(),
@@ -96,20 +96,20 @@ pub async fn put_seen(
 }
 
 #[derive(Serialize)]
-struct SeenRow {
+struct FrontierRow {
     member_id: String,
     replica: String,
     counter: i64,
     reported_at: String,
 }
 
-/// `GET /trees/{tree_id}/seen` — every member's last-reported per-replica frontier, raw.
+/// `GET /v1/trees/{tree_id}/frontier` — every member's last-reported per-replica frontier, raw.
 /// `Access::Administer`-gated per the design (§4): server cost-control internals, not ordinary sync
 /// traffic.
 ///
 /// # Errors
 /// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
-pub async fn get_seen(
+pub async fn get_frontier(
     State(state): State<AppState>,
     identity: Identity,
     Path(tree_id): Path<Uuid>,
@@ -131,9 +131,9 @@ pub async fn get_seen(
     .await
     .map_err(internal)?;
 
-    let seen: Vec<SeenRow> = rows
+    let frontier: Vec<FrontierRow> = rows
         .into_iter()
-        .map(|(member_id, replica, counter, reported_at)| SeenRow {
+        .map(|(member_id, replica, counter, reported_at)| FrontierRow {
             member_id: member_id.to_string(),
             replica,
             counter,
@@ -141,5 +141,5 @@ pub async fn get_seen(
         })
         .collect();
 
-    Ok((StatusCode::OK, Json(json!({ "seen": seen }))).into_response())
+    Ok((StatusCode::OK, Json(json!({ "frontier": frontier }))).into_response())
 }

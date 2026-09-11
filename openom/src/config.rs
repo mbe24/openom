@@ -204,7 +204,7 @@ impl Config {
     pub fn is_lambda(&self) -> bool {
         self.run_mode == RunMode::Production
     }
-    /// Dev-only routes (`/dev/gc`, later `/dev/token`) are registered only on the local
+    /// Dev-only routes (`/dev/media/gc`, later `/dev/auth/token`) are registered only on the local
     /// server deployment — never under Lambda.
     #[must_use]
     pub fn dev_routes_enabled(&self) -> bool {

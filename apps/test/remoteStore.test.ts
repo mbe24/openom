@@ -31,7 +31,7 @@ describe('RemoteStore', () => {
     const snap = await store.readSnapshot('tree-1');
     expect(Array.from(snap!.bytes)).toEqual([1, 2, 3]);
     expect(snap!.version).toBe('abc-123');
-    expect(fetch).toHaveBeenCalledWith('http://x/trees/tree-1', expect.anything());
+    expect(fetch).toHaveBeenCalledWith('http://x/v1/trees/tree-1', expect.anything());
   });
 
   it('readSnapshot returns null on 404', async () => {

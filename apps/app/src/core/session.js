@@ -42,7 +42,7 @@ const uuidv4 = () =>
  *
  * The bearer is minted by `#tokenFor(id)`. Today it returns the raw account UUID — option (A) in the
  * design: the server under `AUTH=dev` accepts a `Bearer <uuid>`. The `#tokenFor` seam is the single
- * place option (B) plugs in later: call a local-only `/dev/token` route, mint/cache a real HS256 JWT
+ * place option (B) plugs in later: call a local-only `/dev/auth/token` route, mint/cache a real HS256 JWT
  * (`sub=<uuid>`), and honour `forceRefresh` to exercise the production verify path — no other change.
  */
 export class DevAuth {
@@ -124,7 +124,7 @@ export class DevAuth {
   }
 
   // The single swap point between option (A) raw-uuid bearer (today) and option (B) a minted +
-  // cached HS256 JWT from a local-only `/dev/token`. Today the uuid IS the bearer; a later option-B
+  // cached HS256 JWT from a local-only `/dev/auth/token`. Today the uuid IS the bearer; a later option-B
   // mode replaces the body here (fetch/cache a JWT, refetch on `forceRefresh`) with nothing above it changing.
   async #tokenFor(id, _opts = {}) {
     return id;

@@ -57,7 +57,7 @@ const args = [
 ];
 for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
 // --test-threads=1: these integration tests share ONE Postgres + MinIO and use GLOBAL operations
-// (POST /dev/gc sweeps ALL expired proposals/blobs, not just the test's tree), so running them in
+// (POST /dev/media/gc sweeps ALL expired proposals/blobs, not just the test's tree), so running them in
 // parallel makes the shared-state assertions non-deterministic (proposals_ttl_swept flaked). Serialize.
 args.push(IMAGE, 'cargo', 'test', '-p', 'openom', ...filter, '--', '--ignored', '--nocapture', '--test-threads=1');
 

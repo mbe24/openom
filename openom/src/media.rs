@@ -456,7 +456,7 @@ pub struct SweepParams {
 const DEFAULT_TOMBSTONE_GRACE_SECS: i64 = 30 * 24 * 3600;
 const DEFAULT_PENDING_EXPIRY_SECS: i64 = 3600;
 
-/// `POST /dev/gc` (local only) — run the physical sweep. In production this logic is
+/// `POST /dev/media/gc` (local only) — run the physical sweep. In production this logic is
 /// driven by a scheduled trigger (`EventBridge` → an authenticated internal call), not
 /// a public route.
 ///

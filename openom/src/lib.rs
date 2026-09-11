@@ -10,6 +10,7 @@ pub mod auth;
 pub mod authz;
 pub mod blobs;
 pub mod config;
+pub mod frontier;
 pub mod invites;
 pub mod jwks;
 pub mod keyring;
@@ -17,7 +18,6 @@ pub mod log;
 pub mod media;
 pub mod prof;
 pub mod proposals;
-pub mod seen;
 pub mod storage;
 pub mod telemetry;
 pub mod trees;
@@ -71,13 +71,12 @@ async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "member_id": id.member_id }))
 }
 
-/// Build the router. `/dev/gc` is local-only (prod drives the sweep from a scheduled
-/// trigger). This is the single source of truth for routes, shared by the binary and
-/// the integration tests.
+/// Build the router. Every resource route is versioned under `/v1` (§API-VERSIONING); `/health`,
+/// `/ready`, and the dev-only routes (grouped by concern, e.g. `/dev/media/gc`) stay unversioned —
+/// infra liveness and local-only tooling aren't part of the public wire contract. This is the single
+/// source of truth for routes, shared by the binary and the integration tests.
 pub fn app(state: AppState) -> Router {
-    let mut router = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
+    let v1 = Router::new()
         .route("/whoami", get(whoami))
         .route(
             "/trees/{tree_id}",
@@ -98,8 +97,8 @@ pub fn app(state: AppState) -> Router {
         // Seen-frontier report (OPE-398 §4): advisory, client-asserted PLUMBING for the future log-GC
         // floor — nothing consumes it yet to gate deletion.
         .route(
-            "/trees/{tree_id}/seen",
-            put(seen::put_seen).get(seen::get_seen),
+            "/trees/{tree_id}/frontier",
+            put(frontier::put_frontier).get(frontier::get_frontier),
         )
         // Proposals: the transient, off-history approval channel for review-changes (§B2).
         .route(
@@ -148,8 +147,15 @@ pub fn app(state: AppState) -> Router {
             "/trees/{tree_id}/media/{blob_id}/detach",
             post(media::detach),
         );
+
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(ready))
+        .nest("/v1", v1);
     if state.config.dev_routes_enabled() {
-        router = router.route("/dev/gc", post(media::sweep_dev));
+        // Dev-only routes are local-only (never registered under Lambda) and grouped by concern,
+        // not versioned — they're tooling, not the public wire contract.
+        router = router.route("/dev/media/gc", post(media::sweep_dev));
     }
     router
         // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)

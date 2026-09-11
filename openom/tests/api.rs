@@ -156,7 +156,7 @@ fn put_bytes_as(uri: String, body: &[u8], member: Uuid, if_absent: bool) -> Requ
 fn put_tree_as(tree: Uuid, env: &[u8], member: Uuid) -> Request<Body> {
     Request::builder()
         .method("PUT")
-        .uri(format!("/trees/{tree}"))
+        .uri(format!("/v1/trees/{tree}"))
         .header("content-type", "application/octet-stream")
         .header("authorization", format!("Bearer {member}"))
         .body(Body::from(env.to_vec()))
@@ -350,7 +350,7 @@ fn put_keyring_as(tree: Uuid, k: &Keyring, member: Uuid) -> Request<Body> {
     };
     Request::builder()
         .method("PUT")
-        .uri(format!("/trees/{tree}/keyring"))
+        .uri(format!("/v1/trees/{tree}/keyring"))
         .header("content-type", "application/octet-stream")
         .header("authorization", format!("Bearer {member}"))
         .body(Body::from(update.encode_to_vec()))
@@ -379,7 +379,7 @@ fn delete_as(uri: String, member: Uuid) -> Request<Body> {
 fn put_tree(tree: Uuid, env: &[u8], if_match: Option<&str>) -> Request<Body> {
     let mut b = Request::builder()
         .method("PUT")
-        .uri(format!("/trees/{tree}"))
+        .uri(format!("/v1/trees/{tree}"))
         .header("content-type", "application/octet-stream");
     if let Some(v) = if_match {
         b = b.header("if-match", v);
@@ -426,7 +426,7 @@ async fn tree_lifecycle() {
     assert_eq!(s, StatusCode::OK, "create");
     let v1 = etag(&h);
 
-    let (s, h, body) = send(&app, get(format!("/trees/{tree}"))).await;
+    let (s, h, body) = send(&app, get(format!("/v1/trees/{tree}"))).await;
     assert_eq!(s, StatusCode::OK, "get");
     assert_eq!(body, env1, "byte round-trip");
     assert_eq!(etag(&h), v1, "etag matches");
@@ -444,7 +444,7 @@ async fn tree_lifecycle() {
     let (s, _, _) = send(&app, put_tree(tree, &bad, Some(&v1))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "tampered hash");
 
-    let (s, _, _) = send(&app, get(format!("/trees/{}", Uuid::new_v4()))).await;
+    let (s, _, _) = send(&app, get(format!("/v1/trees/{}", Uuid::new_v4()))).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "unknown tree");
 }
 
@@ -464,7 +464,7 @@ async fn delta_log_lifecycle() {
     let d0 = delta_envelope(tree, b"delta-zero", &ra, 0);
     let d1 = delta_envelope(tree, b"delta-one", &ra, 1);
 
-    let (s, _, b0) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
+    let (s, _, b0) = send(&app, post_bytes(format!("/v1/trees/{tree}/log"), &d0)).await;
     assert_eq!(s, StatusCode::OK, "append d0");
     assert_eq!(
         serde_json::from_slice::<Value>(&b0).unwrap()["seq"]
@@ -473,7 +473,7 @@ async fn delta_log_lifecycle() {
         0
     );
 
-    let (s, _, b1) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d1)).await;
+    let (s, _, b1) = send(&app, post_bytes(format!("/v1/trees/{tree}/log"), &d1)).await;
     assert_eq!(s, StatusCode::OK, "append d1");
     assert_eq!(
         serde_json::from_slice::<Value>(&b1).unwrap()["seq"]
@@ -483,7 +483,7 @@ async fn delta_log_lifecycle() {
     );
 
     // Re-delivering d0 (same replica dot) is idempotent — same seq, no new entry.
-    let (s, _, br) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d0)).await;
+    let (s, _, br) = send(&app, post_bytes(format!("/v1/trees/{tree}/log"), &d0)).await;
     assert_eq!(s, StatusCode::OK, "re-append idempotent");
     assert_eq!(
         serde_json::from_slice::<Value>(&br).unwrap()["seq"]
@@ -493,7 +493,7 @@ async fn delta_log_lifecycle() {
     );
 
     // Whole tail: both deltas, in order, payloads round-tripping the exact sealed bytes.
-    let (s, _, tb) = send(&app, get(format!("/trees/{tree}/log?since=-1"))).await;
+    let (s, _, tb) = send(&app, get(format!("/v1/trees/{tree}/log?since=-1"))).await;
     assert_eq!(s, StatusCode::OK, "read tail");
     let tail: Value = serde_json::from_slice(&tb).unwrap();
     let entries = tail["entries"].as_array().unwrap();
@@ -518,7 +518,7 @@ async fn delta_log_lifecycle() {
     assert_eq!(p0, d0, "payload round-trips the sealed delta bytes");
 
     // From a cursor: only the tail after seq 0.
-    let (s, _, tb2) = send(&app, get(format!("/trees/{tree}/log?since=0"))).await;
+    let (s, _, tb2) = send(&app, get(format!("/v1/trees/{tree}/log?since=0"))).await;
     assert_eq!(s, StatusCode::OK, "read tail since 0");
     let tail2: Value = serde_json::from_slice(&tb2).unwrap();
     assert_eq!(
@@ -533,7 +533,7 @@ async fn delta_log_lifecycle() {
     let (s, _, _) = send(
         &app,
         post_bytes(
-            format!("/trees/{unknown}/log"),
+            format!("/v1/trees/{unknown}/log"),
             &delta_envelope(unknown, b"x", &ra, 0),
         ),
     )
@@ -562,7 +562,7 @@ async fn oversized_delta_spills_to_r2_and_reads_back() {
         "the envelope must exceed the inline cap to exercise spill"
     );
 
-    let (s, _, b) = send(&app, post_bytes(format!("/trees/{tree}/log"), &d)).await;
+    let (s, _, b) = send(&app, post_bytes(format!("/v1/trees/{tree}/log"), &d)).await;
     assert_eq!(s, StatusCode::OK, "append oversized delta");
     let seq = serde_json::from_slice::<Value>(&b).unwrap()["seq"]
         .as_i64()
@@ -581,7 +581,7 @@ async fn oversized_delta_spills_to_r2_and_reads_back() {
 
     // …yet the tail read resolves it transparently — the client gets the exact sealed bytes back,
     // indistinguishable from an inline delta.
-    let (s, _, tb) = send(&app, get(format!("/trees/{tree}/log?since=-1"))).await;
+    let (s, _, tb) = send(&app, get(format!("/v1/trees/{tree}/log?since=-1"))).await;
     assert_eq!(s, StatusCode::OK, "read tail");
     let tail: Value = serde_json::from_slice(&tb).unwrap();
     let got = base64::engine::general_purpose::STANDARD
@@ -618,7 +618,7 @@ async fn cross_owner_access_forbidden() {
     send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d0", &ra, 0),
             owner,
         ),
@@ -627,7 +627,7 @@ async fn cross_owner_access_forbidden() {
 
     // A non-owner is refused on read snapshot, read log, append, and a CAS snapshot update (the
     // seam now guards the PUT/commit path too — it used to inline owner_id in the SQL predicate).
-    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}"), other)).await;
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}"), other)).await;
     assert_eq!(
         s,
         StatusCode::FORBIDDEN,
@@ -635,7 +635,7 @@ async fn cross_owner_access_forbidden() {
     );
     let cas = Request::builder()
         .method("PUT")
-        .uri(format!("/trees/{tree}"))
+        .uri(format!("/v1/trees/{tree}"))
         .header("content-type", "application/octet-stream")
         .header("authorization", format!("Bearer {other}"))
         .header("if-match", version.trim_matches('"'))
@@ -647,12 +647,12 @@ async fn cross_owner_access_forbidden() {
         StatusCode::FORBIDDEN,
         "non-owner cannot commit a snapshot update"
     );
-    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/log?since=-1"), other)).await;
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/log?since=-1"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot read the log");
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"x", b"replica-other000", 0),
             other,
         ),
@@ -687,19 +687,19 @@ async fn roles_read_propose_commit() {
     // Read — every member role can read snapshot, log, and proposals.
     for m in [viewer, editor, maint] {
         assert_eq!(
-            send(&app, get_as(format!("/trees/{tree}"), m)).await.0,
+            send(&app, get_as(format!("/v1/trees/{tree}"), m)).await.0,
             StatusCode::OK,
             "read snapshot"
         );
         assert_eq!(
-            send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m))
+            send(&app, get_as(format!("/v1/trees/{tree}/log?since=-1"), m))
                 .await
                 .0,
             StatusCode::OK,
             "read log"
         );
         assert_eq!(
-            send(&app, get_as(format!("/trees/{tree}/proposals"), m))
+            send(&app, get_as(format!("/v1/trees/{tree}/proposals"), m))
                 .await
                 .0,
             StatusCode::OK,
@@ -712,7 +712,7 @@ async fn roles_read_propose_commit() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, viewer)
         )
         .await
         .0,
@@ -722,7 +722,7 @@ async fn roles_read_propose_commit() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, editor)
         )
         .await
         .0,
@@ -732,7 +732,7 @@ async fn roles_read_propose_commit() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, maint)
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, maint)
         )
         .await
         .0,
@@ -746,7 +746,7 @@ async fn roles_read_propose_commit() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &d(b"replica-viewer00"),
                 viewer
             )
@@ -760,7 +760,7 @@ async fn roles_read_propose_commit() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &d(b"replica-editor00"),
                 editor
             )
@@ -773,7 +773,7 @@ async fn roles_read_propose_commit() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/log"), &d(b"replica-maint000"), maint)
+            post_bytes_as(format!("/v1/trees/{tree}/log"), &d(b"replica-maint000"), maint)
         )
         .await
         .0,
@@ -809,7 +809,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), viewer)
+            post_json_as(format!("/v1/trees/{tree}/media/intent"), intent_body(), viewer)
         )
         .await
         .0,
@@ -819,7 +819,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/trees/{tree}/media/intent"), intent_body(), editor)
+            post_json_as(format!("/v1/trees/{tree}/media/intent"), intent_body(), editor)
         )
         .await
         .0,
@@ -835,7 +835,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], editor)
+            post_bytes_as(format!("/v1/trees/{tree}/media/{blob}/attach"), &[], editor)
         )
         .await
         .0,
@@ -845,7 +845,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/media/{blob}/attach"), &[], maint)
+            post_bytes_as(format!("/v1/trees/{tree}/media/{blob}/attach"), &[], maint)
         )
         .await
         .0,
@@ -876,7 +876,7 @@ async fn per_member_rate_isolation() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &delta_envelope(tree, b"m0", b"replica-maint000", 0),
                 maint
             )
@@ -890,7 +890,7 @@ async fn per_member_rate_isolation() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &delta_envelope(tree, b"m1", b"replica-maint000", 1),
                 maint
             )
@@ -905,7 +905,7 @@ async fn per_member_rate_isolation() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &delta_envelope(tree, b"o0", b"replica-owner000", 0),
                 owner
             )
@@ -965,7 +965,7 @@ async fn keyring_genesis_derives_acl() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, editor)
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, editor)
         )
         .await
         .0,
@@ -976,7 +976,7 @@ async fn keyring_genesis_derives_acl() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &delta_envelope(tree, b"x", b"replica-editor00", 0),
                 editor
             )
@@ -989,7 +989,7 @@ async fn keyring_genesis_derives_acl() {
     assert_eq!(
         send(
             &app,
-            post_bytes_as(format!("/trees/{tree}/proposals"), &prop, viewer)
+            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, viewer)
         )
         .await
         .0,
@@ -1047,7 +1047,7 @@ async fn keyring_transition_updates_and_removes() {
         send(
             &app,
             post_bytes_as(
-                format!("/trees/{tree}/log"),
+                format!("/v1/trees/{tree}/log"),
                 &delta_envelope(tree, b"c", b"replica-m0000000", 0),
                 m
             )
@@ -1071,7 +1071,7 @@ async fn keyring_transition_updates_and_removes() {
         "ACL row gone after removal"
     );
     assert_eq!(
-        send(&app, get_as(format!("/trees/{tree}/log?since=-1"), m))
+        send(&app, get_as(format!("/v1/trees/{tree}/log?since=-1"), m))
             .await
             .0,
         StatusCode::FORBIDDEN,
@@ -1148,7 +1148,7 @@ async fn keyring_history() {
     send(&app, put_keyring_as(tree, &rev1, owner)).await;
     send(&app, put_keyring_as(tree, &rev2, owner)).await;
 
-    let (s, _, b) = send(&app, get_as(format!("/trees/{tree}/keyring?from=1"), owner)).await;
+    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=1"), owner)).await;
     assert_eq!(s, StatusCode::OK);
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
@@ -1165,7 +1165,7 @@ async fn keyring_history() {
     assert_eq!(env1.engine, "chain");
     assert_eq!(env1.body, rev1.encode_to_vec(), "the revision's keyring round-trips inside the envelope");
 
-    let (_, _, b2) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
+    let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner)).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&b2).unwrap()["revisions"]
             .as_array()
@@ -1270,7 +1270,7 @@ async fn keyring_accepts_a_recovery_reset() {
     );
 
     // GET flags the reset revision (a UX hint for the OOB re-verify prompt).
-    let (_, _, b) = send(&app, get_as(format!("/trees/{tree}/keyring?from=2"), owner)).await;
+    let (_, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner)).await;
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
     assert_eq!(
@@ -1351,7 +1351,7 @@ async fn keyring_removal_purges_and_access_list() {
     send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/proposals"),
+            format!("/v1/trees/{tree}/proposals"),
             &proposal_envelope(tree, b"p"),
             m,
         ),
@@ -1360,7 +1360,7 @@ async fn keyring_removal_purges_and_access_list() {
     send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"c", b"replica-m0000000", 0),
             m,
         ),
@@ -1389,7 +1389,7 @@ async fn keyring_removal_purges_and_access_list() {
     );
 
     // The access list shows both members.
-    let (_, _, ab) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
+    let (_, _, ab) = send(&app, get_as(format!("/v1/trees/{tree}/access"), owner)).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&ab).unwrap()["members"]
             .as_array()
@@ -1429,7 +1429,7 @@ async fn keyring_removal_purges_and_access_list() {
         (0, 0),
         "m's proposal + rate bucket reclaimed on removal"
     );
-    let (_, _, ab2) = send(&app, get_as(format!("/trees/{tree}/access"), owner)).await;
+    let (_, _, ab2) = send(&app, get_as(format!("/v1/trees/{tree}/access"), owner)).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&ab2).unwrap()["members"]
             .as_array()
@@ -1461,7 +1461,7 @@ async fn proposals_lifecycle() {
     let prop = proposal_envelope(tree, b"suggested-edit-bundle");
     let (s, _, body) = send(
         &app,
-        post_bytes_as(format!("/trees/{tree}/proposals"), &prop, owner),
+        post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "submit proposal");
@@ -1471,7 +1471,7 @@ async fn proposals_lifecycle() {
         .to_string();
 
     // List it back — payload round-trips the exact sealed bytes, attributed to the proposer.
-    let (s, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    let (s, _, lb) = send(&app, get_as(format!("/v1/trees/{tree}/proposals"), owner)).await;
     assert_eq!(s, StatusCode::OK, "list proposals");
     let list: Value = serde_json::from_slice(&lb).unwrap();
     let items = list["proposals"].as_array().unwrap();
@@ -1486,11 +1486,11 @@ async fn proposals_lifecycle() {
     );
 
     // A non-owner can neither list nor submit (the authz seam) — V1 owner-only.
-    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/proposals"), other)).await;
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/proposals"), other)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot list proposals");
     let (s, _, _) = send(
         &app,
-        post_bytes_as(format!("/trees/{tree}/proposals"), &prop, other),
+        post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, other),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-owner cannot propose");
@@ -1498,11 +1498,11 @@ async fn proposals_lifecycle() {
     // Resolve (delete) it → gone from the open list; deleting again is idempotent.
     let (s, _, _) = send(
         &app,
-        delete_as(format!("/trees/{tree}/proposals/{id}"), owner),
+        delete_as(format!("/v1/trees/{tree}/proposals/{id}"), owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "delete proposal");
-    let (s, _, lb2) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    let (s, _, lb2) = send(&app, get_as(format!("/v1/trees/{tree}/proposals"), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&lb2).unwrap()["proposals"]
@@ -1514,7 +1514,7 @@ async fn proposals_lifecycle() {
     );
     let (s, _, _) = send(
         &app,
-        delete_as(format!("/trees/{tree}/proposals/{id}"), owner),
+        delete_as(format!("/v1/trees/{tree}/proposals/{id}"), owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "delete is idempotent");
@@ -1523,7 +1523,7 @@ async fn proposals_lifecycle() {
     // can never replay an editor's proposal into the authoritative tree history.
     let (s, _, _) = send(
         &app,
-        post_bytes_as(format!("/trees/{tree}/log"), &prop, owner),
+        post_bytes_as(format!("/v1/trees/{tree}/log"), &prop, owner),
     )
     .await;
     assert_eq!(
@@ -1551,7 +1551,7 @@ async fn proposals_caps() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_free}/proposals"),
+            format!("/v1/trees/{t_free}/proposals"),
             &proposal_envelope(t_free, b"x"),
             free,
         ),
@@ -1576,7 +1576,7 @@ async fn proposals_caps() {
     let (s, _, b1) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_cap}/proposals"),
+            format!("/v1/trees/{t_cap}/proposals"),
             &proposal_envelope(t_cap, b"p1"),
             cap,
         ),
@@ -1590,7 +1590,7 @@ async fn proposals_caps() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_cap}/proposals"),
+            format!("/v1/trees/{t_cap}/proposals"),
             &proposal_envelope(t_cap, b"p2"),
             cap,
         ),
@@ -1603,13 +1603,13 @@ async fn proposals_caps() {
     );
     send(
         &app,
-        delete_as(format!("/trees/{t_cap}/proposals/{id1}"), cap),
+        delete_as(format!("/v1/trees/{t_cap}/proposals/{id1}"), cap),
     )
     .await;
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_cap}/proposals"),
+            format!("/v1/trees/{t_cap}/proposals"),
             &proposal_envelope(t_cap, b"p3"),
             cap,
         ),
@@ -1630,7 +1630,7 @@ async fn proposals_caps() {
     let (s, _, bd) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_day}/proposals"),
+            format!("/v1/trees/{t_day}/proposals"),
             &proposal_envelope(t_day, b"d1"),
             day,
         ),
@@ -1643,13 +1643,13 @@ async fn proposals_caps() {
         .to_string();
     send(
         &app,
-        delete_as(format!("/trees/{t_day}/proposals/{idd}"), day),
+        delete_as(format!("/v1/trees/{t_day}/proposals/{idd}"), day),
     )
     .await; // resolve it
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{t_day}/proposals"),
+            format!("/v1/trees/{t_day}/proposals"),
             &proposal_envelope(t_day, b"d2"),
             day,
         ),
@@ -1680,7 +1680,7 @@ async fn proposals_ttl_swept() {
     let (_, _, body) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/proposals"),
+            format!("/v1/trees/{tree}/proposals"),
             &proposal_envelope(tree, b"stale"),
             owner,
         ),
@@ -1697,7 +1697,7 @@ async fn proposals_ttl_swept() {
         .await
         .unwrap();
     // Already invisible to reads before the physical sweep.
-    let (_, _, lb) = send(&app, get_as(format!("/trees/{tree}/proposals"), owner)).await;
+    let (_, _, lb) = send(&app, get_as(format!("/v1/trees/{tree}/proposals"), owner)).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&lb).unwrap()["proposals"]
             .as_array()
@@ -1707,7 +1707,7 @@ async fn proposals_ttl_swept() {
         "expired hidden from reads"
     );
     // The sweep physically reclaims it.
-    let (s, _, gb) = send(&app, post("/dev/gc".to_string())).await;
+    let (s, _, gb) = send(&app, post("/dev/media/gc".to_string())).await;
     assert_eq!(s, StatusCode::OK, "run dev gc");
     assert!(
         serde_json::from_slice::<Value>(&gb).unwrap()["proposals_expired"]
@@ -1720,7 +1720,7 @@ async fn proposals_ttl_swept() {
     let (_, _, lb2) = send(
         &app,
         get_as(
-            format!("/trees/{tree}/proposals?include_expired=true"),
+            format!("/v1/trees/{tree}/proposals?include_expired=true"),
             owner,
         ),
     )
@@ -1758,7 +1758,7 @@ async fn log_rate_limit_429() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d0", &ra, 0),
             member,
         ),
@@ -1770,7 +1770,7 @@ async fn log_rate_limit_429() {
     let (s, h, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d1", &ra, 1),
             member,
         ),
@@ -1783,7 +1783,7 @@ async fn log_rate_limit_429() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d0", &ra, 0),
             member,
         ),
@@ -1793,7 +1793,7 @@ async fn log_rate_limit_429() {
 
     // Only d0 actually landed — the throttled append never persisted.
     let read = Request::builder()
-        .uri(format!("/trees/{tree}/log?since=-1"))
+        .uri(format!("/v1/trees/{tree}/log?since=-1"))
         .header("authorization", format!("Bearer {member}"))
         .body(Body::empty())
         .unwrap();
@@ -1827,7 +1827,7 @@ async fn log_capacity_403() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d0", &ra, 0),
             member,
         ),
@@ -1853,7 +1853,7 @@ async fn log_capacity_403() {
     let (s, _, _) = send(
         &app,
         post_bytes_as(
-            format!("/trees/{tree}/log"),
+            format!("/v1/trees/{tree}/log"),
             &delta_envelope(tree, b"d1", &ra, 1),
             member,
         ),
@@ -1888,7 +1888,7 @@ async fn media_lifecycle_and_gc() {
     // Intent → presigned staging PUT → confirm.
     let media = b"openom fake encrypted media blob".to_vec();
     let intent = post_json(
-        format!("/trees/{tree}/media/intent"),
+        format!("/v1/trees/{tree}/media/intent"),
         serde_json::json!({ "size_bytes": media.len(), "object_sha256": sha256_b64(&media) }),
     );
     let (s, _, body) = send(&app, intent).await;
@@ -1909,13 +1909,13 @@ async fn media_lifecycle_and_gc() {
         "presigned PUT"
     );
 
-    let (s, _, cbody) = send(&app, post(format!("/trees/{tree}/media/{blob}/confirm"))).await;
+    let (s, _, cbody) = send(&app, post(format!("/v1/trees/{tree}/media/{blob}/confirm"))).await;
     assert_eq!(s, StatusCode::OK, "confirm");
     let cj: Value = serde_json::from_slice(&cbody).unwrap();
     assert_eq!(cj["size_bytes"].as_u64().unwrap() as usize, media.len());
 
     // Presigned download round-trips the exact bytes.
-    let (s, _, gbody) = send(&app, get(format!("/trees/{tree}/media/{blob}"))).await;
+    let (s, _, gbody) = send(&app, get(format!("/v1/trees/{tree}/media/{blob}"))).await;
     assert_eq!(s, StatusCode::OK, "get media");
     let gj: Value = serde_json::from_slice(&gbody).unwrap();
     let dl = reqwest::get(gj["download_url"].as_str().unwrap())
@@ -1928,8 +1928,8 @@ async fn media_lifecycle_and_gc() {
     );
 
     // attach → detach-to-zero → tombstone → sweep physically deletes → 404.
-    send(&app, post(format!("/trees/{tree}/media/{blob}/attach"))).await;
-    let (_, _, dbody) = send(&app, post(format!("/trees/{tree}/media/{blob}/detach"))).await;
+    send(&app, post(format!("/v1/trees/{tree}/media/{blob}/attach"))).await;
+    let (_, _, dbody) = send(&app, post(format!("/v1/trees/{tree}/media/{blob}/detach"))).await;
     let dj: Value = serde_json::from_slice(&dbody).unwrap();
     assert_eq!(
         dj["state"].as_str().unwrap(),
@@ -1939,7 +1939,7 @@ async fn media_lifecycle_and_gc() {
 
     let (s, _, sbody) = send(
         &app,
-        post("/dev/gc?tombstone_grace_secs=0&pending_expiry_secs=999999".into()),
+        post("/dev/media/gc?tombstone_grace_secs=0&pending_expiry_secs=999999".into()),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "sweep");
@@ -1949,7 +1949,7 @@ async fn media_lifecycle_and_gc() {
         "swept the tombstone"
     );
 
-    let (s, _, _) = send(&app, get(format!("/trees/{tree}/media/{blob}"))).await;
+    let (s, _, _) = send(&app, get(format!("/v1/trees/{tree}/media/{blob}"))).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "gone after sweep");
 }
 
@@ -1994,7 +1994,7 @@ async fn access_summary_derives_acl_generation_and_basis() {
     let owner = Uuid::new_v4();
     let tree = new_tree(&app, &db, owner).await;
     let editor = Uuid::new_v4();
-    let uri = format!("/trees/{tree}/access");
+    let uri = format!("/v1/trees/{tree}/access");
 
     let (s, _, body) = send(
         &app,
@@ -2024,7 +2024,7 @@ async fn access_summary_cas_and_idempotent_reassert() {
     let tree = new_tree(&app, &db, owner).await;
     let editor = Uuid::new_v4();
     let viewer = Uuid::new_v4();
-    let uri = format!("/trees/{tree}/access");
+    let uri = format!("/v1/trees/{tree}/access");
     let g = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap()["generation"].as_i64().unwrap();
 
     // First push (expects no summary yet) → generation 1.
@@ -2061,7 +2061,7 @@ async fn access_summary_signer_gate() {
     let maint = Uuid::new_v4();
     let editor = Uuid::new_v4();
     let stranger = Uuid::new_v4();
-    let uri = format!("/trees/{tree}/access");
+    let uri = format!("/v1/trees/{tree}/access");
 
     // Owner establishes the roster.
     send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)]), owner)).await;
@@ -2088,7 +2088,7 @@ async fn access_summary_owner_invariant_and_validation() {
     let owner = Uuid::new_v4();
     let tree = new_tree(&app, &db, owner).await;
     let editor = Uuid::new_v4();
-    let uri = format!("/trees/{tree}/access");
+    let uri = format!("/v1/trees/{tree}/access");
 
     // A summary that OMITS the owner still keeps the owner in the ACL at role Owner (owner is invariant).
     let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(editor, 4)]), owner)).await;
@@ -2128,7 +2128,7 @@ async fn blob_put_mints_tree_row_on_first_write() {
     let (s, h, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree}/blobs/log/replicaAAA/0"),
+            format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"),
             b"delta-bytes",
             owner,
             true,
@@ -2157,7 +2157,7 @@ async fn blob_put_mints_tree_row_on_first_write() {
     let (s, _, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree2}/blobs/log/replicaAAA/0"),
+            format!("/v1/trees/{tree2}/blobs/log/replicaAAA/0"),
             b"x",
             capped,
             true,
@@ -2181,7 +2181,7 @@ async fn blob_put_get_roundtrip_pointer() {
 
     let (s, h, _) = send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"7", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"7", owner, false),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "pointer put (Precondition::Any)");
@@ -2189,7 +2189,7 @@ async fn blob_put_get_roundtrip_pointer() {
 
     let (s, h2, body) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), owner),
+        get_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "get roundtrip");
@@ -2199,14 +2199,14 @@ async fn blob_put_get_roundtrip_pointer() {
     // Unconditional overwrite — no conflict, new etag.
     let (s, h3, _) = send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"8", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"8", owner, false),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "pointer overwrite");
     assert_ne!(etag(&h3), e1, "new content, new etag");
     let (_, _, body2) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), owner),
+        get_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), owner),
     )
     .await;
     assert_eq!(body2, b"8", "the overwrite landed");
@@ -2214,7 +2214,7 @@ async fn blob_put_get_roundtrip_pointer() {
     // Missing key -> 404 (graceful absence).
     let (s, _, _) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs/heads/replicaZZZ"), owner),
+        get_as(format!("/v1/trees/{tree}/blobs/heads/replicaZZZ"), owner),
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "missing key");
@@ -2227,7 +2227,7 @@ async fn blob_if_absent_create_then_conflict_and_idempotent_retry() {
     let db = db().await;
     let owner = Uuid::new_v4();
     let tree = new_tree(&app, &db, owner).await;
-    let key = format!("/trees/{tree}/blobs/log/replicaAAA/0");
+    let key = format!("/v1/trees/{tree}/blobs/log/replicaAAA/0");
 
     let (s, h, _) = send(&app, put_bytes_as(key.clone(), b"delta-zero", owner, true)).await;
     assert_eq!(s, StatusCode::OK, "immutable create");
@@ -2266,28 +2266,28 @@ async fn blob_list_by_prefix() {
 
     send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
     )
     .await;
     send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaBBB"), b"2", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaBBB"), b"2", owner, false),
     )
     .await;
     send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/log/replicaAAA/0"), b"d", owner, true),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"), b"d", owner, true),
     )
     .await;
     send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/snapshot"), b"s", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/snapshot"), b"s", owner, false),
     )
     .await;
 
     let (s, _, b) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs?prefix=heads/"), owner),
+        get_as(format!("/v1/trees/{tree}/blobs?prefix=heads/"), owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK);
@@ -2306,7 +2306,7 @@ async fn blob_list_by_prefix() {
     );
 
     // No prefix -> everything.
-    let (s, _, b2) = send(&app, get_as(format!("/trees/{tree}/blobs"), owner)).await;
+    let (s, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/blobs"), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&b2).unwrap()["keys"]
@@ -2319,7 +2319,7 @@ async fn blob_list_by_prefix() {
 
     // A tree with no blobs yet -> empty list, not an error.
     let empty_tree = new_tree(&app, &db, owner).await;
-    let (s, _, eb) = send(&app, get_as(format!("/trees/{empty_tree}/blobs"), owner)).await;
+    let (s, _, eb) = send(&app, get_as(format!("/v1/trees/{empty_tree}/blobs"), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         serde_json::from_slice::<Value>(&eb).unwrap()["keys"]
@@ -2349,7 +2349,7 @@ async fn blob_metering_capacity_gates_immutable_only() {
     let (s, _, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree}/blobs/log/replicaAAA/0"),
+            format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"),
             b"delta-zero",
             owner,
             true,
@@ -2375,7 +2375,7 @@ async fn blob_metering_capacity_gates_immutable_only() {
     // A pointer overwrite still succeeds — capacity-exempt.
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "a pointer put is capacity-exempt");
@@ -2384,7 +2384,7 @@ async fn blob_metering_capacity_gates_immutable_only() {
     let (s, _, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree}/blobs/log/replicaAAA/1"),
+            format!("/v1/trees/{tree}/blobs/log/replicaAAA/1"),
             b"delta-one",
             owner,
             true,
@@ -2423,14 +2423,14 @@ async fn blob_metering_rate_gates_every_put() {
 
     let (s, _, _) = send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "first pointer put spends the single token");
 
     let (s, h, _) = send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"2", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"2", owner, false),
     )
     .await;
     assert_eq!(
@@ -2451,22 +2451,22 @@ async fn blob_authz_forbidden_for_non_members_viewer_cant_commit() {
     let tree = new_tree(&app, &db, owner).await;
     send(
         &app,
-        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
     )
     .await;
 
     let (s, _, _) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), stranger),
+        get_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), stranger),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't read a blob");
-    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/blobs"), stranger)).await;
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/blobs"), stranger)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't list blobs");
     let (s, _, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree}/blobs/heads/replicaAAA"),
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
             b"2",
             stranger,
             false,
@@ -2480,14 +2480,14 @@ async fn blob_authz_forbidden_for_non_members_viewer_cant_commit() {
     grant_role(&db, tree, viewer, 5).await;
     let (s, _, _) = send(
         &app,
-        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), viewer),
+        get_as(format!("/v1/trees/{tree}/blobs/heads/replicaAAA"), viewer),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "viewer can read");
     let (s, _, _) = send(
         &app,
         put_bytes_as(
-            format!("/trees/{tree}/blobs/heads/replicaAAA"),
+            format!("/v1/trees/{tree}/blobs/heads/replicaAAA"),
             b"2",
             viewer,
             false,
@@ -2497,11 +2497,11 @@ async fn blob_authz_forbidden_for_non_members_viewer_cant_commit() {
     assert_eq!(s, StatusCode::FORBIDDEN, "viewer can't commit a blob write");
 }
 
-// ---- OPE-398 seen-frontier plumbing (seen.rs) -------------------------------------------------------
+// ---- OPE-398 seen-frontier plumbing (frontier.rs) -------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
-async fn seen_report_upserts_and_administer_gates_read() {
+async fn frontier_report_upserts_and_administer_gates_read() {
     let app = router().await;
     let db = db().await;
     let owner = Uuid::new_v4();
@@ -2512,35 +2512,35 @@ async fn seen_report_upserts_and_administer_gates_read() {
     grant_role(&db, tree, editor, 4).await;
 
     let body = serde_json::json!({ "frontier": { "replicaAAA": 3, "replicaBBB": 1 } });
-    let (s, _, _) = send(&app, put_json_as(format!("/trees/{tree}/seen"), body, editor)).await;
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), body, editor)).await;
     assert_eq!(s, StatusCode::OK, "a member reports its own frontier");
 
     // Administer (Maintainer+) can read the raw reports.
-    let (s, _, b) = send(&app, get_as(format!("/trees/{tree}/seen"), maint)).await;
-    assert_eq!(s, StatusCode::OK, "maintainer reads seen reports");
+    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), maint)).await;
+    assert_eq!(s, StatusCode::OK, "maintainer reads frontier reports");
     let v: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(
-        v["seen"].as_array().unwrap().len(),
+        v["frontier"].as_array().unwrap().len(),
         2,
         "one row per reported replica"
     );
 
     // Re-report updates in place, not duplicates.
     let body2 = serde_json::json!({ "frontier": { "replicaAAA": 5 } });
-    send(&app, put_json_as(format!("/trees/{tree}/seen"), body2, editor)).await;
-    let (_, _, b2) = send(&app, get_as(format!("/trees/{tree}/seen"), maint)).await;
+    send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), body2, editor)).await;
+    let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), maint)).await;
     let v2: Value = serde_json::from_slice(&b2).unwrap();
-    let rows2 = v2["seen"].as_array().unwrap();
+    let rows2 = v2["frontier"].as_array().unwrap();
     assert_eq!(rows2.len(), 2, "still one row per replica — updated, not appended");
     let a = rows2.iter().find(|r| r["replica"] == "replicaAAA").unwrap();
     assert_eq!(a["counter"].as_i64().unwrap(), 5, "counter updated in place");
 
     // An Editor (below the Administer gate) can't read the raw reports back.
-    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/seen"), editor)).await;
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), editor)).await;
     assert_eq!(
         s,
         StatusCode::FORBIDDEN,
-        "editor is below the Administer gate for GET /seen"
+        "editor is below the Administer gate for GET /frontier"
     );
 
     // A non-member can't even PUT.
@@ -2548,8 +2548,8 @@ async fn seen_report_upserts_and_administer_gates_read() {
     let body3 = serde_json::json!({ "frontier": { "replicaAAA": 1 } });
     let (s, _, _) = send(
         &app,
-        put_json_as(format!("/trees/{tree}/seen"), body3, stranger),
+        put_json_as(format!("/v1/trees/{tree}/frontier"), body3, stranger),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't report seen");
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't report frontier");
 }

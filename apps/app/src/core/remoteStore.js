@@ -75,7 +75,7 @@ export class RemoteStore {
   }
 
   #tree(id) {
-    return `${this.#baseUrl}/trees/${encodeURIComponent(id)}`;
+    return `${this.#baseUrl}/v1/trees/${encodeURIComponent(id)}`;
   }
 
   // Every request routes through here so auth is applied uniformly and a 401 gets EXACTLY ONE
