@@ -8,6 +8,7 @@
 pub mod access;
 pub mod auth;
 pub mod authz;
+pub mod blobs;
 pub mod config;
 pub mod invites;
 pub mod jwks;
@@ -16,6 +17,7 @@ pub mod log;
 pub mod media;
 pub mod prof;
 pub mod proposals;
+pub mod seen;
 pub mod storage;
 pub mod telemetry;
 pub mod trees;
@@ -85,6 +87,19 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/trees/{tree_id}/log",
             post(log::append_log).get(log::get_log),
+        )
+        // Data-channel blob store (OPE-398): the R2+Neon realization of the client's BlobStore-over-HTTP
+        // contract (opaque get/put-with-precondition/list-by-prefix; no DELETE — that's GC-internal only).
+        .route("/trees/{tree_id}/blobs", get(blobs::list_blobs))
+        .route(
+            "/trees/{tree_id}/blobs/{*sub}",
+            get(blobs::get_blob).put(blobs::put_blob),
+        )
+        // Seen-frontier report (OPE-398 §4): advisory, client-asserted PLUMBING for the future log-GC
+        // floor — nothing consumes it yet to gate deletion.
+        .route(
+            "/trees/{tree_id}/seen",
+            put(seen::put_seen).get(seen::get_seen),
         )
         // Proposals: the transient, off-history approval channel for review-changes (§B2).
         .route(

@@ -1,0 +1,145 @@
+//! Seen-frontier report — plumbing for the future log-GC floor
+//! (`plan/sync/design.ope398-managed-server.md` §4, build-order step 5).
+//!
+//! `PUT` lets a member advisorally report its own `BlobSyncClient::frontier()` (what it has
+//! PULLED/FOLDED so far, `docsync/src/lib.rs:800-803`) per replica; `GET` (Administer-gated) reads the raw
+//! reports back. **PLUMBING ONLY: nothing consumes this yet to gate deletion.** The two-gate GC floor
+//! (safety = the server snapshot's PUBLISHED covered frontier; liveness = every current member's
+//! last-reported pull frontier, within a grace window) and the F3 self-heal-before-GC ordering invariant
+//! are a follow-up, security-reviewed slice (§4, §5.6/#12) — deliberately out of scope here. This table +
+//! these handlers are advisory and client-asserted, never authoritative — the same trust model as
+//! `access.rs`'s membership summary.
+
+use std::collections::BTreeMap;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::auth::Identity;
+use crate::authz::Access;
+use crate::trees::ApiError;
+use crate::AppState;
+
+/// Hard caps on a report — a member's own frontier is small (one entry per replica it knows of); these
+/// stop a hostile client bloating the table (mirrors `access.rs`'s `MAX_BASIS_TOKENS`/`MAX_BASIS_TOKEN_LEN`).
+const MAX_REPLICAS: usize = 4096;
+const MAX_REPLICA_LEN: usize = 128;
+
+// A value->value error conversion used as a `.map_err(fn)` argument; `&` would force a closure per call.
+#[allow(clippy::needless_pass_by_value)]
+fn internal(e: sqlx::Error) -> ApiError {
+    ApiError::Internal(e.to_string())
+}
+
+#[derive(Deserialize)]
+pub struct SeenBody {
+    /// `replica -> counter`, the caller's own `Frontier` (`docsync/src/lib.rs:400-404`): the next,
+    /// exclusive counter this replica's log entries are covered up to, from the reporting member's point
+    /// of view.
+    frontier: BTreeMap<String, u64>,
+}
+
+/// `PUT /trees/{tree_id}/seen` — upsert the caller's own reported frontier, one row per replica.
+///
+/// **Flagged gate choice** (not specified by the design beyond "same shape as `access.rs`"): `Access::Read`
+/// — any current member may self-report their own pull progress. Unlike `access.rs`'s membership summary
+/// (which mutates the security-adjacent advisory ACL and so is signer-gated), this is pure telemetry
+/// nothing yet acts on, so the ordinary tree-membership gate is enough.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized, the report is oversized, or the store access fails.
+pub async fn put_seen(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+    Json(body): Json<SeenBody>,
+) -> Result<Response, ApiError> {
+    let _p = crate::prof::span("seen.put");
+    if body.frontier.len() > MAX_REPLICAS || body.frontier.keys().any(|r| r.len() > MAX_REPLICA_LEN) {
+        return Err(ApiError::BadRequest(
+            "frontier exceeds the size limit".into(),
+        ));
+    }
+
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    let owner = owner.ok_or(ApiError::NotFound)?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
+
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    for (replica, counter) in &body.frontier {
+        let counter = i64::try_from(*counter).unwrap_or(i64::MAX);
+        sqlx::query(
+            "INSERT INTO tree_member_seen (tree_id, member_id, replica, counter, reported_at)
+             VALUES ($1, $2, $3, $4, now())
+             ON CONFLICT (tree_id, member_id, replica) DO UPDATE
+               SET counter = EXCLUDED.counter, reported_at = now()",
+        )
+        .bind(tree_id)
+        .bind(identity.member_id)
+        .bind(replica)
+        .bind(counter)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    }
+    tx.commit().await.map_err(internal)?;
+    Ok(StatusCode::OK.into_response())
+}
+
+#[derive(Serialize)]
+struct SeenRow {
+    member_id: String,
+    replica: String,
+    counter: i64,
+    reported_at: String,
+}
+
+/// `GET /trees/{tree_id}/seen` — every member's last-reported per-replica frontier, raw.
+/// `Access::Administer`-gated per the design (§4): server cost-control internals, not ordinary sync
+/// traffic.
+///
+/// # Errors
+/// Returns [`ApiError`] if the caller isn't authorized or the store access fails.
+pub async fn get_seen(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    let owner = owner.ok_or(ApiError::NotFound)?;
+    crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Administer).await?;
+
+    let rows: Vec<(Uuid, String, i64, String)> = sqlx::query_as(
+        "SELECT member_id, replica, counter, reported_at::text FROM tree_member_seen
+          WHERE tree_id = $1 ORDER BY member_id, replica",
+    )
+    .bind(tree_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+
+    let seen: Vec<SeenRow> = rows
+        .into_iter()
+        .map(|(member_id, replica, counter, reported_at)| SeenRow {
+            member_id: member_id.to_string(),
+            replica,
+            counter,
+            reported_at,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!({ "seen": seen }))).into_response())
+}

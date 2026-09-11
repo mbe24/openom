@@ -197,8 +197,14 @@ export class RemoteStore {
 
   /** The keys under `prefix` (a `{treeKey}/` prefix) as `[{ key, etag }]`, re-prefixed to the caller's namespace. */
   async blobList(prefix) {
-    const tree = prefix.replace(/\/.*$/, '').replace(/\/$/, '');
-    const res = await this.#send(`${this.#tree(tree)}/blobs`, { method: 'GET' });
+    const slash = prefix.indexOf('/');
+    const tree = slash === -1 ? prefix : prefix.slice(0, slash);
+    // Forward the sub-prefix (everything after `{tree}/`) as `?prefix=` so the server scopes the LIST
+    // itself (OPE-398 §2/§5.1) — additive and backward-compatible: an empty sub-prefix (bare `{tree}/` or
+    // no prefix at all) omits the query param, which is today's whole-tree behavior unchanged.
+    const sub = slash === -1 ? '' : prefix.slice(slash + 1).replace(/\/$/, '');
+    const qs = sub ? `?prefix=${encodeURIComponent(sub)}` : '';
+    const res = await this.#send(`${this.#tree(tree)}/blobs${qs}`, { method: 'GET' });
     if (res.status === 404) return [];
     if (!res.ok) throw httpError(`blobList ${tree}`, res.status);
     const j = await res.json();

@@ -37,7 +37,10 @@ use crate::AppState;
 
 /// Absolute per-append cap. Deltas are tiny; a payload near this should be a snapshot instead. Kept
 /// under Axum's default request-body limit so the ceiling is enforced here with a clear 400.
-const MAX_DELTA_BYTES: usize = 1024 * 1024;
+///
+/// Also reused by `blobs.rs` as the `log/` namespace's per-object cap (design.ope398-managed-server.md
+/// §1) — an immutable data-channel delta object is the same kind of payload as a scalar delta.
+pub(crate) const MAX_DELTA_BYTES: usize = 1024 * 1024;
 /// Payloads at or below this stay inline in Postgres; larger ones spill to an R2 object (see
 /// `append_log`). Settled ops are far smaller than this, so the spill path is exercised mainly by bulk
 /// imports — but it always exists, so a large delta is stored, not rejected.
@@ -225,8 +228,9 @@ pub async fn append_log(
 
     // Metering — capacity charged to the tree OWNER (owner-pays, §17); rate is PER-MEMBER so one abusive
     // member can't drain a shared bucket and DoS the owner + co-members. Only a genuinely new append is
-    // metered (re-deliveries returned above, so a retrying client is never metered).
-    charge_metering(&mut tx, tree_id, owner, identity.member_id, d.size).await?;
+    // metered (re-deliveries returned above, so a retrying client is never metered). A scalar delta always
+    // accumulates R2 bytes (it's immutable), so the capacity gate always fires here.
+    charge_metering(&mut tx, tree_id, owner, identity.member_id, d.size, true).await?;
 
     let seq = next_seq;
     let object_key = spill_if_oversized(&state, tree_id, seq, &body).await?;
@@ -260,20 +264,28 @@ pub async fn append_log(
     Ok((StatusCode::OK, Json(AppendResult { seq })).into_response())
 }
 
-/// Meter a genuinely-new append (re-deliveries are returned before this runs, so a retrying client is never
-/// metered). Two independent gates, each atomic in SQL. (1a) Per-member abuse rate: a token bucket keyed
-/// (tree, member), refilled at the OWNER's plan rate (owner-pays sets the budget, the member holds the
-/// state), lazily created full on first append; the WHERE guard on the UPDATE branch re-derives the balance
-/// so check and debit can't race (0 rows → over). This isolates one abusive member from draining a shared
-/// bucket. (2) Byte capacity: the tree-byte meter (§17), an axis independent of the media pool; charge the
-/// delta's size (0 rows → the tree reserve is full). A coarse per-account backstop against *coordinated*
-/// multi-member bursts is a follow-up — it needs its own burst budget above one member's `log_burst`.
-async fn charge_metering(
+/// Meter a genuinely-new append/put (re-deliveries are returned before this runs, so a retrying client is
+/// never metered). Two independent gates, each atomic in SQL. (1) Per-member abuse rate: a token bucket
+/// keyed (tree, member), refilled at the OWNER's plan rate (owner-pays sets the budget, the member holds
+/// the state), lazily created full on first append; the WHERE guard on the UPDATE branch re-derives the
+/// balance so check and debit can't race (0 rows → over). This isolates one abusive member from draining a
+/// shared bucket. It gates every write, unconditionally. (2) Byte capacity: the tree-byte meter (§17), an
+/// axis independent of the media pool; charge `size` (0 rows → the tree reserve is full) — but ONLY when
+/// `charge_capacity` is set. A coarse per-account backstop against *coordinated* multi-member bursts is a
+/// follow-up — it needs its own burst budget above one member's `log_burst`.
+///
+/// Re-homed for the data-channel blob path (`blobs.rs`, design.ope398-managed-server.md §3.1): the scalar
+/// delta-log append always accumulates R2 bytes, so it always passes `charge_capacity = true`; a blob PUT
+/// passes it only for an immutable (`Precondition::IfAbsent`) write — a pointer overwrite
+/// (`Precondition::Any`, `heads/`/`snapshot`) doesn't grow R2 usage, so charging capacity for it would
+/// over-charge the same logical state on every sync tick. The rate gate stays unconditional either way.
+pub(crate) async fn charge_metering(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tree_id: Uuid,
     owner: Uuid,
     member_id: Uuid,
     size: i64,
+    charge_capacity: bool,
 ) -> Result<(), ApiError> {
     let (m_rate, m_burst): (f64, i32) =
         sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
@@ -308,6 +320,10 @@ async fn charge_metering(
         };
         tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %member_id);
         return Err(ApiError::TooManyRequests(retry.max(1)));
+    }
+
+    if !charge_capacity {
+        return Ok(());
     }
 
     let capped = sqlx::query(

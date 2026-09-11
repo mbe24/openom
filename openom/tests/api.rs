@@ -138,6 +138,20 @@ fn post_bytes_as(uri: String, body: &[u8], member: Uuid) -> Request<Body> {
         .unwrap()
 }
 
+/// A blob PUT authenticated as a specific member. `if_absent` sends `if-none-match: *`
+/// (`Precondition::IfAbsent`); otherwise no conditional header (`Precondition::Any`).
+fn put_bytes_as(uri: String, body: &[u8], member: Uuid, if_absent: bool) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {member}"));
+    if if_absent {
+        b = b.header("if-none-match", "*");
+    }
+    b.body(Body::from(body.to_vec())).unwrap()
+}
+
 /// A snapshot PUT authenticated as a specific member (creates a tree owned by them).
 fn put_tree_as(tree: Uuid, env: &[u8], member: Uuid) -> Request<Body> {
     Request::builder()
@@ -2095,4 +2109,447 @@ async fn access_summary_owner_invariant_and_validation() {
     let bad_role = summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 9)]);
     let (s, _, _) = send(&app, put_json_as(uri, bad_role, owner)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "role out of range is refused");
+}
+
+// ---- OPE-398 data-channel blob store (blobs.rs) ----------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_put_mints_tree_row_on_first_write() {
+    // No scalar PUT /trees/{id} first — a brand-new tree's first *blob* write mints the trees row and
+    // makes the writer its owner (the flagged default for design.ope398-managed-server.md's open
+    // question #3: nothing else mints the tree row once the scalar snapshot PUT is gone).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+
+    let (s, h, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree}/blobs/log/replicaAAA/0"),
+            b"delta-bytes",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "first blob write mints the tree");
+    assert!(h.get("etag").is_some());
+
+    let row_owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree)
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+    assert_eq!(row_owner, Some(owner), "the first writer becomes the owner");
+
+    // Entitlement gate: an account already at max_trees can't mint a new one via a blob write.
+    let capped = Uuid::new_v4();
+    seed_account(&db, capped, 1 << 30, 1000.0, 1000).await;
+    sqlx::query("UPDATE accounts SET max_trees = 0 WHERE id = $1")
+        .bind(capped)
+        .execute(&db)
+        .await
+        .unwrap();
+    let tree2 = Uuid::new_v4();
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree2}/blobs/log/replicaAAA/0"),
+            b"x",
+            capped,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "over max_trees can't mint a tree via a blob write"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_put_get_roundtrip_pointer() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+
+    let (s, h, _) = send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"7", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "pointer put (Precondition::Any)");
+    let e1 = etag(&h);
+
+    let (s, h2, body) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "get roundtrip");
+    assert_eq!(body, b"7");
+    assert_eq!(etag(&h2), e1, "get etag matches put etag");
+
+    // Unconditional overwrite — no conflict, new etag.
+    let (s, h3, _) = send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"8", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "pointer overwrite");
+    assert_ne!(etag(&h3), e1, "new content, new etag");
+    let (_, _, body2) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), owner),
+    )
+    .await;
+    assert_eq!(body2, b"8", "the overwrite landed");
+
+    // Missing key -> 404 (graceful absence).
+    let (s, _, _) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs/heads/replicaZZZ"), owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "missing key");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_if_absent_create_then_conflict_and_idempotent_retry() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let key = format!("/trees/{tree}/blobs/log/replicaAAA/0");
+
+    let (s, h, _) = send(&app, put_bytes_as(key.clone(), b"delta-zero", owner, true)).await;
+    assert_eq!(s, StatusCode::OK, "immutable create");
+    let e1 = etag(&h);
+
+    // A different-content PUT to the same immutable key conflicts.
+    let (s, h2, _) = send(&app, put_bytes_as(key.clone(), b"delta-different", owner, true)).await;
+    assert_eq!(
+        s,
+        StatusCode::PRECONDITION_FAILED,
+        "IfAbsent on an existing key conflicts"
+    );
+    assert_eq!(etag(&h2), e1, "412 carries the existing etag");
+
+    // The identical-content retry a client actually sends on a crash-retry is the same shape — still
+    // 412s (the client treats this as idempotent success, remoteStore.js:224) — and the stored bytes are
+    // untouched either way.
+    let (s, _, _) = send(&app, put_bytes_as(key.clone(), b"delta-zero", owner, true)).await;
+    assert_eq!(
+        s,
+        StatusCode::PRECONDITION_FAILED,
+        "identical-content retry still 412s"
+    );
+
+    let (_, _, body) = send(&app, get_as(key, owner)).await;
+    assert_eq!(body, b"delta-zero", "the conflicting writes did not land");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_list_by_prefix() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+
+    send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaBBB"), b"2", owner, false),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/log/replicaAAA/0"), b"d", owner, true),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/snapshot"), b"s", owner, false),
+    )
+    .await;
+
+    let (s, _, b) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs?prefix=heads/"), owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    let mut keys: Vec<String> = v["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["heads/replicaAAA".to_string(), "heads/replicaBBB".to_string()],
+        "prefix scopes the listing, relative to the tree segment"
+    );
+
+    // No prefix -> everything.
+    let (s, _, b2) = send(&app, get_as(format!("/trees/{tree}/blobs"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&b2).unwrap()["keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4,
+        "an empty prefix lists everything under the tree"
+    );
+
+    // A tree with no blobs yet -> empty list, not an error.
+    let empty_tree = new_tree(&app, &db, owner).await;
+    let (s, _, eb) = send(&app, get_as(format!("/trees/{empty_tree}/blobs"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&eb).unwrap()["keys"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_metering_capacity_gates_immutable_only() {
+    // §3.1: the byte-capacity meter fires only on an IfAbsent (immutable, accumulating) put; a pointer
+    // (Precondition::Any) overwrite is capacity-exempt.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
+
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree}/blobs/log/replicaAAA/0"),
+            b"delta-zero",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "first immutable write");
+    let used: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(used > 0, "an immutable put charged the capacity meter");
+
+    // Pin max_tree_bytes to exactly what's used — the reserve is now full.
+    sqlx::query("UPDATE accounts SET max_tree_bytes = $2 WHERE id = $1")
+        .bind(owner)
+        .bind(used)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // A pointer overwrite still succeeds — capacity-exempt.
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "a pointer put is capacity-exempt");
+
+    // Another immutable write over the (now full) reserve is refused.
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree}/blobs/log/replicaAAA/1"),
+            b"delta-one",
+            owner,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "an immutable put over the reserve is refused"
+    );
+
+    // The rejected put charged nothing.
+    let after: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(after, used, "a rejected immutable put leaves the meter untouched");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_metering_rate_gates_every_put() {
+    // §3.1: the per-(tree,member) rate bucket gates EVERY blob put, immutable or pointer.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 0.001, 1).await; // burst 1, negligible refill
+    let tree = Uuid::new_v4();
+    send(
+        &app,
+        put_tree_as(tree, &snapshot_envelope(tree, b"ct", None), owner),
+    )
+    .await;
+
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "first pointer put spends the single token");
+
+    let (s, h, _) = send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"2", owner, false),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::TOO_MANY_REQUESTS,
+        "second put over rate — pointer writes are rate-gated too"
+    );
+    assert!(h.get("retry-after").is_some(), "429 carries Retry-After");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_authz_forbidden_for_non_members_viewer_cant_commit() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let stranger = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    send(
+        &app,
+        put_bytes_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), b"1", owner, false),
+    )
+    .await;
+
+    let (s, _, _) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), stranger),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't read a blob");
+    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/blobs"), stranger)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't list blobs");
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree}/blobs/heads/replicaAAA"),
+            b"2",
+            stranger,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't write a blob");
+
+    // A Viewer (Read-only) can read but not commit a write.
+    let viewer = Uuid::new_v4();
+    grant_role(&db, tree, viewer, 5).await;
+    let (s, _, _) = send(
+        &app,
+        get_as(format!("/trees/{tree}/blobs/heads/replicaAAA"), viewer),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "viewer can read");
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(
+            format!("/trees/{tree}/blobs/heads/replicaAAA"),
+            b"2",
+            viewer,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "viewer can't commit a blob write");
+}
+
+// ---- OPE-398 seen-frontier plumbing (seen.rs) -------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn seen_report_upserts_and_administer_gates_read() {
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let maint = Uuid::new_v4();
+    grant_role(&db, tree, maint, 3).await;
+    let editor = Uuid::new_v4();
+    grant_role(&db, tree, editor, 4).await;
+
+    let body = serde_json::json!({ "frontier": { "replicaAAA": 3, "replicaBBB": 1 } });
+    let (s, _, _) = send(&app, put_json_as(format!("/trees/{tree}/seen"), body, editor)).await;
+    assert_eq!(s, StatusCode::OK, "a member reports its own frontier");
+
+    // Administer (Maintainer+) can read the raw reports.
+    let (s, _, b) = send(&app, get_as(format!("/trees/{tree}/seen"), maint)).await;
+    assert_eq!(s, StatusCode::OK, "maintainer reads seen reports");
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(
+        v["seen"].as_array().unwrap().len(),
+        2,
+        "one row per reported replica"
+    );
+
+    // Re-report updates in place, not duplicates.
+    let body2 = serde_json::json!({ "frontier": { "replicaAAA": 5 } });
+    send(&app, put_json_as(format!("/trees/{tree}/seen"), body2, editor)).await;
+    let (_, _, b2) = send(&app, get_as(format!("/trees/{tree}/seen"), maint)).await;
+    let v2: Value = serde_json::from_slice(&b2).unwrap();
+    let rows2 = v2["seen"].as_array().unwrap();
+    assert_eq!(rows2.len(), 2, "still one row per replica — updated, not appended");
+    let a = rows2.iter().find(|r| r["replica"] == "replicaAAA").unwrap();
+    assert_eq!(a["counter"].as_i64().unwrap(), 5, "counter updated in place");
+
+    // An Editor (below the Administer gate) can't read the raw reports back.
+    let (s, _, _) = send(&app, get_as(format!("/trees/{tree}/seen"), editor)).await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "editor is below the Administer gate for GET /seen"
+    );
+
+    // A non-member can't even PUT.
+    let stranger = Uuid::new_v4();
+    let body3 = serde_json::json!({ "frontier": { "replicaAAA": 1 } });
+    let (s, _, _) = send(
+        &app,
+        put_json_as(format!("/trees/{tree}/seen"), body3, stranger),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't report seen");
 }

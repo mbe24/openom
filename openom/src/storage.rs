@@ -334,6 +334,15 @@ pub mod keys {
         format!("blobs/{}/{}/{}", shard(tree), tree.simple(), blob.simple())
     }
 
+    /// `data/{shard}/{tree}/{key}` — the OPE-397/398 data-channel blob store (`blobs.rs`). `key` is the
+    /// client's OPAQUE sub-path (`log/{replica}/{counter}`, `heads/{replica}`, `snapshot`) — unlike the
+    /// other namespaces here, the server does not choose it, only routes it through, so it is validated
+    /// (no empty/`.`/`..` segments, bounded length) by the caller before this is built.
+    #[must_use]
+    pub fn data_blob(tree: Uuid, key: &str) -> String {
+        format!("data/{}/{}/{}", shard(tree), tree.simple(), key)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -366,6 +375,12 @@ pub mod keys {
             assert!(blob(tree, bid).starts_with("blobs/"));
             assert!(staging(tree, bid).starts_with("staging/"));
             assert!(!blob(tree, bid).contains('-'));
+
+            // data_blob: same shard-locality + namespacing, opaque client-chosen key passed through as-is.
+            let d = data_blob(tree, "log/AbC/7");
+            assert!(d.starts_with("data/"));
+            assert_eq!(shard_of(&d), sh);
+            assert!(d.ends_with("/log/AbC/7"));
         }
     }
 }
