@@ -92,9 +92,11 @@ pub struct Header {
 }
 /// The decrypted body of a KIND_COVER entry (OPE-382 self-heal): the set of entries this cover blesses. Each
 /// covered entry names its ciphertext-hash (H(ciphertext), recomputed by the reader — the header field is
-/// unauthenticated) plus the id + author key that signed it, so the reader verifies the covered entry's
-/// signature against these bound values while WAIVING only the current-membership/role check. The cover
-/// author must have observed + accepted each entry it lists (a Maintainer's own signed, auditable act).
+/// unauthenticated) plus the claimed author id. The reader resolves that author's keys-ever-held and
+/// strongest-role from its OWN verified membership (never from the cover) and verifies the entry's signature +
+/// kind against those, WAIVING only the current-membership check. So a forged cover can neither bind an
+/// attacker key to a real removed member nor waive the role check. The cover author must have observed +
+/// accepted each entry it lists (a Maintainer's own signed, auditable act).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CoverBody {
     #[prost(message, repeated, tag="1")]
@@ -108,9 +110,6 @@ pub struct CoveredEntry {
     /// The blessed entry's claimed author (must equal its header.author_member_id).
     #[prost(string, tag="2")]
     pub author_member_id: ::prost::alloc::string::String,
-    /// The Ed25519 verify key the blessed entry's author_signature is checked against.
-    #[prost(bytes="vec", tag="3")]
-    pub author_public_key: ::prost::alloc::vec::Vec<u8>,
 }
 /// The managed keyring-endpoint transport envelope: the ONE message the server parses for
 /// `PUT /trees/{id}/keyring`. It carries only ROUTING metadata the server uses WITHOUT understanding any

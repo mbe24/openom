@@ -147,6 +147,25 @@ pub const ROLE_MAINTAINER: i16 = 3;
 pub const ROLE_EDITOR: i16 = 4;
 pub const ROLE_VIEWER: i16 = 5;
 
+/// What the self-heal (OPE-382) needs about a member who was EVER legitimately admitted — resolved from the
+/// verified keyring, NEVER from an (untrusted) cover. Both facts are single-sourced here so a caller can't
+/// assemble a mismatched (id, wrong key, wrong role) tuple — the split that let a forged cover-bound key hide.
+///
+/// - `keys_ever_held`: every author public key the member ever legitimately held (admission key ⊔ every
+///   effective re-key: dag `ReFound` recovery + `Retarget` self-rekey). The reader accepts a covered entry only
+///   if its signature verifies against one of THESE, so an attacker-chosen cover key is not honored.
+/// - `strongest_role`: the strongest role the member ever held (numeric, **lower is stronger**, so the MIN over
+///   their admission role and every effective `ChangeRole`). The reader checks the covered entry's kind against
+///   THIS, so a never-promoted below-Maintainer's planted delta is not blessed by a cover. Strongest-ever
+///   (rather than write-time or at-removal) is monotone and never drops a promoted-then-removed member's
+///   legitimate history; the bounded residue (a demoted ex-Maintainer's below-role write) is closed by the
+///   snapshot boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EverMemberInfo {
+    pub keys_ever_held: Vec<Vec<u8>>,
+    pub strongest_role: i16,
+}
+
 /// One member of the resolved keyring, engine-agnostic. Both engines fold to this: chain from
 /// `Keyring.members`, dag from the resolved `GroupState`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

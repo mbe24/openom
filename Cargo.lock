@@ -1225,6 +1225,7 @@ dependencies = [
 name = "docsync"
 version = "0.1.0"
 dependencies = [
+ "store-blob",
  "store-log",
  "thiserror 2.0.20",
 ]
@@ -3641,6 +3642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "store-blob",
  "store-log",
  "thiserror 2.0.20",
  "wasm-bindgen",
@@ -3728,7 +3730,7 @@ dependencies = [
  "openom-protocol",
  "openom-sealer",
  "serde_json",
- "store-log",
+ "store-blob",
 ]
 
 [[package]]

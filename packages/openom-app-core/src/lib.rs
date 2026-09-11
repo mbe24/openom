@@ -1,17 +1,21 @@
 #![doc = include_str!("../README.md")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openom_data_tree::{OpView, Tree, TreeError};
-use openom_docsync::SyncClient;
+use openom_docsync::{SyncClient, Verdict};
 use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
 use openom_vault::{Disposition, MembershipResolver};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
-use store_log::DocStore;
+use store_blob::{BlobError, BlobStore, MemoryBlob, Precondition};
+
+/// One stored object: its keyspace key and its opaque sealed bytes. The unit of [`AppCore::export`] /
+/// [`AppCore::import`] / [`AppCore::sync_against`] — a `(key, bytes)` pair the host ferries verbatim.
+pub type StoredObject = (String, Vec<u8>);
 
 #[cfg(feature = "wasm")]
 mod wasm;
@@ -25,116 +29,97 @@ pub enum CoreError {
     /// An engine (mint / flush / read) error.
     #[error(transparent)]
     Tree(#[from] TreeError),
-    /// A local durable-store error (the replicator's direct append / read).
+    /// A local durable-store (Blob seam) error.
     #[error(transparent)]
-    Store(#[from] store_log::StoreError),
+    Store(#[from] BlobError),
     /// A vault crypto error — e.g. a member's epoch adopt over a malformed keyring (OPE-393).
     #[error(transparent)]
     Vault(#[from] openom_vault::VaultError),
 }
 
-/// The local-origin sealed deltas awaiting a server push, and the local-store cursor they cover.
+/// One tree's Rust core: the engine + sealer + the `docsync::BlobSyncClient` loop over a LOCAL device
+/// `BlobStore`. Every method is **synchronous**. The device-local ⇄ shared-remote replication is the
+/// `docsync::mirror` anti-entropy the caller drives (the test harness directly; the worker's async JS wraps
+/// it): mirror the remote's objects into the local store, then [`fold`](Self::fold) them through the §B3 gate.
 ///
-/// The worker driver POSTs each entry to the server, and on success calls
-/// [`AppCore::mark_pushed`] with `through` — so a failed push simply re-scans the same range next
-/// tick (the server dedups a re-sent entry on its replica dot, so a retry is harmless).
-#[derive(Debug, Clone)]
-pub struct Outbound {
-    /// The sealed `Envelope` bytes to POST to the server's log, oldest first.
-    pub entries: Vec<Vec<u8>>,
-    /// The local-store seq the scan reached — pass to [`AppCore::mark_pushed`] once every entry lands.
-    pub through: u64,
-}
-
-/// One tree's Rust core: the engine + sealer + docsync loop over a local durable store, plus the
-/// local⇄server [`Replicator`](self) cursors. Every method is **synchronous**; the worker driver
-/// wraps them with `fetch`.
-///
-/// The store is held as `Arc<S>` so the docsync client and the replicator share one underlying log:
-/// docsync appends this replica's mints and folds the local tail into the engine, while the replicator
-/// pushes this replica's own entries up and appends peers' entries down.
-pub struct AppCore<S: DocStore> {
+/// The store is `Arc<S>` so the client and the mirror share one local log: the client writes this replica's
+/// mints as immutable per-replica log objects + folds peers' (mirrored-in) objects into the engine.
+pub struct AppCore<S: BlobStore> {
     client: SyncClient<Arc<S>>,
     store: Arc<S>,
     doc: String,
-    /// This replica's id (the sealer's `replica_id`) — the discriminator that keeps the replicator
-    /// from echoing peers' entries back up or re-storing our own on the way down.
-    replica: Vec<u8>,
-    /// Every peer replica-dot `(replica_id, counter)` already in the local store — so re-pulling the
-    /// server tail on a reload (when `server_cursor` has reset) does NOT re-append peer entries. Built
-    /// from the store on [`import_log`](Self::import_log); grown on [`ingest`](Self::ingest).
-    seen: std::collections::BTreeSet<(Vec<u8>, u64)>,
-    /// Server log entries whose header wouldn't even decode (can't attribute or dedup them) — skipped
-    /// at ingest and surfaced via [`anomalies`](Self::anomalies), not silently dropped.
+    /// Peer entries whose envelope/header wouldn't decode (can't verify) — surfaced via
+    /// [`anomalies`](Self::anomalies), never blindly folded.
     undecodable: usize,
-    /// Local-store seq already scanned for outbound push.
-    push_scan: Option<u64>,
-    /// Local-store seq already mirrored to durable storage (the persist cursor lives in Rust, not the
-    /// worker — the host just executes the append and confirms with [`mark_persisted`](Self::mark_persisted)).
-    persisted: Option<u64>,
-    /// The server log `?since` cursor — the seq of the newest server entry already pulled.
-    server_cursor: Option<i64>,
-    /// The §B3 governing membership for verify-on-ingest. `None` ⇒ a solo / never-shared tree (no keyring):
-    /// AEAD-only is safe there (only the DEK holder can write), so ingest accepts without attribution. The
-    /// worker installs `Some(..)` via [`set_membership`](Self::set_membership) once the tree is shared, after
-    /// which every peer entry is verified against the resolved roles before it is stored or folded.
-    membership: Option<Box<dyn MembershipResolver>>,
-    /// Peer entries HELD because their governing keyring/epoch isn't retained locally yet (the data channel
-    /// outran the keyring channel). Re-verified on the next [`set_membership`](Self::set_membership); never
-    /// folded until they verify. Bounded by [`HELD_CAP`](Self::HELD_CAP) — an overflow is dropped (counted in
-    /// [`anomalies`](Self::anomalies)) and recovered on a reload's full re-pull, since the server log is never
-    /// pruned below an un-subsumed entry.
-    held: Vec<Vec<u8>>,
-    /// Peer entries REJECTED by §B3 verification (forged / unattributed-on-shared / illegitimate), plus any
-    /// hold-buffer overflow — never stored, and the cursor still advances so a forgery can't stall the tail.
-    /// Surfaced via [`anomalies`](Self::anomalies), never silently swallowed.
+    /// Peer entries REJECTED by §B3 verification (forged / unattributed-on-shared / illegitimate). Never
+    /// folded; surfaced via [`anomalies`](Self::anomalies), never silently swallowed. (Hold is the client's
+    /// frontier-held set — see [`fold`](Self::fold).)
     rejected: usize,
-    /// The self-heal covered set (OPE-382 SH-2): `H(ciphertext) → (author_member_id, author_public_key)` for
-    /// every entry a currently-valid Cover marker blesses. A since-removed member's data entry that would
-    /// otherwise fail `UnknownAuthor` is accepted iff its recomputed hash is here AND it still signature-
-    /// verifies against the bound key ([`openom_vault::verify_covered_entry`]). Rebuilt from
-    /// [`cover_envelopes`](Self) on every [`set_membership`](Self) (a cover from a now-removed Maintainer must
-    /// drop out — pin P3), and NOT durable: a fresh replay re-pulls the whole server log, covers included.
-    covered: std::collections::BTreeMap<Vec<u8>, (String, Vec<u8>)>,
-    /// The raw `Cover` envelopes seen this session, retained so [`covered`](Self) can be REBUILT against the
-    /// current membership on each [`set_membership`](Self) (a cover's own validity is current-time — pin P3).
-    /// In-memory only, re-pulled from the server log each session.
+    /// The §B3 governing membership for verify-on-fold. `None` ⇒ a solo / never-shared tree (AEAD-only is safe:
+    /// only the DEK holder can write). The worker installs `Some(..)` via [`set_membership`](Self::set_membership)
+    /// once shared, after which every peer entry is verified before it folds.
+    membership: Option<Box<dyn MembershipResolver>>,
+    /// The self-heal covered set (OPE-382 SH-2): `H(ciphertext) → author_member_id` for every entry a
+    /// currently-valid Cover blesses. Only the author ID is stored — the author's KEY and ROLE are resolved from
+    /// the membership at accept time via [`MembershipResolver::ever_member_info`], NEVER taken from the
+    /// (untrusted) cover, so a forged cover can't bind an attacker key or waive the role check. Rebuilt from
+    /// [`cover_envelopes`](Self) on every [`set_membership`](Self) (pin P3), and not durable: a fresh fold
+    /// re-scans the whole local store.
+    covered: BTreeMap<Vec<u8>, String>,
+    /// The raw `Cover` envelopes folded this session, retained so [`covered`](Self) can be REBUILT against the
+    /// current membership on each [`set_membership`](Self).
     cover_envelopes: Vec<Vec<u8>>,
-    /// A MEMBER core retains its epoch-adopt secret (the HPKE secret + context) so a keyring sync that rotated
-    /// the write epoch (a removal) can splice the new epoch DEK into the running sealer WITHOUT a passphrase
-    /// (OPE-393) — see [`adopt_epochs`](Self::adopt_epochs). `None` on an owner / solo / never-shared core.
-    /// Never crosses to JS (the wasm veneer sets it inside this core at member unlock).
+    /// A MEMBER core retains its epoch-adopt secret so a keyring sync that rotated the write epoch can splice
+    /// the new epoch DEK into the running sealer WITHOUT a passphrase (OPE-393). `None` on an owner / solo core.
     member_epoch_secret: Option<openom_vault::sharing::MemberEpochSecret>,
 }
 
-impl<S: DocStore> AppCore<S> {
-    /// Wrap a freshly-unlocked tree. `created_by` is this device's author `did:key`; `sealer` carries
-    /// the DEK and this replica's id; `store` is the local durable log; `doc` is its store key.
+/// This replica's keyspace folder — the raw id as lowercase hex, so a random binary replica id maps to a
+/// valid, injective object-key segment (the sealer keeps the raw bytes for attribution).
+fn replica_key(replica: &[u8]) -> String {
+    use std::fmt::Write as _;
+    replica.iter().fold(String::with_capacity(replica.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+impl<S: BlobStore> AppCore<S> {
+    /// Wrap a freshly-unlocked tree over a local `BlobStore`. `created_by` is this device's author `did:key`;
+    /// `sealer` carries the DEK + this replica's id; `store` is the local durable `BlobStore`; `doc` is its
+    /// keyspace prefix; `replica` is this replica's raw id.
     pub fn new(
         created_by: impl Into<String>,
         sealer: SealerSet,
         store: Arc<S>,
         doc: impl Into<String>,
-        replica: Vec<u8>,
+        replica: &[u8],
     ) -> Self {
         let doc = doc.into();
         Self {
-            client: SyncClient::new(created_by, sealer, Arc::clone(&store), doc.clone()),
+            client: SyncClient::new(
+                created_by,
+                sealer,
+                Arc::clone(&store),
+                doc.clone(),
+                replica_key(replica),
+            ),
             store,
             doc,
-            replica,
-            seen: std::collections::BTreeSet::new(),
             undecodable: 0,
-            push_scan: None,
-            persisted: None,
-            server_cursor: None,
-            membership: None,
-            held: Vec::new(),
             rejected: 0,
-            covered: std::collections::BTreeMap::new(),
+            membership: None,
+            covered: BTreeMap::new(),
             cover_envelopes: Vec::new(),
             member_epoch_secret: None,
         }
+    }
+
+    /// The local device `BlobStore` — the caller mirrors it against the shared remote (`docsync::mirror`)
+    /// before/after [`fold`](Self::fold).
+    #[must_use]
+    pub fn store(&self) -> &Arc<S> {
+        &self.store
     }
 
     /// Retain the member's epoch-adopt secret (OPE-393) — set by the wasm veneer at a MEMBER unlock so the
@@ -171,11 +156,6 @@ impl<S: DocStore> AppCore<S> {
             .adopt_epochs(adopted.epochs, adopted.write_key_id, adopted.governing_ref))
     }
 
-    /// The hold buffer's cap — entries awaiting a not-yet-synced governing keyring. Beyond this an overflow is
-    /// dropped (recovered on a reload's full re-pull), so a peer withholding a keyring can't grow memory
-    /// without bound.
-    const HELD_CAP: usize = 1024;
-
     /// Rebuild the engine from the local durable log (snapshot + tail) — call once on open, after a
     /// reload. This is what makes an offline mint survive a reload: the mint is durable in the local
     /// store, so it re-enters the engine here and is re-offered by [`outbound`](Self::outbound).
@@ -183,7 +163,7 @@ impl<S: DocStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if the store read or a merge fails.
     pub fn bootstrap(&mut self) -> Result<(), CoreError> {
-        self.client.bootstrap_claims()?;
+        self.fold()?; // re-scan the whole local store through the §B3 gate (a fresh client's frontier is empty)
         Ok(())
     }
 
@@ -223,101 +203,148 @@ impl<S: DocStore> AppCore<S> {
     /// Returns [`CoreError`] if clearing the local store fails.
     pub fn reset(&mut self) -> Result<(), CoreError> {
         self.client.tree_mut().clear();
-        self.store.delete(&self.doc)?;
-        self.push_scan = None;
-        self.server_cursor = None;
-        self.persisted = None;
-        self.seen.clear();
+        // Delete every object under this doc's keyspace (log/heads/snapshot).
+        let prefix = format!("{}/", self.doc);
+        for (key, _etag) in self.store.list(&prefix)? {
+            self.store.delete(&key, Precondition::Any)?;
+        }
         self.undecodable = 0;
-        self.held.clear();
         self.rejected = 0;
         self.covered.clear();
         self.cover_envelopes.clear();
         Ok(())
     }
 
-    // --- the replicator: local log ⇄ server ----------------------------------------------------
+    // --- fold: the §B3 verify gate over the (mirrored) local store ------------------------------
 
-    /// This replica's own sealed deltas the server hasn't seen yet (see [`Outbound`]). Peers' entries
-    /// that reached the local store via [`ingest`](Self::ingest) are filtered out by replica id.
+    /// Fold every log object past the client's inbound frontier through the §B3 gate: each peer `Delta` is
+    /// verified ([`classify_entry`]) — accepted → merged, held → parked for a later fold (a later membership
+    /// op / cover un-holds it), rejected → dropped + counted — and each `Cover` is verified + folded into
+    /// [`covered`](Self) ([`fold_cover_entry`]). The caller mirrors the shared remote into the local store
+    /// first; this then folds the arrivals. Returns how many entries merged this call.
     ///
     /// # Errors
-    /// Returns [`CoreError`] if the local store read fails.
-    pub fn outbound(&self) -> Result<Outbound, CoreError> {
-        let (updates, through) = self.store.read_updates(&self.doc, self.push_scan)?;
-        let entries = updates
-            .into_iter()
-            .filter(|env| envelope_dot(env).is_some_and(|(r, _)| r == self.replica))
-            .collect();
-        Ok(Outbound { entries, through })
-    }
-
-    /// Advance the outbound cursor after every entry from an [`outbound`](Self::outbound) batch has
-    /// been accepted by the server.
-    pub const fn mark_pushed(&mut self, through: u64) {
-        self.push_scan = Some(through);
-    }
-
-    // --- durable persistence: the core owns the log; the host executes the plan --------------------
-    //
-    // The core computes *what* to persist synchronously (opaque sealed byte-batches + the log cursor);
-    // the host (worker JS) executes the writes against a dumb async blob store (IndexedDB on web,
-    // rusqlite on Tauri) OUTSIDE these sync steps. No storage engine lives in Rust-wasm — persisting
-    // encrypted blobs is plumbing the platform already handles.
-
-    /// Every local-log entry after `since` (the whole log if `None`) plus the new cursor — the batch the
-    /// host should append to durable storage. Unlike [`outbound`](Self::outbound), this is NOT filtered
-    /// by replica: durability mirrors the *whole* local log (ours + peers'), so a reload rebuilds the
-    /// full set without re-pulling everything from the server.
-    ///
-    /// # Errors
-    /// Returns [`CoreError`] if the local store read fails.
-    pub fn export_since(&self, since: Option<u64>) -> Result<(Vec<Vec<u8>>, u64), CoreError> {
-        Ok(self.store.read_updates(&self.doc, since)?)
-    }
-
-    /// Load durably-persisted log entries back into the local store on open (before
-    /// [`bootstrap`](Self::bootstrap) replays them into the engine). Idempotent at the engine level
-    /// (merge dedups by content id), but the host should load each entry once (it tracks its own
-    /// persisted cursor).
-    ///
-    /// # Errors
-    /// Returns [`CoreError`] if the local store append fails.
-    pub fn import_log(&mut self, entries: &[Vec<u8>]) -> Result<(), CoreError> {
-        for env in entries {
-            if let Some((replica, counter)) = envelope_dot(env) {
-                if replica != self.replica {
-                    self.seen.insert((replica, counter)); // so a later re-pull doesn't re-append these
+    /// Returns [`CoreError`] if a local store read fails (a broken backend — not one bad entry).
+    pub fn fold(&mut self) -> Result<usize, CoreError> {
+        use std::cell::{Cell, RefCell};
+        // `covered`/`cover_envelopes` are shared by the two closures (classify reads, fold_cover writes), so
+        // take them into interior-mutable locals for the call; `membership` is a disjoint field, borrowed
+        // shared, while `self.client` is borrowed mut by pull_verified.
+        let membership = self.membership.as_deref();
+        let covered = RefCell::new(std::mem::take(&mut self.covered));
+        let cover_envs = RefCell::new(std::mem::take(&mut self.cover_envelopes));
+        let rejected = Cell::new(0_usize);
+        let n = {
+            let classify = |env: &[u8], pt: &[u8], _r: &str, _c: u64| {
+                let v = classify_entry(membership, &covered.borrow(), env, pt);
+                if v == Verdict::Reject {
+                    rejected.set(rejected.get() + 1);
                 }
+                v
+            };
+            let fold_cover = |env: &[u8], body: &[u8], _r: &str, _c: u64| {
+                if fold_cover_entry(membership, &mut covered.borrow_mut(), env, body) {
+                    cover_envs.borrow_mut().push(env.to_vec());
+                } else {
+                    rejected.set(rejected.get() + 1);
+                }
+            };
+            self.client.pull_verified(classify, fold_cover)?
+        };
+        self.covered = covered.into_inner();
+        self.cover_envelopes = cover_envs.into_inner();
+        self.rejected += rejected.get();
+        Ok(n)
+    }
+
+    // --- durable persistence: the local BlobStore mirrored to a durable tier -----------------------
+    //
+    // The local BlobStore is the device-local durable cache. Where it is in-memory (tests), the host
+    // persists it to a durable tier (IndexedDB / rusqlite) as opaque (key, bytes) objects: `export` lists
+    // them; `import` puts them back on open. The core computes WHAT to persist synchronously; the host runs
+    // the async writes outside these steps.
+
+    /// Every object under this doc's keyspace, as `(key, bytes)` — the batch the host writes to durable
+    /// storage. Not filtered by replica: durability mirrors the WHOLE local store (ours + peers'), so a
+    /// reload rebuilds the full set without re-pulling from the remote.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if a local store read fails.
+    pub fn export(&self) -> Result<Vec<(String, Vec<u8>)>, CoreError> {
+        let prefix = format!("{}/", self.doc);
+        let mut out = Vec::new();
+        for (key, _etag) in self.store.list(&prefix)? {
+            if let Some((bytes, _etag)) = self.store.get(&key)? {
+                out.push((key, bytes));
             }
         }
-        if !entries.is_empty() {
-            self.store.append(&self.doc, entries)?;
+        Ok(out)
+    }
+
+    /// Load durably-persisted objects back into the local store on open (before [`bootstrap`](Self::bootstrap)
+    /// folds them). Idempotent: immutable log objects go in `IfAbsent`, head/snapshot pointers overwrite.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if a local store write fails.
+    pub fn import(&mut self, objects: &[(String, Vec<u8>)]) -> Result<(), CoreError> {
+        for (key, bytes) in objects {
+            let pre = if is_pointer_key(key) {
+                Precondition::Any
+            } else {
+                Precondition::IfAbsent
+            };
+            match self.store.put(key, bytes, pre) {
+                Ok(_) | Err(BlobError::PreconditionFailed) => {}
+                Err(e) => return Err(e.into()),
+            }
         }
-        // Everything imported is already durable (it came FROM durable storage), so the persist cursor
-        // starts past it — the host won't re-mirror the reloaded log.
-        self.persisted = Some(self.store.read_updates(&self.doc, None)?.1);
         Ok(())
     }
 
-    /// Local-log entries not yet mirrored to durable storage, plus the cursor to confirm afterwards
-    /// with [`mark_persisted`](Self::mark_persisted). The persist cursor lives here, in the core — the
-    /// host just runs the append and confirms.
+    // --- remote sync: reconcile against a snapshot of the shared remote --------------------------------
+
+    /// Reconcile against a snapshot of the shared remote's objects, and return what the remote is missing.
+    ///
+    /// The caller (the worker) lists every object the shared remote holds under this doc and passes them here.
+    /// This mirrors them into the local store (PULL), folds the arrivals through the §B3 gate, then mirrors the
+    /// local store back into an in-memory copy of the remote (PUSH) and returns the objects that copy has which
+    /// the input snapshot lacked — exactly the set the caller must upload. `docsync::mirror` owns the whole
+    /// keyspace + frontier + head-monotonicity decision (a peer's head is only ever advanced, never rolled
+    /// back), so the caller stays a dumb ferry that never parses, builds, or compares a key.
+    ///
+    /// Returns `(objects_to_upload, folded_count)`.
     ///
     /// # Errors
-    /// Returns [`CoreError`] if the local store read fails.
-    pub fn export_unpersisted(&self) -> Result<(Vec<Vec<u8>>, u64), CoreError> {
-        self.export_since(self.persisted)
+    /// Returns [`CoreError`] if a store read/write or a mirror step fails.
+    pub fn sync_against(&mut self, remote: &[StoredObject]) -> Result<(Vec<StoredObject>, usize), CoreError> {
+        // An in-memory view of the remote, seeded from the caller's snapshot.
+        let view = MemoryBlob::new();
+        for (key, bytes) in remote {
+            view.put(key, bytes, Precondition::Any)?;
+        }
+        // PULL remote → local (monotonic), fold the arrivals, then PUSH local → the view (monotonic).
+        docsync::mirror(&view, &self.store, &self.doc)?;
+        let folded = self.fold()?;
+        docsync::mirror(&self.store, &view, &self.doc)?;
+        // The view now holds the union; whatever it has that the input snapshot didn't (a fresh log object, or
+        // an advanced head/snapshot pointer) is what the remote must be sent.
+        let had: std::collections::HashMap<&str, &[u8]> =
+            remote.iter().map(|(k, b)| (k.as_str(), b.as_slice())).collect();
+        let mut uploads = Vec::new();
+        for (key, _etag) in view.list(&format!("{}/", self.doc))? {
+            let Some((bytes, _etag)) = view.get(&key)? else {
+                continue;
+            };
+            if had.get(key.as_str()) != Some(&bytes.as_slice()) {
+                uploads.push((key, bytes));
+            }
+        }
+        Ok((uploads, folded))
     }
 
-    /// Advance the persist cursor after the host has durably written an [`export_unpersisted`] batch.
-    pub const fn mark_persisted(&mut self, through: u64) {
-        self.persisted = Some(through);
-    }
-
-    /// Data-integrity anomalies observed so far: server entries whose header wouldn't decode, the pull's
-    /// quarantined (un-openable / un-mergeable) entries, and the §B3-rejected forgeries (+ hold overflow). A
-    /// caller surfaces a non-zero count as a warning — these are never silently swallowed.
+    /// Data-integrity anomalies observed so far: entries whose header wouldn't decode, the fold's quarantined
+    /// (un-openable / un-mergeable) objects, and the §B3-rejected forgeries. A caller surfaces a non-zero
+    /// count as a warning — these are never silently swallowed.
     #[must_use]
     pub fn anomalies(&self) -> usize {
         self.undecodable + self.client.quarantined_count() + self.rejected
@@ -345,161 +372,104 @@ impl<S: DocStore> AppCore<S> {
         // Re-validate every retained Cover against the NEW membership (pin P3): a cover whose author is no
         // longer a Maintainer must stop blessing, so rebuild `covered` from scratch rather than let it grow.
         self.rebuild_covered();
-        self.drain_held()
+        // Re-fold: the client re-verifies its held dots under the new membership (a now-retained governing
+        // keyring/epoch releases them), and folds the newly-released entries.
+        self.fold()
     }
 
     /// Author a self-heal **cover** over this device's stored entries whose author was legitimately a member
-    /// but is no longer current (the OPE-382 writer sweep — dag only in practice). Scans the local Accepted
-    /// store: a `Delta` authored by a since-removed EVER-member (pin P6: never a voided thief or a
-    /// never-member) that isn't already covered goes into a `CoverBody`, bound to the author's key. Returns
-    /// the sealed `Cover` envelope for the caller to push to the server (it is NOT stored locally — a Cover
-    /// must not enter the claim log); the cover is folded into the local covered set so a re-sweep is
-    /// idempotent. `None` when there is nothing to cover.
+    /// but is no longer current (the OPE-382 writer sweep — dag only in practice). Scans the local store: a
+    /// `Delta` by a since-removed EVER-member (pin P6: never a voided thief or a never-member), not already
+    /// covered, is covered ONLY if it would itself pass covered-accept — the same [`verify_covered_entry`]
+    /// predicate the reader applies (a valid signature by a key the author actually held AND a kind permitted by
+    /// the author's strongest role). This is what makes the previously-implicit "the store holds only accepted
+    /// entries" coupling explicit: the writer covers exactly what the reader would accept, so a rogue below-role
+    /// plant or a forgery in the dumb-mirror store is never blessed. Publishes the sealed `Cover` as a log
+    /// object (folded into the local covered set so a re-sweep is idempotent). Returns whether a cover was
+    /// authored.
     ///
     /// Re-run on every membership change (a removal, or a covering Maintainer's own later removal — pin P4);
     /// each run covers whatever became uncovered.
     ///
     /// # Errors
     /// Returns [`CoreError`] if the store read or the seal fails.
-    pub fn author_cover(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
-        let entries = self.store.read_updates(&self.doc, None)?.0;
-        let covered_entries: Vec<CoveredEntry> = match self.membership.as_deref() {
-            None => return Ok(None), // solo tree: no removed members to heal
-            Some(membership) => entries
-                .iter()
-                .filter_map(|env| {
-                    let envelope = Envelope::decode(env.as_slice()).ok()?;
-                    let header = envelope.header?;
-                    // Only data (Delta) entries by a SINCE-REMOVED ever-member, not already covered.
-                    if header.kind != Kind::Delta as i32 || membership.current_member(&header.author_member_id)
-                    {
-                        return None;
-                    }
-                    let key = membership.ever_member_key(&header.author_member_id)?; // P6: ever a member
-                    let hash = Sha256::digest(&envelope.ciphertext).to_vec();
-                    if self.covered.contains_key(&hash) {
-                        return None;
-                    }
-                    Some(CoveredEntry {
-                        ciphertext_hash: hash,
-                        author_member_id: header.author_member_id,
-                        author_public_key: key,
-                    })
-                })
-                .collect(),
+    pub fn author_cover(&mut self) -> Result<bool, CoreError> {
+        let Some(membership) = self.membership.as_deref() else {
+            return Ok(false); // solo tree: no removed members to heal
         };
-        if covered_entries.is_empty() {
-            return Ok(None);
+        // Scan every local log object for a Delta by a SINCE-REMOVED ever-member, not already covered.
+        let log_prefix = format!("{}/log/", self.doc);
+        let mut covered_entries: Vec<CoveredEntry> = Vec::new();
+        for (key, _etag) in self.store.list(&log_prefix)? {
+            let Some((env, _etag)) = self.store.get(&key)? else {
+                continue;
+            };
+            let Ok(envelope) = Envelope::decode(env.as_slice()) else {
+                continue;
+            };
+            let Some(header) = envelope.header.as_ref() else {
+                continue;
+            };
+            if header.kind != Kind::Delta as i32 || membership.current_member(&header.author_member_id) {
+                continue;
+            }
+            let Some(info) = membership.ever_member_info(&header.author_member_id) else {
+                continue; // P6: ever a legitimate member
+            };
+            let hash = Sha256::digest(&envelope.ciphertext).to_vec();
+            if self.covered.contains_key(&hash) {
+                continue;
+            }
+            // Cover ONLY what the reader would covered-accept: open the entry and re-check the exact predicate
+            // (real key + strongest role). Skips a forgery / below-role plant sitting in the dumb-mirror store.
+            let Ok(plaintext) = self.client.try_open_delta(&env) else {
+                continue;
+            };
+            let accepts = info.keys_ever_held.iter().any(|k| {
+                openom_vault::verify_covered_entry(
+                    envelope.version,
+                    header,
+                    &plaintext,
+                    &header.author_member_id,
+                    k,
+                    info.strongest_role,
+                )
+            });
+            if !accepts {
+                continue;
+            }
+            // The writer/reader coupling as a live invariant: never push a candidate the reader would reject.
+            debug_assert!(accepts, "author_cover gates every push on verify_covered_entry (the reader's predicate)");
+            // The reader resolves the author's key from its own membership, so the cover binds only (hash, id) —
+            // there is no key field to forge.
+            covered_entries.push(CoveredEntry {
+                ciphertext_hash: hash,
+                author_member_id: header.author_member_id.clone(),
+            });
         }
-        let sealed = self
-            .client
-            .seal_cover(&CoverBody { entries: covered_entries }.encode_to_vec())?;
-        // Fold our OWN cover locally so the next sweep skips these hashes (we never re-pull our own entries).
-        self.try_fold_cover(&sealed);
-        Ok(Some(sealed))
+        if covered_entries.is_empty() {
+            return Ok(false);
+        }
+        // Fold our OWN cover locally (the next sweep skips these hashes; the client advances our frontier past
+        // the cover object, so `fold` never re-offers our own cover), then publish it as a Cover log object.
+        for e in &covered_entries {
+            self.covered.insert(e.ciphertext_hash.clone(), e.author_member_id.clone());
+        }
+        self.client
+            .push_cover(&CoverBody { entries: covered_entries }.encode_to_vec())?;
+        Ok(true)
     }
 
-    /// The server log `?since` cursor for the next pull (`None` ⇒ from the beginning).
-    #[must_use]
-    pub const fn server_since(&self) -> Option<i64> {
-        self.server_cursor
-    }
-
-    /// Fold a page of server log entries into the tree, then advance the server cursor. Each peer entry
-    /// is appended to the local log **once** — deduped on its replica dot against [`seen`](Self) — so a
-    /// reload that re-pulls the tail (cursor reset) does not re-append peer history. Our own entries
-    /// (echoed back) are skipped; an entry whose header won't decode is counted (see
-    /// [`anomalies`](Self::anomalies)), never blindly stored. The merge is fault-isolated in `pull`, so
-    /// one bad entry can't wedge. Returns how many entries the merge folded in.
+    /// TEST-ONLY: push a raw `Cover` body, bypassing [`author_cover`](Self::author_cover)'s gate — to simulate a
+    /// COMPROMISED (but currently-legitimate) Maintainer minting a cover the honest sweep would refuse, so a
+    /// test can prove the READER's independent role/key resolution rejects it regardless of the writer.
     ///
     /// # Errors
-    /// Returns [`CoreError`] if a local store append or read fails (a broken backend — not one bad entry).
-    pub fn ingest(&mut self, payloads: &[Vec<u8>], next_cursor: i64) -> Result<usize, CoreError> {
-        // Two passes (pin: covers-before-covered): a Cover marker is authored AFTER the entries it blesses, so
-        // it sits LATER in the log. Fold every Cover in this page first, then disposition the data entries —
-        // so a since-removed member's entry in the same page is covered-accepted rather than dropped. (A cover
-        // that lands in a LATER page than its covered entry heals on the next full re-pull / reload, when the
-        // whole log arrives together.)
-        for env in payloads {
-            if entry_kind(env) == Some(Kind::Cover as i32) {
-                match envelope_dot(env) {
-                    Some((replica, _)) if replica == self.replica => {} // our own, echoed back
-                    Some(dot) if self.seen.contains(&dot) => {} // already folded (a re-pulled tail)
-                    Some(dot) => self.ingest_cover(env, dot),
-                    None => self.undecodable += 1,
-                }
-            }
-        }
-        for env in payloads {
-            if entry_kind(env) == Some(Kind::Cover as i32) {
-                continue; // handled in the covers pass
-            }
-            match envelope_dot(env) {
-                None => self.undecodable += 1, // can't attribute or dedup — skip, surface via anomalies
-                Some((replica, _)) if replica == self.replica => {} // our own, echoed back
-                Some(dot) if self.seen.contains(&dot) => {} // already stored (a re-pulled tail)
-                Some(dot) => self.admit(env, dot)?,
-            }
-        }
-        // Monotonic: never rewind the cursor (a smaller value would re-pull; dedup makes that safe but
-        // wasteful — a rewind loop is not). Only ever move forward.
-        self.server_cursor = Some(self.server_cursor.map_or(next_cursor, |c| c.max(next_cursor)));
-        Ok(self.client.pull_claims()?)
-    }
-
-    /// Verify + fold one `Cover` marker: it must verify as a current Maintainer+ entry (pin P8 role gate);
-    /// then retain the raw envelope (for [`rebuild_covered`](Self) on a later membership change) and fold its
-    /// body into [`covered`](Self). A cover that doesn't verify (forged / non-member author) is an anomaly.
-    fn ingest_cover(&mut self, env: &[u8], dot: (Vec<u8>, u64)) {
-        if self.try_fold_cover(env) {
-            self.seen.insert(dot);
-            self.cover_envelopes.push(env.to_vec());
-        } else {
-            self.rejected += 1;
-        }
-    }
-
-    /// Verify a Cover envelope against the CURRENT membership and, if valid, fold its `CoverBody` into
-    /// [`covered`](Self). Returns whether it was a valid, current-Maintainer+-authored cover. Shared by the
-    /// ingest path and [`rebuild_covered`](Self). A no-op returning `false` when no membership is installed
-    /// (a solo tree has no removed members to heal).
-    fn try_fold_cover(&mut self, env: &[u8]) -> bool {
-        let Some(membership) = self.membership.as_deref() else {
-            return false;
-        };
-        let Ok(envelope) = Envelope::decode(env) else {
-            return false;
-        };
-        let Some(header) = envelope.header.as_ref() else {
-            return false;
-        };
-        // A cover is a signed Maintainer+ entry (required_role_for_kind(Cover)=Maintainer); verify it exactly
-        // like any entry, opening as Cover.
-        let verdict = openom_vault::verify_ingest(
-            envelope.version,
-            membership,
-            header,
-            &header.governing_ref,
-            &header.key_id,
-            || self.client.try_open_cover(env),
-        );
-        if verdict != Disposition::Accept {
-            return false;
-        }
-        let Ok(plaintext) = self.client.try_open_cover(env) else {
-            return false;
-        };
-        let Ok(body) = CoverBody::decode(plaintext.as_slice()) else {
-            return false;
-        };
-        for e in body.entries {
-            // Skip a malformed binding rather than fail the whole cover.
-            if !e.ciphertext_hash.is_empty() && !e.author_public_key.is_empty() {
-                self.covered
-                    .insert(e.ciphertext_hash, (e.author_member_id, e.author_public_key));
-            }
-        }
-        true
+    /// Returns [`CoreError`] if sealing or the blob write fails.
+    #[cfg(test)]
+    pub(crate) fn push_raw_cover_for_test(&mut self, body: &CoverBody) -> Result<(), CoreError> {
+        self.client.push_cover(&body.encode_to_vec())?;
+        Ok(())
     }
 
     /// Rebuild [`covered`](Self) from the retained Cover envelopes against the current membership — pin P3, so
@@ -508,118 +478,16 @@ impl<S: DocStore> AppCore<S> {
         self.covered.clear();
         let covers = std::mem::take(&mut self.cover_envelopes);
         for env in &covers {
-            let _ = self.try_fold_cover(env); // re-folds into `covered` iff still valid under current membership
+            if let Ok(body) = self.client.try_open_cover(env) {
+                // Re-fold iff still valid under the current membership.
+                let _ = fold_cover_entry(self.membership.as_deref(), &mut self.covered, env, &body);
+            }
         }
         self.cover_envelopes = covers;
     }
 
-    /// Route one deduped, attributable peer entry through §B3 verification. Accept ⇒ store it (the next
-    /// `pull_claims` folds it, and a reload re-folds it from the durable log). Hold ⇒ buffer it, unstored, for
-    /// re-verification after the next [`set_membership`](Self::set_membership). Reject ⇒ count it as an
-    /// anomaly and drop it — never stored, so a forgery can neither be folded nor stall the tail.
-    fn admit(&mut self, env: &[u8], dot: (Vec<u8>, u64)) -> Result<(), CoreError> {
-        match self.classify(env) {
-            Disposition::Accept => {
-                self.seen.insert(dot);
-                self.store.append(&self.doc, &[env.to_vec()])?;
-            }
-            Disposition::Hold => self.hold(env),
-            Disposition::Reject => self.rejected += 1,
-        }
-        Ok(())
-    }
-
-    /// The §B3 disposition for one peer entry. With no shared membership installed (a solo / never-shared
-    /// tree) every entry is accepted — AEAD-only is safe because only the DEK holder can write. Otherwise the
-    /// entry is opened ONLY if a signature must actually be checked (`verify_ingest` calls `open` lazily), and
-    /// an entry whose envelope/header won't even decode on a shared tree is rejected as untrustworthy.
-    fn classify(&self, env: &[u8]) -> Disposition {
-        let Some(membership) = self.membership.as_deref() else {
-            return Disposition::Accept;
-        };
-        let Ok(envelope) = Envelope::decode(env) else {
-            return Disposition::Reject;
-        };
-        let Some(header) = envelope.header.as_ref() else {
-            return Disposition::Reject;
-        };
-        let verdict = openom_vault::verify_ingest(
-            envelope.version,
-            membership,
-            header,
-            &header.governing_ref,
-            &header.key_id,
-            || self.client.try_open_delta(env),
-        );
-        // Self-heal covered-accept (SH-2): a since-removed member's entry fails `UnknownAuthor` under the
-        // current membership (dag always-current). Rescue it iff a currently-valid Cover blessed its
-        // RECOMPUTED ciphertext hash (pin P1 — the header field is not authenticated) AND it still carries a
-        // valid author signature by the key the cover bound (pin P2 — a cover waives membership, never
-        // integrity). On chain the entry already verifies against its retained governing revision, so this
-        // never triggers (self-heal is dag-only).
-        if verdict == Disposition::Reject {
-            let hash = Sha256::digest(&envelope.ciphertext);
-            if let Some((member_id, key)) = self.covered.get(hash.as_slice()) {
-                // Pin P6: only covered-accept an author who was EVER a legitimate member — never a carve-out-
-                // voided thief (their Add was neutralized by a recovery) or a never-member. `ever_member`
-                // resolves that from the current anchor, so even a tricked/malicious cover over a voided
-                // author's entries is refused.
-                if membership.ever_member(member_id) {
-                    if let Ok(plaintext) = self.client.try_open_delta(env) {
-                        if openom_vault::verify_covered_entry(
-                            envelope.version,
-                            header,
-                            &plaintext,
-                            member_id,
-                            key,
-                        ) {
-                            return Disposition::Accept;
-                        }
-                    }
-                }
-            }
-        }
-        verdict
-    }
-
-    // (entry_kind is a free fn at the bottom of this file.)
-
-    /// Buffer a held entry, bounded by [`HELD_CAP`](Self::HELD_CAP). An overflow is dropped and counted as an
-    /// anomaly (recovered on a reload's full re-pull), so a peer withholding a keyring can't exhaust memory.
-    fn hold(&mut self, env: &[u8]) {
-        if self.held.len() < Self::HELD_CAP {
-            self.held.push(env.to_vec());
-        } else {
-            self.rejected += 1;
-        }
-    }
-
-    /// Re-verify the Held buffer after a [`set_membership`](Self::set_membership): a now-retained governing
-    /// keyring/epoch releases its entries into the store, the rest stay held or are rejected. Folds the
-    /// released entries and returns the fold count.
-    fn drain_held(&mut self) -> Result<usize, CoreError> {
-        if self.held.is_empty() {
-            return Ok(0);
-        }
-        let held = std::mem::take(&mut self.held);
-        for (i, env) in held.iter().enumerate() {
-            match envelope_dot(env) {
-                Some(dot) if !self.seen.contains(&dot) => {
-                    if let Err(e) = self.admit(env, dot) {
-                        // A local-store append failed — keep the failed entry AND the un-visited remainder
-                        // for a later retry rather than silently dropping them.
-                        self.held.extend_from_slice(&held[i..]);
-                        return Err(e);
-                    }
-                }
-                _ => {} // undecodable dots never entered the buffer; a since-stored dot needs no replay
-            }
-        }
-        Ok(self.client.pull_claims()?)
-    }
-
-    /// How many sealed batches docsync has queued but not yet appended locally (0 == the local write is
-    /// fully durable). A diagnostic for the driver.
+    /// How many sealed batches are queued but not yet written (always 0 — the client writes immediately).
+    /// A diagnostic for the driver.
     #[must_use]
     pub fn pending_count(&self) -> usize {
         self.client.pending_count()
@@ -678,19 +546,119 @@ impl<S: DocStore> AppCore<S> {
     }
 }
 
-/// The replica dot `(replica_id, replica_counter)` from a sealed `Envelope`'s (plaintext) header — the
-/// replicator's echo discriminator and its idempotency key. `None` if the bytes don't decode as an
-/// `Envelope` with a header (never our own freshly-sealed entry; a peer entry that returns `None` is
-/// counted as an anomaly rather than misattributed).
-fn envelope_dot(envelope: &[u8]) -> Option<(Vec<u8>, u64)> {
-    let header = Envelope::decode(envelope).ok()?.header?;
-    Some((header.replica_id, header.replica_counter))
+/// A head/snapshot pointer key (overwritten, unlike immutable log objects) — for [`AppCore::import`]'s
+/// precondition choice, and for the wasm veneer to tell JS a PUSH precondition without JS ever parsing a key.
+pub(crate) fn is_pointer_key(key: &str) -> bool {
+    key.contains("/heads/") || key.ends_with("/snapshot")
 }
 
-/// The `Header.kind` (a proto `Kind` i32) of a sealed envelope — so ingest can route `Cover` markers through
-/// the covers pass. `None` if the bytes don't decode as an `Envelope` with a header.
-fn entry_kind(envelope: &[u8]) -> Option<i32> {
-    Some(Envelope::decode(envelope).ok()?.header?.kind)
+const fn disposition_to_verdict(d: Disposition) -> Verdict {
+    match d {
+        Disposition::Accept => Verdict::Accept,
+        Disposition::Hold => Verdict::Hold,
+        Disposition::Reject => Verdict::Reject,
+    }
+}
+
+/// The §B3 disposition for one peer `Delta`, as a docsync [`Verdict`] — the `pull_verified` classify gate,
+/// re-homed from `AppCore::classify`. Pure over `(membership, covered, envelope, opened plaintext)` (no client
+/// borrow: `pull_verified` opens and hands us the plaintext). With no shared membership every entry is
+/// accepted (AEAD-only is safe — only the DEK holder can write). Otherwise `verify_ingest` decides, plus the
+/// SH-2 covered-accept rescue: a since-removed EVER-member's entry (pin P6) is accepted iff a currently-valid
+/// Cover blessed its RECOMPUTED ciphertext hash (pin P1) and it still signature-verifies against a key the
+/// author actually held, with its kind permitted by the author's strongest role — key and role resolved from
+/// OUR membership, never the cover (pin P2).
+fn classify_entry(
+    membership: Option<&dyn MembershipResolver>,
+    covered: &BTreeMap<Vec<u8>, String>,
+    env: &[u8],
+    plaintext: &[u8],
+) -> Verdict {
+    let Some(membership) = membership else {
+        return Verdict::Accept;
+    };
+    let Ok(envelope) = Envelope::decode(env) else {
+        return Verdict::Reject;
+    };
+    let Some(header) = envelope.header.as_ref() else {
+        return Verdict::Reject;
+    };
+    let verdict = openom_vault::verify_ingest(
+        envelope.version,
+        membership,
+        header,
+        &header.governing_ref,
+        &header.key_id,
+        || Ok::<_, ()>(plaintext.to_vec()),
+    );
+    if verdict == Disposition::Reject {
+        let hash = Sha256::digest(&envelope.ciphertext);
+        if let Some(member_id) = covered.get(hash.as_slice()) {
+            // Resolve the author's keys + STRONGEST role from OUR OWN membership (pin P6), NEVER from the cover
+            // — so a forged cover can neither bind an attacker key to a real removed id nor waive the role check.
+            // `verify_covered_entry` is the sole covered-accept decision site (see its doc): accept iff the entry
+            // signature-verifies against a key the author actually held AND its kind is permitted by that role.
+            if let Some(info) = membership.ever_member_info(member_id) {
+                if info.keys_ever_held.iter().any(|key| {
+                    openom_vault::verify_covered_entry(
+                        envelope.version,
+                        header,
+                        plaintext,
+                        member_id,
+                        key,
+                        info.strongest_role,
+                    )
+                }) {
+                    return Verdict::Accept;
+                }
+            }
+        }
+    }
+    disposition_to_verdict(verdict)
+}
+
+/// Verify one `Cover` envelope as a current Maintainer+ entry (pin P8) and, if valid, fold its `CoverBody`
+/// into `covered`. Returns whether it was valid — the `pull_verified` `fold_cover` gate, re-homed from
+/// `AppCore::try_fold_cover`. Pure over `(membership, covered, envelope, opened cover body)`. `false` when no
+/// membership is installed (a solo tree has no removed members to heal).
+fn fold_cover_entry(
+    membership: Option<&dyn MembershipResolver>,
+    covered: &mut BTreeMap<Vec<u8>, String>,
+    env: &[u8],
+    body_plaintext: &[u8],
+) -> bool {
+    let Some(membership) = membership else {
+        return false;
+    };
+    let Ok(envelope) = Envelope::decode(env) else {
+        return false;
+    };
+    let Some(header) = envelope.header.as_ref() else {
+        return false;
+    };
+    let verdict = openom_vault::verify_ingest(
+        envelope.version,
+        membership,
+        header,
+        &header.governing_ref,
+        &header.key_id,
+        || Ok::<_, ()>(body_plaintext.to_vec()),
+    );
+    if verdict != Disposition::Accept {
+        return false;
+    }
+    let Ok(body) = CoverBody::decode(body_plaintext) else {
+        return false;
+    };
+    for e in body.entries {
+        // Store only (hash → author id); the author's KEY + ROLE are resolved from the membership at accept
+        // time (`classify_entry`), never from the cover — the reader's defense against a forged binding (the
+        // cover carries no key field to trust). Skip a malformed entry rather than fail the cover.
+        if !e.ciphertext_hash.is_empty() && !e.author_member_id.is_empty() {
+            covered.insert(e.ciphertext_hash, e.author_member_id);
+        }
+    }
+    true
 }
 
 #[cfg(test)]

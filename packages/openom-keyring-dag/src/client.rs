@@ -254,13 +254,15 @@ pub struct Resolved {
     pub checkpoint_sealing: Option<Vec<SealingEntry>>,
     /// The checkpoint's minting-op baseline (0 on an un-compacted anchor) — seeds the OPE-289 count.
     pub minting_ops_baseline: u32,
-    /// The members EVER legitimately admitted (id → their author public key) — the genesis founder plus every
-    /// member whose `Add` op is EFFECTIVE (authorized at its causal position), INCLUDING members later removed
-    /// (a `Remove` is a separate op; it doesn't un-effect the `Add`). It EXCLUDES a carve-out-voided `Add` (a
-    /// key-thief neutralized by a `ReFound` recovery — that Add is not effective). The self-heal (OPE-382)
-    /// uses this two ways: the READER (pin P6) covered-accepts a data entry only if its author is here, so a
-    /// voided thief's entries are never blessed; the WRITER binds the author's key into the cover it mints.
-    pub ever_members: std::collections::BTreeMap<String, Vec<u8>>,
+    /// The members EVER legitimately admitted (id → the keys they ever held + their strongest role) — the
+    /// genesis founder plus every member whose `Add` op is EFFECTIVE (authorized at its causal position),
+    /// INCLUDING members later removed (a `Remove` is a separate op; it doesn't un-effect the `Add`). It
+    /// EXCLUDES a carve-out-voided `Add` (a key-thief neutralized by a `ReFound` recovery — that Add is not
+    /// effective). The self-heal (OPE-382) uses this: the READER (pin P6) covered-accepts a data entry only if
+    /// its author is here AND its signature verifies against one of the author's `keys_ever_held` AND its kind
+    /// is permitted by the author's `strongest_role` — so a voided thief, an attacker-chosen cover key, and a
+    /// never-promoted below-role author are all refused. See [`openom_keyring_api::EverMemberInfo`].
+    pub ever_members: std::collections::BTreeMap<String, openom_keyring_api::EverMemberInfo>,
     /// The resolved recovery authority (RVK) at this frontier. `None` on a group with no recovery authority.
     /// Lets a caller confirm a `RotateRecoveryAuthority` actually took effect once it has synced — the
     /// two-phase "rotate then confirm the resolved authority" gate (OPE-381 / §11.2), so a rotation
@@ -577,28 +579,68 @@ pub fn accept_remote_anchor(
     merge(local_bytes, remote_bytes)
 }
 
-/// The ever-legitimately-a-member set (id → author key): the current members plus every member whose Add is
-/// EFFECTIVE (which includes removed members but excludes carve-out-voided Adds). See [`Resolved::ever_members`].
+/// The ever-legitimately-a-member set (id → keys ever held + strongest role ever held): the current members
+/// plus every member whose Add is EFFECTIVE (which includes removed members but excludes carve-out-voided
+/// Adds). See [`Resolved::ever_members`].
+///
+/// Folds every KEY-changing effective action (`Create`/`Add` admission + `ReFound` recovery + `Retarget`
+/// self-rekey) into `keys_ever_held`, and every ROLE-setting one (`Create`/`Add` + `ChangeRole`) into
+/// `strongest_role` (numeric min — lower is stronger). Quorum-wrapped targets (`Propose`/`Commit`) are not
+/// un-wrapped here — matching this function's pre-existing `Add`-only scope; the effect is only ever
+/// conservative (a missed promotion → a stronger role gate → a legitimate entry is DROPPED, never escalated),
+/// so it is fail-closed.
+type EverMap = std::collections::BTreeMap<String, openom_keyring_api::EverMemberInfo>;
+
+/// Union `key` into `id`'s keys-ever-held (deduped).
+fn note_ever_key(ever: &mut EverMap, id: &str, key: &[u8]) {
+    let e = ever.entry(id.to_string()).or_insert_with(|| openom_keyring_api::EverMemberInfo {
+        keys_ever_held: Vec::new(),
+        strongest_role: i16::MAX,
+    });
+    if !e.keys_ever_held.iter().any(|k| k == key) {
+        e.keys_ever_held.push(key.to_vec());
+    }
+}
+
+/// Fold `role` into `id`'s strongest-role-ever-held (numeric min — lower is stronger).
+fn note_ever_role(ever: &mut EverMap, id: &str, role: i16) {
+    let e = ever.entry(id.to_string()).or_insert_with(|| openom_keyring_api::EverMemberInfo {
+        keys_ever_held: Vec::new(),
+        strongest_role: i16::MAX,
+    });
+    e.strongest_role = e.strongest_role.min(role);
+}
+
 fn collect_ever_members(
     members: &MembershipView,
     effective: Vec<[u8; 32]>,
     by_id: &HashMap<[u8; 32], &KeyringOp>,
-) -> std::collections::BTreeMap<String, Vec<u8>> {
-    let mut ever: std::collections::BTreeMap<String, Vec<u8>> = members
-        .members
-        .iter()
-        .map(|m| (m.member_id.clone(), m.author_public_key.clone()))
-        .collect();
+) -> EverMap {
+    let mut ever: EverMap = std::collections::BTreeMap::new();
+    // Seed with the CURRENT members' current key + role.
+    for m in &members.members {
+        note_ever_key(&mut ever, &m.member_id, &m.author_public_key);
+        note_ever_role(&mut ever, &m.member_id, m.role);
+    }
     for op_id in effective {
         let Some(op) = by_id.get(&op_id) else { continue };
         match &op.action {
-            MembershipAction::Add { member, author_public_key, .. } => {
-                ever.entry(member.clone()).or_insert_with(|| author_public_key.to_vec());
-            }
             MembershipAction::Create { initial_members } => {
                 for m in initial_members {
-                    ever.entry(m.id.clone()).or_insert_with(|| m.author_public_key.to_vec());
+                    note_ever_key(&mut ever, &m.id, m.author_public_key.as_ref());
+                    note_ever_role(&mut ever, &m.id, m.role.0);
                 }
+            }
+            MembershipAction::Add { member, role, author_public_key, .. } => {
+                note_ever_key(&mut ever, member, author_public_key.as_ref());
+                note_ever_role(&mut ever, member, role.0);
+            }
+            MembershipAction::ChangeRole { member, new_role } => {
+                note_ever_role(&mut ever, member, new_role.0);
+            }
+            MembershipAction::ReFound { member, new_author_public_key, .. }
+            | MembershipAction::Retarget { member, new_author_public_key, .. } => {
+                note_ever_key(&mut ever, member, new_author_public_key.as_ref());
             }
             _ => {}
         }
@@ -1379,6 +1421,40 @@ mod tests {
             resolve(&a2).unwrap().has_been_shared,
             "an un-shared-back-to-solo dag still reports has_been_shared (monotonic)"
         );
+    }
+
+    #[test]
+    fn ever_members_folds_strongest_role_and_every_key_ever_held() {
+        // The self-heal covered-accept inputs (OPE-397 role/key gate): `strongest_role` is the MIN over a
+        // member's whole role history (a promotion is honored, so a promoted-then-removed member's Maintainer-era
+        // history stays coverable), and `keys_ever_held` unions the admission key with every self-rekey key (so a
+        // rekeyed member's older-key history still verifies). Bob is admitted as EDITOR, promoted to MAINTAINER,
+        // and self-rekeys — then removed. His ever-member record must reflect all of it.
+        let a0 = provision_anchor(b"tree-em", "founder", vpk(1), xpk(1), vk(9), b"g".to_vec(), &sk(1));
+        let a1 = append_add(&a0, "founder", &minit("bob", KeyringRole::EDITOR, 2), b"w".to_vec(), &sk(1)).unwrap();
+        // Promote bob EDITOR→MAINTAINER (owner-authored ChangeRole — no public append needed, so exercise the
+        // private `append` directly rather than add speculative API).
+        let a2 = append(
+            &a1,
+            "founder",
+            MembershipAction::ChangeRole { member: "bob".to_string(), new_role: KeyringRole::MAINTAINER },
+            b"w".to_vec(),
+            &sk(1),
+        )
+        .unwrap();
+        // Bob self-rekeys (signed by his CURRENT key, seed 2) to a fresh key (seed 7).
+        let a3 = append_retarget(&a2, "bob", vpk(7), xpk(7), b"w".to_vec(), &sk(2)).unwrap();
+        let a4 = append_remove(&a3, "founder", "bob", b"reseal".to_vec(), &sk(1)).unwrap();
+
+        let ever = resolve(&a4).unwrap().ever_members;
+        let bob = ever.get("bob").expect("a removed member is still an ever-member");
+        assert_eq!(
+            bob.strongest_role,
+            openom_keyring_api::ROLE_MAINTAINER,
+            "strongest_role is the MIN over the role history — the promotion is honored"
+        );
+        assert!(bob.keys_ever_held.contains(&vk(2).to_vec()), "the admission key is retained");
+        assert!(bob.keys_ever_held.contains(&vk(7).to_vec()), "the self-rekey key is retained");
     }
 
     #[test]

@@ -17,15 +17,16 @@ use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
 use openom_vault::AppVault;
-use store_log::memory::MemoryStore;
+use store_blob::MemoryBlob;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::AppCore;
 
-/// The local durable store the worker core runs over. `MemoryStore` for now (functional, not durable
-/// across a reload); an OPFS-backed `DocStore` swaps in here to make an offline mint survive a reload.
-type Store = MemoryStore;
+/// The local durable `BlobStore` the worker core runs over. `MemoryBlob` for now (functional, not durable
+/// across a reload); the host mirrors it to `IndexedDB` via [`export`](AppCoreHandle::export) /
+/// [`import`](AppCoreHandle::import), and an OPFS-backed `BlobStore` swaps in here later.
+type Store = MemoryBlob;
 
 /// One tree's core, as the worker sees it. Owns the engine + sealer (DEK) + local store + replicator.
 #[wasm_bindgen]
@@ -44,9 +45,9 @@ impl AppCoreHandle {
             TreeId::new(tree_id.to_vec()),
             ReplicaId::new(replica_id.to_vec()),
         ));
-        let store = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryBlob::new());
         Self {
-            inner: AppCore::new(created_by, sealer, store, doc, replica_id.to_vec()),
+            inner: AppCore::new(created_by, sealer, store, doc, replica_id),
         }
     }
 
@@ -159,62 +160,110 @@ impl AppCoreHandle {
         self.inner.reset().map_err(to_js)
     }
 
-    // --- the replicator's synchronous steps (the worker driver does the `fetch` between them) --------
+    // --- the sync steps: the worker mirrors this LOCAL BlobStore against the shared REMOTE (R2/BYO) ------
+    //
+    // The local store is the single source of truth for the keyspace; the worker is a dumb ferry that never
+    // parses or builds a key. PULL: the worker lists the remote under `{doc}/`, GETs the objects, and hands
+    // them to `import` (which picks the per-key precondition itself), then calls `fold`. PUSH: the worker
+    // takes `export`'s objects and PUTs each to the remote (immutable log objects `If-None-Match`, `pointer`
+    // objects overwrite — the `pointer` flag comes from here, so the worker still never inspects a key).
 
-    /// This replica's own sealed deltas the server hasn't seen, as `{ entries: Uint8Array[], through:
-    /// number }`. POST each entry, then call [`markPushed`](Self::mark_pushed) with `through`.
+    /// Every object in the local store, as `[{ key, bytes, pointer }]` — the worker pushes each to the remote
+    /// (skipping any the remote already has; a `pointer` object — heads/snapshot — always re-writes with
+    /// overwrite, an immutable log object writes `If-None-Match`). Also the durability snapshot the host writes
+    /// to `IndexedDB`.
     ///
     /// # Errors
-    /// Returns a [`JsError`] if the local store read fails, or the result object can't be built.
+    /// Returns a [`JsError`] if the local store read fails, or the result can't be built.
     #[wasm_bindgen]
-    pub fn outbound(&self) -> Result<JsValue, JsError> {
-        let out = self.inner.outbound().map_err(to_js)?;
-        let entries = Array::new();
-        for env in &out.entries {
-            entries.push(&Uint8Array::from(env.as_slice()));
+    pub fn export(&self) -> Result<JsValue, JsError> {
+        let arr = Array::new();
+        for (key, bytes) in self.inner.export().map_err(to_js)? {
+            let obj = Object::new();
+            set(&obj, "key", &JsValue::from_str(&key))?;
+            set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
+            set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
+            arr.push(&obj);
         }
-        let obj = Object::new();
-        set(&obj, "entries", &entries)?;
-        set(&obj, "through", &JsValue::from_f64(u64_to_f64(out.through)))?;
-        Ok(obj.into())
+        Ok(arr.into())
     }
 
-    /// Advance the outbound cursor after every entry from an [`outbound`](Self::outbound) batch landed.
-    #[wasm_bindgen(js_name = markPushed)]
-    pub fn mark_pushed(&mut self, through: f64) -> Result<(), JsError> {
-        self.inner.mark_pushed(as_u64(through, "through")?);
-        Ok(())
-    }
-
-    /// The server log `?since` cursor for the next pull (`undefined` ⇒ from the beginning).
-    #[wasm_bindgen(js_name = serverSince)]
-    #[must_use]
-    pub fn server_since(&self) -> Option<f64> {
-        self.inner.server_since().map(i64_to_f64)
-    }
-
-    /// Fold a page of server log entries (an array of `Uint8Array`) into the tree, advance the server
-    /// cursor to `next_cursor`, and merge the new local tail into the engine. Returns how many entries
-    /// the merge folded in.
+    /// Load objects into the local store — the PULL sink (objects the worker GET from the remote) and the
+    /// reload path (objects the host read back from `IndexedDB`). `objects` is `[{ key, bytes }]`; the core picks
+    /// each object's write precondition (immutable log objects are idempotent, pointers overwrite), so a
+    /// re-import is harmless. Call [`fold`](Self::fold) afterwards to merge any new arrivals.
     ///
     /// # Errors
-    /// Returns a [`JsError`] if an element isn't a `Uint8Array`, or the store/merge fails.
+    /// Returns a [`JsError`] if an element is malformed, or a local store write fails.
     #[wasm_bindgen]
-    pub fn ingest(&mut self, payloads: &Array, next_cursor: f64) -> Result<usize, JsError> {
-        let mut batch: Vec<Vec<u8>> = Vec::with_capacity(payloads.length() as usize);
-        for v in payloads.iter() {
-            let bytes: Uint8Array = v
+    pub fn import(&mut self, objects: &Array) -> Result<(), JsError> {
+        let mut batch: Vec<(String, Vec<u8>)> = Vec::with_capacity(objects.length() as usize);
+        for v in objects.iter() {
+            let key = Reflect::get(&v, &JsValue::from_str("key"))
+                .ok()
+                .and_then(|k| k.as_string())
+                .ok_or_else(|| JsError::new("each object must have a string `key`"))?;
+            let bytes: Uint8Array = Reflect::get(&v, &JsValue::from_str("bytes"))
+                .map_err(|_| JsError::new("each object must have a `bytes` field"))?
                 .dyn_into()
-                .map_err(|_| JsError::new("each server log entry must be a Uint8Array"))?;
-            batch.push(bytes.to_vec());
+                .map_err(|_| JsError::new("`bytes` must be a Uint8Array"))?;
+            batch.push((key, bytes.to_vec()));
         }
-        self.inner
-            .ingest(&batch, as_i64(next_cursor, "nextCursor")?)
-            .map_err(to_js)
+        self.inner.import(&batch).map_err(to_js)
     }
 
-    /// Install (or refresh) the §B3 governing membership so [`ingest`](Self::ingest) verifies peer entries
-    /// against the resolved roles. The worker calls this on unlock of a shared tree and after every keyring
+    /// Fold every object past the §B3 gate into the tree — call after [`import`](Self::import) has mirrored the
+    /// remote's arrivals into the local store (and once on open, after a reload's `import`). Returns how many
+    /// entries merged this call.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if a local store read fails.
+    #[wasm_bindgen]
+    pub fn fold(&mut self) -> Result<usize, JsError> {
+        self.inner.fold().map_err(to_js)
+    }
+
+    /// Reconcile against the shared remote in ONE call — the worker's whole tick. `remote` is `[{ key, bytes }]`:
+    /// every object the worker listed + GET from the remote under `{doc}/`. Returns `{ put: [{ key, bytes,
+    /// pointer }], folded }` — the objects the worker must upload (a `pointer` overwrites, an immutable log
+    /// object writes `If-None-Match`) and how many entries folded. All keyspace + head-monotonicity logic stays
+    /// in Rust (`docsync::mirror`); the worker never parses, builds, or compares a key.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if an element is malformed, or a store/mirror step fails.
+    #[wasm_bindgen]
+    pub fn sync(&mut self, remote: &Array) -> Result<JsValue, JsError> {
+        let mut snapshot: Vec<(String, Vec<u8>)> = Vec::with_capacity(remote.length() as usize);
+        for v in remote.iter() {
+            let key = Reflect::get(&v, &JsValue::from_str("key"))
+                .ok()
+                .and_then(|k| k.as_string())
+                .ok_or_else(|| JsError::new("each remote object must have a string `key`"))?;
+            let bytes: Uint8Array = Reflect::get(&v, &JsValue::from_str("bytes"))
+                .map_err(|_| JsError::new("each remote object must have a `bytes` field"))?
+                .dyn_into()
+                .map_err(|_| JsError::new("`bytes` must be a Uint8Array"))?;
+            snapshot.push((key, bytes.to_vec()));
+        }
+        let (uploads, folded) = self.inner.sync_against(&snapshot).map_err(to_js)?;
+        let put = Array::new();
+        for (key, bytes) in uploads {
+            let obj = Object::new();
+            set(&obj, "key", &JsValue::from_str(&key))?;
+            set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
+            set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
+            put.push(&obj);
+        }
+        let result = Object::new();
+        set(&result, "put", &put)?;
+        #[allow(clippy::cast_precision_loss)] // fold counts are tiny (entries merged this tick)
+        let folded_f = folded as f64;
+        set(&result, "folded", &JsValue::from_f64(folded_f))?;
+        Ok(result.into())
+    }
+
+    /// Install (or refresh) the §B3 governing membership so peer entries are verified on fold against the
+    /// resolved roles. The worker calls this on unlock of a shared tree and after every keyring
     /// sync, passing the engine tag, the current head keyring/anchor, and — chain only — the retained
     /// per-revision keyrings as `[revision, Uint8Array][]` (empty for the dag, which resolves from the single
     /// anchor). Returns how many held entries the refresh released into the tree.
@@ -253,21 +302,17 @@ impl AppCoreHandle {
 
     /// Author a self-heal **cover** over this device's stored entries whose author was a legitimate member but
     /// is no longer current — the OPE-382 writer sweep. Call after a removal (once
-    /// [`setMembership`](Self::set_membership) has refreshed the resolver): returns the sealed `Cover` envelope
-    /// to push to the server data channel, or `undefined` when there is nothing to cover. The cover is NOT
-    /// stored locally (a Cover must not enter the claim log) but IS folded into the local covered set, so a
-    /// re-sweep is idempotent. Dag-only in practice (the chain retains per-revision history, so its removed
-    /// members' entries verify without a cover).
+    /// [`setMembership`](Self::set_membership) has refreshed the resolver). The cover is written to the local
+    /// store as a `Cover` log object (so the next [`export`](Self::export)/PUSH mirrors it to the remote like any
+    /// object) and folded into the local covered set, so a re-sweep is idempotent. Returns whether a cover was
+    /// authored. Dag-only in practice (the chain retains per-revision history, so removed members' entries verify
+    /// without a cover).
     ///
     /// # Errors
     /// Returns a [`JsError`] if the store read or the seal fails.
     #[wasm_bindgen(js_name = authorCover)]
-    pub fn author_cover(&mut self) -> Result<Option<Uint8Array>, JsError> {
-        Ok(self
-            .inner
-            .author_cover()
-            .map_err(to_js)?
-            .map(|bytes| Uint8Array::from(bytes.as_slice())))
+    pub fn author_cover(&mut self) -> Result<bool, JsError> {
+        self.inner.author_cover().map_err(to_js)
     }
 
     /// Adopt a rotated write epoch after a keyring sync (OPE-393) — a member's counterpart to the owner
@@ -290,59 +335,12 @@ impl AppCoreHandle {
         self.inner.pending_count()
     }
 
-    // --- durable persistence: the worker mirrors this to IndexedDB (web) / rusqlite (Tauri) ----------
-
-    /// The local-log entries not yet mirrored to durable storage, as `{ entries: Uint8Array[], through:
-    /// number }`. The worker appends `entries` to `IndexedDB`, then confirms with
-    /// [`markPersisted`](Self::mark_persisted)`(through)`. The persist cursor lives in the core (not the
-    /// worker) — the host only executes the append.
-    ///
-    /// # Errors
-    /// Returns a [`JsError`] if the local store read fails, or the result object can't be built.
-    #[wasm_bindgen(js_name = exportUnpersisted)]
-    pub fn export_unpersisted(&self) -> Result<JsValue, JsError> {
-        let (updates, through) = self.inner.export_unpersisted().map_err(to_js)?;
-        let entries = Array::new();
-        for env in &updates {
-            entries.push(&Uint8Array::from(env.as_slice()));
-        }
-        let obj = Object::new();
-        set(&obj, "entries", &entries)?;
-        set(&obj, "through", &JsValue::from_f64(u64_to_f64(through)))?;
-        Ok(obj.into())
-    }
-
-    /// Advance the persist cursor after the host has durably written an
-    /// [`exportUnpersisted`](Self::export_unpersisted) batch.
-    #[wasm_bindgen(js_name = markPersisted)]
-    pub fn mark_persisted(&mut self, through: f64) -> Result<(), JsError> {
-        self.inner.mark_persisted(as_u64(through, "through")?);
-        Ok(())
-    }
-
-    /// Data-integrity anomalies observed (server entries that wouldn't decode + quarantined pull
-    /// entries). A non-zero count is surfaced to the user, never silently swallowed.
+    /// Data-integrity anomalies observed (peer entries that wouldn't decode + quarantined + §B3-rejected
+    /// forgeries). A non-zero count is surfaced to the user, never silently swallowed.
     #[wasm_bindgen]
     #[must_use]
     pub fn anomalies(&self) -> usize {
         self.inner.anomalies()
-    }
-
-    /// Load durably-persisted log entries back into the local store on open (call before
-    /// [`bootstrap`](Self::bootstrap)). `entries` is an array of `Uint8Array`.
-    ///
-    /// # Errors
-    /// Returns a [`JsError`] if an element isn't a `Uint8Array`, or the store append fails.
-    #[wasm_bindgen(js_name = importLog)]
-    pub fn import_log(&mut self, entries: &Array) -> Result<(), JsError> {
-        let mut batch: Vec<Vec<u8>> = Vec::with_capacity(entries.length() as usize);
-        for v in entries.iter() {
-            let bytes: Uint8Array = v
-                .dyn_into()
-                .map_err(|_| JsError::new("each persisted entry must be a Uint8Array"))?;
-            batch.push(bytes.to_vec());
-        }
-        self.inner.import_log(&batch).map_err(to_js)
     }
 
     // --- reads -------------------------------------------------------------------------------------
@@ -525,7 +523,7 @@ pub fn provision(
         .map_err(to_js)?;
     let did = p.did_key.into_string();
     let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), p.sealer, Arc::new(MemoryStore::new()), doc, replica_id.to_vec()),
+        inner: AppCore::new(did.clone(), p.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
     };
     Ok(OpenResult {
         handle: Some(handle),
@@ -573,7 +571,7 @@ pub fn unlock(
     // persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here would be dead work
     // and would conflate a bad passphrase with one corrupt log entry.
     let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), u.sealer, Arc::new(MemoryStore::new()), doc, replica_id.to_vec()),
+        inner: AppCore::new(did.clone(), u.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
     };
     Ok(OpenResult {
         handle: Some(handle),
@@ -629,7 +627,7 @@ pub fn recover(
         .map_err(to_js)?;
     let did = r.did_key.into_string();
     let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), r.sealer, Arc::new(MemoryStore::new()), doc, replica_id.to_vec()),
+        inner: AppCore::new(did.clone(), r.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
     };
     Ok(OpenResult {
         handle: Some(handle),
@@ -1109,9 +1107,9 @@ pub fn unlock_as_member(
     let mut inner = AppCore::new(
         u.did_key.clone(),
         u.sealer,
-        Arc::new(MemoryStore::new()),
+        Arc::new(MemoryBlob::new()),
         doc,
-        replica_id.to_vec(),
+        replica_id,
     );
     // Retain the member's epoch-adopt secret so a keyring sync that rotates the write epoch (a removal) can
     // splice the new epoch DEK into this running core WITHOUT a passphrase (OPE-393). Stays inside the core.
@@ -1411,17 +1409,6 @@ fn to_js(e: impl std::fmt::Display) -> JsError {
 
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0; // 2^53 - 1
 
-fn as_u64(n: f64, field: &str) -> Result<u64, JsError> {
-    if n.is_nan() || n < 0.0 || n.fract() != 0.0 || n > MAX_SAFE {
-        return Err(JsError::new(&format!(
-            "{field} must be a non-negative integer within 2^53"
-        )));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let v = n as u64;
-    Ok(v)
-}
-
 fn as_i64(n: f64, field: &str) -> Result<i64, JsError> {
     if n.is_nan() || n.fract() != 0.0 || n.abs() > MAX_SAFE {
         return Err(JsError::new(&format!(
@@ -1431,18 +1418,4 @@ fn as_i64(n: f64, field: &str) -> Result<i64, JsError> {
     #[allow(clippy::cast_possible_truncation)]
     let v = n as i64;
     Ok(v)
-}
-
-fn u64_to_f64(n: u64) -> f64 {
-    // Local-log seq; far below 2^53 in practice.
-    #[allow(clippy::cast_precision_loss)]
-    let f = n as f64;
-    f
-}
-
-fn i64_to_f64(n: i64) -> f64 {
-    // Server seq; far below 2^53 in practice.
-    #[allow(clippy::cast_precision_loss)]
-    let f = n as f64;
-    f
 }

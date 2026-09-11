@@ -3,10 +3,11 @@
 // `docId`; each core owns one tree. The main thread provides only a `transport` (a Comlink-proxied
 // `fetch` seam) and drives ticks via `syncNow`.
 //
-// The sync tick is the only async work here: it calls the core's SYNCHRONOUS Rust steps (outbound /
-// ingest / markPushed) with `await transport.*` in between. A per-core single-flight guard (`syncing`)
-// plus a `dirty` re-run make concurrent ticks safe — the Rust core is never re-entered mid-borrow
-// because each step runs to completion before the next `await`.
+// The sync tick is the only async work here: it fetches the remote's object snapshot, calls the core's
+// SYNCHRONOUS Rust `sync` step (mirror + fold + compute the upload set), and uploads the diff — with
+// `await transport.*` in between. A per-core single-flight guard (`syncing`) plus a `dirty` re-run make
+// concurrent ticks safe — the Rust core is never re-entered mid-borrow because each step runs to
+// completion before the next `await`.
 import * as Comlink from '../vendor/comlink.js';
 import init, {
   AppCoreHandle,
@@ -90,11 +91,19 @@ const cores = new Map();
 const transports = new Map();
 const transportFor = (docId) => transports.get(docId) ?? null;
 
+// The shared REMOTE keyspace is per-TREE (every device of one tree meets there), while the core's LOCAL
+// keyspace + the durable store are per-DEVICE (`docId`, so two devices in one page/origin stay isolated). The
+// worker maps between them at the transport boundary — the only place it touches a key, and only its leading
+// doc segment (never the internal `log/{replica}/{counter}` structure the core owns).
+const treeKeyOf = (treeId) => [...new Uint8Array(treeId)].map((b) => b.toString(16).padStart(2, '0')).join('');
+
 class Core {
   constructor(handle, docId, persist, treeId = null, engine = null) {
     this.handle = handle;
     this.docId = docId;
     this.treeId = treeId; // the 16-byte seam id — needed to sync the keyring channel before a data pull
+    // The remote keyspace prefix for this tree (falls back to docId if a dev core has no treeId).
+    this.treeKey = treeId ? treeKeyOf(treeId) : docId;
     this.engine = engine; // 'chain' | 'dag' | null — only chain has the per-revision keyring channel to sync
     this.shared = false; // set once a §B3 resolver is installed (a shared tree) → the tick keyring-syncs first
     this.persist = persist; // mirror the local log to IndexedDB (off for in-memory / UI-test mode)
@@ -105,27 +114,23 @@ class Core {
   }
 }
 
-// Load the durably-persisted log into a fresh handle, then let the engine rebuild from it. `importLog`
-// advances the core's OWN persist cursor past what came from durable storage, so nothing re-mirrors.
+// Load the durably-persisted objects into a fresh handle's local store, then let the engine rebuild from it.
+// `import` picks each object's write precondition (immutable vs pointer), so replaying is idempotent.
 async function hydrate(core) {
   if (core.persist) {
-    const { updates } = await store().readUpdates(core.docId, null);
-    if (updates.length) core.handle.importLog(updates);
+    const objects = await store().readBlobs(core.docId);
+    if (objects.length) core.handle.import(objects);
   }
-  core.handle.bootstrap(); // replay the local log into the engine (a no-op on an empty store)
+  core.handle.bootstrap(); // fold the local store into the engine (a no-op on an empty store)
 }
 
-// Mirror everything the core has logged since the last persist (local mints + folded server deltas) to
-// durable storage. Serialized on the core's persistLock so commit and a running tick can't interleave
-// their export→append→mark and double-write. The persist CURSOR lives in the core, not here.
-function persistDelta(core) {
+// Mirror the core's whole local store to durable storage. `export()` is idempotent to re-persist (immutable
+// log objects are content-stable; pointer objects overwrite), so we simply write the current object set.
+// Serialized on the core's persistLock so a commit and a running tick can't interleave their writes.
+function persistBlobs(core) {
   if (!core.persist) return Promise.resolve();
   core.persistLock = core.persistLock.then(async () => {
-    const { entries, through } = core.handle.exportUnpersisted();
-    if (entries.length) {
-      await store().append(core.docId, entries);
-      core.handle.markPersisted(through);
-    }
+    await store().putBlobs(core.docId, core.handle.export());
   });
   return core.persistLock;
 }
@@ -226,7 +231,7 @@ const api = {
     await ensureInit();
     const handle = AppCoreHandle.dev(treeId, replicaId, createdBy, docId);
     const core = new Core(handle, docId, persist, treeId, null); // dev path: never shared, no keyring sync
-    await hydrate(core); // importLog (if persisting) + bootstrap — uniform for both modes
+    await hydrate(core); // import persisted objects (if persisting) + bootstrap — uniform for both modes
     cores.set(docId, core);
     return true;
   },
@@ -510,13 +515,17 @@ const api = {
     // replay (the chain retains per-revision membership, so its history needs no cover). hydrate reloads the
     // durable log, which is what authorCover sweeps.
     const re = wasmUnlock(eng, passphrase, treeId, ownerMemberId, freshReplica(), change.keyring, docId);
-    let cover = null;
+    let nc = null;
     try {
       await saveWatermark(docId, re.watermark);
-      const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
+      nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
       await hydrate(nc);
       await installMembership(nc, docId, eng, change.keyring);
-      cover = nc.handle.authorCover() ?? null; // Uint8Array (dag, if there is history to cover) | undefined
+      // Author a self-heal cover over the removed member's stored history (dag; a no-op on the chain, which
+      // retains per-revision membership). The cover is written to the local store as a Cover log object, so it
+      // rides the next data sync to the remote like any object; `authorCover` returns whether one was authored.
+      nc.handle.authorCover();
+      await persistBlobs(nc); // persist the cover + rotated state before we swap cores
       try { c.handle.free(); } catch { /* old handle already gone */ }
       cores.set(docId, nc);
     } finally {
@@ -524,12 +533,9 @@ const api = {
     }
     // Publish the rotated keyring so members adopt the removal. Best-effort.
     await publishMembership(docId, eng, treeId);
-    // Push the self-heal cover to the DATA channel so peers covered-accept the removed member's history. It is
-    // a bare sealed envelope (not in outbound — a Cover never enters the local claim log), so it is appended
-    // directly. Best-effort: if it fails to land, a later authorCover sweep re-mints it (idempotent).
-    if (cover && transportFor(docId)) {
-      await transportFor(docId).appendLog(docId, cover);
-    }
+    // Push the self-heal cover (and any other pending local objects) to the DATA channel so peers covered-accept
+    // the removed member's history. Best-effort: if it fails to land, a later tick re-uploads it (idempotent).
+    if (transportFor(docId)) await syncData(nc);
   },
 
   /**
@@ -644,8 +650,8 @@ const api = {
   async commit(docId) {
     const c = core(docId);
     c.handle.commit();
-    await persistDelta(c); // durably mirror the new batch (no-op when not persisting)
-    if (c.syncing) c.dirty = true; // a commit during a tick → re-scan outbound
+    await persistBlobs(c); // durably mirror the new batch (no-op when not persisting)
+    if (c.syncing) c.dirty = true; // a commit during a tick → re-run the data sync
   },
 
   // --- reads --------------------------------------------------------------------------------------
@@ -674,7 +680,7 @@ const api = {
 
   // --- sync ---------------------------------------------------------------------------------------
 
-  /** Run one full tick (push our outbound, then pull + fold the server tail). Single-flighted. */
+  /** Run one full tick (keyring-before-data, then reconcile the data channel with the remote). Single-flighted. */
   async syncNow(docId) {
     return runTick(core(docId));
   },
@@ -723,14 +729,12 @@ async function runTick(c) {
     do {
       c.dirty = false;
       if (c.aborted) break;
-      await syncKeyringForTick(c); // keyring-before-data: verify the tail against the CURRENT membership
+      await syncKeyringForTick(c); // keyring-before-data: verify the arrivals against the CURRENT membership
       if (c.aborted) break;
-      await pushOnce(c);
-      if (c.aborted) break;
-      await pullOnce(c);
+      await syncData(c);
     } while (c.dirty);
     if (c.aborted) return { state: 'stopped' }; // torn down mid-tick — don't touch the (maybe-freed) handle
-    // `anomalies` (quarantined / undecodable entries) is surfaced, never swallowed; the driver can warn.
+    // `anomalies` (quarantined / undecodable / §B3-rejected entries) is surfaced, never swallowed.
     return { state: 'ok', pending: c.handle.pendingCount(), anomalies: c.handle.anomalies() };
   } catch (e) {
     return { state: 'error', message: String(e?.message ?? e) };
@@ -739,31 +743,31 @@ async function runTick(c) {
   }
 }
 
-async function pushOnce(c) {
+// One data-channel reconciliation: fetch the shared remote's whole snapshot for this doc, hand it to the
+// core's `sync` (which mirrors it in, folds, and returns what the remote is missing), upload that diff, then
+// mirror the updated local store to durable storage. The core owns the entire keyspace + head-monotonicity
+// decision — this is a dumb ferry that never parses, builds, or compares a key.
+async function syncData(c) {
   const transport = transportFor(c.docId);
-  const out = c.handle.outbound(); // { entries: Uint8Array[], through: number }
-  for (const env of out.entries) {
+  if (!transport) return;
+  const localPrefix = c.docId + '/'; // the core's own (per-device) keyspace
+  const remotePrefix = c.treeKey + '/'; // the shared (per-tree) keyspace on the remote
+  // Fetch the remote's whole snapshot, re-keyed into the core's local namespace for `sync`.
+  const remote = [];
+  for (const { key } of await transport.blobList(remotePrefix)) {
     if (c.aborted) return;
-    await transport.appendLog(c.docId, env);
+    const bytes = await transport.blobGet(key);
+    if (bytes) remote.push({ key: localPrefix + key.slice(remotePrefix.length), bytes });
   }
-  if (c.aborted) return; // no await between this check and markPushed → close() can't free under us
-  c.handle.markPushed(out.through);
-}
-
-async function pullOnce(c) {
-  // Drain the whole tail this tick — a fresh device against a big tree shouldn't need one syncNow per
-  // page. Bounded: stop on an empty page, or if the cursor didn't advance (a non-advancing / hostile
-  // server), so this can't spin.
-  for (;;) {
+  if (c.aborted) return;
+  const { put } = c.handle.sync(remote); // { put: [{ key, bytes, pointer }], folded }
+  for (const o of put) {
     if (c.aborted) return;
-    const since = c.handle.serverSince(); // number | undefined
-    const page = await transportFor(c.docId).readLog(c.docId, since); // { entries: Uint8Array[], nextCursor }
-    if (c.aborted) return;
-    c.handle.ingest(page.entries, page.nextCursor);
-    await persistDelta(c); // durably mirror the folded server deltas too
-    const advanced = c.handle.serverSince() !== since;
-    if (!page.entries?.length || !advanced) return;
+    // Re-key the core's object back into the shared tree namespace for upload.
+    await transport.blobPut(remotePrefix + o.key.slice(localPrefix.length), o.bytes, o.pointer);
   }
+  if (c.aborted) return;
+  await persistBlobs(c);
 }
 
 Comlink.expose(api);

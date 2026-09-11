@@ -8,7 +8,7 @@
 //! ([`chain::ChainMembershipResolver`]); the dag engine adds one more impl behind the same seam — nothing in the
 //! neutral policy or the caller (`openom-app-core`'s `ingest`) changes.
 
-use openom_keyring_api::{EngineKind, MembershipView};
+use openom_keyring_api::{EngineKind, EverMemberInfo, MembershipView};
 use openom_protocol::v1::Header;
 
 use crate::attribution::verify_entry;
@@ -45,18 +45,16 @@ pub trait MembershipResolver {
     fn shared(&self) -> bool;
     /// Resolve the governing membership for an entry sealed under `key_id` with header `governing_ref`.
     fn resolve(&self, governing_ref: &[u8], key_id: &[u8]) -> Governing;
-    /// Whether `member_id` was EVER a legitimate member — the self-heal covered-accept gate (pin P6): a data
-    /// entry may be covered-accepted only if its author is one, so a carve-out-voided thief (never a
-    /// legitimate member) or a never-member is never blessed by a cover. Defaults to `false` (fail-closed):
-    /// only the dag resolver, whose always-current model drops legitimately-removed members' history, needs a
-    /// real answer; the chain resolver retains history so covered-accept never fires there.
-    fn ever_member(&self, _member_id: &str) -> bool {
-        false
-    }
-    /// The author public key an ever-member was admitted with — for the self-heal WRITER to bind into a cover
-    /// it mints over that (now-removed) member's entries. `None` if the id was never a legitimate member.
-    /// Defaults to `None` (only the dag resolver mints covers).
-    fn ever_member_key(&self, _member_id: &str) -> Option<Vec<u8>> {
+    /// Everything the self-heal covered-accept gate (pin P6) needs about a member who was EVER legitimately
+    /// admitted — resolved from THIS client's verified membership, never from an (untrusted) cover: every author
+    /// key they ever held + the strongest role they ever held (see [`EverMemberInfo`]). `None` if the id was
+    /// never a legitimate member (a carve-out-voided thief or a never-member) — so a cover can never bless their
+    /// entries. This is the SINGLE source of truth for an ever-member's facts, so a caller can't assemble a
+    /// mismatched (id present, wrong key, wrong role) tuple — the split that let a forged cover-bound key hide.
+    /// Defaults to `None` (fail-closed): only the dag resolver, whose always-current model drops legitimately-
+    /// removed members' history, returns `Some`; the chain resolver retains history so covered-accept never
+    /// fires there.
+    fn ever_member_info(&self, _member_id: &str) -> Option<EverMemberInfo> {
         None
     }
     /// Whether `member_id` is a member RIGHT NOW — the writer covers only entries whose author is no longer
@@ -134,13 +132,24 @@ fn verify_or_reject<E>(
 }
 
 /// Verify a since-removed member's entry against a **cover binding** (SH-2 covered-accept, pin P2): the entry
-/// must STILL carry a valid author signature over its content, made by the key the cover bound to its author
-/// id — a cover WAIVES only the current-membership/role check, never integrity. Reuses the audited
-/// [`verify_entry`] with a SYNTHETIC single-member view (never escapes this call), so no crypto is duplicated:
-/// the author id must match the entry's `author_member_id`, the signature must verify against `author_public_key`,
-/// and the epoch echoes the entry's own `key_id` (accept any epoch it was legitimately sealed under, as the dag
-/// resolver does). `plaintext` is the AEAD-opened body — the caller must have opened it, which itself proves
-/// integrity of the ciphertext the recomputed hash pinned.
+/// must STILL carry a valid author signature over its content, made by a key the author ACTUALLY held, and its
+/// kind must be permitted by the strongest role the author ACTUALLY held — a cover WAIVES only the
+/// *current-membership* check, never integrity and never role.
+///
+/// **This is the ONE function that decides covered-acceptance.** Its only two callers are the reader
+/// (`openom_app_core::classify_entry`, the fold-time gate) and the writer (`openom_app_core::author_cover`,
+/// which covers a candidate only if this returns true for it). Both source `author_public_key` and
+/// `author_role` from their OWN resolver's [`MembershipResolver::ever_member_info`] — NEVER from the (untrusted)
+/// cover — so a forged cover can neither bind an attacker key to a real removed id nor waive the role check.
+/// Keep this the sole decision site; do not inline a second copy.
+///
+/// Reuses the audited [`verify_entry`] with a SYNTHETIC single-member view (never escapes this call), so no
+/// crypto is duplicated: the author id must match the entry's `author_member_id`, the signature must verify
+/// against `author_public_key`, `author_role` gates the entry's kind (a `Delta` needs Maintainer), and the epoch
+/// echoes the entry's own `key_id` (accept any epoch it was legitimately sealed under, as the dag resolver
+/// does). `plaintext` is the AEAD-opened body — the caller must have opened it, which itself proves integrity of
+/// the ciphertext the recomputed hash pinned. `author_role` is in the [`openom_keyring_api`] convention (lower is
+/// stronger); pass the author's STRONGEST-ever role.
 #[must_use]
 pub fn verify_covered_entry(
     version: u32,
@@ -148,11 +157,12 @@ pub fn verify_covered_entry(
     plaintext: &[u8],
     author_member_id: &str,
     author_public_key: &[u8],
+    author_role: i16,
 ) -> bool {
     let view = MembershipView::new(
         vec![openom_keyring_api::MemberView {
             member_id: author_member_id.to_string(),
-            role: openom_roles::ROLE_MAINTAINER,
+            role: author_role,
             author_public_key: author_public_key.to_vec(),
             hpke_public_key: Vec::new(),
         }],
@@ -281,7 +291,7 @@ pub mod dag {
         view: MembershipView,
         has_been_shared: bool,
         retained_epochs: BTreeSet<Vec<u8>>,
-        ever_members: std::collections::BTreeMap<String, Vec<u8>>,
+        ever_members: std::collections::BTreeMap<String, super::EverMemberInfo>,
     }
 
     impl DagMembershipResolver {
@@ -307,11 +317,7 @@ pub mod dag {
             self.has_been_shared
         }
 
-        fn ever_member(&self, member_id: &str) -> bool {
-            self.ever_members.contains_key(member_id)
-        }
-
-        fn ever_member_key(&self, member_id: &str) -> Option<Vec<u8>> {
+        fn ever_member_info(&self, member_id: &str) -> Option<super::EverMemberInfo> {
             self.ever_members.get(member_id).cloned()
         }
 

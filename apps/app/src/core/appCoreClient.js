@@ -33,18 +33,16 @@ export function resetAppCoreWorker() {
 
 /**
  * The network transport the worker calls (Comlink-proxied in). A thin adapter over `RemoteStore`, which
- * keeps auth + serverUrl on the main thread. Only the delta-log push/pull is wired here; snapshot /
- * keyring / access channels ride the same RemoteStore when those are moved onto the core.
+ * keeps auth + serverUrl on the main thread. The DATA channel is a BlobStore (list/get/put over opaque
+ * object keys — the worker never parses a key); the keyring / access channels ride the same RemoteStore.
  */
 export function remoteTransport(remoteStore) {
   return {
-    // Push a sealed delta envelope; the worker ignores the returned seq.
-    appendLog: (docId, env) => remoteStore.appendLog(docId, env),
-    // Pull the tail after `since` (undefined ⇒ from the start) as { entries: Uint8Array[], nextCursor }.
-    async readLog(docId, since) {
-      const tail = await remoteStore.readLog(docId, since ?? -1);
-      return { entries: tail.entries.map((e) => e.payload), nextCursor: tail.nextCursor };
-    },
+    // The data channel as a BlobStore: the worker lists the remote under a `{treeKey}/` prefix, GETs the
+    // objects, and PUTs the diff the core computes. `pointer` (heads/snapshot) overwrites; else If-None-Match.
+    blobList: (prefix) => remoteStore.blobList(prefix),
+    blobGet: (key) => remoteStore.blobGet(key),
+    blobPut: (key, bytes, pointer) => remoteStore.blobPut(key, bytes, pointer),
     // The keyring revision chain from `from` (inclusive) — for a member JOIN's genesis-walk. Returns
     // { revisions: [{ revision, bytes }], head }; bytes = the opaque signed keyring (a MembershipEnvelope).
     readKeyring: (treeUuid, from) => remoteStore.readKeyring(treeUuid, from),

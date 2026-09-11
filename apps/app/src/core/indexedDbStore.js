@@ -11,9 +11,12 @@
 import { ConflictError } from './store.js';
 
 const DB = 'openom';
-const VERSION = 1;
+const VERSION = 2;
 const SNAPSHOTS = 'snapshots';
 const UPDATES = 'updates';
+// The durable mirror of the core's local BlobStore: opaque (doc, key) → bytes objects. The app-core core owns
+// the keyspace; this just persists whatever `export()` hands it and replays it into `import()` on reload.
+const BLOBS = 'blobs';
 
 function open() {
   return new Promise((resolve, reject) => {
@@ -25,6 +28,11 @@ function open() {
         // Fortlaufender Schluessel: der Log ist eine Reihenfolge, kein Satz.
         const s = db.createObjectStore(UPDATES, { keyPath: 'seq', autoIncrement: true });
         s.createIndex('doc', 'doc');
+      }
+      if (!db.objectStoreNames.contains(BLOBS)) {
+        // Keyed by the composite [doc, key]; indexed by doc so a whole document's objects load in one range.
+        const b = db.createObjectStore(BLOBS, { keyPath: ['doc', 'key'] });
+        b.createIndex('doc', 'doc');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -105,11 +113,31 @@ export class IndexedDbStore {
     return 'v' + counter;
   }
 
+  // Load every persisted object for a doc as [{ key, bytes }] — fed straight into the core's `import`.
+  async readBlobs(doc) {
+    const tx = await this.#tx([BLOBS], 'readonly');
+    const rows = await ask(tx.objectStore(BLOBS).index('doc').getAll(doc));
+    return rows.map((r) => ({ key: r.key, bytes: new Uint8Array(r.bytes) }));
+  }
+
+  // Persist a batch of the core's objects (from `export()`). Idempotent: immutable log objects re-put
+  // identically; pointer objects (heads/snapshot) overwrite. `objects` is [{ key, bytes }] (a `pointer` flag,
+  // if present, is ignored here — durability keeps every object regardless).
+  async putBlobs(doc, objects) {
+    if (!objects.length) return;
+    const tx = await this.#tx([BLOBS], 'readwrite');
+    const store = tx.objectStore(BLOBS);
+    for (const { key, bytes } of objects) store.put({ doc, key, bytes: Array.from(bytes) });
+    await done(tx);
+  }
+
   async delete(doc) {
-    const tx = await this.#tx([SNAPSHOTS, UPDATES], 'readwrite');
+    const tx = await this.#tx([SNAPSHOTS, UPDATES, BLOBS], 'readwrite');
     tx.objectStore(SNAPSHOTS).delete(doc);
-    const index = tx.objectStore(UPDATES).index('doc');
-    for (const key of await ask(index.getAllKeys(doc))) tx.objectStore(UPDATES).delete(key);
+    const updIndex = tx.objectStore(UPDATES).index('doc');
+    for (const key of await ask(updIndex.getAllKeys(doc))) tx.objectStore(UPDATES).delete(key);
+    const blobIndex = tx.objectStore(BLOBS).index('doc');
+    for (const key of await ask(blobIndex.getAllKeys(doc))) tx.objectStore(BLOBS).delete(key);
     await done(tx);
   }
 }

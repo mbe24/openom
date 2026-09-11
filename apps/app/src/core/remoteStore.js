@@ -182,6 +182,52 @@ export class RemoteStore {
     };
   }
 
+  // ---- data blob surface (the OPE-397 BlobStore-over-HTTP; the managed server is OPE-398) ----
+  //
+  // The data channel is a content-addressable blob store keyed by the core's OPAQUE object keys —
+  // `{treeKey}/log/{replica}/{counter}` (immutable) | `{treeKey}/heads/{replica}` | `{treeKey}/snapshot`
+  // (pointers). The tree (for routing + authz) is the key's leading segment; the rest is the object path.
+
+  #blobUrl(key) {
+    const slash = key.indexOf('/');
+    const tree = key.slice(0, slash);
+    const sub = key.slice(slash + 1).split('/').map(encodeURIComponent).join('/');
+    return `${this.#tree(tree)}/blobs/${sub}`;
+  }
+
+  /** The keys under `prefix` (a `{treeKey}/` prefix) as `[{ key, etag }]`, re-prefixed to the caller's namespace. */
+  async blobList(prefix) {
+    const tree = prefix.replace(/\/.*$/, '').replace(/\/$/, '');
+    const res = await this.#send(`${this.#tree(tree)}/blobs`, { method: 'GET' });
+    if (res.status === 404) return [];
+    if (!res.ok) throw httpError(`blobList ${tree}`, res.status);
+    const j = await res.json();
+    return (j.keys ?? []).map((k) => ({ key: `${tree}/${k.key}`, etag: k.etag }));
+  }
+
+  /** Fetch one object's bytes, or `null` if absent. */
+  async blobGet(key) {
+    const res = await this.#send(this.#blobUrl(key), { method: 'GET' });
+    if (res.status === 404) return null;
+    if (!res.ok) throw httpError(`blobGet ${key}`, res.status);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  /** Write one object. A `pointer` overwrites; an immutable object writes `If-None-Match: *` (a 412 = the
+   *  object already exists → idempotent success, since immutable objects are content-stable). */
+  async blobPut(key, bytes, pointer) {
+    const res = await this.#send(this.#blobUrl(key), {
+      method: 'PUT',
+      extraHeaders: { 'content-type': 'application/octet-stream', ...(pointer ? {} : { 'if-none-match': '*' }) },
+      body: bytes,
+    });
+    if (res.status === 412) return; // immutable object already present — idempotent
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw httpError(`blobPut ${key}`, res.status, detail);
+    }
+  }
+
   // ---- keyring surface (GET /trees/{id}/keyring) ----
 
   /**

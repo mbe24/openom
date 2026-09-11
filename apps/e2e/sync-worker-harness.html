@@ -2,11 +2,11 @@
 <meta charset="utf-8" />
 <title>app-core sync harness</title>
 <!--
-  Loads the real app-core worker path (the wasm engine + sealer + docsync loop + local store +
-  replicator, in a real Web Worker) — no app UI. Two workers = two devices of ONE tree (same dev
-  DEK + treeId, distinct replicaIds), meeting only through an in-page fake transport (the server
-  seam). Proves the loop in a real browser: two devices converge, and an un-pushed offline mint is
-  still offered outbound once a transport is attached. Keys live only in the workers.
+  Loads the real app-core worker path (the wasm engine + sealer + docsync loop + local BlobStore +
+  the mirror/fold sync loop, in a real Web Worker) — no app UI. Two workers = two devices of ONE tree
+  (same dev DEK + treeId, distinct replicaIds), meeting only through an in-page fake transport (a dumb
+  BlobStore, the server seam). Proves the loop in a real browser: two devices converge, and an un-pushed
+  offline mint still reaches the remote once a transport is attached. Keys live only in the workers.
 -->
 <body>
   <div id="status">loading…</div>
@@ -48,17 +48,24 @@
     }
 
     function makeTransport() {
-      const log = [];
+      // The DATA channel is now a dumb BlobStore keyed by the core's opaque object keys (the server owns no
+      // keyspace knowledge — R2/BYO satisfy this with zero compute). One shared store = the shared remote.
+      const blobs = new Map(); // key -> Uint8Array
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
       return {
-        async appendLog(_docId, env) {
-          log.push(env);
-          return { seq: log.length };
+        // List the keys under a prefix (the worker passes `${docId}/`). Order is unspecified, like R2 LIST.
+        async blobList(prefix) {
+          return [...blobs.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key }));
         },
-        async readLog(_docId, since) {
-          const start = since == null ? 0 : since;
-          return { entries: log.slice(start), nextCursor: log.length };
+        async blobGet(key) {
+          return blobs.get(key) ?? null;
+        },
+        // `pointer` (heads/snapshot) overwrites; an immutable log object is written only if absent (idempotent
+        // re-push is a no-op), mirroring R2 If-None-Match.
+        async blobPut(key, bytes, pointer) {
+          if (!pointer && blobs.has(key)) return;
+          blobs.set(key, bytes);
         },
         // The keyring channel. publishKeyring PUTs ascending from head+1, so the revision is the publish
         // order; we store the unwrapped MembershipEnvelope payload (what a joiner's walk consumes).
@@ -75,8 +82,10 @@
           }
           return { revisions, head: keyringHead };
         },
+        // The count of DATA log objects (deltas + covers) — pointers (heads/snapshot) are excluded, so this
+        // counts settled writes the way the old scalar log length did.
         _size() {
-          return log.length;
+          return [...blobs.keys()].filter((k) => k.includes('/log/')).length;
         },
       };
     }
@@ -115,8 +124,8 @@
         return { aPush, bPull, serverSize: transport._size(), aPeople: aProj.people, bPeople: bProj.people };
       },
 
-      // An offline mint (committed with NO transport) is still offered outbound after a transport is
-      // attached — the outbound scan reads it back from the durable local log, not an in-memory queue.
+      // An offline mint (committed with NO transport) still reaches the remote after a transport is
+      // attached — the sync reads it from the durable local store, not an in-memory queue.
       async offlineThenSync() {
         const transport = makeTransport();
         const aWorker = spawnWorker();

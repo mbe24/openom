@@ -725,7 +725,12 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             }
         }
 
-        // 2. Fresh scan: each replica's gap past the frontier.
+        // 2. Fresh scan: each replica's gap past the frontier, in TWO phases so every Cover in this tick
+        //    folds BEFORE any Delta is classified. This is load-bearing, not an optimization: a since-removed
+        //    member's delta resolves to Reject (its author is gone from the rotated view), NOT Hold, so it is
+        //    NOT parked for a later drain — the covered-accept rescue must already see the cover's binding when
+        //    the delta is classified, or the delta is dropped for good. Covers and deltas from different
+        //    replicas interleave by replica-sort order, so a single inline pass could classify the delta first.
         let hp = heads_prefix(&self.doc);
         let mut replicas: Vec<String> = self
             .store
@@ -734,6 +739,11 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             .filter_map(|(k, _etag)| parse_head_key(&hp, &k))
             .collect();
         replicas.sort();
+
+        // Phase 1: fold every Cover in the gap, and buffer each Delta (with its opened plaintext) for phase 2.
+        // The frontier is advanced here — a Delta parked in `held` below sits at a counter < frontier and is
+        // retried via the drain, exactly like the drain path expects.
+        let mut deltas: Vec<(String, u64, Vec<u8>, Vec<u8>)> = Vec::new();
         for replica in replicas {
             let Some((hb, _etag)) = self.store.get(&head_key(&self.doc, &replica))? else {
                 continue;
@@ -747,29 +757,32 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
                     break;
                 };
-                // Route by kind: a Cover folds into the caller's covered set (never merged, never held); a
-                // Delta goes through the §B3 classify gate. `open` is kind-strict, so a delta fails the Cover
-                // open and falls through. (A delta held before its cover un-holds on a later drain.)
+                // `open` is kind-strict: a Delta fails the Cover open and falls through to the Delta open.
                 if let Ok(cover_body) = self.sealer.open(EntryKind::Cover, &env) {
                     fold_cover(&env, &cover_body, &replica, c);
                 } else {
                     match self.sealer.open(EntryKind::Delta, &env) {
-                        Ok(pt) => match classify(&env, &pt, &replica, c) {
-                            Verdict::Accept => match self.engine.merge(&pt) {
-                                Ok(()) => merged += 1,
-                                Err(_) => self.quarantined += 1,
-                            },
-                            Verdict::Hold => {
-                                self.held.insert((replica.clone(), c));
-                            }
-                            Verdict::Reject => {}
-                        },
+                        Ok(pt) => deltas.push((replica.clone(), c, env, pt)),
                         Err(_) => self.quarantined += 1,
                     }
                 }
                 c += 1;
             }
             self.pull_frontier.insert(replica, c);
+        }
+
+        // Phase 2: classify each buffered Delta now that every cover in this tick has folded.
+        for (replica, c, env, pt) in deltas {
+            match classify(&env, &pt, &replica, c) {
+                Verdict::Accept => match self.engine.merge(&pt) {
+                    Ok(()) => merged += 1,
+                    Err(_) => self.quarantined += 1,
+                },
+                Verdict::Hold => {
+                    self.held.insert((replica, c));
+                }
+                Verdict::Reject => {}
+            }
         }
         Ok(merged)
     }

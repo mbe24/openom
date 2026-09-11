@@ -299,19 +299,21 @@ fn blob_mirror_two_local_stores_converge_through_a_remote() {
 }
 
 #[test]
-fn blob_verified_pull_folds_a_cover_that_un_holds_a_delta() {
-    // The self-heal case: an unattributed delta is HELD; a Cover marker blessing it folds into the caller's
-    // covered set; the next drain re-classifies the delta as covered → Accept. Proves covers route through
-    // pull_verified (never merged as claims, never held) and drive the hold/drain the same way membership does.
+fn blob_verified_pull_folds_a_cover_before_classifying_the_delta_it_blesses() {
+    // The self-heal case, covers-first within a tick: a delta whose author is covered by a Cover marker is
+    // accepted in the SAME pull, because every cover in the gap folds BEFORE any delta is classified. This is
+    // load-bearing: a since-removed member's delta classifies as Reject (not Hold), so it is NOT retried on a
+    // later drain — the cover MUST already have folded when the delta is classified. Here the delta's replica
+    // (A) sorts before the cover author's would in a naive inline scan, yet covers-first still blesses it.
     let store = Arc::new(MemoryBlob::new());
     let mut a = blob_client(store.clone(), "replica-A");
-    a.apply("blessed".into()).unwrap(); // A:0 — an (initially) unattributed delta
-    a.push_cover(b"cover-for-blessed").unwrap(); // A:1 — a cover blessing it
+    a.apply("blessed".into()).unwrap(); // A:0 — a delta whose author is (only) legitimized by a cover
+    a.push_cover(b"cover-for-blessed").unwrap(); // A:1 — the cover blessing it
 
     let covered = std::cell::RefCell::new(false);
     let classify = |_env: &[u8], pt: &[u8], _r: &str, _c: u64| {
-        // Hold the "blessed" delta until a cover for it has folded; accept anything else.
-        if pt == b"blessed" && !*covered.borrow() { Verdict::Hold } else { Verdict::Accept }
+        // Model a removed-member delta: Reject unless a cover for it has already folded (never Hold).
+        if pt == b"blessed" && !*covered.borrow() { Verdict::Reject } else { Verdict::Accept }
     };
     let fold_cover = |_env: &[u8], body: &[u8], _r: &str, _c: u64| {
         if body == b"cover-for-blessed" {
@@ -320,16 +322,10 @@ fn blob_verified_pull_folds_a_cover_that_un_holds_a_delta() {
     };
 
     let mut b = blob_client(store.clone(), "replica-B");
-    // Pass 1: the delta is scanned before its cover, so it holds; the cover then folds (covered = true).
+    // One tick: the cover folds first (covered = true), THEN the delta is classified — now covered → Accept.
     let merged = b.pull_verified(classify, fold_cover).unwrap();
-    assert_eq!(merged, 0, "the unattributed delta holds this tick");
-    assert_eq!(b.held_count(), 1);
+    assert_eq!(merged, 1, "the cover folds before the delta, so the delta is accepted this same tick");
+    assert_eq!(b.held_count(), 0, "the delta is never held — it was accepted outright");
     assert!(*covered.borrow(), "the cover folded (routed, not merged, not held)");
-    assert!(!b.engine().lines.contains("blessed"));
-
-    // Pass 2: the drain re-classifies the held delta — now covered → Accept.
-    let merged = b.pull_verified(classify, fold_cover).unwrap();
-    assert_eq!(merged, 1, "the cover un-holds the delta on the next drain");
-    assert_eq!(b.held_count(), 0);
-    assert!(b.engine().lines.contains("blessed"), "the blessed delta is folded once covered");
+    assert!(b.engine().lines.contains("blessed"), "the blessed delta is folded once the cover blesses it");
 }

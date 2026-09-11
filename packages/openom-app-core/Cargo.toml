@@ -34,6 +34,8 @@ wasm = [
 [dependencies]
 docsync = { path = "../docsync" }
 openom-docsync = { path = "../openom-docsync" }
+# The storage swap seam the data channel now runs over (local device BlobStore ⇄ remote R2/BYO).
+store-blob = { path = "../store-blob" }
 openom-data-tree.workspace = true
 openom-data-crdt.workspace = true
 openom-sealer = { path = "../openom-sealer" }
