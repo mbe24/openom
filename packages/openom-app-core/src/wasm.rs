@@ -424,11 +424,7 @@ pub fn provision(
     doc: String,
 ) -> Result<OpenResult, JsError> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -469,11 +465,7 @@ pub fn unlock(
     doc: String,
 ) -> Result<OpenResult, JsError> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -522,11 +514,7 @@ pub fn recover(
     doc: String,
 ) -> Result<OpenResult, JsError> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -579,11 +567,7 @@ pub fn change_passphrase(
     floor: &[u8],
 ) -> Result<OpenResult, JsError> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -662,11 +646,7 @@ pub fn rotate_recovery(
     let dag = AppVault::from_kind(parse_engine(engine)?)
         .as_dag()
         .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -733,11 +713,7 @@ pub fn backfill_rrk(
         .ok_or_else(|| JsError::new("this operation requires the dag keyring engine"))?;
     let kdf = keyeo_crypto::codec::decode_kdf_params(member_kdf_params)
         .map_err(|e| JsError::new(&format!("bad kdf params: {e}")))?;
-    let (tree, member, replica) = (
-        TreeId::new(tree_id),
-        MemberId::new(member_id),
-        ReplicaId::new(replica_id),
-    );
+    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
         tree_id: &tree,
         member_id: &member,
@@ -1196,6 +1172,13 @@ pub fn adopt_reset(
         keyring: a.keyring,
         watermark: a.watermark,
     })
+}
+
+/// Parse the `(tree, member, replica)` id triple every lifecycle/sharing flow builds a [`VaultContext`] from.
+/// The `VaultContext` itself stays at each call site: it BORROWS these owned ids, so it can't outlive a helper
+/// that returned it (the ids would drop) — folding the id construction is as far as this can cleanly go.
+fn parse_ids(tree_id: &[u8], member_id: &str, replica_id: &[u8]) -> (TreeId, MemberId, ReplicaId) {
+    (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id))
 }
 
 /// The engine tag mapping ([`EngineKind`]'s own `FromStr`, so this and the vault host can't drift).
