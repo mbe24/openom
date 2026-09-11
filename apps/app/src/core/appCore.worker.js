@@ -93,9 +93,15 @@ async function needsCreateTree(docId) {
   return !!s && s.bytes[0] === 1;
 }
 async function clearNeedsCreateTree(docId) {
-  const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
-  if (!prev) return; // never marked → nothing to clear
-  await store().putSnapshot(NEEDS_TREE_KEY(docId), new Uint8Array([0]), prev.version ?? null);
+  try {
+    const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
+    if (!prev) return; // never marked → nothing to clear
+    await store().putSnapshot(NEEDS_TREE_KEY(docId), new Uint8Array([0]), prev.version ?? null);
+  } catch {
+    // Best-effort: the marker is advisory and createTree is idempotent, so losing the CAS race against
+    // another Core for this docId (or a transient store hiccup) just leaves the marker set — a later
+    // session re-POSTs (a 200 no-op for the owner) and re-clears. Never wedge the tick on a cleanup write.
+  }
 }
 
 // The durable mirror: a dumb async blob store (IndexedDB on web — also works in the Tauri webview).
@@ -761,6 +767,9 @@ async function runTick(c) {
     // retries. A joining member never set the marker, so this is a no-op read for it.
     if (!c.treeEnsured) {
       if (await needsCreateTree(c.docId)) {
+        // `docId` is the tree UUID and `treeKey` (used for blob/keyring keys) is the same 16 bytes in
+        // hex — both parse to one Postgres UUID (main.js derives docId = treeIdToUuid(treeId bytes)). So
+        // createTree(docId) mints the SAME server tree the blob pushes target.
         await transport.createTree(c.docId);
         await clearNeedsCreateTree(c.docId);
       }

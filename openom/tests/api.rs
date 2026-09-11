@@ -2206,20 +2206,42 @@ async fn create_tree_idempotent_for_owner_forbidden_for_others() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
-async fn create_tree_over_max_trees_is_quota_rejected() {
-    // The entitlement gate: an account at its `max_trees` can't create another tree (403 QuotaExceeded).
+async fn create_tree_enforces_max_trees_limit() {
+    // The entitlement gate counts real rows: at max_trees=2 the first two creates succeed and the third is
+    // refused (403 QuotaExceeded) — exercising the `count < max` arithmetic, not just the degenerate 0.
     let app = router().await;
     let db = db().await;
-    let capped = Uuid::new_v4();
-    seed_account(&db, capped, 1 << 30, 1000.0, 1000).await;
-    sqlx::query("UPDATE accounts SET max_trees = 0 WHERE id = $1")
-        .bind(capped)
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    sqlx::query("UPDATE accounts SET max_trees = 2 WHERE id = $1")
+        .bind(owner)
         .execute(&db)
         .await
         .unwrap();
 
-    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), capped)).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "over max_trees can't create a tree");
+    for _ in 0..2 {
+        let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+        assert_eq!(s, StatusCode::CREATED, "creates up to max_trees succeed");
+    }
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the create past max_trees is refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_then_get_tree_404s_gracefully() {
+    // A data-channel tree has no scalar snapshot, so GET /trees/{id} (the scalar path) 404s gracefully via
+    // its `snapshot_version IS NULL` check — the create-tree row and the scalar-snapshot path don't collide.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "create-tree mints the row");
+    let (s, _, _) = send(&app, get_as(format!("/v1/trees/{tree}"), owner)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "a snapshot-less tree 404s on the scalar GET, not 500");
 }
 
 #[tokio::test]
