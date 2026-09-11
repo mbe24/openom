@@ -78,9 +78,14 @@ async fn whoami(id: auth::Identity) -> Json<serde_json::Value> {
 pub fn app(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/whoami", get(whoami))
+        // POST creates the tree row (OPE-407, decision 3-B) — the explicit, entitlement-gated mint that
+        // `put_blob` no longer does implicitly. GET/PUT keep the scalar-snapshot path; POST is a distinct
+        // method on the same id, so no new path segment.
         .route(
             "/trees/{tree_id}",
-            get(trees::get_tree).put(trees::put_tree),
+            get(trees::get_tree)
+                .put(trees::put_tree)
+                .post(trees::create_tree),
         )
         // Delta-log: append a sealed delta / pull the ordered tail (sync + change history, §B1).
         .route(

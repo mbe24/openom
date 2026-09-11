@@ -77,6 +77,27 @@ async function loadWatermark(docId) {
   return s ? s.bytes : new Uint8Array(0);
 }
 
+// OPE-407 (explicit create-tree): a DURABLE per-doc marker that this device provisioned a NEW tree whose
+// server `trees` row may not exist yet. Set at provision, consumed + cleared on the first sync tick that
+// reaches the server (`createTree` is idempotent for the owner). Durable — not just an in-memory flag — so
+// an offline provision that later RESTARTS before it ever synced still mints the tree on its first online
+// tick, rather than 404ing forever. A JOINing member never sets it: it adopts a tree the owner created.
+// Stored in the same per-doc meta slot as the watermark (no localStorage in a Worker); `[1]` = pending.
+const NEEDS_TREE_KEY = (docId) => `${docId}::needs-create-tree`;
+async function markNeedsCreateTree(docId) {
+  const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
+  await store().putSnapshot(NEEDS_TREE_KEY(docId), new Uint8Array([1]), prev?.version ?? null);
+}
+async function needsCreateTree(docId) {
+  const s = await store().readSnapshot(NEEDS_TREE_KEY(docId));
+  return !!s && s.bytes[0] === 1;
+}
+async function clearNeedsCreateTree(docId) {
+  const prev = await store().readSnapshot(NEEDS_TREE_KEY(docId));
+  if (!prev) return; // never marked → nothing to clear
+  await store().putSnapshot(NEEDS_TREE_KEY(docId), new Uint8Array([0]), prev.version ?? null);
+}
+
 // The durable mirror: a dumb async blob store (IndexedDB on web — also works in the Tauri webview).
 // The Rust core owns ALL persistence logic; this just executes the append/readUpdates verbs it dictates
 // over already-sealed bytes. Lazily created; shared across cores in this worker (keyed by docId inside).
@@ -111,6 +132,7 @@ class Core {
     this.syncing = false; // single-flight: one tick at a time
     this.dirty = false; // an edit/commit arrived mid-tick — re-run before returning
     this.aborted = false;
+    this.treeEnsured = false; // OPE-407: skip the durable needs-create-tree check once satisfied this session
   }
 }
 
@@ -250,6 +272,12 @@ const api = {
       // genesis-walk must fetch rev 1 from the server.
       if (engine === 'chain') await keyringStore().save(docId, 1, res.keyring);
       await saveWatermark(docId, res.watermark); // the anti-rollback floor for recover / change-passphrase
+      // OPE-407: this device provisioned a NEW tree, so it owns it and must mint the server `trees` row
+      // before its first push (`put_blob` no longer mints — it 404s on a missing tree). Recorded DURABLY
+      // and performed on the first sync tick, NOT inline here, so provisioning stays local-first: an
+      // offline / no-backend device still provisions, and the tree is created on the first tick that
+      // reaches the server. Cleared once that createTree succeeds.
+      await markNeedsCreateTree(docId);
       const core = new Core(res.takeHandle(), docId, true, treeId, engine);
       await hydrate(core); // fresh store → a no-op bootstrap
       cores.set(docId, core);
@@ -726,6 +754,18 @@ async function runTick(c) {
   }
   c.syncing = true;
   try {
+    // OPE-407: mint this owner's `trees` row before its FIRST push (keyring PUT + blob PUT both 404 on a
+    // missing tree). Driven by the durable needs-create-tree marker (set at provision), gated behind an
+    // in-memory flag so it's one store read per session, not per tick. `createTree` is idempotent for the
+    // owner; a throw (offline / server down) propagates to the catch below → {state:'error'} → the tick
+    // retries. A joining member never set the marker, so this is a no-op read for it.
+    if (!c.treeEnsured) {
+      if (await needsCreateTree(c.docId)) {
+        await transport.createTree(c.docId);
+        await clearNeedsCreateTree(c.docId);
+      }
+      c.treeEnsured = true; // reached only if createTree didn't throw (or wasn't needed)
+    }
     do {
       c.dirty = false;
       if (c.aborted) break;

@@ -99,6 +99,21 @@ export class RemoteStore {
     return res;
   }
 
+  /**
+   * Explicit create-tree (OPE-407): POST the tree id to mint its `trees` row (entitlement-gated on
+   * `max_trees`) so the caller becomes owner, BEFORE any blob write reaches the server — `put_blob` no
+   * longer mints and `404`s on a missing tree. Idempotent for the owner (a returning device re-POSTs and
+   * gets `2xx`, not an error); a tree owned by someone else is refused (`403`, surfaced as an httpError so
+   * `runTick` can tell a permanent refusal from offline). `id` is the tree UUID (the same id `#tree` routes on).
+   */
+  async createTree(id) {
+    const res = await this.#send(this.#tree(id), { method: 'POST' });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw httpError(`createTree ${id}`, res.status, detail);
+    }
+  }
+
   async readSnapshot(id) {
     const res = await this.#send(this.#tree(id), { method: 'GET' });
     if (res.status === 404) return null;

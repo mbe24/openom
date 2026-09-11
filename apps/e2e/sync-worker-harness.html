@@ -54,6 +54,10 @@
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
       return {
+        // Explicit create-tree (OPE-407): the managed server mints a `trees` row here; this fake blob store
+        // has no tree-row concept (it's a plain Map), so it's a no-op. Present so the owner's first tick,
+        // which now mints the tree before its first push, doesn't call an undefined method.
+        async createTree(_id) {},
         // List the keys under a prefix (the worker passes `${docId}/`). Order is unspecified, like R2 LIST.
         async blobList(prefix) {
           return [...blobs.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key }));

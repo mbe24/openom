@@ -110,68 +110,19 @@ fn precondition_failed(tag: &str) -> Response {
     (StatusCode::PRECONDITION_FAILED, [(ETAG, etag_header(tag))]).into_response()
 }
 
-/// Resolve `tree_id`'s owner, minting the row if this is the first write anyone has made to it.
+/// Resolve `tree_id`'s owner, or [`ApiError::NotFound`] if the tree row doesn't exist yet.
 ///
-/// **Flagged default (open question #3, §3.2/§5.3 of design.ope398-managed-server.md):** with the scalar
-/// `PUT /trees/{id}` gone from the client's write path, nothing else mints the `trees` row. This mirrors
-/// `trees::cas_create`'s "first snapshot PUT creates the tree, gated on `max_trees`" shape — the caller
-/// performing this first write becomes the owner, exactly as `cas_create` keys off `identity.member_id`
-/// today — applied to the first blob PUT instead (any key; in practice the genesis delta,
-/// `log/{replica}/0`). The scalar-envelope columns (`object_key`, `envelope_version`, `aead`) this table
-/// still carries get placeholder defaults; a tree minted this way has no scalar snapshot, which
-/// `trees::get_tree` already renders as a graceful 404 via its `snapshot_version IS NULL` check, so the
-/// two write paths don't collide as long as nothing also PUTs a scalar snapshot to the same tree.
-async fn resolve_or_mint_owner(state: &AppState, tree_id: Uuid, caller: Uuid) -> Result<Uuid, ApiError> {
-    let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+/// A blob handler never mints (OPE-407, decision 3-B): the tree must be created first via the explicit
+/// `POST /trees/{id}` (`trees::create_tree`), so a blob write to a tree that doesn't exist is a `404`, not
+/// an implicit create. Shared by `put_blob` / `get_blob` / `list_blobs` — all three resolve the owner the
+/// same way before authorizing.
+async fn resolve_owner(state: &AppState, tree_id: Uuid) -> Result<Uuid, ApiError> {
+    sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(internal)?;
-    if let Some(owner) = existing {
-        return Ok(owner);
-    }
-
-    let inserted = sqlx::query(
-        "INSERT INTO trees (id, owner_id, object_key, envelope_version, aead, size_bytes, covers_through_seq)
-         SELECT $1, $2, '', 0, 0, 0, 0
-         WHERE (SELECT count(*) FROM trees WHERE owner_id = $2)
-             < (SELECT max_trees FROM accounts WHERE id = $2)
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(tree_id)
-    .bind(caller)
-    .execute(&state.db)
-    .await
-    .map_err(internal)?;
-    if inserted.rows_affected() == 1 {
-        return Ok(caller);
-    }
-
-    // 0 rows: a concurrent first-writer beat us to it, or the entitlement gate blocked the mint.
-    let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    if let Some(owner) = existing {
-        return Ok(owner);
-    }
-    let limits: Option<(i64, i32)> = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM trees WHERE owner_id = $1), a.max_trees
-           FROM accounts a WHERE a.id = $1",
-    )
-    .bind(caller)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(internal)?;
-    match limits {
-        Some((count, max)) if count >= i64::from(max) => {
-            tracing::info!(event = "quota_rejected", resource = "trees", owner = %caller);
-            Err(ApiError::QuotaExceeded)
-        }
-        None => Err(ApiError::Forbidden), // unknown account
-        Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
-    }
+        .map_err(internal)?
+        .ok_or(ApiError::NotFound)
 }
 
 /// `PUT /trees/{tree_id}/blobs/{*sub}` — write one opaque blob under `sub`, per the precondition mapping
@@ -207,7 +158,7 @@ pub async fn put_blob(
     }
     let if_absent = is_if_absent(&headers);
 
-    let owner = resolve_or_mint_owner(&state, tree_id, identity.member_id).await?;
+    let owner = resolve_owner(&state, tree_id).await?; // 404 if the tree was never created (OPE-407)
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Commit).await?;
 
     let key = crate::storage::keys::data_blob(tree_id, &sub);
@@ -302,12 +253,7 @@ pub async fn get_blob(
     let _p = crate::prof::span("blobs.get");
     validate_sub(&sub)?;
 
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    let owner = owner.ok_or(ApiError::NotFound)?;
+    let owner = resolve_owner(&state, tree_id).await?;
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
     let key = crate::storage::keys::data_blob(tree_id, &sub);
@@ -362,12 +308,7 @@ pub async fn list_blobs(
         return Err(ApiError::BadRequest("prefix exceeds the size limit".into()));
     }
 
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
-        .bind(tree_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    let owner = owner.ok_or(ApiError::NotFound)?;
+    let owner = resolve_owner(&state, tree_id).await?;
     crate::authz::authorize(&state.db, tree_id, owner, identity.member_id, Access::Read).await?;
 
     let rows: Vec<(String, String)> = sqlx::query_as(

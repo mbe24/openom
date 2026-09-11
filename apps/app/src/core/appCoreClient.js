@@ -38,6 +38,10 @@ export function resetAppCoreWorker() {
  */
 export function remoteTransport(remoteStore) {
   return {
+    // Explicit create-tree (OPE-407): mint the tree row (entitlement-gated) before the first blob write.
+    // The worker calls this once per owner core, driven by a durable "needs-create-tree" marker set at
+    // provision — idempotent for the owner, never called by a joining member.
+    createTree: (treeUuid) => remoteStore.createTree(treeUuid),
     // The data channel as a BlobStore: the worker lists the remote under a `{treeKey}/` prefix, GETs the
     // objects, and PUTs the diff the core computes. `pointer` (heads/snapshot) overwrites; else If-None-Match.
     blobList: (prefix) => remoteStore.blobList(prefix),

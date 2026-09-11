@@ -188,6 +188,83 @@ pub async fn get_tree(
         .into_response())
 }
 
+/// `POST /trees/{tree_id}` — explicitly create the tree row (OPE-407, decision 3-B), entitlement-gated on
+/// the owner's `max_trees`; the caller becomes owner. This is the ONE place a `trees` row is minted for the
+/// data-channel path — `put_blob` no longer mints (it `404`s on a missing tree). The row carries placeholder
+/// scalar-snapshot columns (empty `object_key`, no `snapshot_version`), which `get_tree` renders as a
+/// graceful `404` via its `version.ok_or(NotFound)` check, so a data-channel tree and a scalar-snapshot tree
+/// don't collide.
+///
+/// Idempotent for the owner: a re-provision / returning device that already minted this tree gets a `2xx`
+/// (`200`), not an error — the client provisioning flow may call it more than once. A tree that already
+/// exists under a DIFFERENT owner is refused (`403`), mirroring `cas_create`'s "exists, not mine"
+/// convention. Over `max_trees` → [`ApiError::QuotaExceeded`] (`403`, a countable product signal).
+///
+/// # Errors
+/// Returns [`ApiError`] if the account is unknown or over its `max_trees`, or the tree exists under another
+/// owner.
+pub async fn create_tree(
+    State(state): State<AppState>,
+    identity: Identity,
+    Path(tree_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let _p = crate::prof::span("tree.create");
+    let caller = identity.member_id;
+
+    // Same entitlement-gated create-only insert `cas_create` uses (count < max_trees, ON CONFLICT DO
+    // NOTHING), minus the snapshot columns — a data-channel tree has no scalar snapshot yet.
+    let res = sqlx::query(
+        "INSERT INTO trees (id, owner_id, object_key, envelope_version, aead, size_bytes, covers_through_seq)
+         SELECT $1, $2, '', 0, 0, 0, 0
+         WHERE (SELECT count(*) FROM trees WHERE owner_id = $2)
+             < (SELECT max_trees FROM accounts WHERE id = $2)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tree_id)
+    .bind(caller)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+    if res.rows_affected() == 1 {
+        tracing::info!(event = "tree_created", %tree_id, owner = %caller);
+        return Ok(StatusCode::CREATED.into_response());
+    }
+
+    // 0 rows: the tree already exists, or the entitlement/account gate blocked the insert. Disambiguate,
+    // exactly as `cas_create` does for the no-If-Match create.
+    let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    match existing {
+        // Already ours → idempotent success (a returning device / a re-provision).
+        Some(o) if o == caller => Ok(StatusCode::OK.into_response()),
+        // Exists under someone else → never hijack an existing tree.
+        Some(_) => Err(ApiError::Forbidden),
+        // Doesn't exist → the entitlement gate blocked the insert. Separate over-quota (a countable signal)
+        // from an unknown account.
+        None => {
+            let limits: Option<(i64, i32)> = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM trees WHERE owner_id = $1), a.max_trees
+                   FROM accounts a WHERE a.id = $1",
+            )
+            .bind(caller)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?;
+            match limits {
+                Some((count, max)) if count >= i64::from(max) => {
+                    tracing::info!(event = "quota_rejected", resource = "trees", owner = %caller);
+                    Err(ApiError::QuotaExceeded)
+                }
+                None => Err(ApiError::Forbidden), // unknown account
+                Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
+            }
+        }
+    }
+}
+
 /// The freshly-written snapshot a CAS points the tree row at: the R2 `object_key`, its opaque `version`
 /// token, byte `size`, and the `Validated` envelope facts (aead / `ciphertext_hash` / `covers_through_seq`).
 struct SnapshotWrite<'a> {

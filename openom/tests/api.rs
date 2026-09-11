@@ -138,6 +138,16 @@ fn post_bytes_as(uri: String, body: &[u8], member: Uuid) -> Request<Body> {
         .unwrap()
 }
 
+/// A bodyless POST authenticated as a specific member — e.g. `POST /v1/trees/{id}` (create-tree, OPE-407).
+fn post_as(uri: String, member: Uuid) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("authorization", format!("Bearer {member}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 /// A blob PUT authenticated as a specific member. `if_absent` sends `if-none-match: *`
 /// (`Precondition::IfAbsent`); otherwise no conditional header (`Precondition::Any`).
 fn put_bytes_as(uri: String, body: &[u8], member: Uuid, if_absent: bool) -> Request<Body> {
@@ -2115,17 +2125,16 @@ async fn access_summary_owner_invariant_and_validation() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
-async fn blob_put_mints_tree_row_on_first_write() {
-    // No scalar PUT /trees/{id} first — a brand-new tree's first *blob* write mints the trees row and
-    // makes the writer its owner (the flagged default for design.ope398-managed-server.md's open
-    // question #3: nothing else mints the tree row once the scalar snapshot PUT is gone).
+async fn blob_put_404s_on_nonexistent_tree() {
+    // OPE-407 (decision 3-B): a blob write no longer mints. A PUT to a tree that was never created via
+    // `POST /trees/{id}` is a 404 — the tree row must exist first.
     let app = router().await;
     let db = db().await;
     let owner = Uuid::new_v4();
     seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
     let tree = Uuid::new_v4();
 
-    let (s, h, _) = send(
+    let (s, _, _) = send(
         &app,
         put_bytes_as(
             format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"),
@@ -2135,17 +2144,72 @@ async fn blob_put_mints_tree_row_on_first_write() {
         ),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "first blob write mints the tree");
-    assert!(h.get("etag").is_some());
+    assert_eq!(s, StatusCode::NOT_FOUND, "a blob write to an uncreated tree 404s");
 
+    let row: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
+        .bind(tree)
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+    assert_eq!(row, None, "the failed write minted nothing");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_then_blob_write_succeeds() {
+    // The OPE-407 provisioning shape: POST /trees/{id} first (entitlement-gated mint, caller becomes owner),
+    // then the blob writes the client's data channel makes land normally.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "create-tree mints the row");
     let row_owner: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree)
         .fetch_optional(&db)
         .await
         .unwrap();
-    assert_eq!(row_owner, Some(owner), "the first writer becomes the owner");
+    assert_eq!(row_owner, Some(owner), "the creator is the owner");
 
-    // Entitlement gate: an account already at max_trees can't mint a new one via a blob write.
+    let (s, h, _) = send(
+        &app,
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"), b"delta", owner, true),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "a blob write to the created tree succeeds");
+    assert!(h.get("etag").is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_idempotent_for_owner_forbidden_for_others() {
+    // Idempotent for the owner (a returning device re-POSTs → 200, not an error); refused for a different
+    // caller (never hijack an existing tree → 403).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let intruder = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    seed_account(&db, intruder, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "first create");
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), owner)).await;
+    assert_eq!(s, StatusCode::OK, "the owner re-creating is an idempotent 200");
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{tree}"), intruder)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "a different caller cannot claim an existing tree");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_over_max_trees_is_quota_rejected() {
+    // The entitlement gate: an account at its `max_trees` can't create another tree (403 QuotaExceeded).
+    let app = router().await;
+    let db = db().await;
     let capped = Uuid::new_v4();
     seed_account(&db, capped, 1 << 30, 1000.0, 1000).await;
     sqlx::query("UPDATE accounts SET max_trees = 0 WHERE id = $1")
@@ -2153,22 +2217,9 @@ async fn blob_put_mints_tree_row_on_first_write() {
         .execute(&db)
         .await
         .unwrap();
-    let tree2 = Uuid::new_v4();
-    let (s, _, _) = send(
-        &app,
-        put_bytes_as(
-            format!("/v1/trees/{tree2}/blobs/log/replicaAAA/0"),
-            b"x",
-            capped,
-            true,
-        ),
-    )
-    .await;
-    assert_eq!(
-        s,
-        StatusCode::FORBIDDEN,
-        "over max_trees can't mint a tree via a blob write"
-    );
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), capped)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "over max_trees can't create a tree");
 }
 
 #[tokio::test]
