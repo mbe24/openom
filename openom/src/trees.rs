@@ -211,8 +211,21 @@ pub async fn create_tree(
     let _p = crate::prof::span("tree.create");
     let caller = identity.member_id;
 
-    // Same entitlement-gated create-only insert `cas_create` uses (count < max_trees, ON CONFLICT DO
-    // NOTHING), minus the snapshot columns — a data-channel tree has no scalar snapshot yet.
+    // Serialize concurrent creates for this owner by locking the accounts row for the duration of the
+    // check-and-insert. A bare `count(*) < max_trees` guard then INSERT races under READ COMMITTED: two
+    // concurrent creates of DIFFERENT ids by the same owner each read the pre-insert count and both pass,
+    // busting the entitlement. The row lock makes the gate atomic w.r.t. a sibling create (different owners
+    // lock different rows, so they don't contend) — the same row-atomic discipline `log.rs` uses for the
+    // byte meter. Requires an explicit tx: an autocommit `FOR UPDATE` would release the lock immediately.
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
+        .bind(caller)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+
+    // Entitlement-gated create-only insert (count < max_trees, ON CONFLICT DO NOTHING), minus the snapshot
+    // columns `cas_create` sets — a data-channel tree has no scalar snapshot yet.
     let res = sqlx::query(
         "INSERT INTO trees (id, owner_id, object_key, envelope_version, aead, size_bytes, covers_through_seq)
          SELECT $1, $2, '', 0, 0, 0, 0
@@ -222,22 +235,23 @@ pub async fn create_tree(
     )
     .bind(tree_id)
     .bind(caller)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal)?;
     if res.rows_affected() == 1 {
+        tx.commit().await.map_err(internal)?;
         tracing::info!(event = "tree_created", %tree_id, owner = %caller);
         return Ok(StatusCode::CREATED.into_response());
     }
 
-    // 0 rows: the tree already exists, or the entitlement/account gate blocked the insert. Disambiguate,
-    // exactly as `cas_create` does for the no-If-Match create.
+    // 0 rows: the tree already exists, or the entitlement/account gate blocked the insert. Disambiguate
+    // inside the same locked tx, exactly as `cas_create` does for the no-If-Match create.
     let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(internal)?;
-    match existing {
+    let outcome = match existing {
         // Already ours → idempotent success (a returning device / a re-provision).
         Some(o) if o == caller => Ok(StatusCode::OK.into_response()),
         // Exists under someone else → never hijack an existing tree.
@@ -250,7 +264,7 @@ pub async fn create_tree(
                    FROM accounts a WHERE a.id = $1",
             )
             .bind(caller)
-            .fetch_optional(&state.db)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(internal)?;
             match limits {
@@ -262,7 +276,9 @@ pub async fn create_tree(
                 Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
             }
         }
-    }
+    };
+    tx.commit().await.map_err(internal)?;
+    outcome
 }
 
 /// The freshly-written snapshot a CAS points the tree row at: the R2 `object_key`, its opaque `version`
@@ -282,6 +298,16 @@ async fn cas_create(
     owner: Uuid,
     snap: &SnapshotWrite<'_>,
 ) -> Result<(), ApiError> {
+    // Lock the accounts row so the `count(*) < max_trees` check-and-insert is atomic w.r.t. a concurrent
+    // create for this owner (a bare guard-then-insert races under READ COMMITTED — see `create_tree`). An
+    // explicit tx is required to hold the `FOR UPDATE` lock across both statements.
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    sqlx::query("SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE")
+        .bind(owner)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+
     let res = sqlx::query(
         "INSERT INTO trees
              (id, owner_id, object_key, snapshot_version, envelope_version, aead,
@@ -300,21 +326,23 @@ async fn cas_create(
     .bind(snap.size)
     .bind(&snap.valid.ciphertext_hash)
     .bind(snap.valid.covers_through_seq)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(internal)?;
 
     if res.rows_affected() == 1 {
+        tx.commit().await.map_err(internal)?;
         return Ok(());
     }
 
-    // 0 rows: the tree already exists, or the entitlement/account gate blocked it.
+    // 0 rows: the tree already exists, or the entitlement/account gate blocked it. Disambiguate in the same
+    // locked tx.
     let existing: Option<Uuid> = sqlx::query_scalar("SELECT owner_id FROM trees WHERE id = $1")
         .bind(tree_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(internal)?;
-    match existing {
+    let outcome = match existing {
         // Exists and is ours → the client should have sent If-Match.
         Some(o) if o == owner => {
             tracing::info!(
@@ -332,7 +360,7 @@ async fn cas_create(
                    FROM accounts a WHERE a.id = $1",
             )
             .bind(owner)
-            .fetch_optional(&state.db)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(internal)?;
             match limits {
@@ -344,7 +372,9 @@ async fn cas_create(
                 Some(_) => Err(ApiError::Conflict), // guard passed yet insert lost — retry
             }
         }
-    }
+    };
+    tx.commit().await.map_err(internal)?;
+    outcome
 }
 
 /// Replace an existing snapshot under CAS: match the expected version and never let

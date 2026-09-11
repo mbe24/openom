@@ -2229,6 +2229,42 @@ async fn create_tree_enforces_max_trees_limit() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_concurrent_creates_respect_max_trees() {
+    // The entitlement gate must be ATOMIC: with exactly one free slot, several concurrent creates of
+    // different ids by one owner must not all pass (a bare count-then-insert races under READ COMMITTED).
+    // The accounts-row lock serializes them → exactly one wins, and the owner never exceeds the cap.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 1000.0, 1000).await;
+    sqlx::query("UPDATE accounts SET max_trees = 1 WHERE id = $1")
+        .bind(owner)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let (a, b, c, d) = tokio::join!(
+        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
+        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
+        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
+        send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)),
+    );
+    let created = [a.0, b.0, c.0, d.0]
+        .iter()
+        .filter(|s| **s == StatusCode::CREATED)
+        .count();
+    assert_eq!(created, 1, "exactly one concurrent create wins the single free slot");
+
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM trees WHERE owner_id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the owner never exceeds max_trees under a concurrent race");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn create_tree_then_get_tree_404s_gracefully() {
     // A data-channel tree has no scalar snapshot, so GET /trees/{id} (the scalar path) 404s gracefully via
     // its `snapshot_version IS NULL` check — the create-tree row and the scalar-snapshot path don't collide.
