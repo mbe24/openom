@@ -177,15 +177,7 @@ impl AppCoreHandle {
     /// Returns a [`JsError`] if the local store read fails, or the result can't be built.
     #[wasm_bindgen]
     pub fn export(&self) -> Result<JsValue, JsError> {
-        let arr = Array::new();
-        for (key, bytes) in self.inner.export().map_err(to_js)? {
-            let obj = Object::new();
-            set(&obj, "key", &JsValue::from_str(&key))?;
-            set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
-            set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
-            arr.push(&obj);
-        }
-        Ok(arr.into())
+        Ok(objects_to_js(self.inner.export().map_err(to_js)?)?.into())
     }
 
     /// Load objects into the local store — the PULL sink (objects the worker GET from the remote) and the
@@ -197,19 +189,7 @@ impl AppCoreHandle {
     /// Returns a [`JsError`] if an element is malformed, or a local store write fails.
     #[wasm_bindgen]
     pub fn import(&mut self, objects: &Array) -> Result<(), JsError> {
-        let mut batch: Vec<(String, Vec<u8>)> = Vec::with_capacity(objects.length() as usize);
-        for v in objects.iter() {
-            let key = Reflect::get(&v, &JsValue::from_str("key"))
-                .ok()
-                .and_then(|k| k.as_string())
-                .ok_or_else(|| JsError::new("each object must have a string `key`"))?;
-            let bytes: Uint8Array = Reflect::get(&v, &JsValue::from_str("bytes"))
-                .map_err(|_| JsError::new("each object must have a `bytes` field"))?
-                .dyn_into()
-                .map_err(|_| JsError::new("`bytes` must be a Uint8Array"))?;
-            batch.push((key, bytes.to_vec()));
-        }
-        self.inner.import(&batch).map_err(to_js)
+        self.inner.import(&objects_from_js(objects)?).map_err(to_js)
     }
 
     /// Fold every object past the §B3 gate into the tree — call after [`import`](Self::import) has mirrored the
@@ -233,27 +213,8 @@ impl AppCoreHandle {
     /// Returns a [`JsError`] if an element is malformed, or a store/mirror step fails.
     #[wasm_bindgen]
     pub fn sync(&mut self, remote: &Array) -> Result<JsValue, JsError> {
-        let mut snapshot: Vec<(String, Vec<u8>)> = Vec::with_capacity(remote.length() as usize);
-        for v in remote.iter() {
-            let key = Reflect::get(&v, &JsValue::from_str("key"))
-                .ok()
-                .and_then(|k| k.as_string())
-                .ok_or_else(|| JsError::new("each remote object must have a string `key`"))?;
-            let bytes: Uint8Array = Reflect::get(&v, &JsValue::from_str("bytes"))
-                .map_err(|_| JsError::new("each remote object must have a `bytes` field"))?
-                .dyn_into()
-                .map_err(|_| JsError::new("`bytes` must be a Uint8Array"))?;
-            snapshot.push((key, bytes.to_vec()));
-        }
-        let (uploads, folded) = self.inner.sync_against(&snapshot).map_err(to_js)?;
-        let put = Array::new();
-        for (key, bytes) in uploads {
-            let obj = Object::new();
-            set(&obj, "key", &JsValue::from_str(&key))?;
-            set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
-            set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
-            put.push(&obj);
-        }
+        let (uploads, folded) = self.inner.sync_against(&objects_from_js(remote)?).map_err(to_js)?;
+        let put = objects_to_js(uploads)?;
         let result = Object::new();
         set(&result, "put", &put)?;
         #[allow(clippy::cast_precision_loss)] // fold counts are tiny (entries merged this tick)
@@ -404,88 +365,43 @@ impl AppCoreHandle {
 /// only), the author `didKey`, and the engine-opaque `watermark`. No secret key material crosses to JS;
 /// the DEK lives inside the handle's `SealerSet` in this module's memory. Mirrors the vault's
 /// `VaultResult`, but hands back an [`AppCoreHandle`] instead of a bare sealer.
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 // The four advisory flags are independent repair signals the worker acts on separately, not a state machine.
 #[allow(clippy::struct_excessive_bools)]
 pub struct OpenResult {
+    // The ready core, taken out ONCE via `takeHandle` (not a getter — AppCoreHandle isn't Clone).
     handle: Option<AppCoreHandle>,
-    keyring: Vec<u8>,
-    recovery_code: String,
-    did_key: String,
-    watermark: Vec<u8>,
-    needs_reseal: bool,
-    needs_backfill: bool,
-    needs_rrk_backfill: bool,
-    write_epoch_unreachable: bool,
+    /// The encoded keyring anchor to persist (empty for unlock).
+    pub keyring: Vec<u8>,
+    /// The one-time recovery code to show once (empty for unlock).
+    #[wasm_bindgen(js_name = recoveryCode)]
+    pub recovery_code: String,
+    /// The author `did:key` (the claim `createdBy`).
+    #[wasm_bindgen(js_name = didKey)]
+    pub did_key: String,
+    /// The engine-opaque anti-rollback cursor to persist and pass back as the floor.
+    pub watermark: Vec<u8>,
+    /// Advisory: the dag write epoch is stale after a concurrent membership merge and a reseal is due
+    /// (always `false` for the chain). Never blocks; the client repairs it out-of-band (OPE-282).
+    #[wasm_bindgen(js_name = needsReseal)]
+    pub needs_reseal: bool,
+    /// Advisory: some retained epoch lacks a resolved member's wrap, so the owner should backfill historical
+    /// read access (always `false` for the chain). Never blocks; repaired out-of-band (OPE-288).
+    #[wasm_bindgen(js_name = needsBackfill)]
+    pub needs_backfill: bool,
+    /// Advisory: a retained epoch's RRK wrap doesn't bind the current recovery escrow — a rotation orphan the
+    /// owner can't read until a MEMBER re-wraps it (`backfillRrk`). Always `false` for the chain (OPE-381 / F3).
+    #[wasm_bindgen(js_name = needsRrkBackfill)]
+    pub needs_rrk_backfill: bool,
+    /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, so it holds
+    /// even when a malicious wrap forges the (unauthenticated) `needsReseal` coverage hint. The worker responds
+    /// with a forced reseal (always `false` for the chain / a fresh tree) (OPE-299).
+    #[wasm_bindgen(js_name = writeEpochUnreachable)]
+    pub write_epoch_unreachable: bool,
 }
 
 #[wasm_bindgen]
 impl OpenResult {
-    /// The encoded keyring anchor to persist (empty for unlock).
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    pub fn keyring(&self) -> Vec<u8> {
-        self.keyring.clone()
-    }
-
-    /// The one-time recovery code to show once (empty for unlock).
-    #[wasm_bindgen(getter, js_name = recoveryCode)]
-    #[must_use]
-    pub fn recovery_code(&self) -> String {
-        self.recovery_code.clone()
-    }
-
-    /// The author `did:key` (the claim `createdBy`).
-    #[wasm_bindgen(getter, js_name = didKey)]
-    #[must_use]
-    pub fn did_key(&self) -> String {
-        self.did_key.clone()
-    }
-
-    /// The engine-opaque anti-rollback cursor to persist and pass back as the floor.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    pub fn watermark(&self) -> Vec<u8> {
-        self.watermark.clone()
-    }
-
-    /// Advisory: the dag write epoch is stale after a concurrent membership merge and a reseal is due
-    /// (always `false` for the chain). Never blocks; the client repairs it out-of-band (OPE-282).
-    #[wasm_bindgen(getter, js_name = needsReseal)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn needs_reseal(&self) -> bool {
-        self.needs_reseal
-    }
-
-    /// Advisory: some retained epoch lacks a resolved member's wrap, so the owner should backfill
-    /// historical read access (always `false` for the chain). Never blocks; repaired out-of-band (OPE-288).
-    #[wasm_bindgen(getter, js_name = needsBackfill)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn needs_backfill(&self) -> bool {
-        self.needs_backfill
-    }
-
-    /// Advisory: a retained epoch's RRK wrap doesn't bind the current recovery escrow — a rotation orphan the
-    /// owner can't read until a MEMBER re-wraps it (`backfillRrk`). Always `false` for the chain (OPE-381 / F3).
-    #[wasm_bindgen(getter, js_name = needsRrkBackfill)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn needs_rrk_backfill(&self) -> bool {
-        self.needs_rrk_backfill
-    }
-
-    /// Advisory: this unlocker's own DEK bag didn't reach the current write epoch — locally derived, so it
-    /// holds even when a malicious wrap forges the (unauthenticated) `needsReseal` coverage hint. The worker
-    /// responds with a forced reseal (always `false` for the chain / a fresh tree) (OPE-299).
-    #[wasm_bindgen(getter, js_name = writeEpochUnreachable)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn write_epoch_unreachable(&self) -> bool {
-        self.write_epoch_unreachable
-    }
-
     /// Take the ready core out to the worker (once).
     #[wasm_bindgen(js_name = takeHandle)]
     #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
@@ -698,78 +614,30 @@ pub fn change_passphrase(
 /// Result of [`rotate_recovery`]: the new keyring anchor to persist, the fresh recovery code, the new
 /// recovery authority to record for confirmation, and the watermark. The code is PROVISIONAL until
 /// [`rotation_confirmed`] returns `true` against the synced anchor (OPE-381 / §11.2).
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 pub struct DagRotated {
-    keyring: Vec<u8>,
-    recovery_code: String,
-    reset_authority: Vec<u8>,
-    watermark: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl DagRotated {
     /// The rotated keyring anchor to persist.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn keyring(&self) -> Vec<u8> {
-        self.keyring.clone()
-    }
+    pub keyring: Vec<u8>,
     /// The one-time NEW recovery code to show once — provisional until confirmed.
-    #[wasm_bindgen(getter, js_name = recoveryCode)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn recovery_code(&self) -> String {
-        self.recovery_code.clone()
-    }
+    #[wasm_bindgen(js_name = recoveryCode)]
+    pub recovery_code: String,
     /// The new recovery authority (RVK) to hand back to [`rotation_confirmed`] after syncing.
-    #[wasm_bindgen(getter, js_name = resetAuthority)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn reset_authority(&self) -> Vec<u8> {
-        self.reset_authority.clone()
-    }
+    #[wasm_bindgen(js_name = resetAuthority)]
+    pub reset_authority: Vec<u8>,
     /// The anti-rollback cursor to persist.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn watermark(&self) -> Vec<u8> {
-        self.watermark.clone()
-    }
+    pub watermark: Vec<u8>,
 }
 
 /// Result of [`backfill_rrk`]: the (possibly unchanged) keyring anchor + watermark to persist, and whether a
 /// heal was actually appended (`false` = no reachable orphan, an idempotent no-op).
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 pub struct DagBackfilled {
-    keyring: Vec<u8>,
-    watermark: Vec<u8>,
-    backfilled: bool,
-}
-
-#[wasm_bindgen]
-impl DagBackfilled {
     /// The keyring anchor to persist (unchanged when `backfilled` is false).
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn keyring(&self) -> Vec<u8> {
-        self.keyring.clone()
-    }
+    pub keyring: Vec<u8>,
     /// The anti-rollback cursor to persist.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn watermark(&self) -> Vec<u8> {
-        self.watermark.clone()
-    }
+    pub watermark: Vec<u8>,
     /// Whether an RRK-backfill op was actually appended.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn backfilled(&self) -> bool {
-        self.backfilled
-    }
+    pub backfilled: bool,
 }
 
 /// Rotate the recovery authority (OPE-381): the owner retires the current recovery code for a fresh one so a
@@ -921,33 +789,17 @@ pub fn recovery_confirmed(
 /// A joining member's freshly-minted account identity (before they claim an invite): the KDF params to
 /// persist locally + the two public keys to hand the owner OOB for `addMember`. The secrets never leave the
 /// worker — they re-derive from the passphrase on `unlockAsMember`.
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 pub struct MemberIdentity {
-    kdf_params: Vec<u8>,
-    author_public_key: Vec<u8>,
-    hpke_public_key: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl MemberIdentity {
     /// The account's KDF params (persist locally; replay on `unlockAsMember`).
-    #[wasm_bindgen(getter, js_name = kdfParams)]
-    #[must_use]
-    pub fn kdf_params(&self) -> Vec<u8> {
-        self.kdf_params.clone()
-    }
+    #[wasm_bindgen(js_name = kdfParams)]
+    pub kdf_params: Vec<u8>,
     /// The Ed25519 author public key (hand to the owner for `addMember`).
-    #[wasm_bindgen(getter, js_name = authorPublicKey)]
-    #[must_use]
-    pub fn author_public_key(&self) -> Vec<u8> {
-        self.author_public_key.clone()
-    }
+    #[wasm_bindgen(js_name = authorPublicKey)]
+    pub author_public_key: Vec<u8>,
     /// The X25519 HPKE public key (hand to the owner for `addMember`).
-    #[wasm_bindgen(getter, js_name = hpkePublicKey)]
-    #[must_use]
-    pub fn hpke_public_key(&self) -> Vec<u8> {
-        self.hpke_public_key.clone()
-    }
+    #[wasm_bindgen(js_name = hpkePublicKey)]
+    pub hpke_public_key: Vec<u8>,
 }
 
 /// Mint a joining member's account identity from their passphrase — the first step of the member flow (before
@@ -969,27 +821,12 @@ pub fn provision_member(passphrase: String) -> Result<MemberIdentity, JsError> {
 /// The result of an owner membership change (add/remove) — the new keyring/anchor to persist + its watermark.
 /// No handle: the owner's running core keeps its DEK and just re-reads membership via
 /// [`setMembership`](AppCoreHandle::set_membership) after the caller persists the new keyring.
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 pub struct MembershipChange {
-    keyring: Vec<u8>,
-    watermark: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl MembershipChange {
     /// The new keyring/anchor bytes to persist as the head (chain also retains it per revision).
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    pub fn keyring(&self) -> Vec<u8> {
-        self.keyring.clone()
-    }
-
+    pub keyring: Vec<u8>,
     /// The engine-opaque anti-rollback watermark to persist.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    pub fn watermark(&self) -> Vec<u8> {
-        self.watermark.clone()
-    }
+    pub watermark: Vec<u8>,
 }
 
 /// Add a member (owner action) — HPKE-wrap the tree DEK to the OOB-verified joiner keys + record them in a
@@ -1185,41 +1022,19 @@ pub fn keyring_covers(
 /// A joining member's verified whole-history walk (`verifyKeyringWalk`): the head revision + RAW head body,
 /// the head's signers (JSON, for the worker's out-of-band fingerprint cross-check), and every RAW per-revision
 /// body (length-prefix framed) for the member to retain.
-#[wasm_bindgen]
+#[wasm_bindgen(getter_with_clone)]
 pub struct KeyringWalk {
-    revision: u32,
-    head_keyring: Vec<u8>,
-    signers_json: String,
-    bodies_framed: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl KeyringWalk {
     /// The verified head revision.
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    #[allow(clippy::missing_const_for_fn)] // wasm-bindgen exports can't be const
-    pub fn revision(&self) -> u32 {
-        self.revision
-    }
+    pub revision: u32,
     /// The RAW head `Keyring` body — stored as the head and fed to `unlockAsMember`.
-    #[wasm_bindgen(getter, js_name = headKeyring)]
-    #[must_use]
-    pub fn head_keyring(&self) -> Vec<u8> {
-        self.head_keyring.clone()
-    }
+    #[wasm_bindgen(js_name = headKeyring)]
+    pub head_keyring: Vec<u8>,
     /// The head's authorized signers as JSON `[{"memberId","authorPublicKey"(hex)}]`.
-    #[wasm_bindgen(getter, js_name = signersJson)]
-    #[must_use]
-    pub fn signers_json(&self) -> String {
-        self.signers_json.clone()
-    }
+    #[wasm_bindgen(js_name = signersJson)]
+    pub signers_json: String,
     /// Every RAW per-revision body 1..=head, ascending, length-prefix framed.
-    #[wasm_bindgen(getter, js_name = bodiesFramed)]
-    #[must_use]
-    pub fn bodies_framed(&self) -> Vec<u8> {
-        self.bodies_framed.clone()
-    }
+    #[wasm_bindgen(js_name = bodiesFramed)]
+    pub bodies_framed: Vec<u8>,
 }
 
 /// Verify a tree's WHOLE keyring history from genesis (a joining member's read-side bootstrap): TOFU the
@@ -1401,6 +1216,39 @@ fn set(obj: &Object, key: &str, value: &JsValue) -> Result<(), JsError> {
     Reflect::set(obj, &JsValue::from_str(key), value)
         .map(|_| ())
         .map_err(|_| JsError::new("failed to set a result field"))
+}
+
+/// Parse a JS `[{ key, bytes }]` array into `(key, bytes)` objects — the shared inbound marshalling for
+/// [`import`](AppCoreHandle::import) / [`sync`](AppCoreHandle::sync). The field names are the whole contract.
+fn objects_from_js(objects: &Array) -> Result<Vec<(String, Vec<u8>)>, JsError> {
+    let mut out = Vec::with_capacity(objects.length() as usize);
+    for v in objects.iter() {
+        let key = Reflect::get(&v, &JsValue::from_str("key"))
+            .ok()
+            .and_then(|k| k.as_string())
+            .ok_or_else(|| JsError::new("each object must have a string `key`"))?;
+        let bytes: Uint8Array = Reflect::get(&v, &JsValue::from_str("bytes"))
+            .map_err(|_| JsError::new("each object must have a `bytes` field"))?
+            .dyn_into()
+            .map_err(|_| JsError::new("`bytes` must be a Uint8Array"))?;
+        out.push((key, bytes.to_vec()));
+    }
+    Ok(out)
+}
+
+/// Build a JS `[{ key, bytes, pointer }]` array from `(key, bytes)` objects — the shared outbound marshalling
+/// for [`export`](AppCoreHandle::export) / [`sync`](AppCoreHandle::sync). `pointer` is derived here (via
+/// `is_pointer_key`), so the worker never inspects a key to choose a write precondition.
+fn objects_to_js(objects: impl IntoIterator<Item = (String, Vec<u8>)>) -> Result<Array, JsError> {
+    let arr = Array::new();
+    for (key, bytes) in objects {
+        let obj = Object::new();
+        set(&obj, "key", &JsValue::from_str(&key))?;
+        set(&obj, "bytes", &Uint8Array::from(bytes.as_slice()))?;
+        set(&obj, "pointer", &JsValue::from_bool(crate::is_pointer_key(&key)))?;
+        arr.push(&obj);
+    }
+    Ok(arr)
 }
 
 fn to_js(e: impl std::fmt::Display) -> JsError {

@@ -59,7 +59,7 @@ console.log(`[✓] Compiled ${path.relative(REPO, WASM)} (${(fs.statSync(WASM).s
 
 function resolvedBindgenVersion() {
   const lock = fs.readFileSync(path.join(REPO, 'Cargo.lock'), 'utf8');
-  const m = lock.match(/name = "wasm-bindgen"\nversion = "([^"]+)"/);
+  const m = lock.match(/name = "wasm-bindgen"\r?\nversion = "([^"]+)"/);
   if (!m) throw new Error('could not find the resolved wasm-bindgen version in Cargo.lock');
   return m[1];
 }
