@@ -705,10 +705,10 @@ fn blob_compact_does_not_regress_a_peer_snapshots_covered() {
 }
 
 #[test]
-fn blob_soft_removal_approve_and_discard_a_dropped_dot() {
-    // OPE-426 opt-in soft removal: a dropped dot (a departed member's trailing edit) can be APPROVED by an
-    // administrator (vouch → merge + un-track, so the next compaction pins it) or DISCARDED (un-track, stays
-    // suppressed). Proves the two review decisions over the `dropped` queue.
+fn blob_readmit_and_forget_a_dropped_dot() {
+    // The two mechanisms openom's soft-removal review is built on: a dropped dot can be RE-ADMITTED into engine
+    // state (gate → merge + un-track, so the next compaction pins it) or FORGOTTEN (un-track, stays suppressed).
+    // docsync stays domain-agnostic — the admit decision is the caller's `gate` closure.
     let store = Arc::new(MemoryBlob::new());
     let mut b = blob_client(store.clone(), "replica-B");
     b.apply("keep-me".into()).unwrap(); // B:0
@@ -723,21 +723,21 @@ fn blob_soft_removal_approve_and_discard_a_dropped_dot() {
     assert!(!x.engine().lines.contains("keep-me"), "a dropped dot is not folded");
     assert!(x.read_dropped("replica-B", 0).unwrap().is_some(), "the raw envelope is readable for review");
 
-    // APPROVE B:0 (vouch passes) → merged + un-tracked.
-    assert!(x.approve_dropped("replica-B", 0, |_env, _pt| true).unwrap());
-    assert!(x.engine().lines.contains("keep-me"), "an approved trailing edit is folded");
-    assert_eq!(x.dropped_count(), 1, "the approved dot leaves the queue");
+    // RE-ADMIT B:0 (gate passes) → merged + un-tracked.
+    assert!(x.readmit_dropped("replica-B", 0, |_env, _pt| true).unwrap());
+    assert!(x.engine().lines.contains("keep-me"), "a re-admitted trailing edit is folded");
+    assert_eq!(x.dropped_count(), 1, "the re-admitted dot leaves the queue");
 
-    // A vouch that DECLINES leaves the dot dropped + unmerged.
-    assert!(!x.approve_dropped("replica-B", 1, |_e, _p| false).unwrap());
+    // A gate that DECLINES leaves the dot dropped + unmerged.
+    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| false).unwrap());
     assert!(!x.engine().lines.contains("drop-me"));
     assert_eq!(x.dropped_count(), 1);
 
-    // DISCARD B:1 → un-tracked, never folded; a subsequent approve is a no-op (unknown dot).
-    assert!(x.discard_dropped("replica-B", 1));
+    // FORGET B:1 → un-tracked, never folded; a subsequent re-admit is a no-op (unknown dot).
+    assert!(x.forget_dropped("replica-B", 1));
     assert!(!x.engine().lines.contains("drop-me"));
     assert_eq!(x.dropped_count(), 0);
-    assert!(!x.approve_dropped("replica-B", 1, |_e, _p| true).unwrap(), "discarded dot is no longer approvable");
+    assert!(!x.readmit_dropped("replica-B", 1, |_e, _p| true).unwrap(), "forgotten dot is no longer admittable");
 }
 
 /// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object

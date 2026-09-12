@@ -497,7 +497,7 @@ impl<S: BlobStore> AppCore<S> {
     /// Returns [`CoreError`] if the store read fails.
     pub fn approve_pending(&mut self, replica: &str, counter: u64) -> Result<bool, CoreError> {
         let membership = self.membership.as_deref();
-        let approved = self.client.approve_dropped(replica, counter, |env, pt| {
+        let approved = self.client.readmit_dropped(replica, counter, |env, pt| {
             let Some(m) = membership else {
                 return true; // solo/unshared — only the DEK holder writes, so an opened entry is trusted
             };
@@ -531,7 +531,7 @@ impl<S: BlobStore> AppCore<S> {
     /// Discard a pending trailing edit (OPE-426): the administrator declines to keep it. It stays suppressed.
     /// Returns whether it was present in the pending queue.
     pub fn discard_pending(&mut self, replica: &str, counter: u64) -> bool {
-        self.client.discard_dropped(replica, counter)
+        self.client.forget_dropped(replica, counter)
     }
 
     /// Install (or refresh) the §B3 governing membership. The worker calls this on unlock and after every

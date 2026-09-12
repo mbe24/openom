@@ -394,7 +394,7 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.dropped_dots()
     }
 
-    /// Read the raw sealed envelope of a dropped dot (soft-removal review preview). See
+    /// Read the raw sealed envelope of a dropped dot (for the caller to inspect). See
     /// [`docsync::BlobSyncClient::read_dropped`].
     ///
     /// # Errors
@@ -403,25 +403,25 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.read_dropped(replica, counter)
     }
 
-    /// APPROVE a dropped dot (soft removal, OPE-426): `vouch` re-checks it (covered-accept predicate) and, if it
-    /// passes, the delta is merged + un-tracked so the next compaction pins it. See
-    /// [`docsync::BlobSyncClient::approve_dropped`].
+    /// Re-admit a dropped dot into engine state if the caller `gate` passes (openom's soft-removal "approve" is
+    /// built on this); merged + un-tracked so the next compaction pins it. See
+    /// [`docsync::BlobSyncClient::readmit_dropped`].
     ///
     /// # Errors
     /// Returns an error if the blob read fails.
-    pub fn approve_dropped(
+    pub fn readmit_dropped(
         &mut self,
         replica: &str,
         counter: u64,
-        vouch: impl FnOnce(&[u8], &[u8]) -> bool,
+        gate: impl FnOnce(&[u8], &[u8]) -> bool,
     ) -> Result<bool> {
-        self.inner.approve_dropped(replica, counter, vouch)
+        self.inner.readmit_dropped(replica, counter, gate)
     }
 
-    /// DISCARD a dropped dot (soft removal, OPE-426): stop tracking it as pending (it stays suppressed). See
-    /// [`docsync::BlobSyncClient::discard_dropped`].
-    pub fn discard_dropped(&mut self, replica: &str, counter: u64) -> bool {
-        self.inner.discard_dropped(replica, counter)
+    /// Forget a dropped dot — stop tracking it as pending (it stays suppressed). openom's soft-removal "discard"
+    /// is built on this. See [`docsync::BlobSyncClient::forget_dropped`].
+    pub fn forget_dropped(&mut self, replica: &str, counter: u64) -> bool {
+        self.inner.forget_dropped(replica, counter)
     }
 }
 

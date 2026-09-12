@@ -1000,17 +1000,17 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         self.dropped.len()
     }
 
-    /// The DROPPED-dot coordinates awaiting review — the pending-review queue for opt-in soft removal (OPE-426).
-    /// By construction a dropped dot passed the governing check (a valid signature by a member at its governing
-    /// revision) but failed the head look-behind (its author is since demoted/removed), so this set is exactly
-    /// "a departed member's trailing edits", never a generic forgery (those `Reject`, never reach here). Read a
-    /// dot's raw envelope with [`read_dropped`](Self::read_dropped) to inspect it.
+    /// The DROPPED-dot coordinates. By construction a dropped dot passed the governing check (a valid signature
+    /// by a member at its governing revision) but failed the head look-behind (its author is since
+    /// demoted/removed), so this set is exactly "a departed member's trailing edits", never a generic forgery
+    /// (those `Reject`, never reach here). The caller decides what to do with them — openom surfaces them as the
+    /// opt-in soft-removal review queue. Read a dot's raw envelope with [`read_dropped`](Self::read_dropped).
     pub fn dropped_dots(&self) -> Vec<(String, u64)> {
         self.dropped.iter().cloned().collect()
     }
 
-    /// Read the raw sealed envelope of a dropped dot (for a soft-removal review preview), or `None` if its
-    /// object is gone (reaped) or the dot is not in the dropped set.
+    /// Read the raw sealed envelope of a dropped dot, or `None` if its object is gone (reaped) or the dot is not
+    /// in the dropped set. The caller opens/inspects it (docsync stays ignorant of the envelope format).
     ///
     /// # Errors
     /// Returns [`SyncError`] if the blob read fails.
@@ -1021,35 +1021,34 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         Ok(self.read_log(replica, counter)?.map(|(env, _etag)| env))
     }
 
-    /// APPROVE a dropped dot (opt-in soft removal, OPE-426): a current administrator VOUCHES for a departed
-    /// member's trailing edit. `vouch(envelope, plaintext)` re-checks it — the caller applies the covered-accept
-    /// predicate (a valid signature by a key the author actually held + a kind their strongest-ever role
-    /// permits), resolved from the caller's OWN membership, never the entry. If it passes, the delta is merged
-    /// into engine state and removed from the dropped set, so the next [`compact`](Self::compact) pins it and
-    /// every replica recovers it via snapshot adoption (the reactive analog of compact-before-remove). Returns
-    /// whether it was approved (false if the dot is unknown, its object is gone, it won't open, or `vouch`
-    /// declined). Merging is idempotent, so a double-approve is harmless.
+    /// RE-ADMIT a dropped dot into engine state, subject to a caller `gate` (the mechanism openom's soft-removal
+    /// "approve" is built on; docsync stays domain-agnostic — the same closure-driven policy/mechanism split as
+    /// [`pull_verified`](Self::pull_verified)'s `classify`). `gate(envelope, plaintext)` decides whether to
+    /// admit it; if it returns true the delta is merged into engine state and removed from the dropped set, so
+    /// the next [`compact`](Self::compact) pins it and every replica recovers it via snapshot adoption. Returns
+    /// whether it was admitted (false if the dot is unknown, its object is gone, it won't open, or `gate`
+    /// declined). Merging is idempotent, so a double-call is harmless.
     ///
     /// # Errors
     /// Returns [`SyncError`] if the blob read fails.
-    pub fn approve_dropped(
+    pub fn readmit_dropped(
         &mut self,
         replica: &str,
         counter: u64,
-        vouch: impl FnOnce(&[u8], &[u8]) -> bool,
+        gate: impl FnOnce(&[u8], &[u8]) -> bool,
     ) -> Result<bool, SyncError> {
         let dot = (replica.to_string(), counter);
         if !self.dropped.contains(&dot) {
             return Ok(false);
         }
         let Some((env, _etag)) = self.read_log(replica, counter)? else {
-            self.dropped.remove(&dot); // object gone — nothing to approve, stop tracking it
+            self.dropped.remove(&dot); // object gone — nothing to admit, stop tracking it
             return Ok(false);
         };
         let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
-            return Ok(false); // not a Delta / won't open — not reviewable this way
+            return Ok(false); // not a Delta / won't open — not admittable this way
         };
-        if !vouch(&env, &pt) {
+        if !gate(&env, &pt) {
             return Ok(false);
         }
         if self.engine.merge(&pt).is_ok() {
@@ -1060,10 +1059,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         }
     }
 
-    /// DISCARD a dropped dot (opt-in soft removal, OPE-426): the administrator declines to keep a departed
-    /// member's trailing edit. It stays suppressed (its coordinate is already covered-but-absent — a compaction
-    /// will not carry it), so this just stops tracking it as pending. Returns whether it was present.
-    pub fn discard_dropped(&mut self, replica: &str, counter: u64) -> bool {
+    /// FORGET a dropped dot — stop tracking it as pending (it stays suppressed: its coordinate is already
+    /// covered-but-absent, so a compaction will not carry it). The mechanism openom's soft-removal "discard" is
+    /// built on. Returns whether it was present.
+    pub fn forget_dropped(&mut self, replica: &str, counter: u64) -> bool {
         self.dropped.remove(&(replica.to_string(), counter))
     }
 
