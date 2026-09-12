@@ -20,6 +20,10 @@ pub type StoredObject = (String, Vec<u8>);
 #[cfg(feature = "wasm")]
 mod wasm;
 
+/// The wasm-core mirror of the unified error-code registry (generated; see `plan/design.error-model.md`).
+/// Ready for the in-core error path to emit `AppError`s once 9457 parsing moves into Rust (B3).
+pub mod error_codes;
+
 /// Anything that can go wrong in the core.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
