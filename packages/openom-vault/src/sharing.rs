@@ -842,6 +842,80 @@ pub fn remove_member(
     }
 }
 
+/// Change an existing member's role (owner action, OPE-364): `new_role == "co-owner"` PROMOTES to the signer
+/// set; any other (non-signer) role DEMOTES a co-owner. A role change touches signing authority, not keys —
+/// no new epoch, so the owner's running sealer is unchanged (unlike removal). Returns the new keyring/anchor +
+/// its watermark (the UNCHANGED write epoch pinned at the new revision).
+///
+/// Engine support: the DAG is fully hard both ways (the resolver's `StrongDemote` rule voids a demoted
+/// member's concurrent over-authority ops). On the CHAIN, PROMOTE is supported; DEMOTE is refused until the
+/// chain attribution hardening lands (OPE-421) — a chain demote would not be forward-secure (a demoted member
+/// could backdate a pre-demote `governing_ref`), so we refuse rather than offer a soft revocation. Remove the
+/// member instead.
+///
+/// # Errors
+/// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, an unknown/owner target, an
+/// unauthorized change, or a chain DEMOTE (unsupported pending OPE-421).
+#[allow(clippy::too_many_arguments)]
+pub fn change_role(
+    engine: EngineKind,
+    keyring: &[u8],
+    founder_passphrase: &Passphrase,
+    tree_id: &[u8],
+    founder_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: &str,
+) -> Result<AcceptedKeyring, VaultError> {
+    let promote = new_role == "co-owner";
+    match engine {
+        EngineKind::Chain => {
+            if !promote {
+                return Err(VaultError::Sharing(
+                    "chain demote is not yet a forward-secure boundary (OPE-421) — remove the member instead"
+                        .into(),
+                ));
+            }
+            let changed = vault::add_co_owner(
+                keyring,
+                founder_passphrase,
+                &TreeId::new(tree_id),
+                &MemberId::new(founder_member_id),
+                min_revision,
+                &MemberId::new(target_member_id),
+            )?;
+            Ok(AcceptedKeyring {
+                keyring: changed.keyring,
+                watermark: chain_wm_pinned(
+                    changed.revision,
+                    &changed.write_key_id,
+                    &changed.write_dek_hash,
+                ),
+            })
+        }
+        EngineKind::Dag => {
+            let (tree, owner, replica) = (
+                TreeId::new(tree_id),
+                MemberId::new(founder_member_id),
+                ReplicaId::new(replica_id),
+            );
+            let ctx = VaultContext {
+                tree_id: &tree,
+                member_id: &owner,
+                replica_id: &replica,
+            };
+            let anchor =
+                DagVault.change_role(&ctx, keyring, founder_passphrase, target_member_id, parse_keyring_role(new_role)?)?;
+            let watermark = DagVault.watermark(&anchor)?;
+            Ok(AcceptedKeyring {
+                keyring: anchor,
+                watermark,
+            })
+        }
+    }
+}
+
 /// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
 /// the anchor (dag), then HPKE-unwrap the member's DEKs with their passphrase + account KDF. Returns a sealer
 /// to install in the core. `trusted_signers` is ignored by the dag (it resolves admission from the anchor).

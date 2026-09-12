@@ -924,6 +924,47 @@ pub fn remove_member(
     })
 }
 
+/// Change an existing member's role (owner action, OPE-364) — `new_role == "co-owner"` PROMOTES to the signer
+/// set; any other (non-signer) role DEMOTES a co-owner. A role change touches signing authority, NOT keys, so
+/// there is no re-epoch: the owner's running core stays valid (no re-unlock, no self-heal cover). Returns the
+/// new keyring/anchor + watermark to persist. DAG: hard both ways (the resolver's `StrongDemote` rule voids a
+/// demoted member's concurrent over-authority ops). CHAIN: promote only — a chain demote is refused pending
+/// the attribution hardening (OPE-421).
+///
+/// # Errors
+/// Returns a [`JsError`] if the engine is unknown, the owner passphrase is wrong, the target is unknown or the
+/// owner, the change is unauthorized, or it is a chain DEMOTE (unsupported).
+#[wasm_bindgen(js_name = changeRole)]
+#[allow(clippy::too_many_arguments)] // wasm-bindgen JS export: the flat argument list IS the JS calling convention
+pub fn change_role(
+    engine: &str,
+    keyring: &[u8],
+    owner_passphrase: String,
+    tree_id: &[u8],
+    owner_member_id: &str,
+    replica_id: &[u8],
+    min_revision: u32,
+    target_member_id: &str,
+    new_role: &str,
+) -> Result<MembershipChange, JsError> {
+    let changed = openom_vault::sharing::change_role(
+        parse_engine(engine)?,
+        keyring,
+        &Passphrase::new(owner_passphrase.into_bytes()),
+        tree_id,
+        owner_member_id,
+        replica_id,
+        min_revision,
+        target_member_id,
+        new_role,
+    )
+    .map_err(to_js)?;
+    Ok(MembershipChange {
+        keyring: changed.keyring,
+        watermark: changed.watermark,
+    })
+}
+
 /// Unlock a shared tree as a non-owner member — verify against the pinned `trusted_signers` (chain) / resolve
 /// the anchor (dag), HPKE-unwrap the member's DEKs with their passphrase + account KDF, and wrap the sealer in
 /// a ready core. Returns an [`OpenResult`] like [`unlock`], whose handle the worker drives.

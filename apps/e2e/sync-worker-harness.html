@@ -512,6 +512,48 @@
         };
       },
 
+      // Co-owner promote/demote through the worker on the DAG (OPE-364): the owner admits a member as an
+      // editor, PROMOTES them to co-owner, then DEMOTES them back to editor — each role asserted via the
+      // advisory /access view the worker pushes. Exercises the full changeRole stack end to end (worker → wasm
+      // → vault → dag_client → the StrongDemote-aware resolver).
+      async shareChangeRoleDag() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(9);
+        const ownerDoc = `cr-owner-${crypto.randomUUID()}`;
+        const memberDoc = `cr-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc, engine: 'dag' });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey, engine: 'dag',
+        });
+        const roleOf = (id) => transport._access()?.members.find((m) => m.memberId === id)?.role;
+        const afterAdd = roleOf('acct-member');
+
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner', engine: 'dag',
+        });
+        const afterPromote = roleOf('acct-member');
+
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor', engine: 'dag',
+        });
+        const afterDemote = roleOf('acct-member');
+
+        return { afterAdd, afterPromote, afterDemote, present: roleOf('acct-member') != null };
+      },
+
       // THE dag self-heal, end to end through the worker (OPE-382 + OPE-393): an owner admits TWO maintainers
       // (bob + carol), bob writes, the owner removes bob — authoring a cover under the NEW (post-removal) epoch
       // — and carol, a REMAINING member, syncs: she adopts the rotated epoch (so she can open the cover) and

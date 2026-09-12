@@ -1159,6 +1159,11 @@ pub fn remove_member_as_co_owner(
 pub struct CoOwnerChanged {
     pub keyring: Vec<u8>,
     pub revision: u32,
+    /// The (UNCHANGED) write epoch's `key_id` + `H(DEK)` to re-watermark at the new revision (OPE-286): a
+    /// role change touches no keys, so this pins the current write epoch forward so anti-rollback + a later
+    /// recover authenticate against the correct key material. Mirrors [`MemberAdded`]'s pin.
+    pub write_key_id: Vec<u8>,
+    pub write_dek_hash: Vec<u8>,
 }
 
 /// Promote an existing member to **co-owner** — add them to the authorized-signer set so
@@ -1187,6 +1192,7 @@ pub fn add_co_owner(
         revision,
         prev_hash,
         identity,
+        rrk_secret,
         mut keyring,
         ..
     } = open_with_passphrase(
@@ -1236,9 +1242,14 @@ pub fn add_co_owner(
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
     sign_keyring(&mut keyring, &identity); // founder signs — authorizes the signer-set change
+    // Pin the UNCHANGED write epoch at the new revision (OPE-286) — a promote re-wraps no keys.
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, founder_member_id, &rrk_secret);
+    let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
     Ok(CoOwnerChanged {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
+        write_key_id,
+        write_dek_hash,
     })
 }
 
@@ -1277,6 +1288,7 @@ pub fn remove_co_owner(
         revision,
         prev_hash,
         identity,
+        rrk_secret,
         mut keyring,
         ..
     } = open_with_passphrase(
@@ -1314,9 +1326,14 @@ pub fn remove_co_owner(
     keyring.prev_keyring_hash = prev_hash;
     keyring.signatures.clear();
     sign_keyring(&mut keyring, &identity); // founder signs
+    // Pin the UNCHANGED write epoch at the new revision (OPE-286) — a demote re-wraps no keys.
+    let deks = epoch_deks(&keyring_epochs(&keyring)?, tree_id, founder_member_id, &rrk_secret);
+    let (write_key_id, write_dek_hash) = write_epoch_pin(&deks)?;
     Ok(CoOwnerChanged {
         keyring: keyring.encode_to_vec(),
         revision: new_revision,
+        write_key_id,
+        write_dek_hash,
     })
 }
 

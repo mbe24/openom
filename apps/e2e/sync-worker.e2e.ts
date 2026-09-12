@@ -183,6 +183,25 @@ test('app-core: dag self-heal — a remaining member adopts the rotated epoch an
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: dag co-owner promote/demote through the worker — role round-trips via /access', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.shareChangeRoleDag());
+
+  // OPE-364: the member is admitted as editor, promoted to co-owner, then demoted back to editor — each role
+  // reflected in the advisory /access view the worker pushes. Roles are numeric, lower = stronger.
+  expect(r.present).toBe(true);
+  expect(typeof r.afterAdd).toBe('number');
+  expect(r.afterPromote).toBeLessThan(r.afterAdd); // promote raised authority (co-owner is stronger)
+  expect(r.afterDemote).toBe(r.afterAdd); // demote restored the original editor role
+  expect(r.afterPromote).not.toBe(r.afterDemote);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

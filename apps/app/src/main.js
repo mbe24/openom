@@ -390,6 +390,38 @@ class App {
     }
   }
 
+  // ── Membership-management seams the partner's members/roles UI (OPE-10/416) binds to (OPE-364). Each needs
+  // the OWNER's passphrase — the membership crypto re-derives the owner's signing identity from it (never
+  // retained in plaintext), so the UI collects it, exactly like doChangePassphrase. They pass through to the
+  // worker and return its result / throw a typed AppError for the UI to render (no DOM here).
+
+  /** Promote an existing member to co-owner — grants signer/admin authority (add/remove members, key ops). */
+  async promoteMember(targetMemberId, ownerPassphrase) {
+    return this.worker.changeRole(this.realDoc, {
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      targetMemberId, newRole: 'co-owner',
+    });
+  }
+
+  /** Demote a co-owner to a non-signer role — revokes signer/admin authority but KEEPS read access (to also
+   *  revoke read, use removeMember). `newRole` ∈ 'maintainer' | 'editor' | 'viewer'. Hard on the dag; on the
+   *  chain a demote is refused pending the attribution hardening (OPE-421) — remove the member instead. */
+  async demoteMember(targetMemberId, newRole, ownerPassphrase) {
+    return this.worker.changeRole(this.realDoc, {
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      targetMemberId, newRole,
+    });
+  }
+
+  /** Remove a member entirely — a forward-secret re-key: the removed member loses read AND write going
+   *  forward. The strong revocation for anyone you no longer trust. */
+  async removeMember(removeMemberId, ownerPassphrase) {
+    return this.worker.removeMember(this.realDoc, {
+      passphrase: ownerPassphrase, treeId: this.realTreeId, ownerMemberId: this.authMemberId(),
+      removeMemberId,
+    });
+  }
+
   // Open the tree over the (already-provisioned/unlocked) worker core and switch to the app. `createdBy`
   // is the core's author did:key; only the real passphrase session is `lockable` (the demo isn't).
   async enterApp({ seedDataset, docId, createdBy = null, lockable = false }) {

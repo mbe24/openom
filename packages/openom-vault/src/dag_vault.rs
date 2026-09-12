@@ -1314,6 +1314,63 @@ impl DagVault {
             .map_err(|e| VaultError::BadKeyring(e.to_string()))
     }
 
+    /// Change an existing member's role (OPE-364) — promote to co-owner (signer) / demote a co-owner to a
+    /// non-signer role. Founder-authorized: the owner's passphrase-derived signing identity must be the pinned
+    /// owner key, and a `ChangeRole` touching a signer requires OWNER authority (enforced verifier-side). NO
+    /// re-epoch / no sealing — a role change touches signing authority, not keys, so read access + the running
+    /// sealer are unchanged; the resolver's `StrongDemote` rule voids a demoted member's concurrent
+    /// over-authority ops. Returns the new anchor bytes; the caller re-watermarks from it.
+    ///
+    /// # Errors
+    /// Returns [`VaultError`] on a malformed anchor, a wrong owner passphrase, an unknown target, or an
+    /// attempt to change the owner's own role.
+    pub fn change_role(
+        &self,
+        ctx: &VaultContext,
+        anchor: &[u8],
+        founder_passphrase: &Passphrase,
+        target_member_id: &str,
+        new_role: KeyringRole,
+    ) -> Result<Vec<u8>, VaultError> {
+        let founder_id = ctx.member_id.as_str();
+
+        let resolved =
+            dag_client::resolve(anchor).map_err(|e| VaultError::BadKeyring(e.to_string()))?;
+        let founder = resolved
+            .members
+            .owner()
+            .ok_or_else(|| VaultError::BadKeyring("no owner in the resolved dag keyring".into()))?;
+
+        // The owner's role is fixed; and the target must exist. (A signer-touching ChangeRole is authorized
+        // OWNER-only verifier-side; these author-side guards keep an ineffective op from being persisted.)
+        if target_member_id == founder.member_id {
+            return Err(VaultError::BadKeyring(
+                "the owner's role cannot be changed".into(),
+            ));
+        }
+        if !resolved
+            .members
+            .members
+            .iter()
+            .any(|m| m.member_id == target_member_id)
+        {
+            return Err(VaultError::MemberNotFound);
+        }
+
+        // The owner authorizes via their passphrase-derived signing identity (anti-substitution) — the same
+        // gate `remove_member` applies. No RRK secret and no sealing: the role change re-wraps no keys.
+        let FoldedSealing { escrow, .. } = fold_resolved(&resolved)?;
+        let (kdf, _, _) = escrow_kek_wrap(&escrow.wraps, KekKind::Passphrase)?;
+        let root = derive_root(founder_passphrase.expose(), &validated_kdf(kdf)?)?;
+        if root.identity.verifying_key().to_bytes().as_slice() != founder.author_public_key.as_slice()
+        {
+            return Err(CryptoError::Signature.into());
+        }
+
+        dag_client::append_change_role(anchor, founder_id, target_member_id, new_role, &root.identity)
+            .map_err(|e| VaultError::BadKeyring(e.to_string()))
+    }
+
     /// Repair a stale write epoch (OPE-282): if the resolved keyring `needs_reseal` — a concurrent
     /// membership merge left the write epoch wrapping a removed member (a leak) or missing an added one (a
     /// lockout) — mint a FRESH DEK wrapped to the RRK (owner) + each resolved ordinary member and append a

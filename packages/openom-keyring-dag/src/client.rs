@@ -102,6 +102,27 @@ pub fn append_remove(
     append(anchor_bytes, author, action, sealing, author_signing_key)
 }
 
+/// Append a **`ChangeRole`** op — an authorized signer (`author`) sets `member`'s role to `new_role`
+/// (promote to co-owner / demote a co-owner to a non-signer role). Carries **no sealing**: a role change
+/// touches signing authority, not keys, so the write epoch is unchanged. Signed by the author's current key.
+/// The resolver's `StrongDemote` rule voids a demoted member's concurrent over-authority ops (OPE-364).
+///
+/// # Errors
+/// Returns [`ClientError`] if `anchor_bytes` is malformed.
+pub fn append_change_role(
+    anchor_bytes: &[u8],
+    author: &str,
+    member_id: &str,
+    new_role: KeyringRole,
+    author_signing_key: &edsign::SigningKey,
+) -> Result<Vec<u8>, ClientError> {
+    let action = MembershipAction::ChangeRole {
+        member: member_id.to_string(),
+        new_role,
+    };
+    append(anchor_bytes, author, action, Vec::new(), author_signing_key)
+}
+
 /// A client-side failure resolving or minting against the dag keyring.
 #[derive(Debug)]
 pub enum ClientError {

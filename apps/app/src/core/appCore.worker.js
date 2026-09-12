@@ -18,6 +18,7 @@ import init, {
   changePassphrase as wasmChangePassphrase,
   addMember as wasmAddMember,
   removeMember as wasmRemoveMember,
+  changeRole as wasmChangeRole,
   provisionMember as wasmProvisionMember,
   verifyKeyringWalk as wasmVerifyKeyringWalk,
   unlockAsMember as wasmUnlockAsMember,
@@ -736,6 +737,50 @@ const api = {
     // Push the self-heal cover (and any other pending local objects) to the DATA channel so peers covered-accept
     // the removed member's history. Best-effort: if it fails to land, a later tick re-uploads it (idempotent).
     if (transportFor(docId)) await syncData(nc);
+  },
+
+  /**
+   * Owner changes an existing member's role (OPE-364): `newRole === 'co-owner'` PROMOTES to the signer set;
+   * any other (non-signer) role DEMOTES a co-owner. A role change touches signing authority, NOT keys — no
+   * new epoch — so unlike `removeMember` the owner's running core stays valid: NO re-unlock, NO self-heal
+   * cover. We only persist the new keyring + watermark and refresh the §B3 resolver + moderators so the new
+   * authority takes effect for verify-on-ingest (a promoted co-owner's signed writes now verify; a demoted
+   * one's over-authority writes are rejected — hard on the dag; chain demote is refused in the vault pending
+   * OPE-421). `opts`: { passphrase, treeId, ownerMemberId, minRevision, targetMemberId, newRole, engine? }.
+   */
+  async changeRole(
+    docId,
+    { passphrase, treeId, ownerMemberId, minRevision = 0, targetMemberId, newRole, engine = KEYRING_ENGINE },
+  ) {
+    const c = core(docId);
+    const head = await keyringStore().loadHead(docId);
+    if (!head) throw new Error(`no keyring stored for ${docId}`);
+    const eng = head.engine || engine;
+    const change = wasmChangeRole(
+      eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
+    );
+    await keyringStore().saveHead(docId, eng, change.keyring);
+    // Chain retention: the new revision is the first 4 bytes of the pinned watermark (revision‖key_id‖H(DEK)).
+    // The dag watermark is a concatenation of tip op-ids, not a revision — so this is chain-only.
+    if (eng === 'chain') {
+      const revision = new DataView(change.watermark.buffer, change.watermark.byteOffset, 4).getUint32(0);
+      await keyringStore().save(docId, revision, change.keyring);
+    }
+    await saveWatermark(docId, change.watermark); // advance the anti-rollback floor to the new revision
+    // Refresh the resolver + moderators on the EXISTING core (the epoch is unchanged, so adoptEpochs is a
+    // no-op) so the new authority takes effect immediately for verify-on-ingest.
+    await refreshMembershipAndEpochs(c, eng, change.keyring);
+    // Under-grant ordering (OPE-293): a DEMOTE removes authority → push the (restrictive) summary BEFORE the
+    // keyring publish; a PROMOTE grants it → publish the keyring FIRST, then the summary. So the advisory ACL
+    // is never less restrictive than the crypto at any crash point.
+    const demote = newRole !== 'co-owner';
+    if (demote) {
+      await pushMembership(docId, eng);
+      await publishMembership(docId, eng, treeId);
+    } else {
+      await publishMembership(docId, eng, treeId);
+      await pushMembership(docId, eng);
+    }
   },
 
   /**
