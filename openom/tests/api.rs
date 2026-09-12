@@ -3062,3 +3062,32 @@ async fn reads_and_writes_are_metered_into_usage_month() {
     assert!(row.2 >= 2, "read_ops counted (two GETs)");
     assert!(row.3 >= 10, "bytes_read counted (>= two 5-byte serves)");
 }
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn head_pointer_is_monotonic() {
+    // OPE-411: a heads/{replica} pointer PUT that LOWERS the stored count is rejected (409 head_rollback) —
+    // anti-rollback/griefing. A monotonic advance and an idempotent re-publish of the same count are allowed.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    let put_head = |n: &str| put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rH"), n.as_bytes(), owner, false);
+
+    assert_eq!(send(&app, put_head("3")).await.0, StatusCode::OK, "initial head");
+    assert_eq!(send(&app, put_head("5")).await.0, StatusCode::OK, "advance 3 -> 5");
+    assert_eq!(send(&app, put_head("5")).await.0, StatusCode::OK, "idempotent re-publish of 5");
+
+    // A rollback to 2 is refused with the typed code, and the stored head stays 5.
+    let (s, _, b) = send(&app, put_head("2")).await;
+    assert_eq!(s, StatusCode::CONFLICT, "rollback 5 -> 2 refused");
+    assert_eq!(body_code(&b), "head_rollback");
+
+    let (gs, _, gb) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/heads/rH"), owner)).await;
+    assert_eq!(gs, StatusCode::OK, "head still served");
+    assert_eq!(gb, b"5", "the rejected rollback did not overwrite the stored head");
+
+    // And a further legitimate advance past 5 still works (the guard only blocks going backward).
+    assert_eq!(send(&app, put_head("9")).await.0, StatusCode::OK, "advance 5 -> 9");
+}

@@ -17,6 +17,7 @@ pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
 pub const RATE_LIMITED: &str = "rate_limited";
 pub const VERSION_CONFLICT: &str = "version_conflict";
 pub const COVERED_ANOMALY: &str = "covered_anomaly";
+pub const HEAD_ROLLBACK: &str = "head_rollback";
 pub const INVALID_REQUEST: &str = "invalid_request";
 pub const ACCESS_DENIED: &str = "access_denied";
 pub const NOT_FOUND: &str = "not_found";
@@ -48,6 +49,7 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "rate_limited", domain: "sync", title: "Rate limited", retriable: true, action: Some("retry") },
     CodeMeta { code: "version_conflict", domain: "sync", title: "Version conflict", retriable: true, action: Some("retry") },
     CodeMeta { code: "covered_anomaly", domain: "sync", title: "Coverage inconsistency", retriable: false, action: Some("contact") },
+    CodeMeta { code: "head_rollback", domain: "sync", title: "Head pointer moved backward", retriable: false, action: None },
     CodeMeta { code: "invalid_request", domain: "sync", title: "Invalid request", retriable: false, action: Some("contact") },
     CodeMeta { code: "access_denied", domain: "sync", title: "Access denied", retriable: false, action: None },
     CodeMeta { code: "not_found", domain: "sync", title: "Not found", retriable: false, action: None },

@@ -7,6 +7,7 @@ export const ERROR_CODES = Object.freeze({
   rate_limited: Object.freeze({ domain: 'sync', title: 'Rate limited', retriable: true, action: 'retry', args: Object.freeze([]) }),
   version_conflict: Object.freeze({ domain: 'sync', title: 'Version conflict', retriable: true, action: 'retry', args: Object.freeze([]) }),
   covered_anomaly: Object.freeze({ domain: 'sync', title: 'Coverage inconsistency', retriable: false, action: 'contact', args: Object.freeze([]) }),
+  head_rollback: Object.freeze({ domain: 'sync', title: 'Head pointer moved backward', retriable: false, action: null, args: Object.freeze([]) }),
   invalid_request: Object.freeze({ domain: 'sync', title: 'Invalid request', retriable: false, action: 'contact', args: Object.freeze([]) }),
   access_denied: Object.freeze({ domain: 'sync', title: 'Access denied', retriable: false, action: null, args: Object.freeze([]) }),
   not_found: Object.freeze({ domain: 'sync', title: 'Not found', retriable: false, action: null, args: Object.freeze([]) }),

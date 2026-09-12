@@ -242,6 +242,32 @@ async fn put_pointer_blob(
         }
     }
 
+    // Head-pointer monotonicity (OPE-411): a `heads/{replica}` pointer is a plaintext monotonic count. Reject
+    // an overwrite that LOWERS it — anti-rollback/griefing, so a malicious member can't roll a peer's head
+    // back to disrupt them (the honest owning replica only ever advances; an idempotent re-publish of the same
+    // count is fine). Under the tree ratchet lock (the SAME `SELECT … FOR UPDATE` the snapshot PUT + GC mark
+    // take) so a concurrent replay of a captured older count can't slip in a lost update. The count's single
+    // source of truth stays the R2 object — no denormalized DB copy to drift.
+    if !if_absent && namespace_of(sub) == "heads" {
+        let new_count = std::str::from_utf8(body)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .ok_or_else(|| ApiError::BadRequest("heads pointer must be an ASCII decimal count".into()))?;
+        sqlx::query("SELECT 1 FROM trees WHERE id = $1 FOR UPDATE")
+            .bind(cx.tree)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?;
+        let replica = sub.strip_prefix("heads/").unwrap_or("");
+        if new_count < head_count(state, cx.tree, replica).await? {
+            tx.rollback().await.map_err(internal)?;
+            return Err(ApiError::conflict(
+                crate::error_codes::HEAD_ROLLBACK,
+                "head pointer must not move backward",
+            ));
+        }
+    }
+
     // Metered inside the tx that also holds the index upsert, so a rejected write charges nothing.
     let axis = if if_absent {
         WriteAxis::Accumulating
