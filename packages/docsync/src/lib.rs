@@ -582,6 +582,19 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         self.snapshot_rejections
     }
 
+    /// A log-object read that treats a GC-reaped object (`Gone`) as ABSENT (`None`), exactly like a
+    /// not-yet-written one. So a reject-then-reaped tail (a poisoned snapshot was refused, and the log below
+    /// its claimed floor was already GC'd) degrades to an incomplete-not-wedged pull — the caller's existing
+    /// `None` handling (break / continue / a `Vanished` stall) applies — instead of a `Gone` propagating as a
+    /// fatal error and turning a correctly-rejected forgery into a sync wedge (OPE-421).
+    fn read_log(&self, replica: &str, counter: u64) -> Result<Option<(Vec<u8>, String)>, SyncError> {
+        match self.store.get(&log_key(&self.doc, replica, counter)) {
+            Ok(v) => Ok(v),
+            Err(store_blob::BlobError::Gone) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub const fn engine_mut(&mut self) -> &mut E {
         &mut self.engine
     }
@@ -709,7 +722,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             // Fetch only this replica's gap: [frontier .. head).
             let mut c = self.pull_frontier.get(&replica).copied().unwrap_or(0);
             while c < head {
-                let Some((bytes, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
+                let Some((bytes, _etag)) = self.read_log(&replica, c)? else {
                     break; // the head ran ahead of a not-yet-written delta — stop; retry next pull
                 };
                 if let Ok(pt) = self.sealer.open(EntryKind::Delta, &bytes) {
@@ -751,7 +764,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         //    frontier, so the fresh scan below never double-processes them.
         for (replica, counter) in self.held.iter().cloned().collect::<Vec<_>>() {
             let dot = (replica.clone(), counter);
-            let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, counter))? else {
+            let Some((env, _etag)) = self.read_log(&replica, counter)? else {
                 // Vanished (reclaimed below a GC floor): move to `stalled` so it keeps blocking `subsumed`
                 // until a bootstrap adopts a snapshot that covers it — NOT dropped (dropping would forge
                 // coverage over a dot we never folded). Under C2 a `Gone` here also triggers that bootstrap.
@@ -812,7 +825,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             };
             let mut c = self.pull_frontier.get(&replica).copied().unwrap_or(0);
             while c < head {
-                let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
+                let Some((env, _etag)) = self.read_log(&replica, c)? else {
                     break;
                 };
                 // `open` is kind-strict: a Delta fails the Cover open and falls through to the Delta open.
@@ -1127,7 +1140,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         let mut cleared = 0;
         for (replica, counter) in self.stalled.keys().cloned().collect::<Vec<_>>() {
             let dot = (replica.clone(), counter);
-            let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, counter))? else {
+            let Some((env, _etag)) = self.read_log(&replica, counter)? else {
                 continue; // still vanished — keep the pin
             };
             // A now-openable Cover folds + clears (e.g. a formerly-`Unopenable` future-version cover, post-upgrade).
