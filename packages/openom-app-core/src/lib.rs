@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openom_data_tree::{OpView, Tree, TreeError};
-use openom_docsync::{SyncClient, Verdict};
+use openom_docsync::{SnapshotPolicy, SyncClient, Verdict};
 use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
@@ -181,6 +181,17 @@ impl<S: BlobStore> AppCore<S> {
     pub fn compact(&mut self) -> Result<(), CoreError> {
         self.client.compact()?;
         Ok(())
+    }
+
+    /// Compact iff `policy` says so, given the `log/*` objects accrued since the last snapshot. Returns whether
+    /// it compacted — if so, the worker uploads the fresh snapshot with the `x-openom-covered` header
+    /// ([`subsumed_frontier`](Self::subsumed_frontier)). The policy is the seam; the app drives it with a fixed
+    /// log-count K ([`openom_docsync::EveryNUpdates`]).
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if a triggered compaction fails.
+    pub fn maybe_compact(&mut self, policy: &impl SnapshotPolicy) -> Result<bool, CoreError> {
+        Ok(self.client.maybe_compact(policy)?)
     }
 
     /// The SUBSUMED frontier — the ONLY coverage this device may honestly publish (OPE-409 C3), sent as the

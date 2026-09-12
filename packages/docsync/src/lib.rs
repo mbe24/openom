@@ -532,6 +532,9 @@ pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     /// honest coverage a compactor may publish (C3). See [`StallCause`].
     stalled: std::collections::BTreeMap<(String, u64), StallCause>,
     quarantined: usize,
+    /// Total `log/*` objects present at the last [`compact`](Self::compact) — the baseline
+    /// [`maybe_compact`](Self::maybe_compact) measures accrual against (0 until the first snapshot).
+    log_len_at_snapshot: u64,
 }
 
 impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
@@ -554,6 +557,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             held: std::collections::BTreeSet::new(),
             stalled: std::collections::BTreeMap::new(),
             quarantined: 0,
+            log_len_at_snapshot: 0,
         }
     }
 
@@ -904,7 +908,36 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             .map_err(|e| SyncError::Sealer(Box::new(e)))?;
         self.store
             .put(&snapshot_key(&self.doc), &out.envelope, store_blob::Precondition::Any)?;
+        // Reset the compaction-trigger baseline: subsequent maybe_compact measures log objects accrued SINCE
+        // this snapshot (a snapshot is a pointer, not a log object, so the count is unchanged by this write).
+        self.log_len_at_snapshot = self.log_object_count()?;
         Ok(())
+    }
+
+    /// The total number of `log/*` objects in the store for this doc — the compaction-trigger measure.
+    fn log_object_count(&self) -> Result<u64, SyncError> {
+        Ok(u64::try_from(self.store.list(&format!("{}/log/", self.doc))?.len()).unwrap_or(u64::MAX))
+    }
+
+    /// Compact iff the [`SnapshotPolicy`] says so, given how many `log/*` objects have accrued since the last
+    /// snapshot (all replicas, not just this one — the whole reclaimable tail). Returns whether it compacted.
+    /// Call after a pull for an up-to-date count. The policy is the seam; [`EveryNUpdates`] bounds the log by a
+    /// fixed count K.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a triggered compaction (or the store scan) fails.
+    pub fn maybe_compact(&mut self, policy: &impl SnapshotPolicy) -> Result<bool, SyncError> {
+        let total = self.log_object_count()?;
+        let state = CompactionState {
+            updates_since_snapshot: total.saturating_sub(self.log_len_at_snapshot),
+            has_snapshot: self.store.get(&snapshot_key(&self.doc))?.is_some(),
+        };
+        if policy.should_compact(&state) {
+            self.compact()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Load `{doc}/snapshot` if present: merge it, adopt its covered (SUBSUMED) frontier as the pull baseline

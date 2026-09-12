@@ -557,6 +557,24 @@ fn blob_mirror_skips_gone_objects_and_carries_the_snapshot() {
 }
 
 #[test]
+fn blob_maybe_compact_fires_at_k_then_resets() {
+    // The compaction-trigger seam bound by K log objects since the last snapshot: below K no compaction; at K
+    // it compacts; the baseline resets so it does not re-fire until K more accrue.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("a1".into()).unwrap();
+    assert!(!a.maybe_compact(&EveryNUpdates(3)).unwrap(), "below K: no compaction");
+    assert!(store.get(&snapshot_key("doc")).unwrap().is_none(), "no snapshot yet");
+
+    a.apply("a2".into()).unwrap();
+    assert!(a.maybe_compact(&EveryNUpdates(3)).unwrap(), "at K: compacts");
+    assert!(store.get(&snapshot_key("doc")).unwrap().is_some(), "snapshot written");
+
+    assert!(!a.maybe_compact(&EveryNUpdates(3)).unwrap(), "baseline reset — no re-fire right after");
+}
+
+#[test]
 fn blob_retry_stalled_clears_a_now_acceptable_dot() {
     // review #4: a dot Rejected on first pull is stalled (pinning subsumed); retry_stalled with a classify
     // that now Accepts it (its membership op has since landed) merges it and unpins — the only heal for a pin.

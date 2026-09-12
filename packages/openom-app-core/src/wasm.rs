@@ -81,6 +81,20 @@ impl AppCoreHandle {
         serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)
     }
 
+    /// Compact iff at least `k` `log/*` objects have accrued since the last snapshot — the initial compaction
+    /// policy (a fixed log-count bound behind the `SnapshotPolicy` seam, OPE-409). Returns whether it compacted;
+    /// if true the worker uploads the fresh snapshot with the `x-openom-covered` header
+    /// ([`subsumedFrontier`](Self::subsumed_frontier)).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if a triggered compaction fails.
+    #[wasm_bindgen(js_name = maybeCompact)]
+    pub fn maybe_compact(&mut self, k: u64) -> Result<bool, JsError> {
+        self.inner
+            .maybe_compact(&openom_docsync::EveryNUpdates(k))
+            .map_err(to_js)
+    }
+
     /// Set the moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     #[wasm_bindgen(js_name = setModerators)]
     pub fn set_moderators(&mut self, dids: Vec<String>) {

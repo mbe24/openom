@@ -303,6 +303,16 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.compact()
     }
 
+    /// Compact iff the [`SnapshotPolicy`](docsync::SnapshotPolicy) says so, given the `log/*` objects accrued
+    /// since the last snapshot (all replicas — the whole reclaimable tail). Returns whether it compacted. The
+    /// initial policy bounds the log by a fixed count K ([`docsync::EveryNUpdates`]).
+    ///
+    /// # Errors
+    /// Returns an error if a triggered compaction or the store scan fails.
+    pub fn maybe_compact(&mut self, policy: &impl docsync::SnapshotPolicy) -> Result<bool> {
+        self.inner.maybe_compact(policy)
+    }
+
     /// Like [`pull_verified`](Self::pull_verified) but the post-snapshot tail is re-classified after adopting
     /// the snapshot's covered baseline — the shared data channel's cold-start / `Gone`-recovery path (OPE-409
     /// C3). A plain `bootstrap` (fold only) merges the tail WITHOUT the §B3 gate, so the verified channel MUST
