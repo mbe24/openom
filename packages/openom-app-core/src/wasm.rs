@@ -11,12 +11,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use openom_crypto::{Passphrase, RecoveryCode};
+use openom_crypto::{CryptoError, Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_vault::AppVault;
+use openom_vault::{AppVault, VaultError};
 use store_blob::MemoryBlob;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -503,7 +503,7 @@ pub fn unlock(
     replica_id: &[u8],
     anchor: &[u8],
     doc: String,
-) -> Result<OpenResult, JsError> {
+) -> Result<OpenResult, JsValue> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
     let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
@@ -513,7 +513,7 @@ pub fn unlock(
     };
     let u = vault
         .unlock(&ctx, anchor, &Passphrase::new(passphrase.into_bytes()))
-        .map_err(to_js)?;
+        .map_err(|e| vault_err_to_js(&e))?;
     let did = u.did_key.into_string();
     // No bootstrap here — hydration is host-driven and uniform: the worker `importLog`s the durably
     // persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here would be dead work
@@ -552,7 +552,7 @@ pub fn recover(
     anchor: &[u8],
     floor: &[u8],
     doc: String,
-) -> Result<OpenResult, JsError> {
+) -> Result<OpenResult, JsValue> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
     let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
@@ -568,7 +568,7 @@ pub fn recover(
             &Passphrase::new(new_passphrase.into_bytes()),
             floor,
         )
-        .map_err(to_js)?;
+        .map_err(|e| vault_err_to_js(&e))?;
     let did = r.did_key.into_string();
     let handle = AppCoreHandle {
         inner: AppCore::new(did.clone(), r.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
@@ -605,7 +605,7 @@ pub fn change_passphrase(
     replica_id: &[u8],
     anchor: &[u8],
     floor: &[u8],
-) -> Result<OpenResult, JsError> {
+) -> Result<OpenResult, JsValue> {
     let vault = AppVault::from_kind(parse_engine(engine)?);
     let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
     let ctx = VaultContext {
@@ -621,7 +621,7 @@ pub fn change_passphrase(
             &Passphrase::new(new_passphrase.into_bytes()),
             floor,
         )
-        .map_err(to_js)?;
+        .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
         handle: None, // the DEK is unchanged — the running core keeps working
         keyring: re.anchor,
@@ -1276,6 +1276,39 @@ fn objects_to_js(objects: impl IntoIterator<Item = (String, Vec<u8>)>) -> Result
 
 fn to_js(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// The unified error-code (`error_codes.rs`) for a typed vault failure — so the gate localizes on a machine
+/// code (wrong passphrase vs rollback vs recovery-code vs verify), not by matching a `Display` string
+/// (OPE-420). The mapping lives here in the app veneer, keeping openom-vault / keyeo-crypto free of app codes.
+fn vault_code(e: &VaultError) -> &'static str {
+    use crate::error_codes as ec;
+    match e {
+        VaultError::RevisionRollback { .. } | VaultError::WatermarkRollback { .. } => ec::REVISION_ROLLBACK,
+        // On unlock the KEK (from the passphrase) can't open the DEK wrap → an AEAD Open; a MissingWrap
+        // likewise reads as "can't unlock" to the member.
+        VaultError::Crypto(CryptoError::Open) | VaultError::MissingWrap => ec::WRONG_PASSPHRASE,
+        VaultError::Crypto(CryptoError::RecoveryFormat | CryptoError::RecoveryChecksum) => ec::RECOVERY_CODE_INVALID,
+        VaultError::Crypto(CryptoError::Signature)
+        | VaultError::BadKeyring(_)
+        | VaultError::BadKdfParams
+        | VaultError::RevisionOverflow
+        | VaultError::Sharing(_) => ec::KEYRING_VERIFY_FAILED,
+        VaultError::Crypto(_) | VaultError::Sealer(_) => ec::DECRYPT_FAILED,
+        VaultError::TreeMismatch => ec::TAMPERED_ANCHOR,
+        VaultError::NotAuthorized => ec::ACCESS_DENIED,
+        VaultError::MemberExists | VaultError::MemberNotFound | VaultError::CannotRemoveOwner => ec::INVALID_REQUEST,
+        VaultError::MalformedWatermark => ec::INTERNAL,
+    }
+}
+
+/// A vault failure as a structured JS value `{ code, message }` — the worker reads `.code` (a stable registry
+/// code) to build its `AppError`, never matching the message. `message` is a dev-log diagnostic only.
+fn vault_err_to_js(e: &VaultError) -> JsValue {
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &JsValue::from_str("code"), &JsValue::from_str(vault_code(e)));
+    let _ = Reflect::set(&obj, &JsValue::from_str("message"), &JsValue::from_str(&e.to_string()));
+    obj.into()
 }
 
 const MAX_SAFE: f64 = 9_007_199_254_740_991.0; // 2^53 - 1

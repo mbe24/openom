@@ -10,7 +10,7 @@ import { RemoteStore } from './core/remoteStore.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { errText } from './core/errorText.js';
-import { normalizeUnknown } from './core/errorModel.js';
+import { normalizeUnknown, isAppError } from './core/errorModel.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
@@ -331,7 +331,7 @@ class App {
     } catch (e) {
       this.gateBusy = false;
       // A rollback is a security signal, not "try again"; everything else reads as wrong-pass.
-      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-wrong');
+      this.gateError = this.gateErr(e, 'gate-err-wrong');
       this.renderGate();
     }
   }
@@ -357,7 +357,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-recover');
+      this.gateError = this.gateErr(e, 'gate-err-recover');
       this.renderGate();
     }
   }
@@ -385,7 +385,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = isRollback(e) ? t('gate-err-tampered') : t('gate-err-change');
+      this.gateError = this.gateErr(e, 'gate-err-change');
       this.renderGate();
     }
   }
@@ -511,6 +511,17 @@ class App {
     };
     globalThis.addEventListener?.('error', (e) => report(e?.error ?? e?.message, 'error'));
     globalThis.addEventListener?.('unhandledrejection', (e) => report(e?.reason, 'rejection'));
+  }
+
+  // The gate error copy for a failed unlock/recover/change. A rollback/tamper (both runtimes report code
+  // `revision_rollback`) always shows the tamper copy; a structured AppError (the web worker's typed vault
+  // code — wrong_passphrase / recovery_code_invalid / keyring_verify_failed / decrypt_failed, OPE-420)
+  // renders its specific localized message; otherwise (a Tauri invoke, or an unknown throw) the
+  // flow-specific fallback.
+  gateErr(e, fallbackKey) {
+    if (isRollback(e)) return t('gate-err-tampered');
+    if (isAppError(e)) return errText(e);
+    return t(fallbackKey);
   }
 
   get generations() {

@@ -256,13 +256,14 @@ async function refreshMembershipAndEpochs(c, engine, head) {
 }
 
 // Map a wasm keyring/unlock error to a specific AppError. A failed anti-rollback check ("rollback" / "rolled
-// back") is a TAMPER/stale-restore signal, distinct from a wrong passphrase — it becomes `revision_rollback`
-// (the same code the Tauri host reports) so the gate shows the tamper message, not "wrong passphrase". Wraps
-// the three lifecycle wasm calls that can produce it; anything else normalizes generically. The message is
-// kept only as dev-log `cause`, never surfaced.
+// Map a wasm lifecycle failure (unlock/recover/change) to a specific AppError. The veneer now throws a
+// STRUCTURED { code, message } — the typed Rust VaultError mapped to a registry code (OPE-420) — so we read
+// the code directly (wrong_passphrase / revision_rollback / recovery_code_invalid / keyring_verify_failed /
+// decrypt_failed), no fragile message-matching. The message is kept only as dev-log `cause`, never surfaced.
 function vaultError(e) {
-  const msg = String(e?.message ?? e ?? '');
-  if (/roll(?:ed)? ?back/i.test(msg)) return makeError('revision_rollback', { cause: msg });
+  if (e && typeof e === 'object' && typeof e.code === 'string') {
+    return makeError(e.code, { cause: e.message });
+  }
   return normalizeUnknown(e);
 }
 
