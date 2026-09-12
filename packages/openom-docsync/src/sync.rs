@@ -290,6 +290,50 @@ impl<S: BlobStore> SyncClient<S> {
     ) -> Result<usize> {
         self.inner.pull_verified(classify, fold_cover)
     }
+
+    /// Like [`pull_verified`](Self::pull_verified) but the post-snapshot tail is re-classified after adopting
+    /// the snapshot's covered baseline — the shared data channel's cold-start / `Gone`-recovery path (OPE-409
+    /// C3). A plain `bootstrap` (fold only) merges the tail WITHOUT the §B3 gate, so the verified channel MUST
+    /// use this once compaction/snapshots are wired. See [`docsync::BlobSyncClient::bootstrap_verified`].
+    ///
+    /// # Errors
+    /// Returns an error if a blob read, open, or merge fails.
+    pub fn bootstrap_verified(
+        &mut self,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+    ) -> Result<()> {
+        self.inner.bootstrap_verified(classify, fold_cover)
+    }
+
+    /// Re-attempt every STALLED dot — app-invoked on a version upgrade / membership change, NEVER per tick.
+    /// The only heal for a pinned subsumed frontier (OPE-409 review #4). See
+    /// [`docsync::BlobSyncClient::retry_stalled`].
+    ///
+    /// # Errors
+    /// Returns an error if a blob read fails.
+    pub fn retry_stalled(
+        &mut self,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
+        fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+    ) -> Result<usize> {
+        self.inner.retry_stalled(classify, fold_cover)
+    }
+
+    /// The SUBSUMED frontier — the ONLY coverage a compaction may honestly publish (the contiguous per-replica
+    /// prefix actually folded into the engine, OPE-409 C3). The app plumbs this as the plaintext `x-openom-covered`
+    /// header on the snapshot PUT. `{replica: counter}`.
+    #[must_use]
+    pub fn subsumed_frontier(&self) -> docsync::Frontier {
+        self.inner.subsumed_frontier()
+    }
+
+    /// How many dots are currently STALLED (dispositioned without absorption; each pins the subsumed frontier).
+    /// A nonzero `Unopenable` count on newer-than-build entries is the "this device is a version straggler" signal.
+    #[must_use]
+    pub fn stalled_count(&self) -> usize {
+        self.inner.stalled_count()
+    }
 }
 
 impl<S: BlobStore> std::fmt::Debug for SyncClient<S> {
