@@ -10,6 +10,7 @@ import { RemoteStore } from './core/remoteStore.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { errText } from './core/errorText.js';
+import { normalizeUnknown } from './core/errorModel.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
@@ -134,6 +135,7 @@ class App {
     this.applyAccent();
     this.bindKeys();
     this.bindResize();
+    this.bindGlobalErrors();
     // Auto-lock: the policy watches for idle/visibility and calls lockNow. It only counts once a
     // lockable session is armed (in enterApp), so it's inert at the gate and during the demo.
     this.autoLockMinutes = loadAutoLock();
@@ -496,6 +498,19 @@ class App {
       const next = (this.loadTreeIdentity() && (await this.worker?.hasKeyring(this.realDoc).catch(() => false))) ? 'unlock' : 'welcome';
       this.showGate(next);
     });
+  }
+
+  // C5: one adapter-agnostic capture for uncaught errors + unhandled rejections — plain-JS bugs, not just
+  // the worker/wasm. The full detail goes to the dev console; a normalized `{code, domain}` (never the raw
+  // message/stack) is re-broadcast as `openom:error` for a future UI indicator (OPE-416) to surface.
+  bindGlobalErrors() {
+    const report = (raw, kind) => {
+      console.error(`[openom] uncaught ${kind}`, raw);
+      const err = normalizeUnknown(raw);
+      globalThis.dispatchEvent?.(new CustomEvent('openom:error', { detail: { code: err.code, domain: err.domain } }));
+    };
+    globalThis.addEventListener?.('error', (e) => report(e?.error ?? e?.message, 'error'));
+    globalThis.addEventListener?.('unhandledrejection', (e) => report(e?.reason, 'rejection'));
   }
 
   get generations() {

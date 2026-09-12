@@ -45,6 +45,8 @@ const uuidv4 = () =>
  * place option (B) plugs in later: call a local-only `/dev/auth/token` route, mint/cache a real HS256 JWT
  * (`sub=<uuid>`), and honour `forceRefresh` to exercise the production verify path — no other change.
  */
+import { makeError } from './errorModel.js';
+
 export class DevAuth {
   #storage;
   #broadcast;
@@ -119,7 +121,7 @@ export class DevAuth {
   // eslint-disable-next-line no-unused-vars -- forceRefresh is a no-op for option (A); the seam for option (B).
   async getAccessToken({ forceRefresh = false } = {}) {
     const id = this.memberId();
-    if (!id) throw new Error('DevAuth.getAccessToken: no active account (sign in first)');
+    if (!id) throw makeError('auth_required', { cause: 'DevAuth: no active account' });
     return this.#tokenFor(id, { forceRefresh });
   }
 
@@ -221,7 +223,7 @@ export class SupabaseAuth {
       // this.#session = data.session;
     }
     const token = this.#session?.access_token;
-    if (!token) throw new Error('SupabaseAuth: no session');
+    if (!token) throw makeError('auth_required', { cause: 'SupabaseAuth: no session' });
     return token;
   }
 
