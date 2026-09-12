@@ -2683,7 +2683,7 @@ async fn snapshot_covered_publish_and_guards() {
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "over-claim rejected");
-    assert_eq!(body_code(&b), "covered_over_claim");
+    assert_eq!(body_code(&b), "covered_anomaly");
 
     // M6 monotonicity: covered {rA:4} regresses the published 5 → 409 covered_regressed.
     let (s, _, b) = send(
@@ -2697,7 +2697,7 @@ async fn snapshot_covered_publish_and_guards() {
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "regression rejected");
-    assert_eq!(body_code(&b), "covered_regressed");
+    assert_eq!(body_code(&b), "covered_anomaly");
 
     // The covered header is mandatory: a snapshot PUT without it → 400.
     let (s, _, _) = send(
@@ -2763,7 +2763,7 @@ async fn log_write_guards_below_floor_and_immutability() {
     )
     .await;
     assert_eq!(s, StatusCode::CONFLICT, "covered below floor rejected");
-    assert_eq!(body_code(&b), "covered_below_gc_floor");
+    assert_eq!(body_code(&b), "covered_anomaly");
 }
 
 #[tokio::test]

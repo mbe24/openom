@@ -467,8 +467,9 @@ pub enum ApiError {
     /// An RFC 9457-shaped error carrying a typed, machine-readable `code`
     /// (`plan/sync/design.http-error-model.md`). The GC / metering paths (OPE-409) need a discriminator
     /// beyond the coarse status — a below-floor write and a reaped read are both about the GC ratchet but
-    /// differ by `(status, code)` (`409 below_gc_floor`, `410 below_gc_floor`, `409 covered_over_claim`, …).
-    /// Rendered as `application/problem+json`; `code` is a stable `&'static str` from the closed set.
+    /// differ by `(status, code)` (`409 below_gc_floor`, `410 below_gc_floor`, `409 covered_anomaly`, …).
+    /// Rendered as `application/problem+json`; `code` is a stable `&'static str` from the closed registry
+    /// (`error_codes.rs`). Every `ApiError` variant now renders through this same 9457 body.
     Coded {
         status: StatusCode,
         code: &'static str,
@@ -502,65 +503,60 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // Rate limiting carries a header, so build its response directly.
-        if let Self::TooManyRequests(secs) = self {
-            let mut resp = (
+        use crate::error_codes as ec;
+        // EVERY variant renders one uniform RFC 9457 `application/problem+json` body carrying a stable,
+        // machine-readable `code` from the closed registry (`error_codes.rs`) — so an openom-free client
+        // localizes on `code`, never the prose. `title`/`detail` are operator-controlled (never request
+        // bytes or backend causes — zero-knowledge). A 429 additionally carries Retry-After. Internal causes
+        // are logged, never sent. (QuotaExceeded stays a 403 — entitlement is an authorization decision,
+        // not a payment handshake, §9.9 — but now also a machine code.)
+        let (status, code, detail, retry_after): (StatusCode, &'static str, String, Option<u64>) = match self
+        {
+            Self::Forbidden => (StatusCode::FORBIDDEN, ec::ACCESS_DENIED, "forbidden".into(), None),
+            Self::NotFound => (StatusCode::NOT_FOUND, ec::NOT_FOUND, "not found".into(), None),
+            Self::Conflict => (
+                StatusCode::CONFLICT,
+                ec::VERSION_CONFLICT,
+                "version conflict — pull the current snapshot and retry".into(),
+                None,
+            ),
+            Self::QuotaExceeded => (
+                StatusCode::FORBIDDEN,
+                ec::QUOTA_EXCEEDED,
+                "account resource limit reached".into(),
+                None,
+            ),
+            Self::TooManyRequests(secs) => (
                 StatusCode::TOO_MANY_REQUESTS,
-                "append rate exceeded — retry after the indicated delay".to_string(),
-            )
-                .into_response();
+                ec::RATE_LIMITED,
+                "append rate exceeded — retry after the indicated delay".into(),
+                Some(secs),
+            ),
+            Self::Gone(m) => (StatusCode::GONE, ec::BELOW_GC_FLOOR, m, None),
+            Self::BadRequest(m) => (StatusCode::BAD_REQUEST, ec::INVALID_REQUEST, m, None),
+            Self::Coded { status, code, detail } => (status, code, detail, None),
+            Self::Internal(m) => {
+                tracing::error!(error = %m, "tree handler internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, ec::UNAVAILABLE, "internal error".into(), None)
+            }
+        };
+        let body = serde_json::json!({
+            "type": format!("/errors/{code}"),
+            "title": detail,
+            "status": status.as_u16(),
+            "code": code,
+        });
+        let mut resp = (status, axum::Json(body)).into_response();
+        resp.headers_mut().insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/problem+json"),
+        );
+        if let Some(secs) = retry_after {
             if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
                 resp.headers_mut().insert(RETRY_AFTER, v);
             }
-            return resp;
         }
-        // RFC 9457 Problem Details for the typed-code errors (the GC / metering discriminators). `title`/
-        // `detail` are operator-controlled strings — never request bytes or internal causes (zero-knowledge).
-        if let Self::Coded { status, code, detail } = self {
-            let body = serde_json::json!({
-                "type": format!("/errors/{code}"),
-                "title": detail,
-                "status": status.as_u16(),
-                "code": code,
-            });
-            let mut resp = (status, axum::Json(body)).into_response();
-            resp.headers_mut().insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("application/problem+json"),
-            );
-            return resp;
-        }
-        let (status, msg) = match self {
-            Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            Self::Conflict => (
-                StatusCode::CONFLICT,
-                "version conflict — pull the current snapshot and retry".to_string(),
-            ),
-            // 403 (not 402): entitlement is an authorization decision, not a payment
-            // handshake. A distinct variant so it's a countable signal, not a generic
-            // Forbidden (§9.9).
-            Self::QuotaExceeded => (
-                StatusCode::FORBIDDEN,
-                "account resource limit reached".to_string(),
-            ),
-            Self::TooManyRequests(_) => {
-                unreachable!("handled before the match (carries a header)")
-            }
-            Self::Coded { .. } => {
-                unreachable!("handled before the match (renders problem+json)")
-            }
-            Self::Gone(m) => (StatusCode::GONE, m),
-            Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            Self::Internal(m) => {
-                tracing::error!(error = %m, "tree handler internal error");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                )
-            }
-        };
-        (status, msg).into_response()
+        resp
     }
 }
 

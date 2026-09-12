@@ -463,7 +463,7 @@ async fn put_snapshot_blob(
     for (r, c) in &covered {
         if *c > head_count(state, cx.tree, r).await? {
             return Err(ApiError::conflict(
-                "covered_over_claim",
+                crate::error_codes::COVERED_ANOMALY,
                 "covered frontier exceeds a replica's published head",
             ));
         }
@@ -474,7 +474,7 @@ async fn put_snapshot_blob(
             Some(c) if *c >= *f => {}
             _ => {
                 return Err(ApiError::conflict(
-                    "covered_below_gc_floor",
+                    crate::error_codes::COVERED_ANOMALY,
                     "covered frontier is below the GC floor for a replica",
                 ))
             }
@@ -484,7 +484,7 @@ async fn put_snapshot_blob(
     for (r, p) in &published {
         if covered.get(r).copied().unwrap_or(0) < *p {
             return Err(ApiError::conflict(
-                "covered_regressed",
+                crate::error_codes::COVERED_ANOMALY,
                 "covered frontier regresses a currently-published replica",
             ));
         }
