@@ -11,7 +11,7 @@
 // It runs ONLY the lints we vetted as true-positives during the 2026-09-07 nursery sweep and drove to zero.
 // The two lints with documented, unavoidable false-positives are suppressed at their source, so a clean tree
 // produces zero output here:
-//   - missing_const_for_fn on the 8 #[wasm_bindgen] exports in openom-vault/src/wasm.rs (the macro forbids
+//   - missing_const_for_fn on the #[wasm_bindgen] exports in openom-app-core/src/wasm.rs (the macro forbids
 //     const fn) — allowed per-method there.
 //   - too_long_first_doc_paragraph on openom-protocol's README (via #![doc = include_str!]) — a location-less
 //     clippy limitation on included markdown, allowed at that crate's root.

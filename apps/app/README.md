@@ -122,8 +122,8 @@ src/views/             one file per screen, composed from ui/ + core/ read helpe
                        onboarding.js, people.js, settings.js, transfer.js.
 
 src/vendor/            generated + third-party, never hand-edited.
-  vault/, tree/           wasm-bindgen output for openom-vault / openom-data-tree — gitignored,
-                          rebuilt by scripts/build-vault.mjs / build-tree.mjs (repo root).
+  app-core/, tree/        wasm-bindgen output for openom-app-core / openom-data-tree — gitignored,
+                          rebuilt by scripts/build-app-core.mjs / build-tree.mjs (repo root).
   sqlite/                 vendored sqlite-wasm (OPFS-SAHPool) bundle, checked in — the persistent
                           browser-SQLite spike (apps/e2e/sqlite*.e2e.ts exercises it).
   comlink.js, fluent.js   vendored third-party libraries (worker RPC, Fluent i18n runtime).
