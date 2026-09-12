@@ -263,6 +263,12 @@ function vaultError(e) {
 }
 
 const api = {
+  /** Liveness probe (C3): a trivial round-trip the main-thread heartbeat uses to detect a wedged/silent
+   *  worker (one that stopped answering without firing an `error` event). Needs no core. */
+  ping() {
+    return true;
+  },
+
   /** Pre-warm the wasm init so the first open is fast. */
   async warm() {
     await ensureInit();

@@ -8,6 +8,44 @@ import { normalizeUnknown, isAppError } from './errorModel.js';
 let workerRef = null;
 let apiRef = null;
 
+let heartbeatTimer = null;
+
+// Silent-hang detection (C3): a CRASHED worker fires an 'error' event (handled below), but a WEDGED one (a
+// stuck wasm call, an infinite loop) simply stops answering — every Comlink call then waits forever. A
+// lightweight ping with a timeout catches that; after MAX_MISSES consecutive unanswered beats we raise the
+// SAME openom:worker-error signal a crash would, so the existing teardown + re-gate recovery runs. A heartbeat
+// (not a per-call timeout) means a legitimately slow syncNow never looks dead — the worker answers ping()
+// between its network awaits; only a truly blocked event loop misses beats.
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 10_000;
+const HEARTBEAT_MAX_MISSES = 2;
+
+function startHeartbeat(api) {
+  let misses = 0;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(async () => {
+    let alive = false;
+    try {
+      await Promise.race([
+        api.ping(),
+        new Promise((_, reject) => { setTimeout(() => reject(new Error('ping timeout')), HEARTBEAT_TIMEOUT_MS); }),
+      ]);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    if (api !== apiRef) return; // the worker was reset out from under this beat
+    if (alive) { misses = 0; return; }
+    misses += 1;
+    if (misses >= HEARTBEAT_MAX_MISSES) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+      console.error('[openom] app-core worker unresponsive — no heartbeat');
+      globalThis.dispatchEvent?.(new CustomEvent('openom:worker-error', { detail: 'worker unresponsive' }));
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
 /** Create (or reuse) the app-core worker and its Comlink proxy. Call `await worker.warm()` early. */
 export function appCoreWorker() {
   if (apiRef) return apiRef;
@@ -18,11 +56,14 @@ export function appCoreWorker() {
     console.error('[openom] app-core worker error', e?.message ?? e);
     globalThis.dispatchEvent?.(new CustomEvent('openom:worker-error', { detail: e?.message }));
   });
+  startHeartbeat(apiRef); // detect a silent hang, not just a crash
   return apiRef;
 }
 
 /** Tear the worker down (fatal error / identity change) so a fresh one is created next time. */
 export function resetAppCoreWorker() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
   try {
     workerRef?.terminate();
   } catch {
