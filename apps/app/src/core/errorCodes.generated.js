@@ -35,9 +35,13 @@ export const ERROR_CODES = Object.freeze({
 /** Every valid code string, for guard checks. */
 export const CODES = Object.freeze(Object.keys(ERROR_CODES));
 
-/** The Fluent key for a code: `${domain}-err-${code}`. */
+/** The Fluent key for a code: `error-${domain}-${code}`, kebab-cased (Fluent ids allow neither
+ *  dots nor a clean hierarchy), with a redundant leading `${domain}_` stripped from the code so
+ *  storage_quota (storage) -> `error-storage-quota`, below_gc_floor (sync) -> `error-sync-below-gc-floor`. */
 export function fluentKey(code) {
   const m = ERROR_CODES[code];
-  return m ? `${m.domain}-err-${code}` : 'app-err-internal';
+  if (!m) return 'error-generic';
+  const tail = code.startsWith(`${m.domain}_`) ? code.slice(m.domain.length + 1) : code;
+  return `error-${m.domain}-${tail.replaceAll('_', '-')}`;
 }
 

@@ -25,6 +25,6 @@ export function errText(err) {
     const msg = t(key, err.args);
     if (msg !== key) return msg; // the partner's catalog covers this code
   }
-  const generic = t('err-generic');
-  return generic === 'err-generic' ? GENERIC_FALLBACK : generic;
+  const generic = t('error-generic');
+  return generic === 'error-generic' ? GENERIC_FALLBACK : generic;
 }

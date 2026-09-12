@@ -72,10 +72,14 @@ function genJs(reg) {
   lines.push('});', '');
   lines.push('/** Every valid code string, for guard checks. */');
   lines.push(`export const CODES = Object.freeze(Object.keys(ERROR_CODES));`, '');
-  lines.push('/** The Fluent key for a code: `${domain}-err-${code}`. */');
+  lines.push('/** The Fluent key for a code: `error-${domain}-${code}`, kebab-cased (Fluent ids allow neither');
+  lines.push(' *  dots nor a clean hierarchy), with a redundant leading `${domain}_` stripped from the code so');
+  lines.push(' *  storage_quota (storage) -> `error-storage-quota`, below_gc_floor (sync) -> `error-sync-below-gc-floor`. */');
   lines.push('export function fluentKey(code) {');
   lines.push('  const m = ERROR_CODES[code];');
-  lines.push("  return m ? `${m.domain}-err-${code}` : 'app-err-internal';");
+  lines.push('  if (!m) return \'error-generic\';');
+  lines.push("  const tail = code.startsWith(`${m.domain}_`) ? code.slice(m.domain.length + 1) : code;");
+  lines.push("  return `error-${m.domain}-${tail.replaceAll('_', '-')}`;");
   lines.push('}', '');
   return lines.join('\n');
 }
