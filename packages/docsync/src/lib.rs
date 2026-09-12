@@ -493,6 +493,25 @@ fn decode_frontier(bytes: &[u8]) -> Option<(Frontier, &[u8])> {
 /// This increment covers DELTA sync (the contract-freezing two-replica convergence). Snapshot / compaction /
 /// bootstrap over a covered-frontier snapshot are the next increment; the existing [`SyncClient`] keeps the
 /// `DocStore` path until consumers migrate onto this one.
+/// Why a dot below `pull_frontier` was dispositioned WITHOUT being folded into engine state. Each such dot
+/// pins its replica's [`subsumed_frontier`](BlobSyncClient::subsumed_frontier) — the compactor must never claim
+/// coverage over a dot no snapshot contains (the covered-⊆-subsumed invariant). Never silently evicted: an
+/// eviction is indistinguishable from absorption to the derivation and would forge coverage → silent data loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StallCause {
+    /// The sealer could not open it (corrupt / tampered / a future wire version this build can't parse). A
+    /// version-skew straggler pins only its OWN published coverage; a current-version compactor covers it.
+    Unopenable,
+    /// Opened + Accepted, but `Engine::merge` errored (malformed plaintext / engine fault).
+    MergeFailed,
+    /// The classifier returned `Reject` — terminal for pull, and NOT treated as absorbed. Pinning keeps GC from
+    /// deleting a since-removed member's tail before its self-heal Cover lands (which would rescue it).
+    Rejected,
+    /// A held dot's object vanished from the store before it could be re-fetched (reclaimed below a GC floor).
+    /// Cleared when a [`bootstrap`](BlobSyncClient::bootstrap) adopts a snapshot whose covered frontier passes it.
+    Vanished,
+}
+
 pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     engine: E,
     sealer: K,
@@ -508,6 +527,10 @@ pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     /// Dots the classifier said to HOLD (couldn't verify yet) — retried each verified pull without blocking
     /// the frontier, so a later-arriving membership op can un-hold them (the §B3 hold/drain, OPE-382).
     held: std::collections::BTreeSet<(String, u64)>,
+    /// Dots below `pull_frontier` dispositioned WITHOUT absorption and NOT auto-retried (unlike `held`).
+    /// Together with `held`, these are the blockers of [`subsumed_frontier`](Self::subsumed_frontier) — the
+    /// honest coverage a compactor may publish (C3). See [`StallCause`].
+    stalled: std::collections::BTreeMap<(String, u64), StallCause>,
     quarantined: usize,
 }
 
@@ -529,6 +552,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             prev_hash: Vec::new(),
             pull_frontier: Frontier::new(),
             held: std::collections::BTreeSet::new(),
+            stalled: std::collections::BTreeMap::new(),
             quarantined: 0,
         }
     }
@@ -667,12 +691,16 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 let Some((bytes, _etag)) = self.store.get(&log_key(&self.doc, &replica, c))? else {
                     break; // the head ran ahead of a not-yet-written delta — stop; retry next pull
                 };
-                match self.sealer.open(EntryKind::Delta, &bytes) {
-                    Ok(pt) => match self.engine.merge(&pt) {
-                        Ok(()) => merged += 1,
-                        Err(_) => self.quarantined += 1,
-                    },
-                    Err(_) => self.quarantined += 1,
+                if let Ok(pt) = self.sealer.open(EntryKind::Delta, &bytes) {
+                    if self.engine.merge(&pt).is_ok() {
+                        merged += 1;
+                    } else {
+                        self.quarantined += 1;
+                        self.stalled.insert((replica.clone(), c), StallCause::MergeFailed);
+                    }
+                } else {
+                    self.quarantined += 1;
+                    self.stalled.insert((replica.clone(), c), StallCause::Unopenable);
                 }
                 c += 1;
             }
@@ -701,25 +729,34 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         // 1. Drain: retry every held dot (a membership op since may now un-hold it). Held dots sit BELOW the
         //    frontier, so the fresh scan below never double-processes them.
         for (replica, counter) in self.held.iter().cloned().collect::<Vec<_>>() {
+            let dot = (replica.clone(), counter);
             let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, counter))? else {
-                self.held.remove(&(replica, counter)); // vanished — unrecoverable
+                // Vanished (reclaimed below a GC floor): move to `stalled` so it keeps blocking `subsumed`
+                // until a bootstrap adopts a snapshot that covers it — NOT dropped (dropping would forge
+                // coverage over a dot we never folded). Under C2 a `Gone` here also triggers that bootstrap.
+                self.held.remove(&dot);
+                self.stalled.insert(dot, StallCause::Vanished);
                 continue;
             };
             let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
                 self.quarantined += 1;
-                self.held.remove(&(replica, counter)); // un-openable: stop retrying it
+                self.held.remove(&dot);
+                self.stalled.insert(dot, StallCause::Unopenable); // un-openable: stop retrying, keep the pin
                 continue;
             };
             match classify(&env, &pt, &replica, counter) {
                 Verdict::Accept => {
-                    match self.engine.merge(&pt) {
-                        Ok(()) => merged += 1,
-                        Err(_) => self.quarantined += 1,
+                    self.held.remove(&dot);
+                    if self.engine.merge(&pt).is_ok() {
+                        merged += 1; // absorbed — no longer a blocker
+                    } else {
+                        self.quarantined += 1;
+                        self.stalled.insert(dot, StallCause::MergeFailed);
                     }
-                    self.held.remove(&(replica, counter));
                 }
                 Verdict::Reject => {
-                    self.held.remove(&(replica, counter));
+                    self.held.remove(&dot);
+                    self.stalled.insert(dot, StallCause::Rejected);
                 }
                 Verdict::Hold => {} // stays held for the next drain
             }
@@ -760,28 +797,38 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 // `open` is kind-strict: a Delta fails the Cover open and falls through to the Delta open.
                 if let Ok(cover_body) = self.sealer.open(EntryKind::Cover, &env) {
                     fold_cover(&env, &cover_body, &replica, c);
+                } else if let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) {
+                    deltas.push((replica.clone(), c, env, pt));
                 } else {
-                    match self.sealer.open(EntryKind::Delta, &env) {
-                        Ok(pt) => deltas.push((replica.clone(), c, env, pt)),
-                        Err(_) => self.quarantined += 1,
-                    }
+                    self.quarantined += 1;
+                    self.stalled.insert((replica.clone(), c), StallCause::Unopenable);
                 }
                 c += 1;
             }
             self.pull_frontier.insert(replica, c);
         }
 
-        // Phase 2: classify each buffered Delta now that every cover in this tick has folded.
+        // Phase 2: classify each buffered Delta now that every cover in this tick has folded. Every dot ends
+        // in exactly one bucket — absorbed (merged), `held`, or `stalled` — so `subsumed_frontier` can never
+        // claim coverage over a dot not folded into the engine (the C3 invariant).
         for (replica, c, env, pt) in deltas {
             match classify(&env, &pt, &replica, c) {
-                Verdict::Accept => match self.engine.merge(&pt) {
-                    Ok(()) => merged += 1,
-                    Err(_) => self.quarantined += 1,
-                },
+                Verdict::Accept => {
+                    if self.engine.merge(&pt).is_ok() {
+                        merged += 1; // absorbed
+                    } else {
+                        self.quarantined += 1;
+                        self.stalled.insert((replica, c), StallCause::MergeFailed);
+                    }
+                }
                 Verdict::Hold => {
                     self.held.insert((replica, c));
                 }
-                Verdict::Reject => {}
+                // Reject is terminal but NOT absorbed — pin it (a since-removed member's tail before its
+                // self-heal Cover is this; pinning stops GC deleting it before the Cover can rescue it).
+                Verdict::Reject => {
+                    self.stalled.insert((replica, c), StallCause::Rejected);
+                }
             }
         }
         Ok(merged)
@@ -795,6 +842,35 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// Total objects `pull` has quarantined (skipped as un-openable / un-mergeable) over this client's life.
     pub const fn quarantined_count(&self) -> usize {
         self.quarantined
+    }
+
+    /// How many dots are currently STALLED — dispositioned without absorption (see [`StallCause`]); each pins
+    /// its replica's [`subsumed_frontier`](Self::subsumed_frontier). A nonzero count with cause `Unopenable`
+    /// on entries newer than this build is the "this device is a version straggler" signal.
+    pub fn stalled_count(&self) -> usize {
+        self.stalled.len()
+    }
+
+    /// The SUBSUMED frontier — the contiguous per-replica prefix actually folded into `self.engine`:
+    /// `pull_frontier` clamped down to the lowest `held`-or-`stalled` counter of each replica. This is the ONLY
+    /// coverage a compactor may honestly publish (C3) — every dot below it is in engine state, so a GC that
+    /// deletes below a published subsumed frontier never deletes an entry the snapshot doesn't contain. Derived
+    /// (not a stored cursor), hence correct by construction whenever every below-frontier dot is in exactly one
+    /// bucket (absorbed / held / stalled), which [`pull`](Self::pull)/[`pull_verified`](Self::pull_verified)
+    /// enforce.
+    pub fn subsumed_frontier(&self) -> Frontier {
+        let mut out = self.pull_frontier.clone();
+        let blockers = self
+            .held
+            .iter()
+            .map(|(r, c)| (r, *c))
+            .chain(self.stalled.keys().map(|(r, c)| (r, *c)));
+        for (replica, counter) in blockers {
+            // and_modify only: a blocker always sits below `pull_frontier[replica]`, so the entry exists; a
+            // replica absent from pull_frontier is (M1) covered=0 downstream, which is conservative.
+            out.entry(replica.clone()).and_modify(|c| *c = (*c).min(counter));
+        }
+        out
     }
 
     /// This replica's inbound frontier — the next counter it will pull from each replica.
@@ -811,7 +887,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// # Errors
     /// Returns [`SyncError`] if sealing or the blob write fails.
     pub fn compact(&mut self) -> Result<(), SyncError> {
-        let mut body = encode_frontier(&self.pull_frontier);
+        // Publish the SUBSUMED frontier (C3) — NOT `pull_frontier` — so the covered claim spans only entries
+        // this snapshot actually contains. Security-critical: GC deletes strictly below the published frontier,
+        // so covering a held/rejected/quarantined dot here would let GC delete an entry no snapshot holds.
+        let mut body = encode_frontier(&self.subsumed_frontier());
         body.extend_from_slice(&self.engine.snapshot());
         let ctx = SealCtx {
             kind: EntryKind::Snapshot,
@@ -828,13 +907,12 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         Ok(())
     }
 
-    /// Bring a fresh client current: load `{doc}/snapshot` if present (adopting its covered frontier as the
-    /// pull baseline), then [`pull`](Self::pull) only the tail past it. Idempotent — an already-current
-    /// client re-runs it harmlessly (the snapshot merges idempotently, the tail is empty).
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
-    pub fn bootstrap(&mut self) -> Result<(), SyncError> {
+    /// Load `{doc}/snapshot` if present: merge it, adopt its covered (SUBSUMED) frontier as the pull baseline
+    /// (max — we may already hold more), and purge every held/stalled dot the snapshot now subsumes (its effect
+    /// is folded, so it no longer blocks `subsumed_frontier`; this also resolves a `Vanished` stall — a dot
+    /// reclaimed below a GC floor the snapshot re-supplies). Shared by both bootstrap variants; only the tail
+    /// pull differs. Kept dots (at/above covered) are re-fetched + re-judged by that tail pull.
+    fn adopt_snapshot_baseline(&mut self) -> Result<(), SyncError> {
         if let Some((env, _etag)) = self.store.get(&snapshot_key(&self.doc))? {
             let body = self
                 .sealer
@@ -844,14 +922,47 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 self.engine
                     .merge_snapshot(engine_bytes)
                     .map_err(|e| SyncError::Engine(Box::new(e)))?;
-                // Adopt the covered frontier as our baseline (max — we may already hold more from a prior pull).
-                for (replica, counter) in covered {
-                    let f = self.pull_frontier.entry(replica).or_insert(0);
-                    *f = (*f).max(counter);
+                for (replica, counter) in &covered {
+                    let f = self.pull_frontier.entry(replica.clone()).or_insert(0);
+                    *f = (*f).max(*counter);
                 }
+                self.held.retain(|(r, c)| !matches!(covered.get(r), Some(cov) if *c < *cov));
+                self.stalled
+                    .retain(|(r, c), _| !matches!(covered.get(r), Some(cov) if *c < *cov));
             }
         }
+        Ok(())
+    }
+
+    /// Bring a fresh client current on a NON-verified channel: adopt the snapshot baseline, then [`pull`] the
+    /// tail. Idempotent. A SHARED channel that verifies arrivals MUST use
+    /// [`bootstrap_verified`](Self::bootstrap_verified) instead — plain `pull` here merges the tail WITHOUT the
+    /// classify/authz gate, admitting entries a verified sync would Reject (safe only where nothing is ever
+    /// Rejected, i.e. an unshared tree with no §B3 membership).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
+    pub fn bootstrap(&mut self) -> Result<(), SyncError> {
+        self.adopt_snapshot_baseline()?;
         self.pull()?;
+        Ok(())
+    }
+
+    /// Like [`bootstrap`](Self::bootstrap), but the post-snapshot tail is pulled through
+    /// [`pull_verified`](Self::pull_verified) — held/rejected/quarantined dots the snapshot did NOT subsume are
+    /// re-classified under THIS client's covers/membership, never merged unconditionally. The shared data
+    /// channel MUST use this for a cold start AND for a `Gone`-triggered re-bootstrap (C2), so GC's safety
+    /// argument (reject-pins, covered-⊆-subsumed) survives the recovery path.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
+    pub fn bootstrap_verified(
+        &mut self,
+        classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+    ) -> Result<(), SyncError> {
+        self.adopt_snapshot_baseline()?;
+        self.pull_verified(classify, fold_cover)?;
         Ok(())
     }
 }

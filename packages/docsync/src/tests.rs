@@ -329,3 +329,167 @@ fn blob_verified_pull_folds_a_cover_before_classifying_the_delta_it_blesses() {
     assert!(*covered.borrow(), "the cover folded (routed, not merged, not held)");
     assert!(b.engine().lines.contains("blessed"), "the blessed delta is folded once the cover blesses it");
 }
+
+// --- C3 (OPE-409): the SUBSUMED frontier — a compactor may publish only coverage its snapshot actually holds ---
+
+use store_blob::{BlobStore, Precondition};
+
+const NO_COVER: fn(&[u8], &[u8], &str, u64) = |_e, _b, _r, _c| {};
+
+#[test]
+fn blob_subsumed_frontier_clamps_to_a_held_dot() {
+    // A held dot at A:1 pins subsumed[A]=1 even though pull_frontier advances to 3 (A:2 merged BEHIND the hole).
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("a1".into()).unwrap();
+    a.apply("a2".into()).unwrap();
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(|_e, _p, _r, c| if c == 1 { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+        .unwrap();
+
+    assert_eq!(b.frontier().get("replica-A").copied(), Some(3), "the fetch frontier advanced past all three");
+    assert_eq!(b.held_count(), 1);
+    assert_eq!(
+        b.subsumed_frontier().get("replica-A").copied(),
+        Some(1),
+        "subsumed stops at the held hole (A:1), NOT the fetch frontier (3)"
+    );
+}
+
+#[test]
+fn blob_subsumed_frontier_pins_at_a_reject() {
+    // The C3 crux: a Rejected dot PINS subsumed (never advances past it), so a compactor can't claim coverage
+    // over a dot it never folded. Holds for an ARBITRARY classify — GC safety needs zero trust in it.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("forged".into()).unwrap(); // A:1
+    a.apply("a2".into()).unwrap();
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(
+        |_e, pt, _r, _c| if pt == b"forged" { Verdict::Reject } else { Verdict::Accept },
+        NO_COVER,
+    )
+    .unwrap();
+
+    assert_eq!(b.frontier().get("replica-A").copied(), Some(3));
+    assert_eq!(b.held_count(), 0, "a reject is not held");
+    assert_eq!(b.stalled_count(), 1, "it is stalled (pinned)");
+    assert_eq!(
+        b.subsumed_frontier().get("replica-A").copied(),
+        Some(1),
+        "subsumed pins at the rejected dot (A:1) — the compactor may not cover past it"
+    );
+}
+
+#[test]
+fn blob_compact_publishes_subsumed_not_pull_frontier() {
+    // COVERED-SUBSUMED: the snapshot's PUBLISHED covered frontier equals subsumed_frontier(), never pull_frontier.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("held1".into()).unwrap(); // A:1
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(
+        |_e, pt, _r, _c| if pt == b"held1" { Verdict::Hold } else { Verdict::Accept },
+        NO_COVER,
+    )
+    .unwrap();
+    b.compact().unwrap();
+
+    let subsumed = b.subsumed_frontier();
+    assert_eq!(subsumed.get("replica-A").copied(), Some(1));
+    // Decode exactly what compact() sealed into the snapshot body.
+    let (env, _) = store.get(&snapshot_key("doc")).unwrap().unwrap();
+    let body = PassthroughSealer.open(EntryKind::Snapshot, &env).unwrap();
+    let (published, _) = decode_frontier(&body).unwrap();
+    assert_eq!(published, subsumed, "compact() publishes the SUBSUMED frontier, not pull_frontier");
+}
+
+#[test]
+fn blob_bootstrap_verified_does_not_merge_a_rejected_tail() {
+    // BOOTSTRAP-REJECTS (review #1): bootstrap_verified re-classifies its tail — a Rejected TAIL entry is NOT
+    // merged (contrast: plain bootstrap would merge it unconditionally).
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("keep".into()).unwrap();
+    a.compact().unwrap(); // snapshot covers {A:1}, contains "keep"
+    let mut bwriter = blob_client(store.clone(), "replica-B");
+    bwriter.apply("forged".into()).unwrap(); // B:0 — a tail past the snapshot
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.bootstrap_verified(
+        |_e, pt, _r, _co| if pt == b"forged" { Verdict::Reject } else { Verdict::Accept },
+        NO_COVER,
+    )
+    .unwrap();
+    assert!(c.engine().lines.contains("keep"), "snapshot content is adopted");
+    assert!(!c.engine().lines.contains("forged"), "the rejected TAIL entry is NOT merged by bootstrap_verified");
+    assert_eq!(c.stalled_count(), 1, "the rejected tail dot is pinned");
+}
+
+#[test]
+fn blob_gc_simulation_subsumed_frontier_prevents_loss() {
+    // The end-to-end security proof: deleting every log object below the PUBLISHED (subsumed) covered frontier —
+    // the maximal sweep gate 1 permits — never loses data. Had the compactor published pull_frontier (which
+    // advanced past a held dot), the sweep would have deleted B:0, an entry NO snapshot contains → silent loss.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    let mut b = blob_client(store.clone(), "replica-B");
+    a.apply("a0".into()).unwrap(); // A:0
+    a.apply("a1".into()).unwrap(); // A:1
+    b.apply("held".into()).unwrap(); // B:0 — A will HOLD it (its membership op hasn't landed)
+
+    // A pulls B's entry but HOLDS it → A's subsumed excludes B, so its snapshot cannot cover B:0.
+    a.pull_verified(|_e, _p, r, _c| if r == "replica-B" { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+        .unwrap();
+    a.compact().unwrap();
+    let covered = a.subsumed_frontier();
+    assert_eq!(covered.get("replica-A").copied(), Some(2));
+    assert_eq!(covered.get("replica-B").copied(), Some(0), "A held B:0, so subsumed can't cover it");
+
+    // The maximal gate-1 sweep: delete every log/{r}/{c} with c < covered[r]. A:0,A:1 go; B:0 is protected.
+    for c in 0..2 {
+        store.delete(&log_key("doc", "replica-A", c), Precondition::Any).unwrap();
+    }
+
+    // A fresh replica bootstraps: snapshot (a0,a1 — A's folded state, NOT "held") + the surviving tail (B:0).
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.bootstrap_verified(|_e, _p, _r, _co| Verdict::Accept, NO_COVER).unwrap();
+    let expected: BTreeSet<String> = ["a0", "a1", "held"].into_iter().map(String::from).collect();
+    assert_eq!(
+        c.engine().lines,
+        expected,
+        "no loss: the snapshot covers A:0-1, and B:0 survived GC (subsumed never covered it) to be re-pulled"
+    );
+}
+
+#[test]
+fn blob_drain_vanished_dot_is_stalled_not_leaked() {
+    // The drain-leak fix: a held dot whose object VANISHES (a GC reclaim) becomes STALLED (still pinning
+    // subsumed), never silently dropped — dropping would forge coverage over a dot never folded.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("v0".into()).unwrap(); // A:0
+    a.apply("a1".into()).unwrap(); // A:1
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(|_e, pt, _r, _c| if pt == b"v0" { Verdict::Hold } else { Verdict::Accept }, NO_COVER)
+        .unwrap();
+    assert_eq!(b.held_count(), 1);
+
+    // The held object vanishes (reclaimed below a GC floor); a later drain runs.
+    store.delete(&log_key("doc", "replica-A", 0), Precondition::Any).unwrap();
+    b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    assert_eq!(b.held_count(), 0, "no longer held");
+    assert_eq!(b.stalled_count(), 1, "moved to stalled (Vanished), not dropped");
+    assert_eq!(
+        b.subsumed_frontier().get("replica-A").copied(),
+        Some(0),
+        "the vanished dot still pins subsumed — coverage never advances over it"
+    );
+}
