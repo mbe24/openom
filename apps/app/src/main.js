@@ -972,6 +972,10 @@ class App {
 const app = new App(document.getElementById('app'));
 window.openom = app;
 app.boot().catch((e) => {
-  document.getElementById('app').innerHTML =
-    '<pre style="padding:24px;color:#c2743f;white-space:pre-wrap">' + String(e && e.stack || e) + '</pre>';
+  // Last-resort boot failure. The full error (incl. stack) goes to the dev console ONLY; the DOM gets a
+  // localized, leak-free message built with the DOM API (no innerHTML injection of an error string) — A2.
+  console.error('[openom] boot failed', e);
+  document.getElementById('app').replaceChildren(
+    h('pre', { style: { padding: '24px', color: '#c2743f', whiteSpace: 'pre-wrap' } }, errText(e)),
+  );
 });

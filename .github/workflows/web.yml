@@ -23,6 +23,14 @@ jobs:
       - name: Parse every module
         run: find apps/app/src -name '*.js' -print0 | xargs -0 -n1 node --check
 
+      # Der Fehlercode-Generator (error-codes.json -> JS + Rust Spiegel) darf nicht driften.
+      - name: Error codes in sync
+        run: node scripts/gen-error-codes.mjs --check
+
+      # Kein `.stack` darf je in die UI gerendert werden (nur Dev-Konsole).
+      - name: Error hygiene
+        run: node scripts/check-error-hygiene.mjs
+
       # Jede Sprache muss dieselben Schluessel tragen wie Englisch.
       - name: Locales complete
         run: node scripts/check-locales.mjs
