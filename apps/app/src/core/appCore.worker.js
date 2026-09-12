@@ -9,6 +9,7 @@
 // concurrent ticks safe — the Rust core is never re-entered mid-borrow because each step runs to
 // completion before the next `await`.
 import * as Comlink from '../vendor/comlink.js';
+import { makeError, normalizeUnknown } from './errorModel.js';
 import init, {
   AppCoreHandle,
   provision as wasmProvision,
@@ -250,6 +251,17 @@ async function refreshMembershipAndEpochs(c, engine, head) {
   c.handle.adoptEpochs(head);
 }
 
+// Map a wasm keyring/unlock error to a specific AppError. A failed anti-rollback check ("rollback" / "rolled
+// back") is a TAMPER/stale-restore signal, distinct from a wrong passphrase — it becomes `revision_rollback`
+// (the same code the Tauri host reports) so the gate shows the tamper message, not "wrong passphrase". Wraps
+// the three lifecycle wasm calls that can produce it; anything else normalizes generically. The message is
+// kept only as dev-log `cause`, never surfaced.
+function vaultError(e) {
+  const msg = String(e?.message ?? e ?? '');
+  if (/roll(?:ed)? ?back/i.test(msg)) return makeError('revision_rollback', { cause: msg });
+  return normalizeUnknown(e);
+}
+
 const api = {
   /** Pre-warm the wasm init so the first open is fast. */
   async warm() {
@@ -321,7 +333,12 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
-    const res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
+    let res;
+    try {
+      res = wasmUnlock(eng, passphrase, treeId, memberId, freshReplica(), head.bytes, docId);
+    } catch (e) {
+      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not wrong-pass
+    }
     try {
       await saveWatermark(docId, res.watermark); // refresh the persisted floor
       const core = new Core(res.takeHandle(), docId, true, treeId, eng);
@@ -344,9 +361,14 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const floor = await loadWatermark(docId);
-    const res = wasmRecover(
-      head.engine || engine, recoveryCode, newPassphrase, treeId, memberId, freshReplica(), head.bytes, floor, docId,
-    );
+    let res;
+    try {
+      res = wasmRecover(
+        head.engine || engine, recoveryCode, newPassphrase, treeId, memberId, freshReplica(), head.bytes, floor, docId,
+      );
+    } catch (e) {
+      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not a bad code
+    }
     try {
       const eng = head.engine || engine;
       await keyringStore().saveHead(docId, eng, res.keyring); // the recovered keyring
@@ -371,9 +393,14 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const floor = await loadWatermark(docId);
-    const res = wasmChangePassphrase(
-      head.engine || engine, current, next, treeId, memberId, freshReplica(), head.bytes, floor,
-    );
+    let res;
+    try {
+      res = wasmChangePassphrase(
+        head.engine || engine, current, next, treeId, memberId, freshReplica(), head.bytes, floor,
+      );
+    } catch (e) {
+      throw vaultError(e); // a rollback becomes revision_rollback so the gate shows tamper, not wrong-pass
+    }
     try {
       await keyringStore().saveHead(docId, head.engine || engine, res.keyring); // the re-wrapped keyring
       await saveWatermark(docId, res.watermark);
@@ -848,4 +875,27 @@ async function syncData(c) {
   }
 }
 
-Comlink.expose(api);
+// Normalize EVERY exposed method's throws/rejections to a plain AppError BEFORE Comlink's own error handler
+// sees them (design B1/B2): Comlink's throwTransferHandler forwards a raw Error's `message`/`name`/`stack`
+// across the worker→main boundary by default, so an un-normalized throw would leak an internal stack. A
+// method that already threw an AppError passes through unchanged (normalizeUnknown is idempotent); anything
+// else becomes `{ code:'internal', domain:'app', cause:<string> }` with NO stack. The main thread catches a
+// plain object (not an Error subclass), so its custom fields survive the structured clone.
+function guardApi(surface) {
+  const guarded = {};
+  for (const [name, value] of Object.entries(surface)) {
+    guarded[name] =
+      typeof value === 'function'
+        ? async (...args) => {
+            try {
+              return await value.apply(surface, args);
+            } catch (e) {
+              throw normalizeUnknown(e);
+            }
+          }
+        : value;
+  }
+  return guarded;
+}
+
+Comlink.expose(guardApi(api));

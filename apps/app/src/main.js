@@ -9,6 +9,7 @@ import { readTreeIdentity, ensureTreeIdentity } from './core/treeId.js';
 import { RemoteStore } from './core/remoteStore.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
+import { errText } from './core/errorText.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
@@ -46,10 +47,9 @@ function readServerUrl() {
   return /^https?:\/\//.test(v) ? v.replace(/\/$/, '') : null;
 }
 
-// A rollback/tamper signal, not a "wrong passphrase". The Tauri host reports a structured
-// `code`; the web worker throws a message — and the message differs by path ("rollback" from
-// the JS unlock check, "rolled back" from the Rust recover path), so match both spellings.
-const isRollback = (e) => e?.code === 'revision_rollback' || /roll(?:ed)? ?back/i.test(e?.message ?? '');
+// A rollback/tamper signal, not a "wrong passphrase". Both surfaces now report the SAME structured code:
+// the Tauri host directly, and the web worker via its AppError normalization (vaultError → revision_rollback).
+const isRollback = (e) => e?.code === 'revision_rollback';
 
 const VIEWS = {
   tree: { render: ancestorsView, title: 'view-ancestors', tab: 'tree' },
@@ -260,7 +260,7 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = t('gate-err-create') + ' ' + (e?.message ?? '');
+      this.gateError = t('gate-err-create');
       this.renderGate();
     }
   }
@@ -602,7 +602,7 @@ class App {
       await this.tree.attachMedia(personId, { ...meta, role: 'portrait' });
       this.render();
     } catch (e) {
-      toast(String(e.message ?? e));
+      toast(errText(e));
     }
   }
 
@@ -725,7 +725,7 @@ class App {
     this.render();
   }
 
-  addField(def) { try { this.schema.define(def); } catch (e) { toast(String(e.message ?? e)); } }
+  addField(def) { try { this.schema.define(def); } catch (e) { toast(errText(e)); } }
   removeField(id) { this.schema.remove(id); }
 
   async parseImport(file) {
@@ -733,7 +733,7 @@ class App {
       this.importReport = await this.transfer.parse(file);
     } catch (e) {
       this.importReport = null;
-      toast(String(e.message ?? e));
+      toast(errText(e));
     }
     this.render();
   }

@@ -31,6 +31,7 @@ pub const SIGN_UP_FAILED: &str = "sign_up_failed";
 pub const EMAIL_TAKEN: &str = "email_taken";
 pub const WRONG_PASSPHRASE: &str = "wrong_passphrase";
 pub const TAMPERED_ANCHOR: &str = "tampered_anchor";
+pub const REVISION_ROLLBACK: &str = "revision_rollback";
 pub const RECOVERY_CODE_INVALID: &str = "recovery_code_invalid";
 pub const KEYRING_VERIFY_FAILED: &str = "keyring_verify_failed";
 pub const DECRYPT_FAILED: &str = "decrypt_failed";
@@ -61,6 +62,7 @@ pub const ERROR_CODES: &[CodeMeta] = &[
     CodeMeta { code: "email_taken", domain: "auth", title: "Email already registered", retriable: false, action: None },
     CodeMeta { code: "wrong_passphrase", domain: "vault", title: "Wrong passphrase", retriable: false, action: None },
     CodeMeta { code: "tampered_anchor", domain: "vault", title: "Tree verification failed", retriable: false, action: Some("contact") },
+    CodeMeta { code: "revision_rollback", domain: "vault", title: "Version rollback detected", retriable: false, action: None },
     CodeMeta { code: "recovery_code_invalid", domain: "vault", title: "Invalid recovery code", retriable: false, action: None },
     CodeMeta { code: "keyring_verify_failed", domain: "vault", title: "Keyring verification failed", retriable: false, action: Some("contact") },
     CodeMeta { code: "decrypt_failed", domain: "vault", title: "Decryption failed", retriable: false, action: Some("contact") },

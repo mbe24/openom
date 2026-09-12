@@ -22,6 +22,7 @@
     "email_taken":         { "domain": "auth", "title": "Email already registered", "retriable": false, "action": null, "note": "RESERVED (F3): unused by default; the auth adapter's EMAIL_TAKEN_DISCLOSURE switch flips sign_up_failed → this for explicit feedback." },
     "wrong_passphrase":    { "domain": "vault", "title": "Wrong passphrase", "retriable": false, "action": null, "note": "unlock/change/recover: the passphrase did not derive the key." },
     "tampered_anchor":     { "domain": "vault", "title": "Tree verification failed", "retriable": false, "action": "contact", "note": "the keyring anchor failed verification — out-of-date or tampered." },
+    "revision_rollback":   { "domain": "vault", "title": "Version rollback detected", "retriable": false, "action": null, "note": "the anti-rollback watermark rejected an older keyring revision — a tamper/stale-restore signal, distinct from a wrong passphrase. Shared code across the web worker and the Tauri host (which already reports this code)." },
     "recovery_code_invalid": { "domain": "vault", "title": "Invalid recovery code", "retriable": false, "action": null, "note": "the recovery code did not validate." },
     "keyring_verify_failed": { "domain": "vault", "title": "Keyring verification failed", "retriable": false, "action": "contact", "note": "a peer keyring/membership failed the verify gate." },
     "decrypt_failed":      { "domain": "vault", "title": "Decryption failed", "retriable": false, "action": "contact", "note": "an envelope failed to open/authenticate." },

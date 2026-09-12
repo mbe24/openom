@@ -21,6 +21,7 @@ export const ERROR_CODES = Object.freeze({
   email_taken: Object.freeze({ domain: 'auth', title: 'Email already registered', retriable: false, action: null, args: Object.freeze([]) }),
   wrong_passphrase: Object.freeze({ domain: 'vault', title: 'Wrong passphrase', retriable: false, action: null, args: Object.freeze([]) }),
   tampered_anchor: Object.freeze({ domain: 'vault', title: 'Tree verification failed', retriable: false, action: 'contact', args: Object.freeze([]) }),
+  revision_rollback: Object.freeze({ domain: 'vault', title: 'Version rollback detected', retriable: false, action: null, args: Object.freeze([]) }),
   recovery_code_invalid: Object.freeze({ domain: 'vault', title: 'Invalid recovery code', retriable: false, action: null, args: Object.freeze([]) }),
   keyring_verify_failed: Object.freeze({ domain: 'vault', title: 'Keyring verification failed', retriable: false, action: 'contact', args: Object.freeze([]) }),
   decrypt_failed: Object.freeze({ domain: 'vault', title: 'Decryption failed', retriable: false, action: 'contact', args: Object.freeze([]) }),
