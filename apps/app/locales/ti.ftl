@@ -205,35 +205,3 @@ security-passphrase = ናይ መሕለፊ ሓረግ
 security-change = ቀይር
 security-change-hint = ሓድሽ ናይ መሕለፊ ሓረግ ኣዳሉ። ሓድሽ ናይ ምምላስ ኮድ እውን ይወሃብ።
 security-planned = እተመደበ
-
-# TODO(ti): translate the error messages below (English placeholders).
-
-err-generic = Something went wrong. Please try again.
-sync-err-below_gc_floor = Catching up from a snapshot…
-sync-err-quota_exceeded = The tree owner's storage limit has been reached.
-sync-err-rate_limited = Too many requests — please try again in a moment.
-sync-err-version_conflict = Someone else just made a change. Retrying…
-sync-err-covered_anomaly = A sync consistency check failed. Please contact support if this keeps happening.
-sync-err-invalid_request = The request was rejected. Please try again, or contact support if it persists.
-sync-err-access_denied = You don't have permission to do that.
-sync-err-not_found = Not found.
-sync-err-unavailable = The server is temporarily unavailable. Retrying…
-sync-err-request_failed = Couldn't reach the server. Retrying…
-sync-err-offline = You're offline. Changes will sync when you're back online.
-sync-err-timeout = The request timed out. Retrying…
-auth-err-auth_required = Please sign in again to continue.
-auth-err-session_expired = Your session has expired. Please sign in again.
-auth-err-sign_in_failed = Sign-in failed. Please check your details and try again.
-auth-err-sign_up_failed = Sign-up failed. Please try again.
-auth-err-email_taken = That email is already registered.
-vault-err-wrong_passphrase = Wrong passphrase.
-vault-err-tampered_anchor = This tree couldn't be verified — it may be out of date or tampered with.
-vault-err-revision_rollback = This tree looks out of date or tampered with — refusing to open it.
-vault-err-recovery_code_invalid = That recovery code isn't valid.
-vault-err-keyring_verify_failed = Membership couldn't be verified for this tree.
-vault-err-decrypt_failed = This data couldn't be decrypted.
-storage-err-storage_quota = Your device's local storage is full. Free up space to keep saving offline.
-storage-err-storage_blocked = Local storage isn't available — some private-browsing modes block it.
-storage-err-storage_corrupt = Local storage is corrupt and needs to be rebuilt.
-app-err-worker_unavailable = Something went wrong and the app needs to reload.
-app-err-internal = Something went wrong. Please try again.
