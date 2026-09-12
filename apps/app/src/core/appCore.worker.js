@@ -51,6 +51,11 @@ const ensureInit = () => (ready ??= init());
 // chain today.
 const KEYRING_ENGINE = 'chain';
 
+// Compaction cadence (OPE-409): the data channel compacts once this many log objects have accrued since the
+// last snapshot (the SnapshotPolicy seam's initial fixed-K bound, driven per sync tick). Overridable via
+// `setCompactK` (tests lower it to exercise compaction with few writes).
+let compactK = 64;
+
 // Durable keyring store (IndexedDB; works in a Worker) — persists the genesis keyring on provision so a
 // later unlock can load it. The fuller keyring-sync/reconcile is OPE-382.
 let keyring = null;
@@ -248,6 +253,11 @@ const api = {
   /** Pre-warm the wasm init so the first open is fast. */
   async warm() {
     await ensureInit();
+  },
+
+  /** Set the compaction cadence K — the log-object count that triggers a snapshot per tick (OPE-409). */
+  setCompactK(k) {
+    compactK = k;
   },
 
   /**
@@ -809,11 +819,15 @@ async function syncData(c) {
     if (bytes) remote.push({ key: localPrefix + key.slice(remotePrefix.length), bytes });
   }
   if (c.aborted) return;
-  const { put } = c.handle.sync(remote); // { put: [{ key, bytes, pointer }], folded }
+  // The tick also compacts once ≥ compactK log objects have accrued since the last snapshot (OPE-409): the
+  // fresh snapshot is in `put`, and `covered` is the SUBSUMED frontier to send as the x-openom-covered header
+  // on that snapshot upload (the server's GC gate 1 trusts only what a snapshot actually folds).
+  const { put, covered } = c.handle.sync(remote, compactK); // { put: [{ key, bytes, pointer }], folded, covered }
   for (const o of put) {
     if (c.aborted) return;
-    // Re-key the core's object back into the shared tree namespace for upload.
-    await transport.blobPut(remotePrefix + o.key.slice(localPrefix.length), o.bytes, o.pointer);
+    // Re-key the core's object back into the shared tree namespace for upload; the snapshot carries the header.
+    const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
+    await transport.blobPut(remotePrefix + o.key.slice(localPrefix.length), o.bytes, o.pointer, coveredHeader);
   }
   if (c.aborted) return;
   await persistBlobs(c);

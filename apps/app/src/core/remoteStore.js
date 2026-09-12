@@ -235,13 +235,13 @@ export class RemoteStore {
   }
 
   /** Write one object. A `pointer` overwrites; an immutable object writes `If-None-Match: *` (a 412 = the
-   *  object already exists → idempotent success, since immutable objects are content-stable). */
-  async blobPut(key, bytes, pointer) {
-    const res = await this.#send(this.#blobUrl(key), {
-      method: 'PUT',
-      extraHeaders: { 'content-type': 'application/octet-stream', ...(pointer ? {} : { 'if-none-match': '*' }) },
-      body: bytes,
-    });
+   *  object already exists → idempotent success, since immutable objects are content-stable). `covered` (the
+   *  snapshot PUT only) is the SUBSUMED covered frontier as a JSON `{replica:counter}` string — sent base64 as
+   *  the mandatory `x-openom-covered` header so the server's GC gate 1 can trust + etag-bind it (OPE-409). */
+  async blobPut(key, bytes, pointer, covered) {
+    const extraHeaders = { 'content-type': 'application/octet-stream', ...(pointer ? {} : { 'if-none-match': '*' }) };
+    if (covered) extraHeaders['x-openom-covered'] = btoa(covered); // ASCII JSON (hex keys + numbers) → btoa is safe
+    const res = await this.#send(this.#blobUrl(key), { method: 'PUT', extraHeaders, body: bytes });
     if (res.status === 412) return; // immutable object already present — idempotent
     if (!res.ok) {
       const detail = await res.text().catch(() => '');

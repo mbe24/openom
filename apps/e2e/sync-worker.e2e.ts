@@ -23,6 +23,23 @@ test('app-core: two devices converge through the server', async ({ page }) => {
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: compaction publishes a snapshot with the covered header', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.compaction());
+
+  expect(r.push.state).toBe('ok');
+  expect(r.hasSnapshot, 'a snapshot object was produced + uploaded').toBe(true);
+  expect(r.covered, 'the x-openom-covered header rode the snapshot PUT').toBeTruthy();
+  const m = JSON.parse(r.covered);
+  expect(Object.values(m).some((v: any) => v > 0), 'covered is a non-empty {replica:counter} map').toBe(true);
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: an offline mint is offered outbound once a transport attaches', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

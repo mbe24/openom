@@ -81,19 +81,6 @@ impl AppCoreHandle {
         serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)
     }
 
-    /// Compact iff at least `k` `log/*` objects have accrued since the last snapshot — the initial compaction
-    /// policy (a fixed log-count bound behind the `SnapshotPolicy` seam, OPE-409). Returns whether it compacted;
-    /// if true the worker uploads the fresh snapshot with the `x-openom-covered` header
-    /// ([`subsumedFrontier`](Self::subsumed_frontier)).
-    ///
-    /// # Errors
-    /// Returns a [`JsError`] if a triggered compaction fails.
-    #[wasm_bindgen(js_name = maybeCompact)]
-    pub fn maybe_compact(&mut self, k: u64) -> Result<bool, JsError> {
-        self.inner
-            .maybe_compact(&openom_docsync::EveryNUpdates(k))
-            .map_err(to_js)
-    }
 
     /// Set the moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     #[wasm_bindgen(js_name = setModerators)]
@@ -239,22 +226,29 @@ impl AppCoreHandle {
     }
 
     /// Reconcile against the shared remote in ONE call — the worker's whole tick. `remote` is `[{ key, bytes }]`:
-    /// every object the worker listed + GET from the remote under `{doc}/`. Returns `{ put: [{ key, bytes,
-    /// pointer }], folded }` — the objects the worker must upload (a `pointer` overwrites, an immutable log
-    /// object writes `If-None-Match`) and how many entries folded. All keyspace + head-monotonicity logic stays
-    /// in Rust (`docsync::mirror`); the worker never parses, builds, or compares a key.
+    /// every object the worker listed + GET from the remote under `{doc}/`. `compactK` triggers compaction as
+    /// part of the tick (compact once ≥ K `log/*` objects have accrued since the last snapshot; `0` disables).
+    /// Returns `{ put: [{ key, bytes, pointer }], folded, covered }` — the objects to upload (a `pointer`
+    /// overwrites, an immutable log object writes `If-None-Match`), how many entries folded, and `covered` =
+    /// the subsumed frontier as a JSON `{replica:counter}` string that the worker base64s into the
+    /// `x-openom-covered` header on the snapshot upload. All keyspace logic stays in Rust (`docsync::mirror`).
     ///
     /// # Errors
-    /// Returns a [`JsError`] if an element is malformed, or a store/mirror step fails.
+    /// Returns a [`JsError`] if an element is malformed, or a store/mirror/compaction step fails.
     #[wasm_bindgen]
-    pub fn sync(&mut self, remote: &Array) -> Result<JsValue, JsError> {
-        let (uploads, folded) = self.inner.sync_against(&objects_from_js(remote)?).map_err(to_js)?;
+    pub fn sync(&mut self, remote: &Array, compact_k: u32) -> Result<JsValue, JsError> {
+        let (uploads, folded) = self
+            .inner
+            .sync_against(&objects_from_js(remote)?, compact_k)
+            .map_err(to_js)?;
         let put = objects_to_js(uploads)?;
         let result = Object::new();
         set(&result, "put", &put)?;
         #[allow(clippy::cast_precision_loss)] // fold counts are tiny (entries merged this tick)
         let folded_f = folded as f64;
         set(&result, "folded", &JsValue::from_f64(folded_f))?;
+        let covered = serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)?;
+        set(&result, "covered", &JsValue::from_str(&covered))?;
         Ok(result.into())
     }
 

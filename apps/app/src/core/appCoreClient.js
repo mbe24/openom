@@ -46,7 +46,7 @@ export function remoteTransport(remoteStore) {
     // objects, and PUTs the diff the core computes. `pointer` (heads/snapshot) overwrites; else If-None-Match.
     blobList: (prefix) => remoteStore.blobList(prefix),
     blobGet: (key) => remoteStore.blobGet(key),
-    blobPut: (key, bytes, pointer) => remoteStore.blobPut(key, bytes, pointer),
+    blobPut: (key, bytes, pointer, covered) => remoteStore.blobPut(key, bytes, pointer, covered),
     // The keyring revision chain from `from` (inclusive) — for a member JOIN's genesis-walk. Returns
     // { revisions: [{ revision, bytes }], head }; bytes = the opaque signed keyring (a MembershipEnvelope).
     readKeyring: (treeUuid, from) => remoteStore.readKeyring(treeUuid, from),

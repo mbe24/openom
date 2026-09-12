@@ -53,6 +53,7 @@
       const blobs = new Map(); // key -> Uint8Array
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
+      let snapshotCovered = null; // the last x-openom-covered header seen on a snapshot PUT (OPE-409)
       return {
         // Explicit create-tree (OPE-407): the managed server mints a `trees` row here; this fake blob store
         // has no tree-row concept (it's a plain Map), so it's a no-op. Present so the owner's first tick,
@@ -67,9 +68,10 @@
         },
         // `pointer` (heads/snapshot) overwrites; an immutable log object is written only if absent (idempotent
         // re-push is a no-op), mirroring R2 If-None-Match.
-        async blobPut(key, bytes, pointer) {
+        async blobPut(key, bytes, pointer, covered) {
           if (!pointer && blobs.has(key)) return;
           blobs.set(key, bytes);
+          if (covered && key.endsWith('/snapshot')) snapshotCovered = covered; // OPE-409 covered header
         },
         // The keyring channel. publishKeyring PUTs ascending from head+1, so the revision is the publish
         // order; we store the unwrapped MembershipEnvelope payload (what a joiner's walk consumes).
@@ -90,6 +92,12 @@
         // counts settled writes the way the old scalar log length did.
         _size() {
           return [...blobs.keys()].filter((k) => k.includes('/log/')).length;
+        },
+        _hasSnapshot() {
+          return [...blobs.keys()].some((k) => k.endsWith('/snapshot'));
+        },
+        _snapshotCovered() {
+          return snapshotCovered; // the covered header (raw {replica:counter} JSON) of the last snapshot PUT
         },
       };
     }
@@ -126,6 +134,20 @@
         const aProj = JSON.parse(await a.project(DOC));
         const bProj = JSON.parse(await b.project(DOC));
         return { aPush, bPull, serverSize: transport._size(), aPeople: aProj.people, bPeople: bProj.people };
+      },
+
+      // Compaction (OPE-409): with a low K, a few commits trigger a snapshot upload on the sync tick, carrying
+      // the x-openom-covered header (the SUBSUMED frontier) the server's GC gate 1 trusts.
+      async compaction() {
+        const transport = makeTransport();
+        const a = await openDevice(spawnWorker(), 0xc1, transport);
+        await a.setCompactK(2); // compact once ≥ 2 log objects have accrued since the last snapshot
+        for (const id of ['pc1', 'pc2', 'pc3']) {
+          await a.assertAnchor(DOC, id, PERSON);
+          await a.commit(DOC); // one committed batch = one log object
+        }
+        const push = await a.syncNow(DOC); // pushes deltas, crosses K → compacts + uploads the snapshot
+        return { push, hasSnapshot: transport._hasSnapshot(), covered: transport._snapshotCovered() };
       },
 
       // An offline mint (committed with NO transport) still reaches the remote after a transport is

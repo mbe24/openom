@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use openom_data_tree::{OpView, Tree, TreeError};
-use openom_docsync::{SnapshotPolicy, SyncClient, Verdict};
+use openom_docsync::{EveryNUpdates, SnapshotPolicy, SyncClient, Verdict};
 use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
@@ -360,19 +360,32 @@ impl<S: BlobStore> AppCore<S> {
     /// keyspace + frontier + head-monotonicity decision (a peer's head is only ever advanced, never rolled
     /// back), so the caller stays a dumb ferry that never parses, builds, or compares a key.
     ///
+    /// `compact_k` triggers compaction as part of the tick: after the fold, if at least `compact_k` `log/*`
+    /// objects have accrued since the last snapshot (`EveryNUpdates`, OPE-409 C3), fold state into a fresh
+    /// snapshot BEFORE the push — so the snapshot object is in the returned uploads. `0` disables compaction.
+    /// When a snapshot was (re)written, the caller sends [`subsumed_frontier`](Self::subsumed_frontier) as the
+    /// `x-openom-covered` header on the snapshot upload.
+    ///
     /// Returns `(objects_to_upload, folded_count)`.
     ///
     /// # Errors
-    /// Returns [`CoreError`] if a store read/write or a mirror step fails.
-    pub fn sync_against(&mut self, remote: &[StoredObject]) -> Result<(Vec<StoredObject>, usize), CoreError> {
+    /// Returns [`CoreError`] if a store read/write, a mirror step, or a triggered compaction fails.
+    pub fn sync_against(
+        &mut self,
+        remote: &[StoredObject],
+        compact_k: u32,
+    ) -> Result<(Vec<StoredObject>, usize), CoreError> {
         // An in-memory view of the remote, seeded from the caller's snapshot.
         let view = MemoryBlob::new();
         for (key, bytes) in remote {
             view.put(key, bytes, Precondition::Any)?;
         }
-        // PULL remote → local (monotonic), fold the arrivals, then PUSH local → the view (monotonic).
+        // PULL remote → local (monotonic), fold the arrivals, MAYBE compact, then PUSH local → the view.
         docsync::mirror(&view, &self.store, &self.doc)?;
         let folded = self.fold()?;
+        if compact_k > 0 {
+            self.client.maybe_compact(&EveryNUpdates(u64::from(compact_k)))?;
+        }
         docsync::mirror(&self.store, &view, &self.doc)?;
         // The view now holds the union; whatever it has that the input snapshot didn't (a fresh log object, or
         // an advanced head/snapshot pointer) is what the remote must be sent.

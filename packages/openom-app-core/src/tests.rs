@@ -96,6 +96,28 @@ fn compact_writes_a_snapshot_and_publishes_the_subsumed_frontier() {
     assert_eq!(covered.get(&replica_hex).copied(), Some(1), "covers this replica's own committed entry");
 }
 
+#[test]
+fn sync_against_compacts_and_surfaces_the_snapshot_in_uploads() {
+    // The worker's tick contract: sync_against with compact_k=1 compacts after the fold, so the fresh snapshot
+    // object is in the returned uploads (the worker sends it with the x-openom-covered header).
+    let dek = generate_dek().unwrap();
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = core(b"replica-A", dek, store.clone());
+    a.tree_mut().assert_anchor("p1", PERSON, 1).unwrap();
+    a.commit().unwrap();
+
+    let (uploads, _folded) = a.sync_against(&[], 1).unwrap();
+    assert!(uploads.iter().any(|(k, _)| k.ends_with("/snapshot")), "the fresh snapshot is in the uploads");
+    assert!(!a.subsumed_frontier().is_empty(), "the covered frontier for the header is available");
+
+    // A fresh core with compaction disabled (0) produces no snapshot.
+    let mut b = core(b"replica-B", generate_dek().unwrap(), Arc::new(MemoryBlob::new()));
+    b.tree_mut().assert_anchor("p2", PERSON, 2).unwrap();
+    b.commit().unwrap();
+    let (ub, _) = b.sync_against(&[], 0).unwrap();
+    assert!(!ub.iter().any(|(k, _)| k.ends_with("/snapshot")), "no snapshot when compaction is off");
+}
+
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
     core.live_records()
         .unwrap()
@@ -113,7 +135,7 @@ fn tick(core: &mut AppCore<MemoryBlob>, remote: &Arc<MemoryBlob>) -> usize {
             snapshot.push((key, bytes));
         }
     }
-    let (uploads, folded) = core.sync_against(&snapshot).unwrap();
+    let (uploads, folded) = core.sync_against(&snapshot, 0).unwrap(); // 0 = no compaction in these tests
     for (key, bytes) in uploads {
         let pre = if key.contains("/heads/") || key.ends_with("/snapshot") {
             store_blob::Precondition::Any
