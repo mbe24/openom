@@ -494,6 +494,68 @@ fn blob_drain_vanished_dot_is_stalled_not_leaked() {
     );
 }
 
+/// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object
+/// (distinct from a plain absent key). Everything else delegates.
+struct GoneFor {
+    inner: Arc<MemoryBlob>,
+    gone: BTreeSet<String>,
+}
+impl BlobStore for GoneFor {
+    fn get(&self, key: &str) -> store_blob::Result<Option<(Vec<u8>, store_blob::Etag)>> {
+        if self.gone.contains(key) {
+            return Err(store_blob::BlobError::Gone);
+        }
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, bytes: &[u8], pre: Precondition) -> store_blob::Result<store_blob::Etag> {
+        self.inner.put(key, bytes, pre)
+    }
+    fn list(&self, prefix: &str) -> store_blob::Result<Vec<(String, store_blob::Etag)>> {
+        self.inner.list(prefix)
+    }
+    fn delete(&self, key: &str, pre: Precondition) -> store_blob::Result<()> {
+        self.inner.delete(key, pre)
+    }
+}
+
+#[test]
+fn blob_mirror_skips_gone_objects_and_carries_the_snapshot() {
+    // C2: a GC-reaped source object returns Gone; mirror SKIPS it (the carried snapshot backs it) and keeps
+    // copying the above-floor tail, instead of aborting — and carries the source snapshot so a client can
+    // bootstrap over the hole.
+    let src = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(src.clone(), "replica-A");
+    a.apply("a0".into()).unwrap(); // A:0
+    a.apply("a1".into()).unwrap(); // A:1
+    a.apply("a2".into()).unwrap(); // A:2
+    a.compact().unwrap(); // a snapshot covering {A:3}, so A:0 is below the covered frontier
+
+    // Model the sweep having reaped A:0 (below the floor): the remote get() returns Gone for it.
+    let gone_src = GoneFor {
+        inner: src.clone(),
+        gone: [log_key("doc", "replica-A", 0)].into_iter().collect(),
+    };
+    let dst = Arc::new(MemoryBlob::new());
+    let copied = mirror(&gone_src, dst.as_ref(), "doc").unwrap();
+
+    assert_eq!(copied, 2, "A:1 and A:2 copied; the reaped A:0 skipped; mirror did not abort");
+    assert!(dst.get(&log_key("doc", "replica-A", 0)).unwrap().is_none(), "the reaped object was not copied");
+    assert!(dst.get(&log_key("doc", "replica-A", 1)).unwrap().is_some());
+    assert!(dst.get(&log_key("doc", "replica-A", 2)).unwrap().is_some());
+    assert_eq!(
+        dst.get(&head_key("doc", "replica-A")).unwrap().and_then(|(b, _)| decode_count(&b)),
+        Some(3),
+        "the head advanced past the Gone gap (snapshot-backed), not capped"
+    );
+    assert!(dst.get(&snapshot_key("doc")).unwrap().is_some(), "the source snapshot was carried");
+
+    // A fresh replica bootstraps from the mirrored store: snapshot (a0,a1,a2) + tail (empty above A:3) = complete.
+    let mut c = blob_client(dst.clone(), "replica-C");
+    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    let expected: BTreeSet<String> = ["a0", "a1", "a2"].into_iter().map(String::from).collect();
+    assert_eq!(c.engine().lines, expected, "no loss: bootstrap over the reaped hole via the carried snapshot");
+}
+
 #[test]
 fn blob_retry_stalled_clears_a_now_acceptable_dot() {
     // review #4: a dot Rejected on first pull is stalled (pinning subsumed); retry_stalled with a classify

@@ -34,6 +34,12 @@ pub enum BlobError {
     /// (`IfMatch`). The caller should refetch and retry: this is the CAS-conflict signal.
     #[error("precondition failed (concurrent write / stale etag)")]
     PreconditionFailed,
+    /// The object EXISTED and was intentionally RECLAIMED (GC, below a retained floor) — distinct from a
+    /// plain absent object (`get` → `None`, "not written yet"). The caller cannot catch up incrementally and
+    /// must re-bootstrap from a snapshot. A remote/HTTP-backed store surfaces this on a `410 Gone`; the local
+    /// reference impls here never produce it (they return `None` for a missing key).
+    #[error("gone (reclaimed below the retained floor — bootstrap from a snapshot)")]
+    Gone,
     /// The underlying backend failed (I/O, network, …).
     #[error("blob backend: {0}")]
     Backend(String),

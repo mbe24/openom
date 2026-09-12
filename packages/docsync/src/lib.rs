@@ -1033,6 +1033,7 @@ pub fn mirror<A: BlobStore, B: BlobStore>(
     to: &B,
     doc: &str,
 ) -> Result<usize, SyncError> {
+    use store_blob::{BlobError, Precondition};
     let mut copied = 0;
     let hp = heads_prefix(doc);
     for (head_object, _etag) in from.list(&hp)? {
@@ -1049,29 +1050,45 @@ pub fn mirror<A: BlobStore, B: BlobStore>(
             .get(&head_key(doc, &replica))?
             .and_then(|(b, _etag)| decode_count(&b))
             .unwrap_or(0);
+        // Copy [to_head..from_head). A source object is one of: Some → copy; `Gone` → GC-reclaimed below the
+        // floor, SKIP (the snapshot carried below covers it) and keep copying the above-floor tail, and it does
+        // NOT cap the head because the snapshot backs it; `None` → not yet durably written (a transient race),
+        // STOP and cap the head here so the target never advertises a head past an object neither it nor a
+        // snapshot holds. (C2 / review #3: mirror must not swallow a `Gone` nor advance a head over a live gap.)
+        let mut head_cap = from_head;
         for c in to_head..from_head {
             let key = log_key(doc, &replica, c);
-            if let Some((bytes, _etag)) = from.get(&key)? {
-                match to.put(&key, &bytes, store_blob::Precondition::IfAbsent) {
-                    Ok(_) | Err(store_blob::BlobError::PreconditionFailed) => copied += 1,
+            match from.get(&key) {
+                Ok(Some((bytes, _etag))) => match to.put(&key, &bytes, Precondition::IfAbsent) {
+                    Ok(_) | Err(BlobError::PreconditionFailed) => copied += 1,
                     Err(e) => return Err(e.into()),
+                },
+                Err(BlobError::Gone) => {} // reaped, snapshot-backed — keep going, don't cap the head
+                Ok(None) => {
+                    head_cap = c;
+                    break;
                 }
+                Err(e) => return Err(e.into()),
             }
         }
-        if from_head > to_head {
-            to.put(
-                &head_key(doc, &replica),
-                &encode_count(from_head),
-                store_blob::Precondition::Any,
-            )?;
+        if head_cap > to_head {
+            to.put(&head_key(doc, &replica), &encode_count(head_cap), Precondition::Any)?;
         }
     }
-    // Carry a snapshot the target lacks (a fuller covered-frontier reconciliation of two competing snapshots
-    // is a refinement; completeness never rests on it — a client always pulls the tail past whatever it finds).
-    if to.get(&snapshot_key(doc))?.is_none() {
-        if let Some((snap, _etag)) = from.get(&snapshot_key(doc))? {
-            to.put(&snapshot_key(doc), &snap, store_blob::Precondition::IfAbsent)?;
+    // Carry the source snapshot when the target's differs (or lacks one), keyed on the ETAG — `mirror` has no
+    // sealer to compare the covered frontiers sealed inside the bodies. In the remote→local direction this
+    // adopts the shared remote's CURRENT snapshot, which a client then bootstraps from over any reaped hole;
+    // covered-monotonicity in the local→remote direction is enforced server-side (the OPE-409 M6 gate). A
+    // `Gone` on the snapshot get (a superseded object reaped as the pointer moved) is skipped.
+    match from.get(&snapshot_key(doc)) {
+        Ok(Some((snap, src_etag))) => {
+            let to_etag = to.get(&snapshot_key(doc))?.map(|(_, e)| e);
+            if to_etag.as_deref() != Some(src_etag.as_str()) {
+                to.put(&snapshot_key(doc), &snap, Precondition::Any)?;
+            }
         }
+        Ok(None) | Err(BlobError::Gone) => {}
+        Err(e) => return Err(e.into()),
     }
     Ok(copied)
 }
