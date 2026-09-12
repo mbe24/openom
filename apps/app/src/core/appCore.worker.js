@@ -464,8 +464,11 @@ const api = {
     try {
       await saveWatermark(docId, res.watermark); // refresh the persisted floor
       const core = new Core(res.takeHandle(), docId, true, treeId, eng);
-      await hydrate(core); // load the persisted log + bootstrap
+      // Install §B3 verify BEFORE hydrate: bootstrap re-folds the WHOLE local mirror on every reopen, and a core
+      // with membership == None accepts every entry unverified — so a forged snapshot/delta already in the store
+      // would be re-adopted on a plain reload. Installing the resolver first gates that fold.
       await installMembership(core, docId, eng, head.bytes); // activate §B3 verify if the tree is shared
+      await hydrate(core); // load the persisted log + bootstrap — now gated by the installed membership
       cores.set(docId, core);
       return { didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
@@ -496,8 +499,9 @@ const api = {
       await keyringStore().saveHead(docId, eng, res.keyring); // the recovered keyring
       await saveWatermark(docId, res.watermark);
       const core = new Core(res.takeHandle(), docId, true, treeId, eng);
-      await hydrate(core);
+      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
       await installMembership(core, docId, eng, res.keyring); // a recovered shared tree keeps verifying
+      await hydrate(core);
       cores.set(docId, core);
       return { recoveryCode: res.recoveryCode, didKey: res.didKey, needsReseal: res.needsReseal, needsBackfill: res.needsBackfill, needsRrkBackfill: res.needsRrkBackfill, writeEpochUnreachable: res.writeEpochUnreachable };
     } finally {
@@ -664,8 +668,9 @@ const api = {
     try {
       await saveWatermark(docId, re.watermark);
       const nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
-      await hydrate(nc);
+      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
       await installMembership(nc, docId, eng, change.keyring); // the tree is now shared → verify goes live
+      await hydrate(nc);
       try { c.handle.free(); } catch { /* old handle already gone */ }
       cores.set(docId, nc);
     } finally {
@@ -716,8 +721,10 @@ const api = {
     try {
       await saveWatermark(docId, re.watermark);
       nc = new Core(re.takeHandle(), docId, c.persist, c.treeId, eng);
-      await hydrate(nc);
+      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold under the rotated head must be
+      // gated by the membership, or the removed member's forgeries in the mirror re-merge unverified.
       await installMembership(nc, docId, eng, change.keyring);
+      await hydrate(nc);
       // Author a self-heal cover over the removed member's stored history (dag; a no-op on the chain, which
       // retains per-revision membership). The cover is written to the local store as a Cover log object, so it
       // rides the next data sync to the remote like any object; `authorCover` returns whether one was authored.
@@ -841,8 +848,9 @@ const api = {
     try {
       await saveWatermark(docId, res.watermark);
       const c = new Core(res.takeHandle(), docId, true, opts.treeId, engine);
-      await hydrate(c);
+      // Install §B3 verify BEFORE hydrate (see unlockCore): the reopen re-fold must be gated by the membership.
       await installMembership(c, docId, engine, (await keyringStore().loadHead(docId)).bytes);
+      await hydrate(c);
       cores.set(docId, c);
       return { didKey: res.didKey };
     } finally {
