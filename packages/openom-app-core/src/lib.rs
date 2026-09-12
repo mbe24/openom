@@ -273,6 +273,21 @@ impl<S: BlobStore> AppCore<S> {
         Ok(self.verify_gated(|client, classify, fold_cover| client.pull_verified(classify, fold_cover))?)
     }
 
+    /// Re-attempt every STALLED dot (a pinned blocker: `Unopenable`/`MergeFailed`/`Rejected`/`Vanished`)
+    /// through the §B3 gate — the only heal for a stuck pin, since stalls are deliberately NOT auto-retried
+    /// per tick (that would recreate the retry loop the terminal `Rejected` disposition avoids). Invoke on
+    /// discrete events only: a membership change ([`set_membership`](Self::set_membership) does this) or an
+    /// explicit user "retry". Safe by construction — it can only REMOVE a blocker, never merge unverified
+    /// content: each re-attempt re-runs the full crypto + role gate, so a forgery never flips to Accept, but a
+    /// peer write that the OLD membership rejected and the NEW membership authorizes (a retroactive grant) is
+    /// legitimately released. Returns how many stalls cleared or re-parked to `held`.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if a local store read fails.
+    pub fn retry_stalled(&mut self) -> Result<usize, CoreError> {
+        Ok(self.verify_gated(|client, classify, fold_cover| client.retry_stalled(classify, fold_cover))?)
+    }
+
     /// Run a verified-pull op (`pull_verified` / `bootstrap_verified`) behind the §B3 gate closures, shared by
     /// [`fold`](Self::fold) and [`bootstrap`](Self::bootstrap). `classify` verifies each peer `Delta`
     /// (accept/hold/reject + the SH-2 covered-accept rescue); `fold_cover` verifies and folds each `Cover`.
@@ -434,9 +449,11 @@ impl<S: BlobStore> AppCore<S> {
     /// built from the freshly-verified keyring. Once set, every peer entry [`ingest`](Self::ingest) sees is
     /// verified against the resolved roles before it is stored or folded.
     ///
-    /// Re-runs verification on the Held buffer: entries whose governing keyring/epoch is now retained are
-    /// stored + folded; the rest stay held (up to the cap) or are rejected. Returns how many newly-released
-    /// held entries the fold took in.
+    /// Re-runs verification on the Held buffer (entries whose governing keyring/epoch is now retained are
+    /// stored + folded; the rest stay held or are rejected) AND re-attempts the stalled pins
+    /// ([`retry_stalled`](Self::retry_stalled)) — a membership change is a discrete event that can authorize a
+    /// peer write the old view rejected. Returns how many entries the new membership released (held drained +
+    /// stalls cleared).
     ///
     /// # Errors
     /// Returns [`CoreError`] if releasing a now-valid held entry fails to append to the local store or fold.
@@ -452,7 +469,13 @@ impl<S: BlobStore> AppCore<S> {
         self.rebuild_covered();
         // Re-fold: the client re-verifies its held dots under the new membership (a now-retained governing
         // keyring/epoch releases them), and folds the newly-released entries.
-        self.fold()
+        let released = self.fold()?;
+        // A membership change is exactly the discrete event `retry_stalled` is meant for: re-attempt the
+        // stalled pins under the new view, so a peer write the OLD membership rejected but the NEW one
+        // authorizes is released (and its subsumed-frontier pin lifts). Terminal by design under auto-retry;
+        // safe here because each re-attempt re-runs the full gate.
+        let unstalled = self.retry_stalled()?;
+        Ok(released + unstalled)
     }
 
     /// Author a self-heal **cover** over this device's stored entries whose author was legitimately a member

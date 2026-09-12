@@ -470,6 +470,23 @@ fn a_held_peer_entry_is_buffered_then_released_on_set_membership() {
 }
 
 #[test]
+fn a_rejected_peer_entry_is_released_when_a_later_membership_authorizes_it() {
+    // A §B3-REJECTED write pins as a STALLED dot (deliberately NOT auto-retried per tick). A membership change
+    // is the discrete event set_membership wires retry_stalled to: under a resolver that now authorizes the
+    // author, the once-rejected entry re-verifies and folds — the retroactive-grant heal. This never re-admits
+    // a forgery: the same crypto gate re-runs; only the resolved role changed. (Contrast
+    // a_rejected_peer_entry_never_folds_now_or_after_a_reload, where the membership stays rejecting.)
+    let (remote, mut b, _b_store) = peer_entry_and_core_b(Route::Reject);
+    pull(&mut b, &remote);
+    assert!(!live_ids(&b).contains("pA"), "the rejected entry does not fold under the old membership");
+    assert!(b.anomalies() >= 1, "the rejection under the old membership is surfaced");
+
+    let released = b.set_membership(Box::new(Fake(Route::Accept))).unwrap();
+    assert_eq!(released, 1, "set_membership re-attempts the stalled reject and releases the now-authorized entry");
+    assert!(live_ids(&b).contains("pA"), "the retroactively-authorized entry is now in the tree");
+}
+
+#[test]
 fn an_accepting_membership_folds_peer_entries_like_the_solo_path() {
     let (remote, mut b, _b_store) = peer_entry_and_core_b(Route::Accept);
     assert_eq!(pull(&mut b, &remote), 1);
