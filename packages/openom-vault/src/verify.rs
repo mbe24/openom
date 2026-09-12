@@ -9,7 +9,8 @@
 //! neutral policy or the caller (`openom-app-core`'s `ingest`) changes.
 
 use openom_keyring_api::{EngineKind, EverMemberInfo, MembershipView};
-use openom_protocol::v1::Header;
+use openom_protocol::v1::{Header, Kind};
+use openom_roles::required_role_for_kind;
 
 use crate::attribution::verify_entry;
 use crate::VaultError;
@@ -30,6 +31,12 @@ pub enum Governing {
         expected_key_id: Vec<u8>,
         /// Whether that epoch requires signatures (its DEK was wrapped beyond the founder).
         epoch_attributed: bool,
+        /// The CURRENT head membership, for the `governing_ref` LOOK-BEHIND (OPE-421): an entry's author must
+        /// satisfy its required role at head, not just at the governing revision, so a since-demoted/removed
+        /// member can't backdate a pre-demote ref to reclaim authority. The chain (which resolves a historical
+        /// per-revision view) fills `Some(head_view)`; the dag leaves it `None` (its `view` IS the current
+        /// head — the governing check already enforces the current role).
+        head_view: Option<MembershipView>,
     },
     /// A legitimate revision we simply don't retain yet — HOLD and retry after the next keyring sync.
     NotYetRetained,
@@ -101,8 +108,16 @@ pub fn verify_ingest<E>(
         (true, Governing::Unattributed) => Disposition::Reject, // rev-0 backdate forge — never a hold (would stall forever)
         (true, Governing::Illegitimate) => Disposition::Reject,
         (true, Governing::NotYetRetained) => Disposition::Hold,
-        (true, Governing::Resolved { view, expected_key_id, .. }) => {
-            verify_or_reject(version, header, &view, &expected_key_id, open)
+        (true, Governing::Resolved { view, expected_key_id, head_view, .. }) => {
+            // Governing-revision verification first (Reject-precedence for real forgeries), THEN the OPE-421
+            // head look-behind: an otherwise-valid entry whose author no longer holds the role at head is a
+            // backdated forge by a since-demoted/removed member.
+            match verify_or_reject(version, header, &view, &expected_key_id, open) {
+                Disposition::Accept if !head_authorized(header, &view, head_view.as_ref()) => {
+                    Disposition::Reject
+                }
+                d => d,
+            }
         }
         // Never-shared (V1 single-owner): unattributed / unsigned-epoch entries are the norm.
         (false, Governing::Unattributed) => Disposition::Accept,
@@ -112,6 +127,47 @@ pub fn verify_ingest<E>(
         (false, Governing::Resolved { view, expected_key_id, .. }) => {
             verify_or_reject(version, header, &view, &expected_key_id, open)
         }
+    }
+}
+
+/// OPE-421 `governing_ref` LOOK-BEHIND: an entry's author must satisfy its required role at the CURRENT head,
+/// not only at its governing revision — so a since-demoted or since-removed member can't backdate a pre-demote
+/// `governing_ref` to reclaim authority. Also binds the KEY: the head member's `author_public_key` must equal
+/// the governing view's key that verified the signature (no laundering a revoked key through a re-admitted
+/// same-`member_id` member). `head_view = None` (the dag, always-current) ⇒ always authorized (the governing
+/// check already used the current role).
+///
+/// SLICE-1 kind gate: applied only to `Kind::Snapshot` for now (rejecting a snapshot is loss-free — state is
+/// re-derivable). Slice 2 removes the gate so the look-behind also covers deltas (which needs the
+/// delta-preservation machinery in place).
+fn head_authorized(header: &Header, governing: &MembershipView, head_view: Option<&MembershipView>) -> bool {
+    let Some(head_view) = head_view else {
+        return true; // dag / always-current — the governing check already enforced the current role
+    };
+    let Ok(kind) = Kind::try_from(header.kind) else {
+        return false;
+    };
+    if kind != Kind::Snapshot {
+        return true; // Slice 1: snapshot-only
+    }
+    let Some(required) = required_role_for_kind(kind) else {
+        return false;
+    };
+    let governing_key = governing
+        .members
+        .iter()
+        .find(|m| m.member_id == header.author_member_id)
+        .map(|m| m.author_public_key.as_slice());
+    match head_view
+        .members
+        .iter()
+        .find(|m| m.member_id == header.author_member_id)
+    {
+        // Present at head, strong enough, AND the same key that verified the signature at the governing view.
+        Some(hm) => {
+            hm.role <= required && Some(hm.author_public_key.as_slice()) == governing_key
+        }
+        None => false, // absent at head (removed) — a backdated forge
     }
 }
 
@@ -239,6 +295,8 @@ pub mod chain {
                     view: openom_keyring_chain::membership_view(kr),
                     expected_key_id: newest_key_id(kr),
                     epoch_attributed: epoch_is_attributed(kr, key_id),
+                    // OPE-421 look-behind: the author must ALSO satisfy the role at the CURRENT head.
+                    head_view: Some(openom_keyring_chain::membership_view(&self.head)),
                 },
                 // Beyond a small look-ahead of the verified head the ref is fabricated → hard Reject. WITHIN
                 // it, a rev just past the head is the benign "keyring channel hasn't caught up with the data
@@ -346,6 +404,9 @@ pub mod dag {
                 // Consulted only on the !shared path; a shared dag entry — the only kind carrying a non-empty
                 // ref — takes the shared arms where this is ignored. Fail-closed `true` regardless.
                 epoch_attributed: true,
+                // The dag is always-current: `view` IS the head, so the governing check already enforces the
+                // current role — no separate look-behind (OPE-421).
+                head_view: None,
             }
         }
     }
@@ -489,6 +550,76 @@ mod tests {
         let m = resolver_from(EngineKind::Chain, &kr.encode_to_vec(), &[(3, kr.encode_to_vec())]).unwrap();
         let h = signed(Kind::Delta, "m1", &k, 3, b"payload");
         assert_eq!(ingest(m.as_ref(), &h, b"payload"), Disposition::Accept);
+    }
+
+    // ── OPE-421 Slice 1: the snapshot look-behind (role at head) — the head_authorized prototype ──
+
+    #[test]
+    fn a_demoted_authors_backdated_snapshot_is_rejected() {
+        // carol is a Maintainer at rev 3 (governing) but demoted to Editor at head rev 4. A Snapshot she signs
+        // stamping the pre-demote ref passes the governing-revision check but MUST fail the head look-behind.
+        let owner = generate_identity().unwrap();
+        let carol = generate_identity().unwrap();
+        let gov3 = keyring(3, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Admin, &carol),
+        ]);
+        let head4 = keyring(4, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Editor, &carol), // demoted
+        ]);
+        let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
+        let snap = signed(Kind::Snapshot, "carol", &carol, 3, b"snap");
+        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Reject, "backdated snapshot by a demoted member");
+    }
+
+    #[test]
+    fn a_current_maintainers_snapshot_is_accepted() {
+        let owner = generate_identity().unwrap();
+        let head4 = keyring(4, true, vec![member("owner", MemberRole::Owner, &owner)]);
+        let m = cm(&head4, &[(4, &head4)]);
+        let snap = signed(Kind::Snapshot, "owner", &owner, 4, b"snap");
+        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Accept);
+    }
+
+    #[test]
+    fn a_re_admitted_member_cannot_launder_a_revoked_key_via_a_backdated_snapshot() {
+        // carol's OLD key was a Maintainer at rev 3; she is re-admitted at head rev 4 with a FRESH key (same
+        // member_id). A snapshot signed by the OLD key stamping rev 3 passes the governing check (the old key
+        // is in the rev-3 view) but the head member carries the NEW key → key mismatch → Reject.
+        let owner = generate_identity().unwrap();
+        let carol_old = generate_identity().unwrap();
+        let carol_new = generate_identity().unwrap();
+        let gov3 = keyring(3, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Admin, &carol_old),
+        ]);
+        let head4 = keyring(4, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Admin, &carol_new), // re-admitted, fresh key
+        ]);
+        let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
+        let snap = signed(Kind::Snapshot, "carol", &carol_old, 3, b"snap");
+        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Reject, "revoked key laundered via a re-admit");
+    }
+
+    #[test]
+    fn slice1_kind_gate_defers_the_delta_look_behind() {
+        // Slice 1 gates only Snapshot. A demoted member's backdated DELTA still passes here (the delta
+        // look-behind is Slice 2, which needs the delta-preservation machinery). Proves the kind gate.
+        let owner = generate_identity().unwrap();
+        let carol = generate_identity().unwrap();
+        let gov3 = keyring(3, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Admin, &carol),
+        ]);
+        let head4 = keyring(4, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("carol", MemberRole::Editor, &carol),
+        ]);
+        let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
+        let delta = signed(Kind::Delta, "carol", &carol, 3, b"d");
+        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Accept, "delta look-behind deferred to Slice 2");
     }
 
     #[test]

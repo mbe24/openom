@@ -195,6 +195,42 @@ fn blob_bootstrap_from_snapshot_plus_tail() {
 }
 
 #[test]
+fn blob_bootstrap_rejects_an_inflated_covered_frontier_that_would_suppress_a_present_dot() {
+    // OPE-421 anti-suppression: a snapshot claiming a replica is covered PAST a still-present dot must not
+    // skip that dot. Replica A writes one real dot; a forged snapshot claims covered {A:1} (past it) with
+    // empty state. A fresh replica must STILL pull the present dot, not silently drop it.
+    // (Pre-fix, `adopt_snapshot_baseline` did `pull_frontier = max(f, claimed)` unconditionally, so the fresh
+    // replica's engine came up EMPTY — the suppression this test pins closed.)
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("keep-me".into()).unwrap(); // A:0, present; heads/A = 1
+
+    // Forge a snapshot: covered {A:1} (inflated one past the present A:0) + empty engine state.
+    let mut inflated = Frontier::default();
+    inflated.insert("replica-A".to_string(), 1);
+    let mut body = encode_frontier(&inflated);
+    body.extend_from_slice(&GrowSet::default().snapshot()); // empty state — the "poison"
+    let ctx = SealCtx {
+        kind: EntryKind::Snapshot,
+        replica_counter: 0,
+        prev_ciphertext_hash: Vec::new(),
+        covers_through_seq: 0,
+    };
+    let mut ps = PassthroughSealer;
+    let sealed = ps.seal(&ctx, &body).unwrap();
+    store
+        .put(&snapshot_key("doc"), &sealed.envelope, store_blob::Precondition::Any)
+        .unwrap();
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    c.bootstrap().unwrap();
+    assert!(
+        c.engine().lines.contains("keep-me"),
+        "the present dot A:0 must be pulled, not suppressed by the inflated covered frontier"
+    );
+}
+
+#[test]
 fn blob_bootstrap_covers_multiple_replicas() {
     // The covered frontier spans every replica the snapshotting client had folded.
     let store = Arc::new(MemoryBlob::new());

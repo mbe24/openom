@@ -1000,13 +1000,41 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 self.engine
                     .merge_snapshot(engine_bytes)
                     .map_err(|e| SyncError::Engine(Box::new(e)))?;
-                for (replica, counter) in &covered {
-                    let f = self.pull_frontier.entry(replica.clone()).or_insert(0);
-                    *f = (*f).max(*counter);
+                // BOUNDED covered-frontier adoption (OPE-421 anti-suppression). The old code advanced
+                // `pull_frontier` to `max(f, claimed)` UNCONDITIONALLY — so a snapshot claiming a replica is
+                // covered to a huge counter silently skipped every real dot below it (state suppression). Now a
+                // claimed counter is trusted only over the range that is (a) at/below this replica's
+                // independently-observed head, and (b) ABSENT from the store (already GC-reaped, so the
+                // snapshot's merged state is the only remaining source). A still-PRESENT dot is never skipped —
+                // it's left for the §B3-gated tail pull. So an inflated frontier can only "cover" dots that no
+                // longer exist, never suppress a live one. (A cross-replica inflation is bounded by the
+                // observed head, which an attacker can't advance for a replica it doesn't own.)
+                for (replica, claimed) in &covered {
+                    let observed_head = self
+                        .store
+                        .get(&head_key(&self.doc, replica))?
+                        .and_then(|(hb, _)| decode_count(&hb))
+                        .unwrap_or(0);
+                    let cap = (*claimed).min(observed_head);
+                    let start = self.pull_frontier.get(replica).copied().unwrap_or(0);
+                    let mut c = start;
+                    // Advance only through ABSENT counters (Ok(None) = never written / Err(Gone) = reaped).
+                    while c < cap
+                        && matches!(
+                            self.store.get(&log_key(&self.doc, replica, c)),
+                            Ok(None) | Err(store_blob::BlobError::Gone)
+                        )
+                    {
+                        c += 1;
+                    }
+                    if c > start {
+                        self.pull_frontier.insert(replica.clone(), c);
+                    }
+                    // Purge a held/stalled dot only below the ADVANCED (absent-only) frontier — its object is
+                    // gone and the snapshot supplies its state (the Vanished-heal); a present dot stays pinned.
+                    self.held.retain(|(r, hc)| !(r == replica && *hc < c));
+                    self.stalled.retain(|(r, sc), _| !(r == replica && *sc < c));
                 }
-                self.held.retain(|(r, c)| !matches!(covered.get(r), Some(cov) if *c < *cov));
-                self.stalled
-                    .retain(|(r, c), _| !matches!(covered.get(r), Some(cov) if *c < *cov));
             }
         }
         Ok(())
