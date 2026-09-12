@@ -101,17 +101,35 @@ export function remoteTransport(remoteStore) {
 }
 
 /**
- * Drive `worker.syncNow(docId)` on a schedule: after each local edit (debounced), on a poll interval,
- * and when the network returns — mirroring the old SyncDriver, but the tick itself is the worker's. The
- * tick result ({state, anomalies}) is routed to the callbacks. Returns a stop function.
+ * Default minimum interval between sync ticks. A sync tick rewrites this replica's `heads/{replica}` and
+ * `snapshot` pointer objects, and R2 rejects more than one write per second to the SAME object key (429). So
+ * the driver never starts ticks closer than this floor — comfortably above 1s — and under sustained editing
+ * a replica's pointer rewrites stay under the ceiling. Overridable via `startSyncDriver`'s `cadenceMs` (the
+ * configurable-cadence groundwork, OPE-410); the driver still clamps the effective floor to ≥1s regardless.
  */
-export function startSyncDriver(worker, docId, { subscribeEdits, onStatus, onAuthError, onSecurity } = {}) {
+export const DEFAULT_SYNC_CADENCE_MS = 1100;
+
+/**
+ * Drive `worker.syncNow(docId)` on a schedule: after each local edit (debounced), on a poll interval, and
+ * when the network returns — mirroring the old SyncDriver, but the tick itself is the worker's. Every trigger
+ * routes through one rate-limited scheduler so ticks are never started closer than the cadence floor (R2's
+ * 1-write/sec-per-key limit). The tick result ({state, anomalies}) is routed to the callbacks. Returns a stop
+ * function.
+ */
+export function startSyncDriver(
+  worker,
+  docId,
+  { subscribeEdits, onStatus, onAuthError, onSecurity, cadenceMs = DEFAULT_SYNC_CADENCE_MS } = {},
+) {
   let stopped = false;
-  let timer = null;
   let inflight = false;
   let dirty = false;
-  const DEBOUNCE_MS = 800;
+  let timer = null;
+  let lastTickAt = 0; // when the last tick STARTED — the cadence floor is measured from here
+  const DEBOUNCE_MS = 300; // let a burst of edits settle before syncing
   const POLL_MS = 30_000;
+  // The hard floor never drops below R2's 1s-per-key ceiling, even if a caller passes something smaller.
+  const MIN_INTERVAL_MS = Math.max(1000, cadenceMs);
 
   // Route a tick failure (an AppError from the worker, or a worker/Comlink death) to the right callback:
   // an auth-required error re-gates; a transient error keeps the driver polling silently ('offline'); a
@@ -120,6 +138,9 @@ export function startSyncDriver(worker, docId, { subscribeEdits, onStatus, onAut
     const err = isAppError(raw) ? raw : normalizeUnknown(raw);
     if (err.code === 'auth_required') { onAuthError?.(err); return; }
     onStatus?.({ state: err.retriable ? 'offline' : 'error', error: err });
+    // Honor server backpressure: a rate-limited tick (429 carrying Retry-After) re-arms after exactly that
+    // delay rather than waiting out the full poll interval.
+    if (err.retriable && err.retryAfter > 0) arm(err.retryAfter * 1000);
   }
 
   async function tick() {
@@ -141,24 +162,36 @@ export function startSyncDriver(worker, docId, { subscribeEdits, onStatus, onAut
     }
   }
 
-  let debounceTimer = null;
-  const kick = () => {
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(tick, DEBOUNCE_MS);
-  };
+  // Run a tick, but never start two closer than MIN_INTERVAL (R2's per-key ceiling). If armed too soon —
+  // e.g. a poll landing right after an edit tick — defer for the remainder rather than firing early.
+  function runTick() {
+    timer = null;
+    if (stopped) return;
+    const early = MIN_INTERVAL_MS - (Date.now() - lastTickAt);
+    if (early > 0) { arm(early); return; }
+    lastTickAt = Date.now();
+    void tick();
+  }
 
-  const unsub = subscribeEdits?.(kick) ?? (() => {});
-  const onOnline = () => tick();
+  // Arm a single pending tick `delay` ms out. Coalesces: concurrent triggers collapse onto the one pending
+  // timer (every trigger does the same work, so the soonest-permissible tick serves them all).
+  function arm(delay) {
+    if (stopped || timer !== null) return;
+    timer = setTimeout(runTick, Math.max(0, delay));
+  }
+
+  const unsub = subscribeEdits?.(() => arm(DEBOUNCE_MS)) ?? (() => {});
+  const onOnline = () => arm(0);
   globalThis.addEventListener?.('online', onOnline);
-  timer = setInterval(tick, POLL_MS);
-  tick(); // initial catch-up
+  const poll = setInterval(() => arm(0), POLL_MS);
+  arm(0); // initial catch-up
 
   return {
-    syncNow: tick,
+    syncNow: () => arm(0),
     stop() {
       stopped = true;
-      clearTimeout(debounceTimer);
-      clearInterval(timer);
+      clearTimeout(timer);
+      clearInterval(poll);
       globalThis.removeEventListener?.('online', onOnline);
       try { unsub(); } catch { /* best-effort */ }
     },

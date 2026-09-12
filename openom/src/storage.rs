@@ -49,6 +49,21 @@ const PROXY_TTL: Duration = Duration::from_secs(30);
 /// The S3 header carrying a base64 SHA-256 the backend enforces on PUT.
 const CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 
+/// R2/S3 throttle-retry budget (OPE-410). R2 rejects more than one write per second to the SAME object key
+/// with a 429, and sheds load with a 503 (`SlowDown`); both are transient. Every store op here is idempotent
+/// (PUT/COPY overwrite, DELETE is absent-is-success, GET/HEAD are reads), so a bounded retry is always safe —
+/// this reproduces the throttle-retry the AWS SDK does by default, which we must add by hand since we sign +
+/// send the request ourselves. The client sync cadence keeps a single replica under the per-key ceiling; this
+/// covers the residual (two replicas racing the shared `snapshot` key, or a general R2 load-shed).
+const MAX_THROTTLE_RETRIES: u32 = 4;
+/// Base backoff; doubles each attempt (250ms, 500ms, 1s, 2s) — the 1s+ tail clears R2's per-second window.
+const THROTTLE_BACKOFF_BASE_MS: u64 = 250;
+
+/// A transient status worth retrying: 429 (per-key rate / Too Many Requests) or 503 (`SlowDown` / unavailable).
+fn is_throttle(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+}
+
 /// What a HEAD surfaces without a download (§12 graceful-absence: `None` = gone).
 #[derive(Debug, Clone)]
 pub struct ObjectHead {
@@ -110,6 +125,26 @@ impl S3Store {
         }
     }
 
+    /// Send a signed request, retrying transient R2/S3 throttling (429/503) with exponential backoff up to
+    /// [`MAX_THROTTLE_RETRIES`] (OPE-410). `build` is re-invoked per attempt (each attempt re-signs and, for a
+    /// PUT, re-supplies the body), so it MUST be idempotent — which every store op here is. Returns the final
+    /// response for the caller's own status branching (success / 404 / `backend_err`).
+    async fn send_retrying(
+        &self,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, StorageError> {
+        let mut attempt = 0u32;
+        loop {
+            let resp = build().send().await?;
+            if !is_throttle(resp.status()) || attempt >= MAX_THROTTLE_RETRIES {
+                return Ok(resp);
+            }
+            attempt += 1;
+            let delay = THROTTLE_BACKOFF_BASE_MS * (1u64 << (attempt - 1));
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+    }
+
     /// Proxy PUT of `body` at `key` (tree envelopes). The backend enforces the
     /// SHA-256 of the exact bytes, so a corrupted write is rejected here, not later.
     ///
@@ -117,17 +152,18 @@ impl S3Store {
     /// Returns [`StorageError`] if the upload fails.
     pub async fn put_object(&self, key: &str, body: Vec<u8>) -> Result<(), StorageError> {
         let checksum = sha256_b64(&body);
-        let mut action = self.bucket.put_object(Some(&self.credentials), key);
-        action
-            .headers_mut()
-            .insert(CHECKSUM_HEADER, checksum.clone());
-        let url = action.sign(PROXY_TTL);
         let resp = self
-            .http
-            .put(url)
-            .header(CHECKSUM_HEADER, checksum)
-            .body(body)
-            .send()
+            .send_retrying(|| {
+                let mut action = self.bucket.put_object(Some(&self.credentials), key);
+                action
+                    .headers_mut()
+                    .insert(CHECKSUM_HEADER, checksum.clone());
+                let url = action.sign(PROXY_TTL);
+                self.http
+                    .put(url)
+                    .header(CHECKSUM_HEADER, checksum.clone())
+                    .body(body.clone())
+            })
             .await?;
         if resp.status().is_success() {
             Ok(())
@@ -141,11 +177,15 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the download fails.
     pub async fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        let url = self
-            .bucket
-            .get_object(Some(&self.credentials), key)
-            .sign(PROXY_TTL);
-        let resp = self.http.get(url).send().await?;
+        let resp = self
+            .send_retrying(|| {
+                let url = self
+                    .bucket
+                    .get_object(Some(&self.credentials), key)
+                    .sign(PROXY_TTL);
+                self.http.get(url)
+            })
+            .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -161,11 +201,15 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the delete fails.
     pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
-        let url = self
-            .bucket
-            .delete_object(Some(&self.credentials), key)
-            .sign(PROXY_TTL);
-        let resp = self.http.delete(url).send().await?;
+        let resp = self
+            .send_retrying(|| {
+                let url = self
+                    .bucket
+                    .delete_object(Some(&self.credentials), key)
+                    .sign(PROXY_TTL);
+                self.http.delete(url)
+            })
+            .await?;
         let status = resp.status();
         if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
             Ok(())
@@ -192,11 +236,15 @@ impl S3Store {
     /// # Errors
     /// Returns [`StorageError`] if the head request fails.
     pub async fn head_object(&self, key: &str) -> Result<Option<ObjectHead>, StorageError> {
-        let url = self
-            .bucket
-            .head_object(Some(&self.credentials), key)
-            .sign(PROXY_TTL);
-        let resp = self.http.head(url).send().await?;
+        let resp = self
+            .send_retrying(|| {
+                let url = self
+                    .bucket
+                    .head_object(Some(&self.credentials), key)
+                    .sign(PROXY_TTL);
+                self.http.head(url)
+            })
+            .await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -219,14 +267,13 @@ impl S3Store {
     /// Returns [`StorageError`] if the copy fails.
     pub async fn copy_object(&self, from: &str, to: &str) -> Result<(), StorageError> {
         let source = format!("/{}/{}", self.bucket_name, from);
-        let mut action = self.bucket.put_object(Some(&self.credentials), to);
-        action.headers_mut().insert("x-amz-copy-source", &source);
-        let url = action.sign(PROXY_TTL);
         let resp = self
-            .http
-            .put(url)
-            .header("x-amz-copy-source", &source)
-            .send()
+            .send_retrying(|| {
+                let mut action = self.bucket.put_object(Some(&self.credentials), to);
+                action.headers_mut().insert("x-amz-copy-source", &source);
+                let url = action.sign(PROXY_TTL);
+                self.http.put(url).header("x-amz-copy-source", &source)
+            })
             .await?;
         if resp.status().is_success() {
             Ok(())

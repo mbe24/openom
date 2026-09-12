@@ -32,7 +32,9 @@ describe('DevAuth — multi-account', () => {
     expect(auth.list()).toEqual([]);
     expect(auth.memberId()).toBeNull();
     expect(auth.activeAccount()).toBeNull();
-    await expect(auth.getAccessToken()).rejects.toThrow(/no active account/);
+    // Signed out → the auth seam rejects with the unified `auth_required` AppError (OPE-419), not a raw
+    // Error; the driver routes that code to re-gate rather than treating it as a transient offline blip.
+    await expect(auth.getAccessToken()).rejects.toMatchObject({ code: 'auth_required', retriable: false });
   });
 
   it('signIn creates a local account, activates it, and makes memberId its uuid', async () => {
