@@ -764,8 +764,9 @@ const api = {
    * new epoch — so unlike `removeMember` the owner's running core stays valid: NO re-unlock, NO self-heal
    * cover. We only persist the new keyring + watermark and refresh the §B3 resolver + moderators so the new
    * authority takes effect for verify-on-ingest (a promoted co-owner's signed writes now verify; a demoted
-   * one's over-authority writes are rejected — hard on the dag; chain demote is refused in the vault pending
-   * OPE-421). `opts`: { passphrase, treeId, ownerMemberId, minRevision, targetMemberId, newRole, engine? }.
+   * one's over-authority writes are rejected — hard on the dag via StrongDemote, and hard on the chain via the
+   * OPE-421 look-behind, with compact-before-demote above preserving their pre-demote history). `opts`:
+   * { passphrase, treeId, ownerMemberId, minRevision, targetMemberId, newRole, engine? }.
    */
   async changeRole(
     docId,
@@ -775,6 +776,14 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
+    // Slice 3 (OPE-421) compact-before-demote: a DEMOTE lowers the target below Maintainer, so on the chain the
+    // delta look-behind will Drop their pre-demote commits on a cold replica (their head role no longer
+    // satisfies a Delta). Pin what we've folded FIRST — pull the latest + force an owner-authored compaction
+    // (the epoch is unchanged, so this runs on the existing core `c`). Chain demote only; a promote grants
+    // authority (nothing to preserve), and the dag voids over-authority ops via StrongDemote. Best-effort.
+    if (newRole !== 'co-owner' && eng === 'chain' && transportFor(docId)) {
+      try { await syncData(c, 1); } catch { /* preserve-history is best-effort; the demote still proceeds */ }
+    }
     const change = wasmChangeRole(
       eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
     );

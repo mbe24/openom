@@ -847,15 +847,17 @@ pub fn remove_member(
 /// no new epoch, so the owner's running sealer is unchanged (unlike removal). Returns the new keyring/anchor +
 /// its watermark (the UNCHANGED write epoch pinned at the new revision).
 ///
-/// Engine support: the DAG is fully hard both ways (the resolver's `StrongDemote` rule voids a demoted
-/// member's concurrent over-authority ops). On the CHAIN, PROMOTE is supported; DEMOTE is refused until the
-/// chain attribution hardening lands (OPE-421) — a chain demote would not be forward-secure (a demoted member
-/// could backdate a pre-demote `governing_ref`), so we refuse rather than offer a soft revocation. Remove the
-/// member instead.
+/// Engine support: both engines are now hard both ways. The DAG's resolver `StrongDemote` rule voids a demoted
+/// member's concurrent over-authority ops; the CHAIN relies on the OPE-421 head look-behind, which Drops a
+/// demoted member's backdated (pre-demote `governing_ref`) commit because their role at the current head no
+/// longer satisfies the kind — so a chain demote is forward-secure for the commit capability (the member keeps
+/// read + their new lower-role capabilities, e.g. propose, exactly as intended). A chain demote does not rotate
+/// the epoch (it re-wraps no keys); the caller should compact-before-demote so the member's already-folded
+/// pre-demote history is pinned (a cold replica would otherwise Drop it as un-vouched, same as removal).
 ///
 /// # Errors
-/// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, an unknown/owner target, an
-/// unauthorized change, or a chain DEMOTE (unsupported pending OPE-421).
+/// Returns [`VaultError`] on a malformed keyring, a wrong owner passphrase, an unknown/owner target, or an
+/// unauthorized change.
 #[allow(clippy::too_many_arguments)]
 pub fn change_role(
     engine: EngineKind,
@@ -871,20 +873,26 @@ pub fn change_role(
     let promote = new_role == "co-owner";
     match engine {
         EngineKind::Chain => {
-            if !promote {
-                return Err(VaultError::Sharing(
-                    "chain demote is not yet a forward-secure boundary (OPE-421) — remove the member instead"
-                        .into(),
-                ));
-            }
-            let changed = vault::add_co_owner(
-                keyring,
-                founder_passphrase,
-                &TreeId::new(tree_id),
-                &MemberId::new(founder_member_id),
-                min_revision,
-                &MemberId::new(target_member_id),
-            )?;
+            let (tree, owner, target) = (
+                TreeId::new(tree_id),
+                MemberId::new(founder_member_id),
+                MemberId::new(target_member_id),
+            );
+            // PROMOTE adds to the signer set; DEMOTE lowers the co-owner to a non-signer role (admin/editor/
+            // viewer) — forward-secure via the OPE-421 look-behind. Both return the same `CoOwnerChanged`.
+            let changed = if promote {
+                vault::add_co_owner(keyring, founder_passphrase, &tree, &owner, min_revision, &target)?
+            } else {
+                vault::remove_co_owner(
+                    keyring,
+                    founder_passphrase,
+                    &tree,
+                    &owner,
+                    min_revision,
+                    &target,
+                    parse_member_role(new_role)?,
+                )?
+            };
             Ok(AcceptedKeyring {
                 keyring: changed.keyring,
                 watermark: chain_wm_pinned(

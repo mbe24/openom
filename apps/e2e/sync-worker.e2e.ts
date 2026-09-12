@@ -220,6 +220,25 @@ test('app-core: dag co-owner promote/demote through the worker — role round-tr
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: chain co-owner demote through the worker — hard + preserves pre-demote history', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.shareChangeRoleChain());
+
+  // OPE-421: chain co-owner demote is no longer refused. The member is promoted to co-owner then demoted back
+  // to editor, each reflected in the advisory /access view (roles numeric, lower = stronger).
+  expect(r.present).toBe(true);
+  expect(r.afterPromote).toBeLessThan(r.afterDemote); // co-owner (stronger) → editor (weaker)
+  // Slice 3: compact-before-demote preserved the demoted member's pre-demote commit across a cold owner reload,
+  // even though the look-behind would Drop it under the post-demote head (Editor < Maintainer for a Delta).
+  expect(r.seenAfterReload).toContain('pMemberWrite');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

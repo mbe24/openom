@@ -613,6 +613,67 @@
         return { afterAdd, afterPromote, afterDemote, present: roleOf('acct-member') != null };
       },
 
+      // SLICE 3 (OPE-421) chain co-owner DEMOTE through the worker — no longer refused. An owner admits a
+      // member, promotes them to co-owner (so they can commit), the member writes a delta, then the owner
+      // DEMOTES them back to editor. Proves: (a) the advisory role round-trips co-owner → editor; (b)
+      // compact-before-demote preserves the demoted member's pre-demote commit across a COLD owner reload (the
+      // look-behind would otherwise Drop it, their head role now being Editor < Maintainer for a Delta).
+      async shareChangeRoleChain() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(10);
+        const ownerDoc = `crc-owner-${crypto.randomUUID()}`;
+        const memberDoc = `crc-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc); // rev 1
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+        const roleOf = (id) => transport._access()?.members.find((m) => m.memberId === id)?.role;
+        // Promote to co-owner so the member can commit data deltas.
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner',
+        });
+        const afterPromote = roleOf('acct-member');
+
+        // The member joins (now a co-owner in the keyring) and commits a delta, syncing it to the remote.
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+        await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
+        await member.commit(memberDoc);
+        await member.syncNow(memberDoc);
+
+        // Owner DEMOTES the co-owner to editor (chain) — compact-before-demote pins their write first.
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor',
+        });
+        const afterDemote = roleOf('acct-member');
+
+        // Cold reload of the owner: the demoted member's pre-demote commit survives (recovered from the pin).
+        const reloaded = spawnWorker();
+        await reloaded.warm();
+        await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
+
+        return { afterPromote, afterDemote, present: roleOf('acct-member') != null, seenAfterReload };
+      },
+
       // THE dag self-heal, end to end through the worker (OPE-382 + OPE-393): an owner admits TWO maintainers
       // (bob + carol), bob writes, the owner removes bob — authoring a cover under the NEW (post-removal) epoch
       // — and carol, a REMAINING member, syncs: she adopts the rotated epoch (so she can open the cover) and
