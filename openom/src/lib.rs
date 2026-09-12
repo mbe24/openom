@@ -10,6 +10,7 @@ pub mod auth;
 pub mod authz;
 pub mod blobs;
 pub mod config;
+pub mod error_codes;
 pub mod frontier;
 pub mod gc;
 pub mod invites;
