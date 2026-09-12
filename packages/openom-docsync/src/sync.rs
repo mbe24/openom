@@ -313,6 +313,17 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.maybe_compact(policy)
     }
 
+    /// Whether the current `{doc}/snapshot` covers state this client lacks (its covered frontier exceeds the
+    /// subsumed frontier) — so the sync must ADOPT it (`bootstrap_verified`) rather than only fold, or a
+    /// fresh/straggler client would miss the reaped-below-floor state that lives only in the snapshot
+    /// (OPE-409 layer 3). See [`docsync::BlobSyncClient::needs_snapshot_adoption`].
+    ///
+    /// # Errors
+    /// Returns an error if the snapshot read/open fails.
+    pub fn needs_snapshot_adoption(&self) -> Result<bool> {
+        self.inner.needs_snapshot_adoption()
+    }
+
     /// Like [`pull_verified`](Self::pull_verified) but the post-snapshot tail is re-classified after adopting
     /// the snapshot's covered baseline — the shared data channel's cold-start / `Gone`-recovery path (OPE-409
     /// C3). A plain `bootstrap` (fold only) merges the tail WITHOUT the §B3 gate, so the verified channel MUST

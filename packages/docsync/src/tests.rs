@@ -63,7 +63,7 @@ fn two_replicas_converge_and_a_third_bootstraps() {
     a.pull().unwrap();
     b.pull().unwrap();
 
-    let expected: BTreeSet<String> = ["alpha", "beta", "gamma"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["alpha", "beta", "gamma"].iter().map(ToString::to_string).collect();
     assert_eq!(a.engine().lines, expected);
     assert_eq!(b.engine().lines, expected, "two replicas converge");
 
@@ -104,7 +104,7 @@ fn snapshot_policy_triggers_compaction_by_length() {
     // A fresh replica bootstraps from the policy-made snapshot.
     let mut c = client(store.clone());
     c.bootstrap().unwrap();
-    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(ToString::to_string).collect();
     assert_eq!(c.engine().lines, expected, "bootstrap from the policy-made snapshot");
 }
 
@@ -136,7 +136,7 @@ fn blob_two_replicas_converge_over_one_store_no_server() {
     b.pull().unwrap();
 
     let expected: BTreeSet<String> =
-        ["alpha", "beta", "gamma"].iter().map(|s| s.to_string()).collect();
+        ["alpha", "beta", "gamma"].iter().map(ToString::to_string).collect();
     assert_eq!(a.engine().lines, expected);
     assert_eq!(b.engine().lines, expected, "two replicas converge over the blob store, no server");
 
@@ -157,7 +157,7 @@ fn blob_fresh_replica_pulls_all_history() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     c.pull().unwrap();
-    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(ToString::to_string).collect();
     assert_eq!(c.engine().lines, expected, "a fresh replica pulls all history from the keyspace");
 
     // Re-pulling is an idempotent no-op — nothing past the advanced frontier.
@@ -188,7 +188,7 @@ fn blob_bootstrap_from_snapshot_plus_tail() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     c.bootstrap().unwrap();
-    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["one", "two", "three"].iter().map(ToString::to_string).collect();
     assert_eq!(c.engine().lines, expected, "bootstrap = snapshot + tail");
     // The covered frontier (A:2) was adopted, then the tail (A:2) pulled → A:3.
     assert_eq!(c.frontier().get("replica-A").copied(), Some(3));
@@ -208,7 +208,7 @@ fn blob_bootstrap_covers_multiple_replicas() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     c.bootstrap().unwrap();
-    let expected: BTreeSet<String> = ["a1", "b1", "b2"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["a1", "b1", "b2"].iter().map(ToString::to_string).collect();
     assert_eq!(c.engine().lines, expected, "bootstrap adopts a multi-replica covered frontier + tail");
     assert_eq!(c.frontier().get("replica-A").copied(), Some(1));
     assert_eq!(c.frontier().get("replica-B").copied(), Some(2));
@@ -290,7 +290,7 @@ fn blob_mirror_two_local_stores_converge_through_a_remote() {
     a.pull().unwrap();
     b.pull().unwrap();
 
-    let expected: BTreeSet<String> = ["x", "y"].iter().map(|s| s.to_string()).collect();
+    let expected: BTreeSet<String> = ["x", "y"].iter().map(ToString::to_string).collect();
     assert_eq!(a.engine().lines, expected);
     assert_eq!(b.engine().lines, expected, "separate local stores converge via a remote object mirror");
 
@@ -572,6 +572,43 @@ fn blob_maybe_compact_fires_at_k_then_resets() {
     assert!(store.get(&snapshot_key("doc")).unwrap().is_some(), "snapshot written");
 
     assert!(!a.maybe_compact(&EveryNUpdates(3)).unwrap(), "baseline reset — no re-fire right after");
+}
+
+#[test]
+fn blob_maybe_compact_skips_when_a_peer_snapshot_already_covers_us() {
+    // Check-before-compact (OPE-409): if the current snapshot already covers our subsumed frontier (a peer
+    // compacted it), maybe_compact SKIPS — no redundant snapshot write / concurrent-compaction churn.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("a1".into()).unwrap();
+    a.compact().unwrap(); // A's snapshot covers {A:2}
+    let etag_before = store.get(&snapshot_key("doc")).unwrap().unwrap().1;
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // B's subsumed = {A:2}
+    assert!(!b.maybe_compact(&EveryNUpdates(1)).unwrap(), "skips — the snapshot already covers B's subsumed");
+    assert_eq!(
+        store.get(&snapshot_key("doc")).unwrap().unwrap().1,
+        etag_before,
+        "the snapshot is untouched — B did not redundantly overwrite it"
+    );
+}
+
+#[test]
+fn blob_needs_snapshot_adoption_signals_missing_state() {
+    // A fresh client whose subsumed is behind the snapshot's coverage needs to ADOPT it (bootstrap), not just
+    // fold — else it misses the reaped-below-floor state that lives only in the snapshot (OPE-409 layer 3).
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+    a.apply("a1".into()).unwrap();
+    a.compact().unwrap(); // snapshot covers {A:2}
+
+    let mut c = blob_client(store.clone(), "replica-C");
+    assert!(c.needs_snapshot_adoption().unwrap(), "a fresh client (subsumed 0) must adopt the {{A:2}} snapshot");
+    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    assert!(!c.needs_snapshot_adoption().unwrap(), "after adoption it holds the snapshot's coverage");
 }
 
 #[test]

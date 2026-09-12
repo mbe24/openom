@@ -877,6 +877,41 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         out
     }
 
+    /// The covered (SUBSUMED) frontier the CURRENT local `{doc}/snapshot` publishes, decoded from its sealed
+    /// body; `None` if there is no snapshot. Used to decide whether to adopt a newer snapshot on sync
+    /// ([`needs_snapshot_adoption`](Self::needs_snapshot_adoption)) and whether a peer already covered us
+    /// ([`maybe_compact`](Self::maybe_compact)'s check-before-compact).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the store read or the snapshot open fails.
+    pub fn snapshot_covered_frontier(&self) -> Result<Option<Frontier>, SyncError> {
+        let Some((env, _etag)) = self.store.get(&snapshot_key(&self.doc))? else {
+            return Ok(None);
+        };
+        let body = self
+            .sealer
+            .open(EntryKind::Snapshot, &env)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+        Ok(decode_frontier(&body).map(|(covered, _)| covered))
+    }
+
+    /// Whether the current snapshot covers state this client lacks — its covered frontier exceeds our
+    /// `subsumed_frontier` for some replica. When true the sync must ADOPT it (`bootstrap_verified`) rather than
+    /// merely fold the tail, or a fresh/straggler client would miss the reaped-below-floor state that lives only
+    /// in the snapshot (OPE-409 layer 3). False when we already hold at least what the snapshot covers.
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if the snapshot read/open fails.
+    pub fn needs_snapshot_adoption(&self) -> Result<bool, SyncError> {
+        let subsumed = self.subsumed_frontier();
+        Ok(match self.snapshot_covered_frontier()? {
+            Some(covered) => covered
+                .iter()
+                .any(|(r, c)| *c > subsumed.get(r).copied().unwrap_or(0)),
+            None => false,
+        })
+    }
+
     /// This replica's inbound frontier — the next counter it will pull from each replica.
     pub const fn frontier(&self) -> &Frontier {
         &self.pull_frontier
@@ -932,12 +967,22 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             updates_since_snapshot: total.saturating_sub(self.log_len_at_snapshot),
             has_snapshot: self.store.get(&snapshot_key(&self.doc))?.is_some(),
         };
-        if policy.should_compact(&state) {
-            self.compact()?;
-            Ok(true)
-        } else {
-            Ok(false)
+        if !policy.should_compact(&state) {
+            return Ok(false);
         }
+        // Check-before-compact (OPE-409): if the current snapshot already covers our subsumed frontier, a peer
+        // already published that coverage — skip the redundant write (avoids concurrent-compaction churn + R2's
+        // 1-write/sec-per-key pressure on the snapshot pointer). Reset the baseline so we don't re-decode every
+        // tick until K more accrue; a rare simultaneous race is still resolved server-side by the M6 guard.
+        let subsumed = self.subsumed_frontier();
+        if let Some(covered) = self.snapshot_covered_frontier()? {
+            if subsumed.iter().all(|(r, c)| covered.get(r).copied().unwrap_or(0) >= *c) {
+                self.log_len_at_snapshot = total;
+                return Ok(false);
+            }
+        }
+        self.compact()?;
+        Ok(true)
     }
 
     /// Load `{doc}/snapshot` if present: merge it, adopt its covered (SUBSUMED) frontier as the pull baseline

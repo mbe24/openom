@@ -380,9 +380,17 @@ impl<S: BlobStore> AppCore<S> {
         for (key, bytes) in remote {
             view.put(key, bytes, Precondition::Any)?;
         }
-        // PULL remote → local (monotonic), fold the arrivals, MAYBE compact, then PUSH local → the view.
+        // PULL remote → local (monotonic). Then ADOPT a newer snapshot if it covers state we lack (a
+        // fresh/straggler client gets the reaped-below-floor state that lives ONLY in the snapshot — OPE-409
+        // layer 3); otherwise just fold the tail. MAYBE compact (which itself skips if a peer already covered
+        // us), then PUSH local → the view.
         docsync::mirror(&view, &self.store, &self.doc)?;
-        let folded = self.fold()?;
+        let folded = if self.client.needs_snapshot_adoption()? {
+            self.bootstrap()?; // adopt the snapshot + re-verify the tail (bootstrap_verified)
+            0 // bootstrap's tail count isn't surfaced; the diagnostic `folded` is a fold-tick count only
+        } else {
+            self.fold()?
+        };
         if compact_k > 0 {
             self.client.maybe_compact(&EveryNUpdates(u64::from(compact_k)))?;
         }

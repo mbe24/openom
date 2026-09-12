@@ -92,7 +92,7 @@ fn compact_writes_a_snapshot_and_publishes_the_subsumed_frontier() {
     let covered = a.subsumed_frontier();
     assert!(!covered.is_empty(), "subsumed frontier is non-empty after compaction");
     // Own entries are always coverable (folded on commit), so the frontier covers this replica.
-    let replica_hex: String = b"replica-A".iter().map(|b| format!("{b:02x}")).collect();
+    let replica_hex = super::replica_key(b"replica-A");
     assert_eq!(covered.get(&replica_hex).copied(), Some(1), "covers this replica's own committed entry");
 }
 
@@ -116,6 +116,41 @@ fn sync_against_compacts_and_surfaces_the_snapshot_in_uploads() {
     b.commit().unwrap();
     let (ub, _) = b.sync_against(&[], 0).unwrap();
     assert!(!ub.iter().any(|(k, _)| k.ends_with("/snapshot")), "no snapshot when compaction is off");
+}
+
+#[test]
+fn a_straggler_adopts_a_snapshot_when_the_covered_log_was_reaped() {
+    // OPE-409 layer 3. After compaction the below-floor log can be REAPED server-side. A fresh/straggler
+    // client that only folded the tail would miss that state — it must ADOPT the snapshot (bootstrap_verified).
+    // Here the remote carries the snapshot + heads but NOT the covered (reaped) log object; the straggler
+    // still recovers the person — proving sync_against took the adopt branch, since a plain fold sees no log.
+    let dek = generate_dek().unwrap();
+    let local = Arc::new(MemoryBlob::new());
+    let mut a = core(b"replica-a", dek.clone(), local.clone());
+    a.tree_mut().assert_anchor("pReaped", PERSON, 1).unwrap();
+    a.commit().unwrap();
+    a.compact().unwrap(); // snapshot covers {a:1}
+
+    // The remote view the straggler pulls: snapshot + heads only — the covered log object is gone (reaped).
+    let mut remote_view = Vec::new();
+    for (key, _etag) in local.list("tree/").unwrap() {
+        if key.starts_with("tree/log/") {
+            continue; // below the floor → reaped
+        }
+        if let Some((bytes, _etag)) = local.get(&key).unwrap() {
+            remote_view.push((key, bytes));
+        }
+    }
+    assert!(remote_view.iter().any(|(k, _)| k.ends_with("/snapshot")), "the remote carries the snapshot");
+    assert!(!remote_view.iter().any(|(k, _)| k.starts_with("tree/log/")), "the covered log is reaped");
+
+    // A fresh straggler over its own empty store, same DEK. Fold alone sees no log; adoption recovers p.
+    let mut b = core(b"replica-b", dek, Arc::new(MemoryBlob::new()));
+    b.sync_against(&remote_view, 0).unwrap();
+    assert!(
+        live_ids(&b).contains("pReaped"),
+        "the straggler adopted the snapshot and recovered the reaped-below-floor state"
+    );
 }
 
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
