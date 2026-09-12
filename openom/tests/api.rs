@@ -2650,7 +2650,12 @@ async fn snapshot_covered_publish_and_guards() {
     let owner = Uuid::new_v4();
     let tree = new_blob_tree(&app, &db, owner).await;
 
-    // A published head of 5 for replica rA (the over-claim ceiling).
+    // Five REAL log objects for rA (0..5) + a published head of 5. A covered frontier may only span objects
+    // the tree actually retains (OPE-421 M3: indexed or reaped-below-floor) — heads alone (client-writable)
+    // is not proof of coverage, so the objects must exist for {rA:5} to be publishable.
+    for i in 0..5 {
+        send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rA/{i}"), b"d", owner, true)).await;
+    }
     send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rA"), b"5", owner, false)).await;
 
     // covered {rA:5} — accepted; the coverage row is written, bound to the snapshot object's etag.

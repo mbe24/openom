@@ -485,12 +485,30 @@ async fn put_snapshot_blob(
             .into_iter()
             .collect();
 
-    // (a) M3 over-claim: no replica may claim coverage past its published head.
+    // (a) M3 over-claim: no replica may claim coverage past what the tree REALLY retains. Bounding to the
+    // client-writable `heads/{r}` pointer was insufficient (OPE-421): a member can advance their own head past
+    // any real object — heads legitimately run ahead of not-yet-written deltas — then claim coverage over
+    // never-written objects, which M6 (c) ratchets into the baseline and thereby 409s every honest smaller
+    // re-compaction forever (a compaction-freeze DoS). Coverage legitimately spans reaped-below-floor objects
+    // AND indexed ones, so the sound bound is `max(gc_floor, max_indexed_log_counter + 1)` — read from the DB
+    // index the client cannot forge, not the pointer it can.
     for (r, c) in &covered {
-        if *c > head_count(state, cx.tree, r).await? {
+        let max_indexed: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(split_part(key, '/', 3)::bigint), -1)
+               FROM tree_blob_index
+              WHERE tree_id = $1 AND split_part(key, '/', 1) = 'log' AND split_part(key, '/', 2) = $2
+                AND split_part(key, '/', 3) ~ '^[0-9]+$'",
+        )
+        .bind(cx.tree)
+        .bind(r)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(internal)?;
+        let bound = floor.get(r).copied().unwrap_or(0).max(max_indexed + 1);
+        if *c > bound {
             return Err(ApiError::conflict(
                 crate::error_codes::COVERED_ANOMALY,
-                "covered frontier exceeds a replica's published head",
+                "covered frontier exceeds what the tree retains for a replica",
             ));
         }
     }
