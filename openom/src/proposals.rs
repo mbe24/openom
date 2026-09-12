@@ -59,7 +59,7 @@ fn validate_proposal(
     reject_dev_key: bool,
 ) -> Result<Vec<u8>, ApiError> {
     let env = Envelope::decode(body)
-        .map_err(|e| ApiError::BadRequest(format!("not a valid envelope: {e}")))?;
+        .map_err(|_| ApiError::BadRequest("not a valid envelope".into()))?;
     if env.version != ENVELOPE_VERSION {
         return Err(ApiError::BadRequest(format!(
             "unsupported envelope version {} (server speaks {ENVELOPE_VERSION})",

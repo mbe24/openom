@@ -172,7 +172,7 @@ fn parse_update(
         return Err(ApiError::BadRequest("keyring exceeds the size limit".into()));
     }
     let update = KeyringUpdate::decode(body.as_ref())
-        .map_err(|e| ApiError::BadRequest(format!("not a valid keyring update: {e}")))?;
+        .map_err(|_| ApiError::BadRequest("not a valid keyring update".into()))?;
     if update.version != KEYRING_UPDATE_VERSION {
         return Err(ApiError::BadRequest(
             "unsupported keyring update version".into(),
