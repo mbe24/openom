@@ -29,6 +29,8 @@ openom-keyring-api.workspace = true
 axum.workspace = true
 lambda_http.workspace = true
 tokio.workspace = true
+# Object-safe async trait for the Meter seam (`Arc<dyn Meter>`, OPE-412).
+async-trait.workspace = true
 
 # Metadata DB: Postgres (Neon in prod, a local container in dev).
 sqlx.workspace = true

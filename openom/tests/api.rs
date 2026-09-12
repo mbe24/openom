@@ -2388,9 +2388,16 @@ async fn blob_list_by_prefix() {
         put_bytes_as(format!("/v1/trees/{tree}/blobs/log/replicaAAA/0"), b"d", owner, true),
     )
     .await;
+    // A snapshot PUT now MANDATES the covered-frontier header (OPE-409); an empty map is valid here (this
+    // test exercises listing, not coverage).
     send(
         &app,
-        put_bytes_as(format!("/v1/trees/{tree}/blobs/snapshot"), b"s", owner, false),
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"s",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[]))],
+        ),
     )
     .await;
 
@@ -2661,4 +2668,360 @@ async fn frontier_report_upserts_and_administer_gates_read() {
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't report frontier");
+}
+
+// ---- OPE-409 log GC + OPE-412 metering (data-channel blobs) --------------------------------------------
+
+/// A blob PUT authenticated as a member, carrying extra headers (e.g. `x-openom-covered` on a snapshot,
+/// `if-none-match: *` on a log dot).
+fn put_bytes_with_headers_as(
+    uri: String,
+    body: &[u8],
+    member: Uuid,
+    extra: &[(&str, &str)],
+) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .header("authorization", format!("Bearer {member}"));
+    for (k, v) in extra {
+        b = b.header(*k, *v);
+    }
+    b.body(Body::from(body.to_vec())).unwrap()
+}
+
+/// The `x-openom-covered` header value: base64 of the JSON `{replica: counter}` map.
+fn covered_b64(map: &[(&str, u64)]) -> String {
+    let obj: serde_json::Map<String, Value> = map
+        .iter()
+        .map(|(r, c)| ((*r).to_string(), serde_json::json!(c)))
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&obj).unwrap())
+}
+
+/// A data-channel tree owned by a freshly-seeded account (blob path needs the `trees` row, OPE-407).
+async fn new_blob_tree(app: &Router, db: &sqlx::PgPool, owner: Uuid) -> Uuid {
+    seed_account(db, owner, 1 << 30, 1000.0, 1000).await;
+    let tree = Uuid::new_v4();
+    assert_eq!(
+        send(app, post_as(format!("/v1/trees/{tree}"), owner)).await.0,
+        StatusCode::CREATED,
+        "create data-channel tree"
+    );
+    tree
+}
+
+/// The typed `code` from an RFC 9457 problem+json error body (empty if absent).
+fn body_code(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v["code"].as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn snapshot_covered_publish_and_guards() {
+    // A snapshot PUT installs tree_snapshot_covered (bound to the object etag), and the three write-guards —
+    // M3 over-claim, the below-floor ratchet, and M6 monotonicity — reject a bad covered frontier.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    // A published head of 5 for replica rA (the over-claim ceiling).
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rA"), b"5", owner, false)).await;
+
+    // covered {rA:5} — accepted; the coverage row is written, bound to the snapshot object's etag.
+    let (s, h, _) = send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap-1",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rA", 5)]))],
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "publish snapshot + covered");
+    let snap_etag = etag(&h);
+    let row: (i64, String) = sqlx::query_as(
+        "SELECT counter, snapshot_etag FROM tree_snapshot_covered WHERE tree_id = $1 AND replica = 'rA'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(row.0, 5, "covered counter stored");
+    assert_eq!(
+        format!("\"{}\"", row.1),
+        snap_etag,
+        "coverage is bound to the live snapshot object's etag (ETAG-BINDING)"
+    );
+
+    // M3 over-claim: covered {rA:6} exceeds the head of 5 → 409 covered_over_claim.
+    let (s, _, b) = send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap-2",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rA", 6)]))],
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "over-claim rejected");
+    assert_eq!(body_code(&b), "covered_over_claim");
+
+    // M6 monotonicity: covered {rA:4} regresses the published 5 → 409 covered_regressed.
+    let (s, _, b) = send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap-3",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rA", 4)]))],
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "regression rejected");
+    assert_eq!(body_code(&b), "covered_regressed");
+
+    // The covered header is mandatory: a snapshot PUT without it → 400.
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/snapshot"), b"snap-4", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "missing x-openom-covered rejected");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn log_write_guards_below_floor_and_immutability() {
+    // With a GC floor seeded for a replica: a log PUT below the floor → 409 below_gc_floor; a non-IfAbsent
+    // log PUT → 400 (M2 immutability); a covered frontier below the floor → 409 covered_below_gc_floor.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    // Seed a floor of 3 for rB directly (stands in for a prior sweep having ratcheted it).
+    sqlx::query("INSERT INTO tree_gc_floor (tree_id, replica, floor) VALUES ($1, 'rB', 3)")
+        .bind(tree)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    // M2: a log/* PUT must be immutable (if-none-match: *) → 400 otherwise.
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/0"), b"d", owner, false),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "non-IfAbsent log PUT rejected (M2)");
+
+    // D2: an IfAbsent log PUT below the floor (counter 1 < 3) → 409 below_gc_floor.
+    let (s, _, b) = send(
+        &app,
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/1"), b"d", owner, true),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "below-floor log PUT rejected (D2)");
+    assert_eq!(body_code(&b), "below_gc_floor");
+
+    // At/above the floor is fine (counter 3 >= 3).
+    let (s, _, _) = send(
+        &app,
+        put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rB/3"), b"d", owner, true),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "at-floor log PUT accepted");
+
+    // A covered frontier below the floor → 409 covered_below_gc_floor (head high enough that M3 passes first).
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rB"), b"5", owner, false)).await;
+    let (s, _, b) = send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rB", 2)]))],
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "covered below floor rejected");
+    assert_eq!(body_code(&b), "covered_below_gc_floor");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn log_get_states_absent_present_marked() {
+    // get_blob's three states for a GC-managed log key: not-yet-written → 404, present → 200, and a
+    // marked-pending row (floor advanced but not yet reaped) → still 200 (M4).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    // Present: write rX/0.
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), b"d0", owner, true)).await;
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)).await.0,
+        StatusCode::OK,
+        "present log dot serves 200"
+    );
+    // Not yet written: rX/5 (at/above floor 0) → 404 graceful-absence.
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/5"), owner)).await.0,
+        StatusCode::NOT_FOUND,
+        "not-yet-written log dot is 404"
+    );
+
+    // Mark rX/0 pending WITHOUT reaping: publish head + report + covered, then sweep with a huge grace.
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rX"), b"1", owner, false)).await;
+    send(
+        &app,
+        put_json_as(
+            format!("/v1/trees/{tree}/frontier"),
+            serde_json::json!({ "frontier": { "rX": 1 } }),
+            owner,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rX", 1)]))],
+        ),
+    )
+    .await;
+    let (s, _, _) = send(&app, post("/dev/log/gc?deletion_grace_secs=999999".into())).await;
+    assert_eq!(s, StatusCode::OK, "mark-only sweep");
+    // The row is marked (floor now 1, counter 0 < 1) but not reaped → still served.
+    let marked: Option<String> = sqlx::query_scalar(
+        "SELECT pending_delete_at::text FROM tree_blob_index WHERE tree_id = $1 AND key = 'log/rX/0'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(marked.is_some(), "row is marked pending_delete_at");
+    assert_eq!(
+        send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rX/0"), owner)).await.0,
+        StatusCode::OK,
+        "a marked-pending dot still serves 200 (M4)"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn gc_sweep_reaps_credits_and_gones() {
+    // The full mark → grace → reap: two log dots below the floor are physically reaped, the byte meter is
+    // credited back, and a subsequent get of a reaped dot → 410 below_gc_floor.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    let before: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+    // Two immutable log dots (accumulating bytes), a published head of 2, an in-window owner report, and a
+    // snapshot covering both.
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), b"delta-zero", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rG/1"), b"delta-one", owner, true)).await;
+    let charged: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(charged > before, "log dots charged the byte meter");
+
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rG"), b"2", owner, false)).await;
+    send(
+        &app,
+        put_json_as(
+            format!("/v1/trees/{tree}/frontier"),
+            serde_json::json!({ "frontier": { "rG": 2 } }),
+            owner,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rG", 2)]))],
+        ),
+    )
+    .await;
+
+    // Sweep with a zero grace → mark advances the floor to 2 and both dots reap immediately.
+    let (s, _, sb) = send(&app, post("/dev/log/gc?deletion_grace_secs=0".into())).await;
+    assert_eq!(s, StatusCode::OK, "sweep");
+    let sj: Value = serde_json::from_slice(&sb).unwrap();
+    assert!(sj["reaped"].as_u64().unwrap() >= 2, "both dots reaped: {sj}");
+
+    // The index rows are gone…
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rG/%'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0, "reaped log rows removed from the index");
+
+    // …the byte meter was credited back to the pre-write level…
+    let after: i64 = sqlx::query_scalar("SELECT tree_used_bytes FROM accounts WHERE id = $1")
+        .bind(owner)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(after, before, "reclaimed bytes credited back to the owner");
+
+    // …and a get of a reaped dot (below the floor of 2) is 410 below_gc_floor, telling the client to bootstrap.
+    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), owner)).await;
+    assert_eq!(s, StatusCode::GONE, "reaped dot is 410");
+    assert_eq!(body_code(&b), "below_gc_floor");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn reads_and_writes_are_metered_into_usage_month() {
+    // OPE-412 cost attribution: a write increments write_ops/bytes_write and a read increments
+    // read_ops/bytes_read in usage_month for (owner-account, tree, member, month).
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), b"delta", owner, true)).await;
+    send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner)).await;
+    send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rM/0"), owner)).await;
+
+    let row: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT write_ops, bytes_write, read_ops, bytes_read FROM usage_month
+          WHERE account_id = $1 AND tree_id = $2 AND member_id = $1
+            AND month = date_trunc('month', now())::date",
+    )
+    .bind(owner)
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(row.0 >= 1, "write_ops counted");
+    assert!(row.1 >= 5, "bytes_write counted (>= the 5-byte delta)");
+    assert!(row.2 >= 2, "read_ops counted (two GETs)");
+    assert!(row.3 >= 10, "bytes_read counted (>= two 5-byte serves)");
 }

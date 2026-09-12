@@ -1,0 +1,251 @@
+//! The `Meter` seam — cost attribution + minimal enforcement, one swappable impl below the `BlobStore` layer
+//! (`plan/sync/design.ope412-409-metering-gc.md` Part 1, OPE-412).
+//!
+//! It replaces the free-function `log::charge_metering` with a trait that keeps a clean **observe / enforce /
+//! reconcile** split:
+//! - **enforce** ([`Meter::charge_write`]): the existing capacity + rate gates — 403/429 — inside the
+//!   caller's tx, so a rollback reverts the charge.
+//! - **observe** ([`Meter::charge_write`]/[`Meter::charge_read`] also fold into `usage_month`; [`Meter::observe`]):
+//!   the cost-attribution rollup — per `(account, tree, member, month)` write/read ops + bytes. Today a Neon
+//!   upsert; the seam is what lets a later graduation to an out-of-band event pipeline swap one impl.
+//! - **reconcile** ([`Meter::credit_storage`]): GC (`gc.rs`) credits reclaimed bytes back — the same seam that
+//!   spends, reconciles.
+//!
+//! [`AppState`](crate::AppState) holds an `Arc<dyn Meter>` (dyn, not generic — a flat non-generic `AppState`
+//! and unchanged handler signatures, per §1.4). [`PgMeter`] is the prod impl.
+
+use async_trait::async_trait;
+use sqlx::{PgPool, Postgres, Transaction};
+use uuid::Uuid;
+
+use crate::trees::ApiError;
+
+/// Who a charge is attributed to: the `account` that pays (the tree owner, owner-pays §17), the `tree`, and
+/// the `member` who drove the op.
+#[derive(Debug, Clone, Copy)]
+pub struct MeterCtx {
+    pub account: Uuid,
+    pub tree: Uuid,
+    pub member: Uuid,
+}
+
+/// Whether a write ACCUMULATES immutable R2 bytes (so the capacity gate fires) or just overwrites a pointer
+/// (rate only — charging capacity per sync tick would over-count the same logical state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteAxis {
+    /// Immutable append (a `log/*` object, a scalar delta) — capacity + rate.
+    Accumulating,
+    /// Pointer overwrite (`heads/{replica}`, the `snapshot` pointer) — rate only.
+    PointerOnly,
+}
+
+/// The out-of-band graduation hook's event shape ([`Meter::observe`]). Inert today (default no-op).
+#[derive(Debug, Clone, Copy)]
+pub enum MeterEvent {
+    Write { bytes: i64, axis: WriteAxis },
+    Read { bytes: Option<i64> },
+    Reclaim { bytes: i64 },
+}
+
+/// A gate rejection from [`Meter::charge_write`]. `Internal` carries a store error the caller renders as 500
+/// (the gate SQL itself failing, not a policy decision).
+#[derive(Debug)]
+pub enum MeterError {
+    /// The per-(tree, member) rate bucket is empty — 429 with this `Retry-After` (whole seconds).
+    RateLimited { retry_after_secs: u64 },
+    /// The owner's tree-byte capacity is exhausted — 403 (`QuotaExceeded`; read-only degradation, never lockout).
+    CapacityExceeded,
+    /// The gate's own SQL failed — surfaced as 500, cause logged not leaked.
+    Internal(String),
+}
+
+impl From<MeterError> for ApiError {
+    fn from(e: MeterError) -> Self {
+        match e {
+            MeterError::RateLimited { retry_after_secs } => Self::TooManyRequests(retry_after_secs.max(1)),
+            MeterError::CapacityExceeded => Self::QuotaExceeded,
+            MeterError::Internal(m) => Self::Internal(m),
+        }
+    }
+}
+
+/// The cost/enforce seam. One impl per environment: [`PgMeter`] in prod; a test double can exercise handler
+/// 403/429 branches without a live DB.
+#[async_trait]
+pub trait Meter: Send + Sync {
+    /// ENFORCE + OBSERVE. The capacity (Accumulating only) + rate gates inside the caller's `tx` (a rollback
+    /// reverts the charge), AND a `usage_month` `write_ops`/`bytes_write` increment for this
+    /// `(account, tree, member, month)`.
+    ///
+    /// # Errors
+    /// [`MeterError::RateLimited`] / [`MeterError::CapacityExceeded`] on a gate rejection; [`MeterError::Internal`]
+    /// if the gate SQL fails.
+    async fn charge_write(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        cx: MeterCtx,
+        size_bytes: i64,
+        axis: WriteAxis,
+    ) -> Result<(), MeterError>;
+
+    /// OBSERVE only (no gate today): count `read_ops`/`bytes_read` for `(account, tree, member, month)`. `bytes`
+    /// from `tree_blob_index` before the store fetch; `None` for a LIST. Best-effort — a metering hiccup must
+    /// never fail a read, so a store error is logged, not returned.
+    ///
+    /// # Errors
+    /// Reserved for a future synchronous read gate; today always `Ok`.
+    async fn charge_read(&self, pool: &PgPool, cx: MeterCtx, bytes: Option<i64>) -> Result<(), MeterError>;
+
+    /// RECONCILE: credit reclaimed bytes back to the owner's tree-byte capacity, in the sweep's row-delete tx
+    /// (GC, `gc.rs`). Mirrors media's `release()`.
+    ///
+    /// # Errors
+    /// Returns the underlying [`sqlx::Error`] if the credit UPDATE fails.
+    async fn credit_storage(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+        bytes: i64,
+    ) -> Result<(), sqlx::Error>;
+
+    /// Graduation hook: an out-of-band emit (Telemetry API / EMF) for the observe path. Default no-op today.
+    fn observe(&self, _cx: &MeterCtx, _event: MeterEvent) {}
+}
+
+/// The production `Meter`: Neon (Postgres) gates + the `usage_month` rollup. Holds no state — every method
+/// takes the caller's tx/pool.
+pub struct PgMeter;
+
+/// Fold one write into the cost rollup, in the caller's tx. A genuinely-new write only (re-deliveries return
+/// before the meter is called), so `+1 write_op` is exact.
+async fn record_write(
+    tx: &mut Transaction<'_, Postgres>,
+    cx: MeterCtx,
+    size_bytes: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO usage_month (account_id, tree_id, member_id, month, write_ops, bytes_write)
+         VALUES ($1, $2, $3, date_trunc('month', now())::date, 1, $4)
+         ON CONFLICT (account_id, tree_id, member_id, month) DO UPDATE
+           SET write_ops = usage_month.write_ops + 1,
+               bytes_write = usage_month.bytes_write + EXCLUDED.bytes_write",
+    )
+    .bind(cx.account)
+    .bind(cx.tree)
+    .bind(cx.member)
+    .bind(size_bytes)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+#[async_trait]
+impl Meter for PgMeter {
+    async fn charge_write(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        cx: MeterCtx,
+        size_bytes: i64,
+        axis: WriteAxis,
+    ) -> Result<(), MeterError> {
+        // (1) Per-member abuse rate: a token bucket keyed (tree, member), refilled at the OWNER's plan rate
+        // (owner-pays sets the budget, the member holds the state), lazily created full on first write; the
+        // WHERE guard on the UPDATE branch re-derives the balance so check and debit can't race (0 rows →
+        // over). Ported verbatim from the former `log::charge_metering`.
+        let (m_rate, m_burst): (f64, i32) =
+            sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
+                .bind(cx.account)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| MeterError::Internal(e.to_string()))?;
+        let member_ok = sqlx::query(
+            "INSERT INTO member_rate (tree_id, member_id, tokens, refilled_at)
+             VALUES ($1, $2, $3::float8 - 1, now())
+             ON CONFLICT (tree_id, member_id) DO UPDATE
+               SET tokens = LEAST($3::float8, member_rate.tokens
+                                  + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) - 1,
+                   refilled_at = now()
+               WHERE LEAST($3::float8, member_rate.tokens
+                           + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) >= 1",
+        )
+        .bind(cx.tree)
+        .bind(cx.member)
+        .bind(m_burst)
+        .bind(m_rate)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| MeterError::Internal(e.to_string()))?;
+        if member_ok.rows_affected() != 1 {
+            // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let retry_after_secs = if m_rate > 0.0 {
+                (1.0 / m_rate).ceil() as u64
+            } else {
+                60
+            };
+            tracing::info!(event = "rate_rejected", resource = "meter", tree = %cx.tree, member = %cx.member);
+            return Err(MeterError::RateLimited { retry_after_secs });
+        }
+
+        // (2) Byte capacity: the tree-byte meter (§17), only for an accumulating (immutable) write — a pointer
+        // overwrite doesn't grow R2 usage, so charging it would over-count the same logical state each tick.
+        if axis == WriteAxis::Accumulating {
+            let capped = sqlx::query(
+                "UPDATE accounts SET tree_used_bytes = tree_used_bytes + $2
+                  WHERE id = $1 AND tree_used_bytes + $2 <= max_tree_bytes",
+            )
+            .bind(cx.account)
+            .bind(size_bytes)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| MeterError::Internal(e.to_string()))?;
+            if capped.rows_affected() != 1 {
+                tracing::info!(event = "quota_rejected", resource = "meter", tree = %cx.tree, owner = %cx.account);
+                return Err(MeterError::CapacityExceeded);
+            }
+        }
+
+        // (3) OBSERVE: fold this write into the cost rollup, same tx (a rollback reverts it with the charge).
+        record_write(tx, cx, size_bytes)
+            .await
+            .map_err(|e| MeterError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn charge_read(&self, pool: &PgPool, cx: MeterCtx, bytes: Option<i64>) -> Result<(), MeterError> {
+        // Best-effort: a metering write must never fail the read it counts. Log a store error and proceed.
+        let res = sqlx::query(
+            "INSERT INTO usage_month (account_id, tree_id, member_id, month, read_ops, bytes_read)
+             VALUES ($1, $2, $3, date_trunc('month', now())::date, 1, $4)
+             ON CONFLICT (account_id, tree_id, member_id, month) DO UPDATE
+               SET read_ops = usage_month.read_ops + 1,
+                   bytes_read = usage_month.bytes_read + EXCLUDED.bytes_read",
+        )
+        .bind(cx.account)
+        .bind(cx.tree)
+        .bind(cx.member)
+        .bind(bytes.unwrap_or(0))
+        .execute(pool)
+        .await;
+        if let Err(e) = res {
+            tracing::warn!(%e, tree = %cx.tree, "could not record read usage (best-effort)");
+        }
+        Ok(())
+    }
+
+    async fn credit_storage(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        owner: Uuid,
+        bytes: i64,
+    ) -> Result<(), sqlx::Error> {
+        // Clamp at 0: the tree-byte meter is monotonic-until-GC, and a credit must never drive it negative
+        // (mirrors media `release`, defensively floored).
+        sqlx::query("UPDATE accounts SET tree_used_bytes = GREATEST(tree_used_bytes - $2, 0) WHERE id = $1")
+            .bind(owner)
+            .bind(bytes)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+}

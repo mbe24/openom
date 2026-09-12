@@ -464,7 +464,40 @@ pub enum ApiError {
     /// The requested log tail is no longer retained — the client must bootstrap from a snapshot.
     Gone(String),
     BadRequest(String),
+    /// An RFC 9457-shaped error carrying a typed, machine-readable `code`
+    /// (`plan/sync/design.http-error-model.md`). The GC / metering paths (OPE-409) need a discriminator
+    /// beyond the coarse status — a below-floor write and a reaped read are both about the GC ratchet but
+    /// differ by `(status, code)` (`409 below_gc_floor`, `410 below_gc_floor`, `409 covered_over_claim`, …).
+    /// Rendered as `application/problem+json`; `code` is a stable `&'static str` from the closed set.
+    Coded {
+        status: StatusCode,
+        code: &'static str,
+        detail: String,
+    },
     Internal(String),
+}
+
+impl ApiError {
+    /// A `409 Conflict` with a typed `code` — the GC write-guards (below-floor log/snapshot writes, over-claim,
+    /// monotonicity). See `plan/sync/design.http-error-model.md`.
+    #[must_use]
+    pub fn conflict(code: &'static str, detail: impl Into<String>) -> Self {
+        Self::Coded {
+            status: StatusCode::CONFLICT,
+            code,
+            detail: detail.into(),
+        }
+    }
+
+    /// A `410 Gone` with a typed `code` — a reaped (GC-reclaimed) blob (`below_gc_floor`, action BOOTSTRAP).
+    #[must_use]
+    pub fn reaped(detail: impl Into<String>) -> Self {
+        Self::Coded {
+            status: StatusCode::GONE,
+            code: "below_gc_floor",
+            detail: detail.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -479,6 +512,22 @@ impl IntoResponse for ApiError {
             if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
                 resp.headers_mut().insert(RETRY_AFTER, v);
             }
+            return resp;
+        }
+        // RFC 9457 Problem Details for the typed-code errors (the GC / metering discriminators). `title`/
+        // `detail` are operator-controlled strings — never request bytes or internal causes (zero-knowledge).
+        if let Self::Coded { status, code, detail } = self {
+            let body = serde_json::json!({
+                "type": format!("/errors/{code}"),
+                "title": detail,
+                "status": status.as_u16(),
+                "code": code,
+            });
+            let mut resp = (status, axum::Json(body)).into_response();
+            resp.headers_mut().insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/problem+json"),
+            );
             return resp;
         }
         let (status, msg) = match self {
@@ -497,6 +546,9 @@ impl IntoResponse for ApiError {
             ),
             Self::TooManyRequests(_) => {
                 unreachable!("handled before the match (carries a header)")
+            }
+            Self::Coded { .. } => {
+                unreachable!("handled before the match (renders problem+json)")
             }
             Self::Gone(m) => (StatusCode::GONE, m),
             Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m),

@@ -11,11 +11,13 @@ pub mod authz;
 pub mod blobs;
 pub mod config;
 pub mod frontier;
+pub mod gc;
 pub mod invites;
 pub mod jwks;
 pub mod keyring;
 pub mod log;
 pub mod media;
+pub mod meter;
 pub mod prof;
 pub mod proposals;
 pub mod storage;
@@ -48,6 +50,9 @@ pub struct AppState {
     jwt_verifier: Option<Arc<jwks::JwtVerifier>>,
     /// Blob store (`MinIO` in dev, R2 in prod).
     storage: S3Store,
+    /// The cost-attribution + enforcement seam (OPE-412): `dyn` so `AppState` stays flat + handler
+    /// signatures unchanged; `PgMeter` in prod, a test double swaps in without a live DB.
+    meter: Arc<dyn meter::Meter>,
 }
 
 /// Liveness: the process is up.
@@ -160,7 +165,9 @@ pub fn app(state: AppState) -> Router {
     if state.config.dev_routes_enabled() {
         // Dev-only routes are local-only (never registered under Lambda) and grouped by concern,
         // not versioned — they're tooling, not the public wire contract.
-        router = router.route("/dev/media/gc", post(media::sweep_dev));
+        router = router
+            .route("/dev/media/gc", post(media::sweep_dev))
+            .route("/dev/log/gc", post(gc::gc_dev));
     }
     router
         // Cap the tree PUT body at the proxy ceiling (§9.9); larger uploads (media)
@@ -230,6 +237,7 @@ pub async fn build_state(config: &Config) -> Result<AppState, BuildError> {
         config: Arc::new(config.clone()),
         jwt_verifier,
         storage,
+        meter: Arc::new(meter::PgMeter),
     })
 }
 

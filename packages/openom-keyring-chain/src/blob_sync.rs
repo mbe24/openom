@@ -151,7 +151,10 @@ impl<S: BlobStore> KeyringChainBlobSync<S> {
         };
         let etag = self.store.put(HEAD, keyring_bytes, pre).map_err(|e| match e {
             BlobError::PreconditionFailed => SyncError::Conflict,
-            err @ BlobError::Backend(_) => SyncError::Store(err),
+            // A keyring HEAD is a pointer, never GC-reaped below a floor, so a `Gone` on this write is a
+            // store-level anomaly, not a bootstrap signal — surface it as a store error (exhaustiveness for
+            // the new `BlobError::Gone`, OPE-409 C2).
+            err @ (BlobError::Backend(_) | BlobError::Gone) => SyncError::Store(err),
         })?;
         self.head_etag = Some(etag);
         self.anchor = Some(KeyringAnchor::from_keyring(&keyring));

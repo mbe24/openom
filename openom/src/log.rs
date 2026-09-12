@@ -229,8 +229,17 @@ pub async fn append_log(
     // Metering — capacity charged to the tree OWNER (owner-pays, §17); rate is PER-MEMBER so one abusive
     // member can't drain a shared bucket and DoS the owner + co-members. Only a genuinely new append is
     // metered (re-deliveries returned above, so a retrying client is never metered). A scalar delta always
-    // accumulates R2 bytes (it's immutable), so the capacity gate always fires here.
-    charge_metering(&mut tx, tree_id, owner, identity.member_id, d.size, true).await?;
+    // accumulates R2 bytes (it's immutable), so the capacity gate always fires here. Behind the `Meter` seam
+    // (OPE-412) — the same gates plus the cost-attribution rollup.
+    state
+        .meter
+        .charge_write(
+            &mut tx,
+            crate::meter::MeterCtx { account: owner, tree: tree_id, member: identity.member_id },
+            d.size,
+            crate::meter::WriteAxis::Accumulating,
+        )
+        .await?;
 
     let seq = next_seq;
     let object_key = spill_if_oversized(&state, tree_id, seq, &body).await?;
@@ -262,84 +271,6 @@ pub async fn append_log(
     }
     tracing::info!(event = "log_append", %tree_id, seq, spilled = object_key.is_some(), "delta appended");
     Ok((StatusCode::OK, Json(AppendResult { seq })).into_response())
-}
-
-/// Meter a genuinely-new append/put (re-deliveries are returned before this runs, so a retrying client is
-/// never metered). Two independent gates, each atomic in SQL. (1) Per-member abuse rate: a token bucket
-/// keyed (tree, member), refilled at the OWNER's plan rate (owner-pays sets the budget, the member holds
-/// the state), lazily created full on first append; the WHERE guard on the UPDATE branch re-derives the
-/// balance so check and debit can't race (0 rows → over). This isolates one abusive member from draining a
-/// shared bucket. It gates every write, unconditionally. (2) Byte capacity: the tree-byte meter (§17), an
-/// axis independent of the media pool; charge `size` (0 rows → the tree reserve is full) — but ONLY when
-/// `charge_capacity` is set. A coarse per-account backstop against *coordinated* multi-member bursts is a
-/// follow-up — it needs its own burst budget above one member's `log_burst`.
-///
-/// Re-homed for the data-channel blob path (`blobs.rs`, design.ope398-managed-server.md §3.1): the scalar
-/// delta-log append always accumulates R2 bytes, so it always passes `charge_capacity = true`; a blob PUT
-/// passes it only for an immutable (`Precondition::IfAbsent`) write — a pointer overwrite
-/// (`Precondition::Any`, `heads/`/`snapshot`) doesn't grow R2 usage, so charging capacity for it would
-/// over-charge the same logical state on every sync tick. The rate gate stays unconditional either way.
-pub(crate) async fn charge_metering(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tree_id: Uuid,
-    owner: Uuid,
-    member_id: Uuid,
-    size: i64,
-    charge_capacity: bool,
-) -> Result<(), ApiError> {
-    let (m_rate, m_burst): (f64, i32) =
-        sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
-            .bind(owner)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(internal)?;
-    let member_ok = sqlx::query(
-        "INSERT INTO member_rate (tree_id, member_id, tokens, refilled_at)
-         VALUES ($1, $2, $3::float8 - 1, now())
-         ON CONFLICT (tree_id, member_id) DO UPDATE
-           SET tokens = LEAST($3::float8, member_rate.tokens
-                              + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) - 1,
-               refilled_at = now()
-           WHERE LEAST($3::float8, member_rate.tokens
-                       + EXTRACT(EPOCH FROM (now() - member_rate.refilled_at)) * $4) >= 1",
-    )
-    .bind(tree_id)
-    .bind(member_id)
-    .bind(m_burst)
-    .bind(m_rate)
-    .execute(&mut **tx)
-    .await
-    .map_err(internal)?;
-    if member_ok.rows_affected() != 1 {
-        // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let retry = if m_rate > 0.0 {
-            (1.0 / m_rate).ceil() as u64
-        } else {
-            60
-        };
-        tracing::info!(event = "rate_rejected", resource = "log_member", %tree_id, member = %member_id);
-        return Err(ApiError::TooManyRequests(retry.max(1)));
-    }
-
-    if !charge_capacity {
-        return Ok(());
-    }
-
-    let capped = sqlx::query(
-        "UPDATE accounts SET tree_used_bytes = tree_used_bytes + $2
-          WHERE id = $1 AND tree_used_bytes + $2 <= max_tree_bytes",
-    )
-    .bind(owner)
-    .bind(size)
-    .execute(&mut **tx)
-    .await
-    .map_err(internal)?;
-    if capped.rows_affected() != 1 {
-        tracing::info!(event = "quota_rejected", resource = "log", %tree_id, %owner);
-        return Err(ApiError::QuotaExceeded);
-    }
-    Ok(())
 }
 
 /// Spill an oversized delta to R2 rather than storing it inline in Postgres, returning its object key (or

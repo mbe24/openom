@@ -108,6 +108,9 @@ jsonschema = { version = "0.28", default-features = false }
 axum = "0.8"
 lambda_http = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+# `async fn` in an object-safe (`dyn`) trait — the Meter seam is `Arc<dyn Meter>` (a swappable cost/enforce
+# impl below the BlobStore layer, OPE-412), which native async-in-traits can't express dyn-compatibly yet.
+async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Observability export: the `tracing` macros stay the only instrumentation API;
