@@ -664,6 +664,46 @@ fn blob_a_forge_above_covered_stays_dropped_without_adoption_churn() {
     assert!(!x.needs_snapshot_adoption().unwrap(), "no churn: the remaining forge is at/above covered");
 }
 
+#[test]
+fn blob_compact_does_not_regress_a_peer_snapshots_covered() {
+    // BYO covered-monotonicity (the client analog of the server's M6 guard): a compactor whose frontier is
+    // INCOMPARABLE to the current snapshot must not clobber it to a lower coordinate — that would un-pin history
+    // the peer covered. A's snapshot covers {A:2}; B (which folded only its own write, not A's) must NOT
+    // overwrite it down to {B:1}. After B adopts A's snapshot it dominates, and its compact lands.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap(); // A:0
+    a.apply("a1".into()).unwrap(); // A:1
+    a.compact().unwrap(); // snapshot covers {A:2}
+    assert_eq!(
+        a.snapshot_covered_frontier().unwrap().unwrap().get("replica-A").copied(),
+        Some(2)
+    );
+
+    // B has its own write but has NOT pulled A. A naive compact would overwrite the snapshot to {B:1},
+    // regressing A:2 -> absent. The guard skips it.
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.apply("b0".into()).unwrap(); // B:0
+    b.compact().unwrap(); // guard: would regress A → no-op
+    assert_eq!(
+        a.snapshot_covered_frontier().unwrap().unwrap().get("replica-A").copied(),
+        Some(2),
+        "B's incomparable compact did not regress A's covered"
+    );
+    assert_eq!(
+        a.snapshot_covered_frontier().unwrap().unwrap().get("replica-B").copied(),
+        None,
+        "and it did not publish B's coordinate either (the whole write was skipped)"
+    );
+
+    // After B adopts A's snapshot + folds the tail, B's subsumed dominates → its compact lands (both covered).
+    b.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    b.compact().unwrap();
+    let cov = b.snapshot_covered_frontier().unwrap().unwrap();
+    assert_eq!(cov.get("replica-A").copied(), Some(2), "A still covered after B dominates");
+    assert!(cov.get("replica-B").copied().unwrap_or(0) >= 1, "B now covered too");
+}
+
 /// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object
 /// (distinct from a plain absent key). Everything else delegates.
 struct GoneFor {

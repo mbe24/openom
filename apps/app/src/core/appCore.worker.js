@@ -701,6 +701,18 @@ const api = {
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
+    // Slice 3 (OPE-421) compact-before-remove: on the CHAIN, the delta look-behind will Drop the departing
+    // member's pre-removal deltas on a cold replica (absent at head ⇒ indistinguishable from a backdated
+    // forge), so pin what we've already folded FIRST. Pull the latest (adopt any snapshot + fold their landed
+    // writes), then force an owner-authored compaction under the PRE-removal epoch (K=1) so the snapshot's
+    // covered frontier vouches for their history. A no-op if a snapshot already covers it; the docsync
+    // covered-monotonicity guard prevents any regression. Dag preserves removed history via the self-heal
+    // cover (authorCover) below instead, so this is chain-only. Best-effort: a transient failure leaves the
+    // removal to proceed (the client look-behind still rejects forgeries; only the in-transit-preservation is
+    // reduced), and the next owner sync re-pins.
+    if (eng === 'chain' && transportFor(docId)) {
+      try { await syncData(c, 1); } catch { /* preserve-history is best-effort; removal still proceeds */ }
+    }
     const change = wasmRemoveMember(
       eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
     );
@@ -1021,9 +1033,12 @@ async function runTick(c) {
 // core's `sync` (which mirrors it in, folds, and returns what the remote is missing), upload that diff, then
 // mirror the updated local store to durable storage. The core owns the entire keyspace + head-monotonicity
 // decision — this is a dumb ferry that never parses, builds, or compares a key.
-async function syncData(c) {
+async function syncData(c, compactKOverride) {
   const transport = transportFor(c.docId);
   if (!transport) return;
+  // The compaction cadence: the global tick K, or a caller override. removeMember forces a compaction (K=1)
+  // BEFORE rotating so the departing member's folded history is pinned into an owner-authored snapshot.
+  const k = compactKOverride === undefined ? compactK : compactKOverride;
   const localPrefix = c.docId + '/'; // the core's own (per-device) keyspace
   const remotePrefix = c.treeKey + '/'; // the shared (per-tree) keyspace on the remote
   // Fetch the remote's whole snapshot, re-keyed into the core's local namespace for `sync`.
@@ -1037,7 +1052,7 @@ async function syncData(c) {
   // The tick also compacts once ≥ compactK log objects have accrued since the last snapshot (OPE-409): the
   // fresh snapshot is in `put`, and `covered` is the SUBSUMED frontier to send as the x-openom-covered header
   // on that snapshot upload (the server's GC gate 1 trusts only what a snapshot actually folds).
-  const { put, covered } = c.handle.sync(remote, compactK); // { put: [{ key, bytes, pointer }], folded, covered }
+  const { put, covered } = c.handle.sync(remote, k); // { put: [{ key, bytes, pointer }], folded, covered }
   for (const o of put) {
     if (c.aborted) return;
     // Re-key the core's object back into the shared tree namespace for upload; the snapshot carries the header.

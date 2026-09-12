@@ -424,6 +424,65 @@
         };
       },
 
+      // SLICE 3 (OPE-421) compact-before-remove, chain: a Maintainer member writes a data delta; the owner
+      // removes them, which pulls + pins the member's folded history into an owner-authored snapshot BEFORE the
+      // rotation. Then a COLD reload of the owner (fresh worker, same IndexedDB, NO transport) re-judges the
+      // whole local log under the post-removal head — where the member is ABSENT, so the delta look-behind
+      // would Drop 'pMemberWrite' — and must still project it, recovered from the pin. Without compact-before-
+      // remove the owner would never have pulled it, so its presence after a pure local reload proves Slice 3.
+      async chainRemovePreservesHistory() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(7);
+        const ownerDoc = `pres-owner-${crypto.randomUUID()}`;
+        const memberDoc = `pres-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc);
+
+        // Admit the member as a MAINTAINER so they can commit data deltas.
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'maintainer',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+
+        // Member joins (genesis-walk) and commits a data delta, syncing it to the remote.
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+        await member.assertAnchor(memberDoc, 'pMemberWrite', PERSON);
+        await member.commit(memberDoc);
+        await member.syncNow(memberDoc);
+
+        // Owner removes the member: compact-before-remove pulls 'pMemberWrite' + pins it under the pre-removal
+        // epoch, THEN rotates.
+        await owner.removeMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 2, removeMemberId: 'acct-member',
+        });
+        const ownerLiveSees = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // COLD reload of the owner — fresh worker, NO transport, pure local hydrate + bootstrap under the
+        // post-removal head.
+        const reloaded = spawnWorker();
+        await reloaded.warm();
+        await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
+
+        return { ownerLiveSees, seenAfterReload };
+      },
+
       // THE dag distribution loop through the real worker: an owner provisions a DAG tree, admits a member,
       // and the member JOINS by verifying a self-contained anchor against an OOB pin (no per-revision walk) —
       // then verify-on-ingest accepts the owner's signed write AND the member's own maintainer write across

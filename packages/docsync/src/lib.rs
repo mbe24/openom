@@ -1017,7 +1017,24 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         // Publish the SUBSUMED frontier (C3) — NOT `pull_frontier` — so the covered claim spans only entries
         // this snapshot actually contains. Security-critical: GC deletes strictly below the published frontier,
         // so covering a held/rejected/quarantined dot here would let GC delete an entry no snapshot holds.
-        let mut body = encode_frontier(&self.subsumed_frontier());
+        let subsumed = self.subsumed_frontier();
+        // Covered-monotonicity (BYO analog of the server's M6 guard): never overwrite `{doc}/snapshot` with a
+        // covered frontier that REGRESSES the existing one in any coordinate. The pointer is last-writer-wins on
+        // a BYO store, so a compactor whose frontier is incomparable to a peer's would otherwise clobber the
+        // peer's snapshot down to a lower coordinate, un-pinning history it covered. If the current snapshot
+        // leads us anywhere, skip: the caller re-syncs (adopts it, growing our subsumed to dominate) and
+        // retries, after which the write lands with no regression. A snapshot we REJECTED reads as no-coverage
+        // (self-heal), so this never blocks overwriting a poison pointer. The managed server enforces the same
+        // rule server-side (M6), so this is purely the BYO/local-store guard.
+        if let Some(existing) = self.snapshot_covered_frontier()? {
+            if existing
+                .iter()
+                .any(|(r, c)| *c > subsumed.get(r).copied().unwrap_or(0))
+            {
+                return Ok(()); // would regress a coordinate — leave the more-covering snapshot in place
+            }
+        }
+        let mut body = encode_frontier(&subsumed);
         body.extend_from_slice(&self.engine.snapshot());
         let ctx = SealCtx {
             kind: EntryKind::Snapshot,

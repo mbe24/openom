@@ -146,6 +146,24 @@ test('app-core: an owner removes a member through the worker — rotate, re-unlo
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: chain removeMember preserves the removed maintainer\'s history via compact-before-remove', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.chainRemovePreservesHistory());
+
+  // The owner folded the member's delta live at removal time.
+  expect(r.ownerLiveSees).toContain('pMemberWrite');
+  // OPE-421 Slice 3: after a COLD reload the owner re-judges the whole log under the post-removal head (member
+  // absent → the look-behind would Drop the delta), yet still projects it — recovered from the compact-before-
+  // remove pin. This is the end-to-end proof that pre-removal history survives a cold re-judgement.
+  expect(r.seenAfterReload).toContain('pMemberWrite');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: dag distribution — a member joins by pin, writes, and removeMember authors a cover', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
