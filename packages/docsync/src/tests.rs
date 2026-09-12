@@ -493,3 +493,27 @@ fn blob_drain_vanished_dot_is_stalled_not_leaked() {
         "the vanished dot still pins subsumed — coverage never advances over it"
     );
 }
+
+#[test]
+fn blob_retry_stalled_clears_a_now_acceptable_dot() {
+    // review #4: a dot Rejected on first pull is stalled (pinning subsumed); retry_stalled with a classify
+    // that now Accepts it (its membership op has since landed) merges it and unpins — the only heal for a pin.
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("a0".into()).unwrap();
+
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.pull_verified(|_e, _p, _r, _c| Verdict::Reject, NO_COVER).unwrap();
+    assert_eq!(b.stalled_count(), 1);
+    assert_eq!(b.subsumed_frontier().get("replica-A").copied(), Some(0), "pinned at the rejected dot");
+
+    let cleared = b.retry_stalled(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    assert_eq!(cleared, 1);
+    assert_eq!(b.stalled_count(), 0, "the stall cleared");
+    assert!(b.engine().lines.contains("a0"), "the dot is now merged");
+    assert_eq!(
+        b.subsumed_frontier().get("replica-A").copied(),
+        Some(1),
+        "subsumed unpinned to the fetch frontier"
+    );
+}

@@ -965,6 +965,55 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         self.pull_verified(classify, fold_cover)?;
         Ok(())
     }
+
+    /// Re-attempt every STALLED dot: re-fetch, re-open, re-classify. Meant to be app-invoked on discrete events
+    /// (a version upgrade that can now open a formerly-`Unopenable` entry; a membership change; an explicit
+    /// "Sync now") — NEVER per tick, which would recreate the retry loop the terminal `Rejected` disposition
+    /// exists to avoid. A now-successful Cover-fold or Accept+merge clears the stall (unpinning the replica's
+    /// `subsumed_frontier`); a now-`Hold` verdict moves it to `held` for the ordinary drain. Safe by
+    /// construction: it can only REMOVE a blocker, never add coverage for unmerged content. Returns how many
+    /// stalls it cleared or re-parked. This is the ONLY heal for a stuck pin (there is deliberately no
+    /// "advance-past" hatch), so a shared channel MUST wire it to upgrade + membership events (OPE-409 review #4).
+    ///
+    /// # Errors
+    /// Returns [`SyncError`] if a blob read fails.
+    pub fn retry_stalled(
+        &mut self,
+        mut classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+        mut fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+    ) -> Result<usize, SyncError> {
+        let mut cleared = 0;
+        for (replica, counter) in self.stalled.keys().cloned().collect::<Vec<_>>() {
+            let dot = (replica.clone(), counter);
+            let Some((env, _etag)) = self.store.get(&log_key(&self.doc, &replica, counter))? else {
+                continue; // still vanished — keep the pin
+            };
+            // A now-openable Cover folds + clears (e.g. a formerly-`Unopenable` future-version cover, post-upgrade).
+            if let Ok(cover_body) = self.sealer.open(EntryKind::Cover, &env) {
+                fold_cover(&env, &cover_body, &replica, counter);
+                self.stalled.remove(&dot);
+                cleared += 1;
+                continue;
+            }
+            let Ok(pt) = self.sealer.open(EntryKind::Delta, &env) else {
+                continue; // still un-openable — keep the pin
+            };
+            match classify(&env, &pt, &replica, counter) {
+                Verdict::Accept if self.engine.merge(&pt).is_ok() => {
+                    self.stalled.remove(&dot);
+                    cleared += 1;
+                }
+                Verdict::Hold => {
+                    self.stalled.remove(&dot);
+                    self.held.insert(dot); // now holdable — let the ordinary drain retry it
+                    cleared += 1;
+                }
+                // Accept whose merge still fails, or still Reject — keep the pin.
+                Verdict::Accept | Verdict::Reject => {}
+            }
+        }
+        Ok(cleared)
+    }
 }
 
 /// One-directional anti-entropy between two [`BlobStore`]s for one doc: copy every log object `to` lacks
