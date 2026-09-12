@@ -1519,6 +1519,76 @@ proptest! {
     }
 }
 
+// ── StrongDemote (OPE-364): a role-lowering ChangeRole voids the demoted member's concurrent over-authority
+// ops, exactly like a Remove — but keeps the member (at the lower role). ──
+
+#[test]
+fn strong_demote_voids_the_demoted_authors_concurrent_ops() {
+    // Alice (owner) demotes Bob Admin→Viewer, while Bob CONCURRENTLY adds Charlie. Both authorized against the
+    // parent (Bob still Admin there). StrongDemote must void Bob's concurrent Add — a Viewer can't add — so
+    // Charlie is absent, exactly as if Bob had been removed. But Bob REMAINS (at Viewer): a demote is not a
+    // removal.
+    let (alice, bob, charlie) = (alice_pk(), bob_pk(), cpk());
+    let mut k = strong_remove_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+    ]);
+    // Concurrent (both parent = genesis op 1): Bob adds Charlie (op 2); Alice demotes Bob to Viewer (op 3).
+    k.apply(make_op(2, vec![1], &[2u8; 32], MembershipAction::Add {
+        member: charlie, role: TestRole::Viewer, author_public_key: charlie, hpke_public_key: [0xcc; 32], member_proof: None,
+    })).unwrap();
+    k.apply(make_op(3, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Viewer })).unwrap();
+    let _ = k.flush();
+
+    let members = k.state().active_members();
+    let bob_role = members.iter().find(|(id, _)| *id == bob).map(|(_, r)| r.clone());
+    assert_eq!(bob_role, Some(TestRole::Viewer), "Bob remains, demoted to Viewer (not removed)");
+    assert!(!members.iter().any(|(id, _)| *id == charlie),
+        "Charlie NOT added — Bob's concurrent Add is voided by the demote (the puppet-add race is closed)");
+}
+
+fn demote_convergence_ops() -> Vec<Op<u64, [u8; 32], TestRole, Ed25519>> {
+    let (bob, carol, dave) = (bob_pk(), cpk(), dave_pk());
+    vec![
+        // Alice demotes Bob Admin→Viewer (op 2); CONCURRENTLY Bob adds Dave (op 3) and Bob removes Carol (op 4).
+        make_op(2, vec![1], &[1u8; 32], MembershipAction::ChangeRole { member: bob, new_role: TestRole::Viewer }),
+        make_op(3, vec![1], &[2u8; 32], MembershipAction::Add {
+            member: dave, role: TestRole::Editor, author_public_key: dave, hpke_public_key: [0xd0; 32], member_proof: None,
+        }),
+        make_op(4, vec![1], &[2u8; 32], MembershipAction::Remove { member: carol }),
+    ]
+}
+
+fn resolve_demote_convergence(order: &[usize]) -> std::collections::BTreeSet<[u8; 32]> {
+    let (alice, bob, carol) = (alice_pk(), bob_pk(), cpk());
+    let mut k = strong_remove_engine(&[
+        minit(alice, TestRole::Admin, [0xaa; 32]),
+        minit(bob, TestRole::Admin, [0xbb; 32]),
+        minit(carol, TestRole::Admin, [0xcc; 32]),
+    ]);
+    let ops = demote_convergence_ops();
+    for &i in order {
+        let _ = k.apply(ops[i].clone());
+    }
+    let _ = k.flush();
+    k.state().active_members().into_iter().map(|(m, _)| m).collect()
+}
+
+proptest! {
+    // BEC convergence WITH a demote: the resolved membership is order-independent, and the StrongDemote
+    // voidings hold under every delivery order — Bob's concurrent Add(Dave) and Remove(Carol) are both voided.
+    #[test]
+    fn demote_resolution_is_order_independent(
+        order in Just((0..3usize).collect::<Vec<usize>>()).prop_shuffle()
+    ) {
+        let canonical = resolve_demote_convergence(&[0, 1, 2]);
+        let shuffled = resolve_demote_convergence(&order);
+        prop_assert_eq!(&canonical, &shuffled, "resolved membership must not depend on application order");
+        prop_assert!(shuffled.contains(&cpk()), "Carol survives — Bob's concurrent Remove voided by the demote");
+        prop_assert!(!shuffled.contains(&dave_pk()), "Dave not added — Bob's concurrent Add voided by the demote");
+    }
+}
+
 // ── v2 multi-signer quorum ──
 // A test QuorumPolicy: eligible = the active Admins; requirement = unanimity of them. So a Commit's
 // target takes effect only when every Admin (the proposer implicitly + the approvers) has approved.

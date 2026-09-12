@@ -120,21 +120,51 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         // is decided once here and then neither applies nor exerts invalidation.
         let authorized = authorized_map(genesis_state, graph, ops, ac, &depth);
 
-        // Removes ordered by the deterministic tiebreak (rule 2), stable across replicas — but ONLY
-        // authorized removes carry invalidation power. An unauthorized `Remove` (author lacks the role)
-        // must not suppress the removee's concurrent, authorized ops (the authority-blind hole, OPE-258).
-        let mut removes: Vec<(OId, Op::MemberId)> = ops
-            .iter()
-            .filter_map(|(id, op)| match op.action() {
-                MembershipAction::Remove { member }
-                    if authorized.get(id).copied().unwrap_or(false) =>
-                {
-                    Some((*id, member.clone()))
+        // Invalidators: authorized `Remove`s (rules 1/2/4) AND authorized role-LOWERING `ChangeRole`s
+        // (StrongDemote, OPE-364), merged into ONE `(depth, id)`-sorted sequence. Only AUTHORIZED ops carry
+        // invalidation power (the authority-blind hole, OPE-258). The single sorted order is required: a demote
+        // that voids a `Remove` must be processed with that remove in one order so the remove can never cascade
+        // onto a third party's op in the pass it becomes invalid (the ignore set never retracts).
+        //
+        // A demote's void-set — the ops it invalidates IFF it is valid — is the target's OWN ops that are
+        // concurrent with the demote and that the target's NEW role no longer authorizes (re-authorization
+        // predicate). It depends only on the fixed `authorized` map, so it is precomputed here. A promotion
+        // voids nothing (every such op stays authorized under the higher role); a member's harmless self-ops
+        // (self-`Remove`/`Retarget`/`Reseal`, authorized for any active member) stay authorized under the new
+        // role and are correctly spared.
+        let mut invalidators: Vec<(OId, Invalidator<OId, Op::MemberId>)> = Vec::new();
+        for (id, op) in ops {
+            if !authorized.get(id).copied().unwrap_or(false) {
+                continue;
+            }
+            match op.action() {
+                MembershipAction::Remove { member } => {
+                    invalidators.push((*id, Invalidator::Remove(member.clone())));
                 }
-                _ => None,
-            })
-            .collect();
-        removes.sort_by_key(|(id, _)| (*depth.get(id).unwrap_or(&0), *id));
+                MembershipAction::ChangeRole { member, new_role } => {
+                    let voidable: Vec<OId> = ops
+                        .iter()
+                        .filter_map(|(o_id, o_op)| {
+                            if o_op.author() != member || !graph.is_concurrent(*o_id, *id) {
+                                return None;
+                            }
+                            let mut st = resolved_state_before(
+                                *o_id, genesis_state, graph, ops, &authorized, &depth,
+                            );
+                            if let Some(ms) = st.members.get_mut(member) {
+                                ms.role = new_role.clone();
+                            }
+                            (!ac.is_authorized(&st, member, o_op.action())).then_some(*o_id)
+                        })
+                        .collect();
+                    if !voidable.is_empty() {
+                        invalidators.push((*id, Invalidator::Demote(voidable)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        invalidators.sort_by_key(|(id, _)| (*depth.get(id).unwrap_or(&0), *id));
 
         // Seed the ignore set with every unauthorized op: it neither applies nor invalidates, and (via
         // rule 3, which skips ignored Add/Remove events) it establishes no presence for its members.
@@ -159,7 +189,7 @@ impl<OId: OpId, R: Role, S: SignatureScheme, Op: SignedOp<OpId = OId, R = R, S =
         loop {
             let before = invalid.len();
             propagate_key_taint(ops, graph, &authorized, &depth, &mut invalid);
-            invalid = strong_remove_fixpoint(ops, graph, &depth, &genesis, &removes, invalid);
+            invalid = strong_remove_fixpoint(ops, graph, &depth, &genesis, &invalidators, invalid);
             if invalid.len() == before {
                 break;
             }
@@ -346,47 +376,79 @@ fn propagate_key_taint<OId, R, S, Op>(
     }
 }
 
-/// Strong-remove fixpoint (rules 1–4) over the seeded `invalid` set, returning the final ignore set. Every
-/// rule only GROWS `invalid` (monotone), so both the inner rules-1-3 loop and the outer rule-4 loop
-/// converge. Rule 4 runs after the inner fixpoint each pass so it reads the RESOLVED surviving removes, and
-/// its suppressions feed back into rule 3 on the next pass.
+/// An invalidator in the merged `StrongRemove`/`StrongDemote` sequence (OPE-364), processed in ONE
+/// `(depth, id)` order so a voided `Remove` can never cascade onto a third party's op in the pass it dies.
+enum Invalidator<OId, MId> {
+    /// A `Remove(M)`: voids M's ops that are concurrent with it (member-based, evaluated in the fixpoint).
+    Remove(MId),
+    /// A role-LOWERING `ChangeRole`: voids this precomputed set — the target's own ops, concurrent with the
+    /// demote, that its new role no longer authorizes (concurrency + re-authorization baked in at build time).
+    Demote(Vec<OId>),
+}
+
+/// Strong-remove/-demote fixpoint (rules 1–4 + `StrongDemote`) over the seeded `invalid` set, returning the
+/// final ignore set. Every rule only GROWS `invalid` (monotone), so the inner rules loop and the outer rule-4
+/// loop converge to the unique least fixpoint (order-independent — BEC). Rule 4 runs after the inner fixpoint
+/// each pass so it reads the RESOLVED surviving removes, and its suppressions feed back into rule 3.
 fn strong_remove_fixpoint<OId: OpId, Op: SignedOp<OpId = OId>>(
     ops: &HashMap<OId, Op>,
     graph: &Graph<OId>,
     depth: &HashMap<OId, usize>,
     genesis: &HashSet<Op::MemberId>,
-    removes: &[(OId, Op::MemberId)],
+    invalidators: &[(OId, Invalidator<OId, Op::MemberId>)],
     mut invalid: HashSet<OId>,
 ) -> HashSet<OId> {
+    // A stable op-id order for the invalid-set-dependent scans (rule 1's inner scan + rule 3): the converged
+    // set is order-independent regardless (monotone least fixpoint), but a deterministic per-pass order is
+    // cheap insurance against any replica-visible intermediate divergence.
+    let mut op_ids: Vec<OId> = ops.keys().copied().collect();
+    op_ids.sort_by_key(|o| (*depth.get(o).unwrap_or(&0), *o));
+
     loop {
-        // Inner fixpoint: rules 1+2+3 iterated until stable (all monotone — the ignore set only grows —
-        // so this converges). Any rule-4 suppressions from a previous outer pass are already in `invalid`
-        // and cascade correctly through rule 3 here.
+        // Inner fixpoint: rules 1+2+StrongDemote+3 iterated until stable (all monotone — the ignore set only
+        // grows — so this converges). Any rule-4 suppressions from a previous outer pass are already in
+        // `invalid` and cascade correctly through rule 3 here.
         loop {
             let mut changed = false;
 
-            // Rule 1 + 2: a valid remove invalidates the removed member's concurrent ops; because removes
-            // are processed in tiebreak order, a mutual remove leaves exactly one winner.
-            for (r, m) in removes {
-                if invalid.contains(r) {
+            // Rules 1 + 2 + StrongDemote: process invalidators in the merged `(depth,id)` order. A valid
+            // `Remove` voids the removed member's concurrent ops; a valid `Demote` voids its precomputed
+            // void-set. Because removes AND demotes share one tiebreak order, a mutual remove leaves exactly
+            // one winner, and a demote-voided remove is skipped (already invalid) before it can cascade.
+            for (inv_id, inv) in invalidators {
+                if invalid.contains(inv_id) {
                     continue;
                 }
-                for (o, op) in ops {
-                    if o == r || invalid.contains(o) {
-                        continue;
+                match inv {
+                    Invalidator::Remove(m) => {
+                        for o in &op_ids {
+                            if o == inv_id || invalid.contains(o) {
+                                continue;
+                            }
+                            if ops[o].author() == m
+                                && graph.is_concurrent(*o, *inv_id)
+                                && invalid.insert(*o)
+                            {
+                                changed = true;
+                            }
+                        }
                     }
-                    if op.author() == m && graph.is_concurrent(*o, *r) && invalid.insert(*o) {
-                        changed = true;
+                    Invalidator::Demote(void_set) => {
+                        for o in void_set {
+                            if o != inv_id && invalid.insert(*o) {
+                                changed = true;
+                            }
+                        }
                     }
                 }
             }
 
             // Rule 3: drop any op whose author is not active in the op's causal ancestry.
-            for (o, op) in ops {
+            for o in &op_ids {
                 if invalid.contains(o) {
                     continue;
                 }
-                if !author_active_before(op.author(), *o, ops, graph, depth, genesis, &invalid)
+                if !author_active_before(ops[o].author(), *o, ops, graph, depth, genesis, &invalid)
                     && invalid.insert(*o)
                 {
                     changed = true;
@@ -409,16 +471,18 @@ fn strong_remove_fixpoint<OId: OpId, Op: SignedOp<OpId = OId>>(
         // (a suppressed re-add can't re-establish its member), and because they only grow the ignore set the
         // outer loop also converges.
         let mut suppressed = false;
-        for (a, op) in ops {
+        for a in &op_ids {
             if invalid.contains(a) {
                 continue;
             }
-            let MembershipAction::Add { member, .. } = op.action() else {
+            let MembershipAction::Add { member, .. } = ops[a].action() else {
                 continue;
             };
-            let concurrent_surviving_remove = removes
-                .iter()
-                .any(|(r, m)| m == member && !invalid.contains(r) && graph.is_concurrent(*a, *r));
+            let concurrent_surviving_remove = invalidators.iter().any(|(r, inv)| {
+                matches!(inv, Invalidator::Remove(m) if m == member)
+                    && !invalid.contains(r)
+                    && graph.is_concurrent(*a, *r)
+            });
             if concurrent_surviving_remove && invalid.insert(*a) {
                 suppressed = true;
             }
