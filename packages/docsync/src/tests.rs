@@ -231,6 +231,56 @@ fn blob_bootstrap_rejects_an_inflated_covered_frontier_that_would_suppress_a_pre
 }
 
 #[test]
+fn a_rejected_snapshot_is_overwritten_by_an_honest_recompaction() {
+    // OPE-421 self-heal: a client that REJECTS a poisoned snapshot must not let its claimed coverage block an
+    // honest re-compaction — it re-publishes the pointer with real state, collapsing the poison window to one
+    // sync interval (needs_snapshot_adoption + maybe_compact both stop trusting a rejected pointer's coverage).
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("real-dot".into()).unwrap(); // A:0
+
+    // Forge a poison snapshot: inflated covered {A:5} + a recognizable poison state.
+    let mut inflated = Frontier::default();
+    inflated.insert("replica-A".to_string(), 5);
+    let mut body = encode_frontier(&inflated);
+    body.extend_from_slice(b"poison-state");
+    let ctx = SealCtx {
+        kind: EntryKind::Snapshot,
+        replica_counter: 0,
+        prev_ciphertext_hash: Vec::new(),
+        covers_through_seq: 0,
+    };
+    let mut ps = PassthroughSealer;
+    let sealed = ps.seal(&ctx, &body).unwrap();
+    store
+        .put(&snapshot_key("doc"), &sealed.envelope, store_blob::Precondition::Any)
+        .unwrap();
+
+    // A syncs with a classify_snapshot that REJECTS the poison (as the auth gate would for a bad author).
+    let reject_poison = |_e: &[u8], body: &[u8]| {
+        if body.ends_with(b"poison-state") { Verdict::Reject } else { Verdict::Accept }
+    };
+    a.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, reject_poison)
+        .unwrap();
+    assert!(a.engine().lines.contains("real-dot"), "the poison did not suppress the real dot");
+
+    // maybe_compact must NOT be fooled by the rejected poison's coverage — it re-compacts, overwriting it.
+    assert!(
+        a.maybe_compact(&EveryNUpdates(1)).unwrap(),
+        "an honest re-compaction overwrote the poisoned pointer"
+    );
+
+    // A fresh client now sees an HONEST snapshot (real covered A:1), not the poison's inflated A:5.
+    let fresh = blob_client(store.clone(), "replica-Z");
+    let covered = fresh.snapshot_covered_frontier().unwrap().unwrap();
+    assert_eq!(
+        covered.get("replica-A").copied(),
+        Some(1),
+        "the honest snapshot covers A:1, not the poison's A:5"
+    );
+}
+
+#[test]
 fn blob_bootstrap_covers_multiple_replicas() {
     // The covered frontier spans every replica the snapshotting client had folded.
     let store = Arc::new(MemoryBlob::new());

@@ -915,9 +915,16 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// # Errors
     /// Returns [`SyncError`] if the store read or the snapshot open fails.
     pub fn snapshot_covered_frontier(&self) -> Result<Option<Frontier>, SyncError> {
-        let Some((env, _etag)) = self.store.get(&snapshot_key(&self.doc))? else {
+        let Some((env, etag)) = self.store.get(&snapshot_key(&self.doc))? else {
             return Ok(None);
         };
+        // A snapshot this client already REJECTED (OPE-421 auth) is not trusted for coverage: report
+        // no-coverage so `needs_snapshot_adoption` stops re-bootstrapping the poison AND `maybe_compact`
+        // re-compacts to OVERWRITE it — an honest client with full state re-publishes the pointer, the
+        // self-heal that collapses the poison window to one sync interval. Cleared when the etag changes.
+        if self.rejected_snapshot_etag.as_deref() == Some(etag.as_str()) {
+            return Ok(None);
+        }
         let body = self
             .sealer
             .open(EntryKind::Snapshot, &env)
