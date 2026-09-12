@@ -32,7 +32,7 @@ fn vk(seed: u8) -> [u8; 32] {
     sk(seed).verifying_key().to_bytes()
 }
 
-/// The shared contract we compare across engines: the resolved (member_id, role) set. Key bytes are
+/// The shared contract we compare across engines: the resolved (`member_id`, role) set. Key bytes are
 /// engine inputs, not semantic divergence, so they're excluded.
 fn semantic(v: &MembershipView) -> Vec<(String, i16)> {
     v.members.iter().map(|m| (m.member_id.clone(), m.role)).collect()

@@ -442,7 +442,7 @@ mod tests {
         h
     }
 
-    /// An UNSIGNED header stamping `rev` (rev 0 ⇒ empty governing_ref, the pre-share / backdate shape).
+    /// An UNSIGNED header stamping `rev` (rev 0 ⇒ empty `governing_ref`, the pre-share / backdate shape).
     fn unsigned(rev: u32) -> Header {
         Header {
             kind: Kind::Delta as i32,

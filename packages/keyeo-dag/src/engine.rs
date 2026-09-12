@@ -824,7 +824,7 @@ mod compaction_tests {
                 hpke_public_key: [0u8; 32],
             }],
         );
-        let mut k: TKeyeo = keyeo::<TOp, TRole, [u8; 32]>(genesis, TRole);
+        let mut ring: TKeyeo = keyeo::<TOp, TRole, [u8; 32]>(genesis, TRole);
         // A unique `sealing` tag per op so ops with the same parents (b and d both branch off a) don't collapse
         // to one content id.
         let mk = |tag: u8, parents: Vec<ContentId>| {
@@ -836,11 +836,11 @@ mod compaction_tests {
         let d = mk(3, vec![a.id]); // fork off a, concurrent with b/c
         let (aid, bid, cid, did) = (a.id, b.id, c.id, d.id);
         for op in [a, b, c, d] {
-            let _ = k.apply(op);
+            let _ = ring.apply(op);
         }
-        let _ = k.flush();
-        assert_eq!(k.effective_ops().len(), 4, "all four ops applied");
-        (k, aid, bid, cid, did)
+        let _ = ring.flush();
+        assert_eq!(ring.effective_ops().len(), 4, "all four ops applied");
+        (ring, aid, bid, cid, did)
     }
 
     #[test]
@@ -883,12 +883,12 @@ mod compaction_tests {
 
     #[test]
     fn accepts_a_complete_cut_across_all_tips_and_prunes_below_it() {
-        let (k, a, b, c, d) = dag();
+        let (ring, a, b, c, d) = dag();
 
         // Frontier {c, d} captures BOTH concurrent tips — a complete cut. Now a and b are below the whole
         // frontier and nothing retained is concurrent with them, so both prune; the tips c, d are the anchors.
         let out = <Retained<'_, TOp> as Compaction>::compact(
-            &k.retained(),
+            &ring.retained(),
             &Frontier { ops: vec![c, d] },
             RetentionPlan::Snapshot { keep_last: 0 },
         )

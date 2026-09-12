@@ -92,10 +92,8 @@ mod tests {
 
     #[test]
     fn roles_are_power_descending() {
-        assert!(ROLE_OWNER < ROLE_CO_OWNER);
-        assert!(ROLE_CO_OWNER < ROLE_MAINTAINER);
-        assert!(ROLE_MAINTAINER < ROLE_EDITOR);
-        assert!(ROLE_EDITOR < ROLE_VIEWER);
+        let ladder = [ROLE_OWNER, ROLE_CO_OWNER, ROLE_MAINTAINER, ROLE_EDITOR, ROLE_VIEWER];
+        assert!(ladder.windows(2).all(|w| w[0] < w[1]), "roles are strictly power-descending");
     }
 
     /// openom-keyring-api hardcodes its OWN generic role convention (Owner=1, CoOwner=2) so it stays

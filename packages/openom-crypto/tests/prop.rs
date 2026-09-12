@@ -130,7 +130,7 @@ struct SealInput {
 /// The two frozen envelope invariants over a structured input: a validly-sealed envelope opens back
 /// to its exact plaintext, and any real ciphertext change fails authentication (never opens, never
 /// panics). Shared verbatim with the fuzz/ target's body.
-fn check_seal_input(input: SealInput) {
+fn check_seal_input(input: &SealInput) {
     let dek = generate_dek().unwrap();
     let aead = if input.aes_gcm {
         Aead::Aes256Gcm
@@ -185,7 +185,7 @@ proptest! {
         // structured SealInput. A short buffer that can't fill the struct just yields Err — skip it.
         let u = Unstructured::new(&entropy);
         if let Ok(input) = SealInput::arbitrary_take_rest(u) {
-            check_seal_input(input);
+            check_seal_input(&input);
         }
     }
 }

@@ -60,7 +60,7 @@ struct Cast {
     seed: u8,
     id: &'static str,
     /// Proto `MemberRole` value (drives both the chain member role and the keyeo `KeyringRole`). The chain
-    /// signer set is DERIVED from this (a member at CO_OWNER or stronger is a signer, OPE-309), so there is
+    /// signer set is DERIVED from this (a member at `CO_OWNER` or stronger is a signer, OPE-309), so there is
     /// no separate signer-role axis.
     member_role: i32,
 }
@@ -116,13 +116,13 @@ fn chain_next(prior: &Keyring, mutate: impl FnOnce(&mut Keyring), sign_with: &[u
     k
 }
 
-/// The keyeo engine for the same cast (constructor genesis; the single-axis `KeyringRole` = MemberRole).
+/// The keyeo engine for the same cast (constructor genesis; the single-axis `KeyringRole` = `MemberRole`).
 fn keyeo_engine(cast: &[Cast]) -> KeyringEngine {
     let inits: Vec<KeyringMemberInit> = cast
         .iter()
         .map(|c| MemberInit {
             id: c.id.to_string(),
-            role: KeyringRole(c.member_role as i16),
+            role: KeyringRole(i16::try_from(c.member_role).unwrap()),
             author_public_key: pk32(&sk(c.seed)),
             hpke_public_key: [c.seed; 32],
         })
@@ -140,7 +140,7 @@ fn keyeo_engine_with_rvk(cast: &[Cast], rvk_pub: [u8; 32]) -> KeyringEngine {
         .iter()
         .map(|c| MemberInit {
             id: c.id.to_string(),
-            role: KeyringRole(c.member_role as i16),
+            role: KeyringRole(i16::try_from(c.member_role).unwrap()),
             author_public_key: pk32(&sk(c.seed)),
             hpke_public_key: [c.seed; 32],
         })

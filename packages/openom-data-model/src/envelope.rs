@@ -462,7 +462,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "parts": { "given": "Ada" } }),
             &did,
-            hlc(1771765800000),
+            hlc(1_771_765_800_000),
         );
         c.compute_id().unwrap();
 

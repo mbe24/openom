@@ -1,8 +1,8 @@
-//! Server integration tests — drive the real router (routing + extractors + handlers
-//! + Postgres + S3) in-process via `tower`'s `oneshot`, no socket. The presigned
-//! media PUT/GET legs go out to MinIO over reqwest, exactly as a client would.
+//! Server integration tests — drive the real router (routing, extractors, handlers,
+//! Postgres, and S3) in-process via `tower`'s `oneshot`, no socket. The presigned
+//! media PUT/GET legs go out to `MinIO` over reqwest, exactly as a client would.
 //!
-//! These hit a **live** Postgres + MinIO, so they're `#[ignore]`d. They own only
+//! These hit a **live** Postgres + `MinIO`, so they're `#[ignore]`d. They own only
 //! random tree ids under the seeded dev account and assert invariants/deltas (not
 //! absolute meter values), so they're safe to run against the shared local stack.
 //!
@@ -81,7 +81,7 @@ fn snapshot_envelope(tree: Uuid, ciphertext: &[u8], hash_of: Option<&[u8]>) -> V
     .encode_to_vec()
 }
 
-/// A real KIND_PROPOSAL envelope (no replica dot — each proposal is a fresh submission).
+/// A real `KIND_PROPOSAL` envelope (no replica dot — each proposal is a fresh submission).
 fn proposal_envelope(tree: Uuid, ciphertext: &[u8]) -> Vec<u8> {
     let header = Header {
         kind: Kind::Proposal as i32,
@@ -98,7 +98,7 @@ fn proposal_envelope(tree: Uuid, ciphertext: &[u8]) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// A real delta envelope with a replica dot (replica_id + replica_counter).
+/// A real delta envelope with a replica dot (`replica_id` + `replica_counter`).
 fn delta_envelope(tree: Uuid, ciphertext: &[u8], replica: &[u8], counter: u64) -> Vec<u8> {
     let header = Header {
         kind: Kind::Delta as i32,
@@ -174,7 +174,7 @@ fn put_tree_as(tree: Uuid, env: &[u8], member: Uuid) -> Request<Body> {
 }
 
 /// A pool straight to the test DB, to seed accounts with specific metering caps. Uses
-/// the same DATABASE_URL the router builds its state from.
+/// the same `DATABASE_URL` the router builds its state from.
 async fn db() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL set for integration tests");
     sqlx::postgres::PgPoolOptions::new()
@@ -236,7 +236,7 @@ async fn set_proposal_meters(
 }
 
 /// Grant (or change) a member's role on a tree — stands in for slice 2's keyring-derived ACL.
-/// Roles: 1 owner, 2 co_owner, 3 maintainer, 4 editor, 5 viewer.
+/// Roles: 1 owner, 2 `co_owner`, 3 maintainer, 4 editor, 5 viewer.
 async fn grant_role(db: &sqlx::PgPool, tree_id: Uuid, member: Uuid, role: i16) {
     sqlx::query(
         "INSERT INTO tree_access (tree_id, member_id, role) VALUES ($1, $2, $3)
@@ -250,7 +250,7 @@ async fn grant_role(db: &sqlx::PgPool, tree_id: Uuid, member: Uuid, role: i16) {
     .expect("grant role");
 }
 
-/// Turn on media entitlements for an account (so a StageMedia authz PASS isn't masked by an
+/// Turn on media entitlements for an account (so a `StageMedia` authz PASS isn't masked by an
 /// entitlement 403).
 async fn enable_media(db: &sqlx::PgPool, id: Uuid) {
     sqlx::query(
@@ -269,7 +269,7 @@ fn intent_body() -> Value {
     serde_json::json!({ "size_bytes": 100, "object_sha256": hash })
 }
 
-fn post_json_as(uri: String, json: Value, member: Uuid) -> Request<Body> {
+fn post_json_as(uri: String, json: &Value, member: Uuid) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
@@ -413,7 +413,7 @@ fn post(uri: String) -> Request<Body> {
         .body(Body::empty())
         .unwrap()
 }
-fn post_json(uri: String, json: Value) -> Request<Body> {
+fn post_json(uri: String, json: &Value) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri(uri)
@@ -719,77 +719,27 @@ async fn roles_read_propose_commit() {
 
     // Propose — Editor+ yes, Viewer no.
     let prop = proposal_envelope(tree, b"suggestion");
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, viewer)
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN,
-        "viewer can't propose"
-    );
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, editor)
-        )
-        .await
-        .0,
-        StatusCode::OK,
-        "editor proposes"
-    );
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, maint)
-        )
-        .await
-        .0,
-        StatusCode::OK,
-        "maintainer proposes"
-    );
+    for (member, want, msg) in [
+        (viewer, StatusCode::FORBIDDEN, "viewer can't propose"),
+        (editor, StatusCode::OK, "editor proposes"),
+        (maint, StatusCode::OK, "maintainer proposes"),
+    ] {
+        let (s, ..) =
+            send(&app, post_bytes_as(format!("/v1/trees/{tree}/proposals"), &prop, member)).await;
+        assert_eq!(s, want, "{msg}");
+    }
 
     // Commit (append a delta) — Maintainer+ yes, Editor + Viewer no.
     let d = |r: &'static [u8]| delta_envelope(tree, b"x", r, 0);
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(
-                format!("/v1/trees/{tree}/log"),
-                &d(b"replica-viewer00"),
-                viewer
-            )
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN,
-        "viewer can't commit"
-    );
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(
-                format!("/v1/trees/{tree}/log"),
-                &d(b"replica-editor00"),
-                editor
-            )
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN,
-        "editor can't commit (V1 propose/approve)"
-    );
-    assert_eq!(
-        send(
-            &app,
-            post_bytes_as(format!("/v1/trees/{tree}/log"), &d(b"replica-maint000"), maint)
-        )
-        .await
-        .0,
-        StatusCode::OK,
-        "maintainer commits"
-    );
+    for (member, replica, want, msg) in [
+        (viewer, b"replica-viewer00", StatusCode::FORBIDDEN, "viewer can't commit"),
+        (editor, b"replica-editor00", StatusCode::FORBIDDEN, "editor can't commit (V1 propose/approve)"),
+        (maint, b"replica-maint000", StatusCode::OK, "maintainer commits"),
+    ] {
+        let (s, ..) =
+            send(&app, post_bytes_as(format!("/v1/trees/{tree}/log"), &d(replica), member)).await;
+        assert_eq!(s, want, "{msg}");
+    }
 }
 
 #[tokio::test]
@@ -819,7 +769,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/v1/trees/{tree}/media/intent"), intent_body(), viewer)
+            post_json_as(format!("/v1/trees/{tree}/media/intent"), &intent_body(), viewer)
         )
         .await
         .0,
@@ -829,7 +779,7 @@ async fn roles_media() {
     assert_eq!(
         send(
             &app,
-            post_json_as(format!("/v1/trees/{tree}/media/intent"), intent_body(), editor)
+            post_json_as(format!("/v1/trees/{tree}/media/intent"), &intent_body(), editor)
         )
         .await
         .0,
@@ -1283,9 +1233,8 @@ async fn keyring_accepts_a_recovery_reset() {
     let (_, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/keyring?from=2"), owner)).await;
     let h: Value = serde_json::from_slice(&b).unwrap();
     assert_eq!(h["head"].as_i64().unwrap(), 2);
-    assert_eq!(
+    assert!(
         h["revisions"][0]["is_reset"].as_bool().unwrap(),
-        true,
         "revision 2 is flagged a reset"
     );
 
@@ -1543,6 +1492,16 @@ async fn proposals_lifecycle() {
     );
 }
 
+/// POST a fresh proposal `label` to `tree` as `member`; returns the status + response body.
+async fn propose(app: &Router, tree: Uuid, label: &[u8], member: Uuid) -> (StatusCode, Vec<u8>) {
+    let (s, _, body) = send(
+        app,
+        post_bytes_as(format!("/v1/trees/{tree}/proposals"), &proposal_envelope(tree, label), member),
+    )
+    .await;
+    (s, body)
+}
+
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn proposals_caps() {
@@ -1558,15 +1517,7 @@ async fn proposals_caps() {
         put_tree_as(t_free, &snapshot_envelope(t_free, b"ct", None), free),
     )
     .await;
-    let (s, _, _) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_free}/proposals"),
-            &proposal_envelope(t_free, b"x"),
-            free,
-        ),
-    )
-    .await;
+    let (s, _) = propose(&app, t_free, b"x", free).await;
     assert_eq!(
         s,
         StatusCode::FORBIDDEN,
@@ -1583,29 +1534,13 @@ async fn proposals_caps() {
         put_tree_as(t_cap, &snapshot_envelope(t_cap, b"ct", None), cap),
     )
     .await;
-    let (s, _, b1) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_cap}/proposals"),
-            &proposal_envelope(t_cap, b"p1"),
-            cap,
-        ),
-    )
-    .await;
+    let (s, b1) = propose(&app, t_cap, b"p1", cap).await;
     assert_eq!(s, StatusCode::OK, "first proposal fits");
     let id1 = serde_json::from_slice::<Value>(&b1).unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
-    let (s, _, _) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_cap}/proposals"),
-            &proposal_envelope(t_cap, b"p2"),
-            cap,
-        ),
-    )
-    .await;
+    let (s, _) = propose(&app, t_cap, b"p2", cap).await;
     assert_eq!(
         s,
         StatusCode::FORBIDDEN,
@@ -1616,15 +1551,7 @@ async fn proposals_caps() {
         delete_as(format!("/v1/trees/{t_cap}/proposals/{id1}"), cap),
     )
     .await;
-    let (s, _, _) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_cap}/proposals"),
-            &proposal_envelope(t_cap, b"p3"),
-            cap,
-        ),
-    )
-    .await;
+    let (s, _) = propose(&app, t_cap, b"p3", cap).await;
     assert_eq!(s, StatusCode::OK, "a slot freed up after resolving one");
 
     // (3) Per-member/day cap of 1 backed by the ledger: survives delete-then-resubmit.
@@ -1637,15 +1564,7 @@ async fn proposals_caps() {
         put_tree_as(t_day, &snapshot_envelope(t_day, b"ct", None), day),
     )
     .await;
-    let (s, _, bd) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_day}/proposals"),
-            &proposal_envelope(t_day, b"d1"),
-            day,
-        ),
-    )
-    .await;
+    let (s, bd) = propose(&app, t_day, b"d1", day).await;
     assert_eq!(s, StatusCode::OK, "first submission of the day");
     let idd = serde_json::from_slice::<Value>(&bd).unwrap()["id"]
         .as_str()
@@ -1656,15 +1575,7 @@ async fn proposals_caps() {
         delete_as(format!("/v1/trees/{t_day}/proposals/{idd}"), day),
     )
     .await; // resolve it
-    let (s, _, _) = send(
-        &app,
-        post_bytes_as(
-            format!("/v1/trees/{t_day}/proposals"),
-            &proposal_envelope(t_day, b"d2"),
-            day,
-        ),
-    )
-    .await;
+    let (s, _) = propose(&app, t_day, b"d2", day).await;
     assert_eq!(
         s,
         StatusCode::FORBIDDEN,
@@ -1899,7 +1810,7 @@ async fn media_lifecycle_and_gc() {
     let media = b"openom fake encrypted media blob".to_vec();
     let intent = post_json(
         format!("/v1/trees/{tree}/media/intent"),
-        serde_json::json!({ "size_bytes": media.len(), "object_sha256": sha256_b64(&media) }),
+        &serde_json::json!({ "size_bytes": media.len(), "object_sha256": sha256_b64(&media) }),
     );
     let (s, _, body) = send(&app, intent).await;
     assert_eq!(s, StatusCode::OK, "intent");
@@ -1922,7 +1833,7 @@ async fn media_lifecycle_and_gc() {
     let (s, _, cbody) = send(&app, post(format!("/v1/trees/{tree}/media/{blob}/confirm"))).await;
     assert_eq!(s, StatusCode::OK, "confirm");
     let cj: Value = serde_json::from_slice(&cbody).unwrap();
-    assert_eq!(cj["size_bytes"].as_u64().unwrap() as usize, media.len());
+    assert_eq!(usize::try_from(cj["size_bytes"].as_u64().unwrap()).unwrap(), media.len());
 
     // Presigned download round-trips the exact bytes.
     let (s, _, gbody) = send(&app, get(format!("/v1/trees/{tree}/media/{blob}"))).await;
@@ -1965,7 +1876,7 @@ async fn media_lifecycle_and_gc() {
 
 // ---- membership summary (OPE-278 / server-keyring-decoupling) ----
 
-fn put_json_as(uri: String, json: Value, member: Uuid) -> Request<Body> {
+fn put_json_as(uri: String, json: &Value, member: Uuid) -> Request<Body> {
     Request::builder()
         .method("PUT")
         .uri(uri)
@@ -2008,7 +1919,7 @@ async fn access_summary_derives_acl_generation_and_basis() {
 
     let (s, _, body) = send(
         &app,
-        put_json_as(uri.clone(), summary_body(&["op:aa", "op:bb"], None, &[(owner, 1), (editor, 4)]), owner),
+        put_json_as(uri.clone(), &summary_body(&["op:aa", "op:bb"], None, &[(owner, 1), (editor, 4)]), owner),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "owner pushes the first summary");
@@ -2038,22 +1949,22 @@ async fn access_summary_cas_and_idempotent_reassert() {
     let g = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap()["generation"].as_i64().unwrap();
 
     // First push (expects no summary yet) → generation 1.
-    let (_, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(owner, 1), (editor, 4)]), owner)).await;
+    let (_, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(owner, 1), (editor, 4)]), owner)).await;
     assert_eq!(g(&b), 1);
 
     // Idempotent re-assert (same members) → 200, generation NOT bumped.
-    let (s, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 4)]), owner)).await;
+    let (s, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 4)]), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(g(&b), 1, "an identical re-assert does not bump the generation");
     assert_eq!(serde_json::from_slice::<Value>(&b).unwrap()["unchanged"], serde_json::json!(true));
 
     // A real change (add a viewer) → generation 2.
-    let (_, _, b) = send(&app, put_json_as(uri.clone(), summary_body(&["op:2"], Some(1), &[(owner, 1), (editor, 4), (viewer, 5)]), owner)).await;
+    let (_, _, b) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:2"], Some(1), &[(owner, 1), (editor, 4), (viewer, 5)]), owner)).await;
     assert_eq!(g(&b), 2);
     assert_eq!(role_of(&db, tree, viewer).await, Some(5));
 
     // A stale push (wrong expected generation) → 409, and it does not apply.
-    let (s, _, _) = send(&app, put_json_as(uri, summary_body(&["op:2"], Some(1), &[(owner, 1)]), owner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri, &summary_body(&["op:2"], Some(1), &[(owner, 1)]), owner)).await;
     assert_eq!(s, StatusCode::CONFLICT, "a stale generation is a CAS conflict");
     assert_eq!(role_of(&db, tree, viewer).await, Some(5), "the refused push did not drop the viewer");
 }
@@ -2074,19 +1985,19 @@ async fn access_summary_signer_gate() {
     let uri = format!("/v1/trees/{tree}/access");
 
     // Owner establishes the roster.
-    send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)]), owner)).await;
+    send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4)]), owner)).await;
 
     // A co-owner may push (adds a viewer).
     let viewer = Uuid::new_v4();
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:2"], Some(1), &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4), (viewer, 5)]), coowner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:2"], Some(1), &[(owner, 1), (coowner, 2), (maint, 3), (editor, 4), (viewer, 5)]), coowner)).await;
     assert_eq!(s, StatusCode::OK, "a co-owner may assert membership");
 
     // A Maintainer (role 3) may NOT.
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:3"], Some(2), &[(owner, 1)]), maint)).await;
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:3"], Some(2), &[(owner, 1)]), maint)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "a Maintainer is below the signer gate");
 
     // A stranger with no role may NOT.
-    let (s, _, _) = send(&app, put_json_as(uri, summary_body(&["op:3"], Some(2), &[(owner, 1)]), stranger)).await;
+    let (s, _, _) = send(&app, put_json_as(uri, &summary_body(&["op:3"], Some(2), &[(owner, 1)]), stranger)).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "a non-member is refused");
 }
 
@@ -2101,23 +2012,23 @@ async fn access_summary_owner_invariant_and_validation() {
     let uri = format!("/v1/trees/{tree}/access");
 
     // A summary that OMITS the owner still keeps the owner in the ACL at role Owner (owner is invariant).
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&["op:1"], None, &[(editor, 4)]), owner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&["op:1"], None, &[(editor, 4)]), owner)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(role_of(&db, tree, owner).await, Some(1), "the owner row is never dropped");
     assert_eq!(role_of(&db, tree, editor).await, Some(4));
 
     // An empty member list is refused (never nuke the ACL).
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), summary_body(&[], Some(1), &[]), owner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), &summary_body(&[], Some(1), &[]), owner)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "empty membership is refused");
 
     // A non-UUID member_id is refused (the advisory layer keys on the account UUID).
     let bad_id = serde_json::json!({ "basis": ["op:1"], "expected_generation": 1, "members": [{ "member_id": "not-a-uuid", "role": 4 }] });
-    let (s, _, _) = send(&app, put_json_as(uri.clone(), bad_id, owner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri.clone(), &bad_id, owner)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "member_id must be a uuid");
 
     // A role outside 1..=5 is refused.
     let bad_role = summary_body(&["op:1"], Some(1), &[(owner, 1), (editor, 9)]);
-    let (s, _, _) = send(&app, put_json_as(uri, bad_role, owner)).await;
+    let (s, _, _) = send(&app, put_json_as(uri, &bad_role, owner)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "role out of range is refused");
 }
 
@@ -2255,12 +2166,12 @@ async fn create_tree_concurrent_creates_respect_max_trees() {
         .count();
     assert_eq!(created, 1, "exactly one concurrent create wins the single free slot");
 
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM trees WHERE owner_id = $1")
+    let tree_count: i64 = sqlx::query_scalar("SELECT count(*) FROM trees WHERE owner_id = $1")
         .bind(owner)
         .fetch_one(&db)
         .await
         .unwrap();
-    assert_eq!(n, 1, "the owner never exceeds max_trees under a concurrent race");
+    assert_eq!(tree_count, 1, "the owner never exceeds max_trees under a concurrent race");
 }
 
 #[tokio::test]
@@ -2628,7 +2539,7 @@ async fn frontier_report_upserts_and_administer_gates_read() {
     grant_role(&db, tree, editor, 4).await;
 
     let body = serde_json::json!({ "frontier": { "replicaAAA": 3, "replicaBBB": 1 } });
-    let (s, _, _) = send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), body, editor)).await;
+    let (s, _, _) = send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), &body, editor)).await;
     assert_eq!(s, StatusCode::OK, "a member reports its own frontier");
 
     // Administer (Maintainer+) can read the raw reports.
@@ -2643,7 +2554,7 @@ async fn frontier_report_upserts_and_administer_gates_read() {
 
     // Re-report updates in place, not duplicates.
     let body2 = serde_json::json!({ "frontier": { "replicaAAA": 5 } });
-    send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), body2, editor)).await;
+    send(&app, put_json_as(format!("/v1/trees/{tree}/frontier"), &body2, editor)).await;
     let (_, _, b2) = send(&app, get_as(format!("/v1/trees/{tree}/frontier"), maint)).await;
     let v2: Value = serde_json::from_slice(&b2).unwrap();
     let rows2 = v2["frontier"].as_array().unwrap();
@@ -2664,7 +2575,7 @@ async fn frontier_report_upserts_and_administer_gates_read() {
     let body3 = serde_json::json!({ "frontier": { "replicaAAA": 1 } });
     let (s, _, _) = send(
         &app,
-        put_json_as(format!("/v1/trees/{tree}/frontier"), body3, stranger),
+        put_json_as(format!("/v1/trees/{tree}/frontier"), &body3, stranger),
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "non-member can't report frontier");
@@ -2885,7 +2796,7 @@ async fn log_get_states_absent_present_marked() {
         &app,
         put_json_as(
             format!("/v1/trees/{tree}/frontier"),
-            serde_json::json!({ "frontier": { "rX": 1 } }),
+            &serde_json::json!({ "frontier": { "rX": 1 } }),
             owner,
         ),
     )
@@ -2950,7 +2861,7 @@ async fn gc_sweep_reaps_credits_and_gones() {
         &app,
         put_json_as(
             format!("/v1/trees/{tree}/frontier"),
-            serde_json::json!({ "frontier": { "rG": 2 } }),
+            &serde_json::json!({ "frontier": { "rG": 2 } }),
             owner,
         ),
     )

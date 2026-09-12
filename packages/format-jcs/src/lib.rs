@@ -258,14 +258,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn canon(v: Value) -> String {
-        String::from_utf8(to_canonical_value(&v).unwrap()).unwrap()
+    fn canon(v: &Value) -> String {
+        String::from_utf8(to_canonical_value(v).unwrap()).unwrap()
     }
 
     #[test]
     fn sorts_keys_and_strips_whitespace() {
         let v = json!({ "b": 1, "a": 2, "c": { "y": 1, "x": 2 } });
-        assert_eq!(canon(v), r#"{"a":2,"b":1,"c":{"x":2,"y":1}}"#);
+        assert_eq!(canon(&v), r#"{"a":2,"b":1,"c":{"x":2,"y":1}}"#);
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert(bmp.to_string(), json!(1));
         map.insert(astral.to_string(), json!(2));
-        let out = canon(Value::Object(map));
+        let out = canon(&Value::Object(map));
         let astral_pos = out.find(astral).unwrap();
         let bmp_pos = out.find(bmp).unwrap();
         assert!(
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn integers_pass_through() {
         assert_eq!(
-            canon(json!({ "n": -42, "u": 9_007_199_254_740_993_i64 })),
+            canon(&json!({ "n": -42, "u": 9_007_199_254_740_993_i64 })),
             r#"{"n":-42,"u":9007199254740993}"#
         );
     }
@@ -313,7 +313,7 @@ mod tests {
     fn string_escaping_is_minimal() {
         // quote, backslash, short escapes, a C0 control (), and literal non-ASCII (ü, 😀).
         let v = json!({ "s": "a\"\\\n\u{07}ü😀" });
-        assert_eq!(canon(v), "{\"s\":\"a\\\"\\\\\\n\\u0007ü😀\"}");
+        assert_eq!(canon(&v), "{\"s\":\"a\\\"\\\\\\n\\u0007ü😀\"}");
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
         let mut map = serde_json::Map::new();
         map.insert(bmp.to_string(), json!(1));
         map.insert(astral.to_string(), json!(2));
-        let out = canon(Value::Object(map));
+        let out = canon(&Value::Object(map));
         assert!(
             out.find(astral).unwrap() < out.find(bmp).unwrap(),
             "shared-prefix key must sort by UTF-16 continuation: {out}"
@@ -430,9 +430,9 @@ mod tests {
     #[test]
     fn write_string_escapes_only_below_0x20_with_lowercase_hex() {
         // Space (0x20) is literal, not escaped — kills `(c as u32) < 0x20` -> `<= 0x20`.
-        assert_eq!(canon(json!("a b")), r#""a b""#);
+        assert_eq!(canon(&json!("a b")), r#""a b""#);
         // A control whose low nibble is >= 10 uses the correct hex letter — kills hex_lower's
         // `nibble - 10` -> `nibble / 10` (which would turn every a–f nibble into 'b').
-        assert_eq!(canon(json!("\u{0f}")), "\"\\u000f\"");
+        assert_eq!(canon(&json!("\u{0f}")), "\"\\u000f\"");
     }
 }

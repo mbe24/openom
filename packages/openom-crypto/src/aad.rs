@@ -207,7 +207,7 @@ mod tests {
             want.extend_from_slice(&v.to_be_bytes());
         }
         let framed = |want: &mut Vec<u8>, b: &[u8]| {
-            want.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            want.extend_from_slice(&u32::try_from(b.len()).unwrap().to_be_bytes());
             want.extend_from_slice(b);
         };
         framed(&mut want, &[0xAA, 0xBB]); // key_id
@@ -280,7 +280,7 @@ mod tests {
         let hash = [0x44u8; 32];
         let mut want = Vec::new();
         let framed = |w: &mut Vec<u8>, b: &[u8]| {
-            w.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            w.extend_from_slice(&u32::try_from(b.len()).unwrap().to_be_bytes());
             w.extend_from_slice(b);
         };
         framed(&mut want, b"openom:author:v1");
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(author_signing_bytes(1, &h, &hash), want);
     }
 
-    /// Excludes nonce, ciphertext_hash, and author_signature — changing any leaves the signing bytes
+    /// Excludes nonce, `ciphertext_hash`, and `author_signature` — changing any leaves the signing bytes
     /// unchanged (so the signature is computable pre-seal and doesn't self-reference).
     #[test]
     fn author_signing_bytes_excludes_seal_derived_fields() {
@@ -354,7 +354,7 @@ mod tests {
     fn author_signing_bytes_domain_disjoint() {
         let h = attributed();
         let asb = author_signing_bytes(1, &h, &[0x44; 32]);
-        assert_eq!(&asb[..4], &(b"openom:author:v1".len() as u32).to_be_bytes());
+        assert_eq!(&asb[..4], &u32::try_from(b"openom:author:v1".len()).unwrap().to_be_bytes());
         assert_eq!(&asb[4..20], b"openom:author:v1");
         // header_aad starts with a bare version int (0,0,0,1), not a framed tag → disjoint at byte 0..4.
         assert_ne!(asb[..4], header_aad(1, &h)[..4]);

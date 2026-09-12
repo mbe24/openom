@@ -296,8 +296,8 @@ mod tests {
         MemberView {
             member_id: id.to_string(),
             role,
-            author_public_key: vec![role as u8],
-            hpke_public_key: vec![role as u8],
+            author_public_key: vec![role.to_le_bytes()[0]],
+            hpke_public_key: vec![role.to_le_bytes()[0]],
         }
     }
 

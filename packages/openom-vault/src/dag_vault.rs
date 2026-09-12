@@ -1761,6 +1761,32 @@ mod tests {
         }
     }
 
+    /// Admit `member_id` as an EDITOR onto `anchor`, returning the new anchor — the verbose
+    /// `add_member` + `Joiner::from_bytes` preamble shared by the membership scenarios.
+    fn admit_editor(
+        tree: &TreeId,
+        owner: &MemberId,
+        owner_pass: &Passphrase,
+        anchor: &[u8],
+        member_id: &str,
+        secrets: &crate::vault_core::OwnerSecrets,
+    ) -> Vec<u8> {
+        DagVault
+            .add_member(
+                &ctx(tree, owner, &ReplicaId::new(b"r1")),
+                anchor,
+                owner_pass,
+                &crate::vault::Joiner::from_bytes(
+                    &MemberId::new(member_id),
+                    KeyringRole::EDITOR,
+                    &secrets.root.identity.verifying_key().to_bytes(),
+                    &secrets.root.hpke_public,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    }
+
     /// The DAG vault provisions a tree's recovery-verification key via `openom_crypto::derive_rvk` (the
     /// shared vault derivation, also used by the chain vault), but the DAG *engine* verifies a `ReFound`
     /// against its own `openom_keyring_dag::recovery::derive_rvk`. Since OPE-279 those two live in different crates —
@@ -1935,9 +1961,9 @@ mod tests {
         let removed = sealing_entry(2, b"k1", 1, Remove, vec![], None);
 
         // Cut after genesis: author from [genesis], retained tail = [removed].
-        let (segment, baseline) = author_checkpoint_sealing(&[genesis.clone()]).unwrap();
+        let (segment, baseline) = author_checkpoint_sealing(std::slice::from_ref(&genesis)).unwrap();
         let from_cp =
-            fold_from_checkpoint(&segment, baseline, &[removed.clone()], &members).unwrap();
+            fold_from_checkpoint(&segment, baseline, std::slice::from_ref(&removed), &members).unwrap();
         let full = fold_sealing(&[genesis, removed], &members).unwrap();
         assert_folded_eq(&from_cp, &full);
     }
@@ -1961,7 +1987,7 @@ mod tests {
         assert_eq!(baseline, 2, "two minting entries below the cut");
 
         let from_cp =
-            fold_from_checkpoint(&segment, baseline, &[retained.clone()], &members).unwrap();
+            fold_from_checkpoint(&segment, baseline, std::slice::from_ref(&retained), &members).unwrap();
         let full = fold_sealing(&[genesis, removed_hi, retained], &members).unwrap();
 
         assert!(
@@ -1974,7 +2000,7 @@ mod tests {
     /// End-to-end: author a checkpoint-rooted anchor from a real provisioned anchor (the vault supplies the
     /// sealing authoring as the callback), then resolve BOTH the checkpoint anchor and the full anchor and
     /// assert they fold to the identical `FoldedSealing` + the same membership. Exercises the whole wired path:
-    /// compact_to_checkpoint → adopt → fold_from_checkpoint.
+    /// `compact_to_checkpoint` → adopt → `fold_from_checkpoint`.
     #[test]
     fn compact_to_checkpoint_round_trips_through_resolve() {
         let sk = edsign::SigningKey::from_seed(&[9u8; 32]);
@@ -2158,7 +2184,7 @@ mod tests {
         );
     }
 
-    /// Ordinal-inflation DoS defense (OPE-289): an ELIGIBLE (Remove-origin) epoch grinding an implausible
+    /// Ordinal-inflation `DoS` defense (OPE-289): an ELIGIBLE (Remove-origin) epoch grinding an implausible
     /// ordinal is dropped by the plausibility bound (ordinal < minting-op count) — so it can neither win the
     /// write epoch nor sit in the retained set where a later `max()+1` re-epoch would `RevisionOverflow` and
     /// permanently brick removals/reseals. A plausible higher ordinal still wins, so the bound never
@@ -2533,7 +2559,7 @@ mod tests {
     }
 
     /// Provision on device A, seal data, then unlock from the anchor alone on device B and open it —
-    /// the dag vault produces a working SealerSet through the shared core, end to end.
+    /// the dag vault produces a working `SealerSet` through the shared core, end to end.
     #[test]
     fn dag_provision_then_unlock_opens_the_same_data() {
         let tree = TreeId::new(TREE);
@@ -2569,7 +2595,7 @@ mod tests {
     }
 
     /// Recover under a new passphrase, then unlock the recovered anchor with it and open pre-recovery
-    /// data — exercises the ReFound op + the multi-op sealing fold (genesis escrow then the ReFound's
+    /// data — exercises the `ReFound` op + the multi-op sealing fold (genesis escrow then the `ReFound`'s
     /// re-escrow, latest wins) + the anti-substitution check against the retargeted Owner.
     #[test]
     fn dag_recover_then_unlock_with_the_new_passphrase_opens_the_same_data() {
@@ -2756,20 +2782,7 @@ mod tests {
         let bob_pass = Passphrase::new(b"bobs own passphrase");
         let bob = new_owner_secrets(bob_pass.expose()).unwrap();
         let bob_id = "acct-bob";
-        let base = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new(bob_id),
-                    KeyringRole::EDITOR,
-                    &bob.root.identity.verifying_key().to_bytes(),
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let base = admit_editor(&tree, &owner, &owner_pass, &p.anchor, bob_id, &bob);
         let base_floor = dag_client::watermark(&base).unwrap();
 
         // Branch A: the owner rotates the recovery authority (escrow A → B; epoch 0 re-wrapped to B).
@@ -2868,7 +2881,7 @@ mod tests {
         );
     }
 
-    /// OPE-381 / F3 DoS bound: one author may add at most `MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH` RrkHpke
+    /// OPE-381 / F3 `DoS` bound: one author may add at most `MAX_RRK_ADDED_WRAPS_PER_AUTHOR_PER_EPOCH` `RrkHpke`
     /// wraps to a single epoch. A hostile member piling junk RRK wraps onto an epoch (to inflate the owner's
     /// per-unlock HPKE work) is capped at fold time; the epoch's OWN minted RRK wrap is never counted, so the
     /// baseline recovery access is untouched.
@@ -3589,34 +3602,8 @@ mod tests {
         // Add bob + carol as editors.
         let bob = new_owner_secrets(Passphrase::new(b"bob pass").expose()).unwrap();
         let carol = new_owner_secrets(Passphrase::new(b"carol pass").expose()).unwrap();
-        let a1 = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &p.anchor,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-bob"),
-                    KeyringRole::EDITOR,
-                    &bob.root.identity.verifying_key().to_bytes(),
-                    &bob.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-        let a2 = DagVault
-            .add_member(
-                &ctx(&tree, &owner, &ReplicaId::new(b"r1")),
-                &a1,
-                &owner_pass,
-                &crate::vault::Joiner::from_bytes(
-                    &MemberId::new("acct-carol"),
-                    KeyringRole::EDITOR,
-                    &carol.root.identity.verifying_key().to_bytes(),
-                    &carol.root.hpke_public,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let a1 = admit_editor(&tree, &owner, &owner_pass, &p.anchor, "acct-bob", &bob);
+        let a2 = admit_editor(&tree, &owner, &owner_pass, &a1, "acct-carol", &carol);
 
         // Two CONCURRENT removals from a2 (both parent on the same frontier): A removes bob, B removes carol.
         let branch_a = DagVault

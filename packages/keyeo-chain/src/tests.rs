@@ -177,7 +177,7 @@ fn anchor(d: &TestDoc) -> Anchor<String, TestRole, [u8; 32]> {
 fn add_editor<'a>(k: &'a edsign::SigningKey, id: &'a str) -> impl FnOnce(&mut TestDoc) + 'a {
     move |d: &mut TestDoc| d.members.push(member(k, id, EDITOR))
 }
-fn promote_to_coowner<'a>(id: &'a str) -> impl FnOnce(&mut TestDoc) + 'a {
+fn promote_to_coowner(id: &str) -> impl FnOnce(&mut TestDoc) + '_ {
     move |d: &mut TestDoc| d.members.iter_mut().find(|m| m.id == id).unwrap().role = CO_OWNER
 }
 fn set_rule(kind: u32, threshold: u32) -> impl FnOnce(&mut TestDoc) {

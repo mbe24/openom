@@ -68,7 +68,7 @@ mod tests {
             "openom.org/core/name/v1",
             json!({ "parts": { "given": "Ada", "family": "Lovelace" } }),
             &d,
-            hlc(1771765800000),
+            hlc(1_771_765_800_000),
         );
         c.compute_id().unwrap();
         assert!(s.is_valid(&c.to_value()), "a real name claim must validate");
@@ -76,7 +76,7 @@ mod tests {
         let anchor = json!({
             "id": "b3d3f6b0-0000-4000-8000-000000000002",
             "type": TYPE_PERSON,
-            "createdAt": hlc(1771765800000).to_string(),
+            "createdAt": hlc(1_771_765_800_000).to_string(),
             "createdBy": d,
         });
         assert!(s.is_valid(&anchor), "a person anchor must validate");

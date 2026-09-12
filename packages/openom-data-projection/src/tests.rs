@@ -15,11 +15,10 @@ fn person(id: &str) -> Record {
     )
 }
 fn claim(id: &str, pred: &str, target: &str, value: Value, author: &str) -> Record {
-    Record::Claim(
-        serde_json::from_value(json!({ "id": id, "type": TYPE_CLAIM, "targetId": target,
-                "predicate": pred, "value": value, "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": author }))
-        .unwrap(),
-    )
+    let mut obj = json!({ "id": id, "type": TYPE_CLAIM, "targetId": target, "predicate": pred,
+            "createdAt": "1970-01-01T00:00:00.001000Z", "createdBy": author });
+    obj["value"] = value; // move the value in (a by-ref param would trip needless_pass_by_value)
+    Record::Claim(serde_json::from_value(obj).unwrap())
 }
 fn same_as(id: &str, a: &str, b: &str, author: &str) -> Record {
     let [x, y] = sorted_pair(a, b);
@@ -67,13 +66,9 @@ fn custom_field(
     )
 }
 fn custom_value(id: &str, person: &str, field_id: &str, value: Value, author: &str) -> Record {
-    claim(
-        id,
-        P_CUSTOM_VALUE,
-        person,
-        json!({ "fieldId": field_id, "value": value }),
-        author,
-    )
+    let mut inner = json!({ "fieldId": field_id });
+    inner["value"] = value; // move in
+    claim(id, P_CUSTOM_VALUE, person, inner, author)
 }
 fn source(id: &str, title: &str, repository: &str, author: &str) -> Record {
     Record::Claim(
@@ -89,12 +84,9 @@ fn with_citation(mut c: Record, source_id: &str, locator: Value, extract: &str) 
     let Record::Claim(claim) = &mut c else {
         panic!("with_citation expects a Claim record");
     };
-    claim.citation = Some(Citations::One(
-        serde_json::from_value(
-            json!({ "sourceId": source_id, "locator": locator, "extract": extract }),
-        )
-        .unwrap(),
-    ));
+    let mut cit = json!({ "sourceId": source_id, "extract": extract });
+    cit["locator"] = locator; // move in
+    claim.citation = Some(Citations::One(serde_json::from_value(cit).unwrap()));
     c
 }
 fn attest(id: &str, target: &str, verdict: &str, author: &str) -> Record {

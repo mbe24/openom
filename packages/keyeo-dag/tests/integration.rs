@@ -100,6 +100,7 @@ fn is_member(k: &TestEngine, id: &[u8; 32]) -> bool {
 /// (Guard for plan/keyring-dag/design.member-identity-consolidation.md.)
 #[test]
 fn golden_add_action_canonical_bytes_are_stable() {
+    use std::fmt::Write as _;
     let action: MembershipAction<[u8; 32], TestRole, Ed25519> = MembershipAction::Add {
         member: [0x11; 32],
         role: TestRole::Editor,
@@ -114,7 +115,10 @@ fn golden_add_action_canonical_bytes_are_stable() {
         &action,
         &[0x55u8; 3],
     );
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex = bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
     // Layout: "keyeo:op:v3" | group_id | parents | author | Add{member, role, author_public_key,
     // hpke_public_key, member_proof} | sealing. The member-field run is the middle — reordering the
     // encoder would move it and break this.
@@ -757,7 +761,7 @@ fn test_buffered_returns_missing_parents() {
             assert!(missing_parents.contains(&99));
             assert!(missing_parents.contains(&100));
         }
-        _ => panic!("expected Buffered"),
+        ApplyOutcome::Applied { .. } => panic!("expected Buffered"),
     }
     assert_eq!(k.pending_count(), 1);
 }
@@ -802,15 +806,15 @@ fn test_flush_chained_pending() {
 #[test]
 fn test_pending_buffer_bounded() {
     let mut k = keyeo_fn(alice_admin_state(), TestRole::Admin);
-    for i in 0..1025 {
+    for i in 0u32..1025 {
         let r = k.apply(make_op(
-            i as u64 + 100,
+            u64::from(i) + 100,
             vec![9999],
             &[1u8; 32],
             MembershipAction::Add {
-                member: [i as u8; 32],
+                member: [i.to_le_bytes()[0]; 32],
                 role: TestRole::Editor,
-                author_public_key: [i as u8; 32],
+                author_public_key: [i.to_le_bytes()[0]; 32],
                 hpke_public_key: [0xbb; 32],
                 member_proof: None,
             },
@@ -971,117 +975,65 @@ fn test_strong_remove_state_rebuild() {
     let bpk = bob_pk();
     let cpk = cpk();
 
-    // Replica A: apply ops in order 1, 2, 3
-    let state_a = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Admin,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }]);
-    let mut k_a = Keyeo::new(
-        state_a,
-        DefaultAccessControl::new(TestRole::Admin),
-        StrongRemove,
+    // Both replicas apply the SAME three ops (genesis, add-bob, add-charlie); only the ORDER differs.
+    let genesis = || {
+        let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
+            id: pk,
+            role: TestRole::Admin,
+            author_public_key: pk,
+            hpke_public_key: [0xaa; 32],
+        }]);
+        Keyeo::new(state, DefaultAccessControl::new(TestRole::Admin), StrongRemove)
+    };
+    let create = || make_op(
+        1,
+        vec![],
+        &[1u8; 32],
+        MembershipAction::Create {
+            initial_members: vec![MemberInit {
+                id: pk,
+                role: TestRole::Admin,
+                author_public_key: pk,
+                hpke_public_key: [0xaa; 32],
+            }],
+        },
     );
-    let _ = k_a
-        .apply(make_op(
-            1,
-            vec![],
-            &[1u8; 32],
-            MembershipAction::Create {
-                initial_members: vec![MemberInit {
-                    id: pk,
-                    role: TestRole::Admin,
-                    author_public_key: pk,
-                    hpke_public_key: [0xaa; 32],
-                }],
-            },
-        ))
-        .unwrap();
-    let _ = k_a
-        .apply(make_op(
-            2,
-            vec![1],
-            &[1u8; 32],
-            MembershipAction::Add {
-                member: bpk,
-                role: TestRole::Editor,
-                author_public_key: bpk,
-                hpke_public_key: [0xbb; 32],
-                member_proof: None,
-            },
-        ))
-        .unwrap();
-    let _ = k_a
-        .apply(make_op(
-            3,
-            vec![1],
-            &[1u8; 32],
-            MembershipAction::Add {
-                member: cpk,
-                role: TestRole::Viewer,
-                author_public_key: cpk,
-                hpke_public_key: [0xcc; 32],
-                member_proof: None,
-            },
-        ))
-        .unwrap();
+    let add_bob = || make_op(
+        2,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: bpk,
+            role: TestRole::Editor,
+            author_public_key: bpk,
+            hpke_public_key: [0xbb; 32],
+            member_proof: None,
+        },
+    );
+    let add_charlie = || make_op(
+        3,
+        vec![1],
+        &[1u8; 32],
+        MembershipAction::Add {
+            member: cpk,
+            role: TestRole::Viewer,
+            author_public_key: cpk,
+            hpke_public_key: [0xcc; 32],
+            member_proof: None,
+        },
+    );
 
-    // Replica B: apply ops in reverse order 1, 3, 2
-    let state_b = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[MemberInit {
-        id: pk,
-        role: TestRole::Admin,
-        author_public_key: pk,
-        hpke_public_key: [0xaa; 32],
-    }]);
-    let mut k_b = Keyeo::new(
-        state_b,
-        DefaultAccessControl::new(TestRole::Admin),
-        StrongRemove,
-    );
-    let _ = k_b
-        .apply(make_op(
-            1,
-            vec![],
-            &[1u8; 32],
-            MembershipAction::Create {
-                initial_members: vec![MemberInit {
-                    id: pk,
-                    role: TestRole::Admin,
-                    author_public_key: pk,
-                    hpke_public_key: [0xaa; 32],
-                }],
-            },
-        ))
-        .unwrap();
-    let _ = k_b
-        .apply(make_op(
-            3,
-            vec![1],
-            &[1u8; 32],
-            MembershipAction::Add {
-                member: cpk,
-                role: TestRole::Viewer,
-                author_public_key: cpk,
-                hpke_public_key: [0xcc; 32],
-                member_proof: None,
-            },
-        ))
-        .unwrap();
-    let _ = k_b
-        .apply(make_op(
-            2,
-            vec![1],
-            &[1u8; 32],
-            MembershipAction::Add {
-                member: bpk,
-                role: TestRole::Editor,
-                author_public_key: bpk,
-                hpke_public_key: [0xbb; 32],
-                member_proof: None,
-            },
-        ))
-        .unwrap();
+    // Replica A applies in order 1, 2, 3.
+    let mut k_a = genesis();
+    for op in [create(), add_bob(), add_charlie()] {
+        k_a.apply(op).unwrap();
+    }
+
+    // Replica B applies in order 1, 3, 2 — StrongRemove must converge it with A.
+    let mut k_b = genesis();
+    for op in [create(), add_charlie(), add_bob()] {
+        k_b.apply(op).unwrap();
+    }
 
     // Both should have the same active members (3: alice + bob + charlie)
     let a_members = k_a.state().active_members();
@@ -1194,7 +1146,7 @@ fn strong_remove_transitively_invalidates_accomplice_chain() {
     let a = alice_pk();
     let b = bob_pk();
     let c = cpk(); // Charlie's key == keypair seed [3;32]
-    let d = make_keypair(&[4u8; 32]).verifying_key().to_bytes();
+    let dave = make_keypair(&[4u8; 32]).verifying_key().to_bytes();
     let state = GroupState::<[u8; 32], TestRole, Ed25519>::create(GroupId::unscoped(), &[
         MemberInit {
             id: a,
@@ -1255,9 +1207,9 @@ fn strong_remove_transitively_invalidates_accomplice_chain() {
         vec![2],
         &[3u8; 32],
         MembershipAction::Add {
-            member: d,
+            member: dave,
             role: TestRole::Viewer,
-            author_public_key: d,
+            author_public_key: dave,
             hpke_public_key: [0xdd; 32],
             member_proof: None,
         },
@@ -1286,7 +1238,7 @@ fn strong_remove_transitively_invalidates_accomplice_chain() {
         "Charlie: added by removed Bob's concurrent op"
     );
     assert!(
-        !members.contains(&d),
+        !members.contains(&dave),
         "Dave: added by never-valid Charlie (transitive)"
     );
     assert_eq!(members.len(), 1);
@@ -1509,12 +1461,12 @@ fn two_party_mutual_remove_leaves_one_survivor() {
 fn three_way_remove_cycle_resolves_to_one_removal() {
     // A→B, B→C, C→A, all concurrent, all Admins. keyeo resolves to a SINGLE removal; p2panda-auth
     // empties the whole 3-cycle (only D remains). Records keyeo's actual one-removal outcome.
-    let (a, b, c, d) = (alice_pk(), bob_pk(), cpk(), dave_pk());
+    let (a, b, c, dave) = (alice_pk(), bob_pk(), cpk(), dave_pk());
     let mut k = strong_remove_engine(&[
         minit(a, TestRole::Admin, [0xaa; 32]),
         minit(b, TestRole::Admin, [0xbb; 32]),
         minit(c, TestRole::Admin, [0xcc; 32]),
-        minit(d, TestRole::Editor, [0xdd; 32]),
+        minit(dave, TestRole::Editor, [0xdd; 32]),
     ]);
     k.apply(make_op(2, vec![1], &[1u8; 32], MembershipAction::Remove { member: b })).unwrap(); // A → B
     k.apply(make_op(3, vec![1], &[2u8; 32], MembershipAction::Remove { member: c })).unwrap(); // B → C
@@ -1522,7 +1474,7 @@ fn three_way_remove_cycle_resolves_to_one_removal() {
     let survivors: std::collections::BTreeSet<[u8; 32]> =
         k.state().active_members().into_iter().map(|(m, _)| m).collect();
     assert_eq!(survivors.len(), 3, "keyeo one-removal semantics (p2panda would leave 1)");
-    assert!(survivors.contains(&d));
+    assert!(survivors.contains(&dave));
 }
 
 fn convergence_ops() -> Vec<Op<u64, [u8; 32], TestRole, Ed25519>> {

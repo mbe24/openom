@@ -142,6 +142,13 @@ mod tests {
 
     #[test]
     fn serde_round_trip_preserves_the_verifiable_envelope() {
+        // Local repr used below to forge a bad-length signature; declared up-front (items precede statements).
+        #[derive(serde::Serialize)]
+        struct BadRepr {
+            body: Body,
+            signer: [u8; 32],
+            signature: Vec<u8>,
+        }
         let sk = edsign::SigningKey::from_seed(&[7u8; 32]);
         let signed: Signed<Body, Ed25519> = Signed::sign(Body { n: 42, flag: true }, &sk);
 
@@ -154,12 +161,6 @@ mod tests {
         assert_eq!(back, signed, "the whole envelope round-trips");
 
         // A 63-byte signature is rejected at deserialize (length is checked on the way into the [u8; 64]).
-        #[derive(serde::Serialize)]
-        struct BadRepr {
-            body: Body,
-            signer: [u8; 32],
-            signature: Vec<u8>,
-        }
         let bad = postcard::to_allocvec(&BadRepr {
             body: Body { n: 1, flag: false },
             signer: [0u8; 32],

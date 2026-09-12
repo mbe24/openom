@@ -18,7 +18,7 @@ fn hlc(ms: i64) -> Hlc {
 
 /// A moderator set (did:keys currently at Maintainer or above) from a list of authors.
 fn mods(authors: &[&str]) -> BTreeSet<String> {
-    authors.iter().map(|a| a.to_string()).collect()
+    authors.iter().map(ToString::to_string).collect()
 }
 
 fn anchor(id: &str, author: &str) -> Record {

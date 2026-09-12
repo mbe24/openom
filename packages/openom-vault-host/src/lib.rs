@@ -514,6 +514,7 @@ pub struct SeededEntropy {
 #[cfg(test)]
 impl SeededEntropy {
     /// Seed the stream (a zero seed is remapped so the generator never sticks at 0).
+    #[must_use]
     pub fn new(seed: u64) -> Self {
         SeededEntropy {
             state: Mutex::new(if seed == 0 {
@@ -1977,11 +1978,15 @@ fn parse_trusted_signers(raw: &[Vec<u8>]) -> Result<Vec<VerifyingKey>> {
 
 #[cfg(test)]
 mod tests {
+    // The test-only request builders below take one positional arg per request-struct field; bundling them
+    // into sub-structs would only re-introduce the verbosity at every call site, so the arg count is inherent.
+    #![allow(clippy::too_many_arguments)]
+
     use super::*;
     use std::sync::Mutex as StdMutex;
 
     // Concise builders for the request structs from the pre-bundling positional arguments, so the tests
-    // stay flat. Test-only, so their argument counts are irrelevant to the lint gate.
+    // stay flat.
     fn mk_add(
         tree_key: &str,
         tree_id: &[u8],
@@ -2177,7 +2182,7 @@ mod tests {
         assert_eq!(req.member.author_public_key, vec![8]);
     }
 
-    /// An in-memory VaultStore: keyring bytes + a monotonic revision floor per tree.
+    /// An in-memory `VaultStore`: keyring bytes + a monotonic revision floor per tree.
     #[derive(Default)]
     struct MemStore {
         keyrings: StdMutex<HashMap<String, Vec<u8>>>,

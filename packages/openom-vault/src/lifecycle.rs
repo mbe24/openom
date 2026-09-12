@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// Drive the whole four-flow spine through the trait object (not the free functions) on the chain
-    /// engine: provision → unlock → change_passphrase → unlock-under-new → recover. Proves the shared menu
+    /// engine: provision → unlock → `change_passphrase` → unlock-under-new → recover. Proves the shared menu
     /// fits the shipping keyring with the anti-rollback floor threaded as OPAQUE bytes (never a scalar) —
     /// the shape the two hosts will dispatch over.
     #[test]
@@ -436,7 +436,7 @@ mod tests {
     }
 
     /// The whole `KeyringLifecycle` contract, engine-agnostic: provision on one replica + seal; unlock on
-    /// another (from the opaque anchor alone) opens it; change_passphrase then unlock-under-the-new-pass
+    /// another (from the opaque anchor alone) opens it; `change_passphrase` then unlock-under-the-new-pass
     /// opens it; recover (with the provision recovery code) opens it. All over opaque anchors + watermarks
     /// + floors, so the body is identical for both engines.
     fn lifecycle_contract<E: KeyringLifecycle>(engine: &E) {

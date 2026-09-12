@@ -114,13 +114,13 @@ mod tests {
         let mut chars: Vec<char> = code.expose().chars().collect();
         let i = chars
             .iter()
-            .position(|c| c.is_ascii_alphanumeric())
+            .position(char::is_ascii_alphanumeric)
             .unwrap();
         chars[i] = if chars[i] == 'A' { 'B' } else { 'A' };
         let typo: String = chars.into_iter().collect();
         assert!(matches!(
             parse_recovery_code(&RecoveryCode::new(typo)),
-            Err(CryptoError::RecoveryChecksum) | Err(CryptoError::RecoveryFormat)
+            Err(CryptoError::RecoveryChecksum | CryptoError::RecoveryFormat)
         ));
     }
 

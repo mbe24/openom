@@ -177,7 +177,7 @@ mod tests {
 
     const EDITOR: i32 = 4;
 
-    /// Wrap a keyring in the shared MembershipEnvelope (chain engine) — the wire `admit` now receives.
+    /// Wrap a keyring in the shared `MembershipEnvelope` (chain engine) — the wire `admit` now receives.
     fn env(k: &Keyring) -> Vec<u8> {
         MembershipEnvelope::wrap(EngineKind::Chain, k.encode_to_vec()).encode()
     }

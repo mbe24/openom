@@ -420,7 +420,7 @@ mod tests {
     /// - **MinIO** (proves the mechanism): bring up the compose stack, then
     ///   `S3_ENDPOINT=http://host.docker.internal:9000 cargo test -p openom --
     ///   checksum_enforced_by_backend --ignored --nocapture` (the container reaches
-    ///   the host-published MinIO via `host.docker.internal`).
+    ///   the host-published `MinIO` via `host.docker.internal`).
     /// - **R2** (the deploy-time reverification the spec flags as unverified): set
     ///   `S3_ENDPOINT`/`S3_BUCKET`/`S3_REGION=auto`/`S3_ACCESS_KEY`/`S3_SECRET_KEY`
     ///   to the R2 values and run the same command. A green run there closes the

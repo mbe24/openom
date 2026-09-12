@@ -45,7 +45,7 @@ mod tests {
     use super::*;
 
     fn set(ids: &[&str]) -> HashSet<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+        ids.iter().map(ToString::to_string).collect()
     }
 
     #[test]

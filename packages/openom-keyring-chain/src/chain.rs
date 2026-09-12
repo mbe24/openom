@@ -614,10 +614,10 @@ mod tests {
     #[test]
     fn governance_founder_or_threshold_gates_a_signer_change() {
         let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
-        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let anchor0 = KeyringAnchor::from_keyring(&g);
+        let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let anchor0 = KeyringAnchor::from_keyring(&ring);
 
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
         let anchor = verify_transition(&anchor0, &ruled).expect("founder may set the rule");
         assert_eq!((anchor.governance_kind, anchor.governance_threshold), (2, 2));
 
@@ -667,12 +667,12 @@ mod tests {
         use std::sync::Arc;
 
         let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
-        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
 
         let store = Arc::new(MemoryBlob::new());
         let mut owner = KeyringChainBlobSync::new(store.clone());
-        owner.publish(&g.encode_to_vec()).unwrap();
+        owner.publish(&ring.encode_to_vec()).unwrap();
         owner.publish(&ruled.encode_to_vec()).unwrap();
 
         let candidate = next(&ruled, add_coowner(&d), &[&a]);
@@ -725,11 +725,11 @@ mod tests {
         use std::sync::Arc;
 
         let (founder, a, b, c, d) = (key(), key(), key(), key(), key());
-        let g = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
-        let ruled = next(&g, |k| { k.governance_kind = 2; k.governance_threshold = 2; }, &[&founder]);
+        let ring = genesis(&founder, &[(&a, "a"), (&b, "b"), (&c, "c")], &[]);
+        let ruled = next(&ring, |key| { key.governance_kind = 2; key.governance_threshold = 2; }, &[&founder]);
         let store = Arc::new(MemoryBlob::new());
         let mut owner = KeyringChainBlobSync::new(store.clone());
-        owner.publish(&g.encode_to_vec()).unwrap();
+        owner.publish(&ring.encode_to_vec()).unwrap();
         owner.publish(&ruled.encode_to_vec()).unwrap();
 
         let candidate = next(&ruled, add_coowner(&d), &[&a, &b]);
@@ -1113,7 +1113,7 @@ mod tests {
         sk(1)
     }
     fn co_k(i: usize) -> SigningKey {
-        sk(2 + i as u8)
+        sk(2 + u8::try_from(i).unwrap())
     }
     fn pend_k() -> SigningKey {
         sk(5)
@@ -1171,10 +1171,10 @@ mod tests {
                 push_wrap(k, wrap("new", HPKE));
             }
             Mutation::Promote => {
-                k.members.iter_mut().find(|m| m.member_id == "pend").unwrap().role = CO_OWNER_MEMBER
+                k.members.iter_mut().find(|m| m.member_id == "pend").unwrap().role = CO_OWNER_MEMBER;
             }
             Mutation::RemoveCoOwner => {
-                k.members.iter_mut().find(|m| m.member_id == "co0").unwrap().role = EDITOR
+                k.members.iter_mut().find(|m| m.member_id == "co0").unwrap().role = EDITOR;
             }
             Mutation::RotateFounder => {
                 let np = pubv(&new_founder_k());

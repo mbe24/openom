@@ -369,8 +369,8 @@ mod proptests {
 mod tests {
     use super::*;
 
-    fn d(y: i32, m: u8, day: u8) -> Option<Date> {
-        Some(Date::new(y, m, day))
+    fn d(y: i32, m: u8, day: u8) -> Date {
+        Date::new(y, m, day)
     }
 
     #[test]
@@ -378,23 +378,23 @@ mod tests {
         let y = parse("1984").unwrap();
         assert_eq!(
             (y.min, y.max, y.precision),
-            (d(1984, 1, 1), d(1984, 12, 31), Precision::Year)
+            (Some(d(1984, 1, 1)), Some(d(1984, 12, 31)), Precision::Year)
         );
 
         let m = parse("1984-06").unwrap();
         assert_eq!(
             (m.min, m.max, m.precision),
-            (d(1984, 6, 1), d(1984, 6, 30), Precision::Month)
+            (Some(d(1984, 6, 1)), Some(d(1984, 6, 30)), Precision::Month)
         );
 
         // 1984 is a leap year → February has 29 days.
-        assert_eq!(parse("1984-02").unwrap().max, d(1984, 2, 29));
-        assert_eq!(parse("1983-02").unwrap().max, d(1983, 2, 28));
+        assert_eq!(parse("1984-02").unwrap().max, Some(d(1984, 2, 29)));
+        assert_eq!(parse("1983-02").unwrap().max, Some(d(1983, 2, 28)));
 
         let day = parse("1985-04-12").unwrap();
         assert_eq!(
             (day.min, day.max, day.precision),
-            (d(1985, 4, 12), d(1985, 4, 12), Precision::Day)
+            (Some(d(1985, 4, 12)), Some(d(1985, 4, 12)), Precision::Day)
         );
     }
 
@@ -402,7 +402,7 @@ mod tests {
     fn qualifiers() {
         let q = parse("1984?").unwrap();
         assert!(q.uncertain && !q.approximate);
-        assert_eq!(q.min, d(1984, 1, 1));
+        assert_eq!(q.min, Some(d(1984, 1, 1)));
         let a = parse("1850~").unwrap();
         assert!(a.approximate && !a.uncertain);
         let both = parse("1850%").unwrap();
@@ -414,21 +414,21 @@ mod tests {
         let decade = parse("19XX").unwrap();
         assert_eq!(
             (decade.min, decade.max, decade.precision),
-            (d(1900, 1, 1), d(1999, 12, 31), Precision::Year)
+            (Some(d(1900, 1, 1)), Some(d(1999, 12, 31)), Precision::Year)
         );
         let some_month = parse("1984-XX").unwrap();
         assert_eq!(
             (some_month.min, some_month.max, some_month.precision),
-            (d(1984, 1, 1), d(1984, 12, 31), Precision::Month)
+            (Some(d(1984, 1, 1)), Some(d(1984, 12, 31)), Precision::Month)
         );
         let some_day = parse("1984-06-XX").unwrap();
         assert_eq!(
             (some_day.min, some_day.max, some_day.precision),
-            (d(1984, 6, 1), d(1984, 6, 30), Precision::Day)
+            (Some(d(1984, 6, 1)), Some(d(1984, 6, 30)), Precision::Day)
         );
         // "1X" as a month → Oct..Dec (10..19 clamped to 12).
-        assert_eq!(parse("1984-1X").unwrap().min, d(1984, 10, 1));
-        assert_eq!(parse("1984-1X").unwrap().max, d(1984, 12, 31));
+        assert_eq!(parse("1984-1X").unwrap().min, Some(d(1984, 10, 1)));
+        assert_eq!(parse("1984-1X").unwrap().max, Some(d(1984, 12, 31)));
     }
 
     #[test]
@@ -436,11 +436,11 @@ mod tests {
         let spring = parse("2001-21").unwrap();
         assert_eq!(
             (spring.min, spring.max, spring.precision),
-            (d(2001, 3, 1), d(2001, 5, 31), Precision::Season)
+            (Some(d(2001, 3, 1)), Some(d(2001, 5, 31)), Precision::Season)
         );
         // Winter spans into the next year.
         let winter = parse("2001-24").unwrap();
-        assert_eq!((winter.min, winter.max), (d(2001, 12, 1), d(2002, 2, 28)));
+        assert_eq!((winter.min, winter.max), (Some(d(2001, 12, 1)), Some(d(2002, 2, 28))));
     }
 
     #[test]
@@ -448,17 +448,17 @@ mod tests {
         let closed = parse("1964/2008").unwrap();
         assert_eq!(
             (closed.kind, closed.min, closed.max),
-            (EdtfKind::Interval, d(1964, 1, 1), d(2008, 12, 31))
+            (EdtfKind::Interval, Some(d(1964, 1, 1)), Some(d(2008, 12, 31)))
         );
 
         let open_end = parse("1985-04-12/..").unwrap();
-        assert_eq!((open_end.min, open_end.max), (d(1985, 4, 12), None));
+        assert_eq!((open_end.min, open_end.max), (Some(d(1985, 4, 12)), None));
 
         let unknown_end = parse("1985/").unwrap();
-        assert_eq!((unknown_end.min, unknown_end.max), (d(1985, 1, 1), None));
+        assert_eq!((unknown_end.min, unknown_end.max), (Some(d(1985, 1, 1)), None));
 
         let open_start = parse("../1985").unwrap();
-        assert_eq!((open_start.min, open_start.max), (None, d(1985, 12, 31)));
+        assert_eq!((open_start.min, open_start.max), (None, Some(d(1985, 12, 31))));
 
         // Qualifier on one side propagates to the interval.
         assert!(parse("1984?/1990").unwrap().uncertain);
@@ -467,10 +467,10 @@ mod tests {
     #[test]
     fn bce_years() {
         let bce = parse("-0044").unwrap();
-        assert_eq!((bce.min, bce.max), (d(-44, 1, 1), d(-44, 12, 31)));
+        assert_eq!((bce.min, bce.max), (Some(d(-44, 1, 1)), Some(d(-44, 12, 31))));
         // "-004X" → years -49..-40; min is the more-negative bound.
         let range = parse("-004X").unwrap();
-        assert_eq!((range.min, range.max), (d(-49, 1, 1), d(-40, 12, 31)));
+        assert_eq!((range.min, range.max), (Some(d(-49, 1, 1)), Some(d(-40, 12, 31))));
     }
 
     #[test]
@@ -480,7 +480,7 @@ mod tests {
         assert!(matches!(parse("1985-02-29"), Err(EdtfError::Malformed(_)))); // 1985 is not a leap year
         assert!(matches!(parse("1984-04-31"), Err(EdtfError::Malformed(_))));
         // …but a real leap day is accepted.
-        assert_eq!(parse("1984-02-29").unwrap().min, d(1984, 2, 29));
+        assert_eq!(parse("1984-02-29").unwrap().min, Some(d(1984, 2, 29)));
 
         // Month/day must be exactly two digits (ISO 8601-2).
         assert!(matches!(parse("1984-1-1"), Err(EdtfError::Malformed(_))));
@@ -526,7 +526,7 @@ mod tests {
         assert!(parse("2000-01-5X").is_err()); // day 50..59
         // 280: winter's max uses the FOLLOWING year for its February length — kills `year_max + 1`
         // -> `year_max * 1`. 2003 -> 2004 (leap), so the correct end is 29 Feb 2004, not 28.
-        assert_eq!(parse("2003-24").unwrap().max, d(2004, 2, 29));
+        assert_eq!(parse("2003-24").unwrap().max, Some(d(2004, 2, 29)));
     }
 
     #[test]
@@ -534,16 +534,16 @@ mod tests {
         // 276 / 277: Summer and Autumn are their own arms, not folded into winter's `_`.
         assert_eq!(
             (parse("2000-22").unwrap().min, parse("2000-22").unwrap().max),
-            (d(2000, 6, 1), d(2000, 8, 31))
+            (Some(d(2000, 6, 1)), Some(d(2000, 8, 31)))
         );
         assert_eq!(
             (parse("2000-23").unwrap().min, parse("2000-23").unwrap().max),
-            (d(2000, 9, 1), d(2000, 11, 30))
+            (Some(d(2000, 9, 1)), Some(d(2000, 11, 30)))
         );
         // 291: the century exceptions in is_leap — 1900 is NOT leap (div 100, not div 400), 2000 IS
         // (div 400). (1984 div 4 and 1983 not-div-4 are covered in year_month_day_bounds.) Kills the
         // `%` -> `/`/`+` mutants that the div-4-only cases can't reach.
-        assert_eq!(parse("1900-02").unwrap().max, d(1900, 2, 28));
-        assert_eq!(parse("2000-02").unwrap().max, d(2000, 2, 29));
+        assert_eq!(parse("1900-02").unwrap().max, Some(d(1900, 2, 28)));
+        assert_eq!(parse("2000-02").unwrap().max, Some(d(2000, 2, 29)));
     }
 }

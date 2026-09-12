@@ -332,7 +332,7 @@ mod tests {
         // A fixed, distinctive public key (contents irrelevant — did:key doesn't validate the point).
         let mut pk = [0u8; 32];
         for (i, b) in pk.iter_mut().enumerate() {
-            *b = i as u8;
+            *b = u8::try_from(i).unwrap();
         }
         let did = encode_ed25519(&pk);
         assert!(

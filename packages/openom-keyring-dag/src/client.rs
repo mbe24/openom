@@ -1125,7 +1125,7 @@ mod tests {
     }
 
     /// A privileged op concurrent with a surviving recovery is carve-out-voided — and its SEALING must be
-    /// dropped from the fold, not merely its membership effect. Proves resolve() folds over the engine's
+    /// dropped from the fold, not merely its membership effect. Proves `resolve()` folds over the engine's
     /// `effective_ops` (topo + carve-out + quorum), never mere op presence. (OPE-285.)
     #[test]
     fn a_carve_out_voided_ops_sealing_is_dropped() {
@@ -1219,7 +1219,7 @@ mod tests {
         );
     }
 
-    /// The watermark is the frontier op-id set, and check_floor is causal-descendant containment: an
+    /// The watermark is the frontier op-id set, and `check_floor` is causal-descendant containment: an
     /// advanced anchor still satisfies an older floor (the old tip remains an ancestor), while a stale
     /// anchor fails a newer floor (the advanced tip is absent). Empty = no floor; a non-32-multiple = bad.
     #[test]

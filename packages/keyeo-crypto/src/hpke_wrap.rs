@@ -224,7 +224,7 @@ mod tests {
     fn dek() -> Dek {
         let mut d = [0u8; KEY_LEN];
         for (i, b) in d.iter_mut().enumerate() {
-            *b = i as u8;
+            *b = u8::try_from(i).unwrap();
         }
         Dek::new(d)
     }
