@@ -51,22 +51,59 @@ pub enum MeterEvent {
 /// (the gate SQL itself failing, not a policy decision).
 #[derive(Debug)]
 pub enum MeterError {
-    /// The per-(tree, member) rate bucket is empty — 429 with this `Retry-After` (whole seconds).
+    /// The per-(tree, member) rate bucket is empty — 429 with this `Retry-After` (whole seconds; coarsened for
+    /// a non-privileged caller so the value can't fingerprint the owner's plan rate, F1).
     RateLimited { retry_after_secs: u64 },
-    /// The owner's tree-byte capacity is exhausted — 403 (`QuotaExceeded`; read-only degradation, never lockout).
-    CapacityExceeded,
+    /// The owner's tree-byte capacity is exhausted — 403 (`quota_exceeded`; read-only degradation, never
+    /// lockout). `limit`/`used` are the owner's plan figures, present ONLY for a caller at or above
+    /// [`BILLING_ARG_MIN_ROLE`] (F1: a lower-role collaborator must not learn the owner's tier/headroom);
+    /// `None` → the client renders a figure-free message.
+    CapacityExceeded { limit: Option<i64>, used: Option<i64> },
     /// The gate's own SQL failed — surfaced as 500, cause logged not leaked.
     Internal(String),
 }
+
+/// Callers at or above this role (numerically `<=`, roles are power-descending) receive the precise billing
+/// figures (quota `{limit, used}`, exact rate retry-after); below it the owner's plan numbers are withheld
+/// (F1). One tunable — raise to `ROLE_CO_OWNER` to restrict further.
+const BILLING_ARG_MIN_ROLE: i16 = openom_roles::ROLE_MAINTAINER;
 
 impl From<MeterError> for ApiError {
     fn from(e: MeterError) -> Self {
         match e {
             MeterError::RateLimited { retry_after_secs } => Self::TooManyRequests(retry_after_secs.max(1)),
-            MeterError::CapacityExceeded => Self::QuotaExceeded,
+            MeterError::CapacityExceeded { limit, used } => {
+                let args = match (limit, used) {
+                    (Some(limit), Some(used)) => serde_json::json!({ "limit": limit, "used": used }),
+                    _ => serde_json::Value::Null,
+                };
+                Self::Coded {
+                    status: axum::http::StatusCode::FORBIDDEN,
+                    code: crate::error_codes::QUOTA_EXCEEDED,
+                    detail: "account resource limit reached".into(),
+                    args,
+                }
+            }
             MeterError::Internal(m) => Self::Internal(m),
         }
     }
+}
+
+/// The caller's role on the tree, resolved on the rare rejection path only: the owner (`member == account`,
+/// owner-pays) is the strongest role; otherwise the `tree_access` row (absent → not privileged). Used solely
+/// to gate the billing figures in the two rejection errors — never on the happy path.
+async fn caller_is_privileged(tx: &mut Transaction<'_, Postgres>, cx: MeterCtx) -> bool {
+    if cx.member == cx.account {
+        return true; // the tree owner
+    }
+    let role: Option<i16> = sqlx::query_scalar("SELECT role FROM tree_access WHERE tree_id = $1 AND member_id = $2")
+        .bind(cx.tree)
+        .bind(cx.member)
+        .fetch_optional(&mut **tx)
+        .await
+        .ok()
+        .flatten();
+    role.is_some_and(|r| r <= BILLING_ARG_MIN_ROLE)
 }
 
 /// The cost/enforce seam. One impl per environment: [`PgMeter`] in prod; a test double can exercise handler
@@ -178,11 +215,10 @@ impl Meter for PgMeter {
         if member_ok.rows_affected() != 1 {
             // A positive ceil'd retry-after in whole seconds; the saturating f64->u64 cast is intentional.
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let retry_after_secs = if m_rate > 0.0 {
-                (1.0 / m_rate).ceil() as u64
-            } else {
-                60
-            };
+            let exact = if m_rate > 0.0 { (1.0 / m_rate).ceil() as u64 } else { 60 };
+            // F1: a non-privileged caller gets a fixed coarse backoff, not the exact 1/rate that would reveal
+            // the owner's plan rate. Privileged callers (owner/co-owner/maintainer) get the precise value.
+            let retry_after_secs = if caller_is_privileged(tx, cx).await { exact } else { exact.max(60) };
             tracing::info!(event = "rate_rejected", resource = "meter", tree = %cx.tree, member = %cx.member);
             return Err(MeterError::RateLimited { retry_after_secs });
         }
@@ -201,7 +237,20 @@ impl Meter for PgMeter {
             .map_err(|e| MeterError::Internal(e.to_string()))?;
             if capped.rows_affected() != 1 {
                 tracing::info!(event = "quota_rejected", resource = "meter", tree = %cx.tree, owner = %cx.account);
-                return Err(MeterError::CapacityExceeded);
+                // F1: attach the owner's plan figures ONLY for a privileged caller; a lower-role collaborator
+                // gets the code with no numbers, so it can't read the owner's tier/headroom.
+                let (limit, used) = if caller_is_privileged(tx, cx).await {
+                    let row: (i64, i64) =
+                        sqlx::query_as("SELECT max_tree_bytes, tree_used_bytes FROM accounts WHERE id = $1")
+                            .bind(cx.account)
+                            .fetch_one(&mut **tx)
+                            .await
+                            .map_err(|e| MeterError::Internal(e.to_string()))?;
+                    (Some(row.0), Some(row.1))
+                } else {
+                    (None, None)
+                };
+                return Err(MeterError::CapacityExceeded { limit, used });
             }
         }
 

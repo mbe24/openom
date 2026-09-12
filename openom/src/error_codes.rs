@@ -7,6 +7,7 @@
 pub struct CodeMeta {
     pub code: &'static str,
     pub domain: &'static str,
+    pub title: &'static str,
     pub retriable: bool,
     pub action: Option<&'static str>,
 }
@@ -41,34 +42,40 @@ pub const INTERNAL: &str = "internal";
 
 /// Every code + its metadata, in source order.
 pub const ERROR_CODES: &[CodeMeta] = &[
-    CodeMeta { code: "below_gc_floor", domain: "sync", retriable: false, action: Some("bootstrap") },
-    CodeMeta { code: "quota_exceeded", domain: "sync", retriable: false, action: Some("upgrade") },
-    CodeMeta { code: "rate_limited", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "version_conflict", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "covered_anomaly", domain: "sync", retriable: false, action: Some("contact") },
-    CodeMeta { code: "invalid_request", domain: "sync", retriable: false, action: Some("contact") },
-    CodeMeta { code: "access_denied", domain: "sync", retriable: false, action: None },
-    CodeMeta { code: "not_found", domain: "sync", retriable: false, action: None },
-    CodeMeta { code: "unavailable", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "request_failed", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "offline", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "timeout", domain: "sync", retriable: true, action: Some("retry") },
-    CodeMeta { code: "auth_required", domain: "auth", retriable: false, action: Some("reauth") },
-    CodeMeta { code: "session_expired", domain: "auth", retriable: false, action: Some("reauth") },
-    CodeMeta { code: "sign_in_failed", domain: "auth", retriable: false, action: None },
-    CodeMeta { code: "sign_up_failed", domain: "auth", retriable: false, action: None },
-    CodeMeta { code: "email_taken", domain: "auth", retriable: false, action: None },
-    CodeMeta { code: "wrong_passphrase", domain: "vault", retriable: false, action: None },
-    CodeMeta { code: "tampered_anchor", domain: "vault", retriable: false, action: Some("contact") },
-    CodeMeta { code: "recovery_code_invalid", domain: "vault", retriable: false, action: None },
-    CodeMeta { code: "keyring_verify_failed", domain: "vault", retriable: false, action: Some("contact") },
-    CodeMeta { code: "decrypt_failed", domain: "vault", retriable: false, action: Some("contact") },
-    CodeMeta { code: "storage_quota", domain: "storage", retriable: false, action: Some("contact") },
-    CodeMeta { code: "storage_blocked", domain: "storage", retriable: false, action: Some("contact") },
-    CodeMeta { code: "storage_corrupt", domain: "storage", retriable: false, action: Some("contact") },
-    CodeMeta { code: "worker_unavailable", domain: "app", retriable: false, action: Some("upgrade") },
-    CodeMeta { code: "internal", domain: "app", retriable: false, action: Some("contact") },
+    CodeMeta { code: "below_gc_floor", domain: "sync", title: "Below the GC floor", retriable: false, action: Some("bootstrap") },
+    CodeMeta { code: "quota_exceeded", domain: "sync", title: "Storage quota exceeded", retriable: false, action: Some("upgrade") },
+    CodeMeta { code: "rate_limited", domain: "sync", title: "Rate limited", retriable: true, action: Some("retry") },
+    CodeMeta { code: "version_conflict", domain: "sync", title: "Version conflict", retriable: true, action: Some("retry") },
+    CodeMeta { code: "covered_anomaly", domain: "sync", title: "Coverage inconsistency", retriable: false, action: Some("contact") },
+    CodeMeta { code: "invalid_request", domain: "sync", title: "Invalid request", retriable: false, action: Some("contact") },
+    CodeMeta { code: "access_denied", domain: "sync", title: "Access denied", retriable: false, action: None },
+    CodeMeta { code: "not_found", domain: "sync", title: "Not found", retriable: false, action: None },
+    CodeMeta { code: "unavailable", domain: "sync", title: "Service unavailable", retriable: true, action: Some("retry") },
+    CodeMeta { code: "request_failed", domain: "sync", title: "Request failed", retriable: true, action: Some("retry") },
+    CodeMeta { code: "offline", domain: "sync", title: "Offline", retriable: true, action: Some("retry") },
+    CodeMeta { code: "timeout", domain: "sync", title: "Request timed out", retriable: true, action: Some("retry") },
+    CodeMeta { code: "auth_required", domain: "auth", title: "Authentication required", retriable: false, action: Some("reauth") },
+    CodeMeta { code: "session_expired", domain: "auth", title: "Session expired", retriable: false, action: Some("reauth") },
+    CodeMeta { code: "sign_in_failed", domain: "auth", title: "Sign-in failed", retriable: false, action: None },
+    CodeMeta { code: "sign_up_failed", domain: "auth", title: "Sign-up failed", retriable: false, action: None },
+    CodeMeta { code: "email_taken", domain: "auth", title: "Email already registered", retriable: false, action: None },
+    CodeMeta { code: "wrong_passphrase", domain: "vault", title: "Wrong passphrase", retriable: false, action: None },
+    CodeMeta { code: "tampered_anchor", domain: "vault", title: "Tree verification failed", retriable: false, action: Some("contact") },
+    CodeMeta { code: "recovery_code_invalid", domain: "vault", title: "Invalid recovery code", retriable: false, action: None },
+    CodeMeta { code: "keyring_verify_failed", domain: "vault", title: "Keyring verification failed", retriable: false, action: Some("contact") },
+    CodeMeta { code: "decrypt_failed", domain: "vault", title: "Decryption failed", retriable: false, action: Some("contact") },
+    CodeMeta { code: "storage_quota", domain: "storage", title: "Local storage full", retriable: false, action: Some("contact") },
+    CodeMeta { code: "storage_blocked", domain: "storage", title: "Local storage unavailable", retriable: false, action: Some("contact") },
+    CodeMeta { code: "storage_corrupt", domain: "storage", title: "Local storage corrupt", retriable: false, action: Some("contact") },
+    CodeMeta { code: "worker_unavailable", domain: "app", title: "Background worker unavailable", retriable: false, action: Some("upgrade") },
+    CodeMeta { code: "internal", domain: "app", title: "Internal error", retriable: false, action: Some("contact") },
 ];
+
+/// The stable RFC 9457 `title` for a code (falls back to a generic label for an unknown code).
+#[must_use]
+pub fn title_for(code: &str) -> &'static str {
+    ERROR_CODES.iter().find(|m| m.code == code).map_or("Error", |m| m.title)
+}
 
 /// Interpolation args for `quota_exceeded`.
 pub struct QuotaExceededArgs {

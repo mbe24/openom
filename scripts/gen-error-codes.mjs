@@ -32,6 +32,7 @@ function validate(reg) {
   for (const [code, m] of Object.entries(reg.codes)) {
     if (!/^[a-z][a-z0-9_]*$/.test(code)) fail(`code "${code}" must be snake_case`);
     if (!domains.has(m.domain)) fail(`code "${code}" has unknown domain "${m.domain}"`);
+    if (typeof m.title !== 'string' || !m.title.trim()) fail(`code "${code}" needs a non-empty title`);
     if (typeof m.retriable !== 'boolean') fail(`code "${code}" needs a boolean retriable`);
     if (m.action !== null && !actions.has(m.action)) fail(`code "${code}" has unknown action "${m.action}"`);
     // Coherence (E4): retriable ⇒ action is retry|null; permanent ⇒ action is not retry.
@@ -52,13 +53,16 @@ function pascal(code) {
   return code.replace(/(^|_)([a-z0-9])/g, (_, __, c) => c.toUpperCase());
 }
 
+const jsStr = (s) => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+const rsStr = (s) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
 function genJs(reg) {
   const lines = [GUARD, '', '/** The closed error-code registry (domain/retriable/action/args) — the client + UI mirror. */'];
   lines.push('export const ERROR_CODES = Object.freeze({');
   for (const [code, m] of Object.entries(reg.codes)) {
     const args = (m.args ?? []).map((a) => `{ name: '${a.name}', type: '${a.type}' }`).join(', ');
     const action = m.action === null ? 'null' : `'${m.action}'`;
-    lines.push(`  ${code}: Object.freeze({ domain: '${m.domain}', retriable: ${m.retriable}, action: ${action}, args: Object.freeze([${args}]) }),`);
+    lines.push(`  ${code}: Object.freeze({ domain: '${m.domain}', title: '${jsStr(m.title)}', retriable: ${m.retriable}, action: ${action}, args: Object.freeze([${args}]) }),`);
   }
   lines.push('});', '');
   lines.push('/** Every valid code string, for guard checks. */');
@@ -77,6 +81,7 @@ function genRust(reg) {
   lines.push('pub struct CodeMeta {');
   lines.push('    pub code: &\'static str,');
   lines.push('    pub domain: &\'static str,');
+  lines.push('    pub title: &\'static str,');
   lines.push('    pub retriable: bool,');
   lines.push('    pub action: Option<&\'static str>,');
   lines.push('}', '');
@@ -89,9 +94,14 @@ function genRust(reg) {
   lines.push('pub const ERROR_CODES: &[CodeMeta] = &[');
   for (const [code, m] of Object.entries(reg.codes)) {
     const action = m.action === null ? 'None' : `Some("${m.action}")`;
-    lines.push(`    CodeMeta { code: "${code}", domain: "${m.domain}", retriable: ${m.retriable}, action: ${action} },`);
+    lines.push(`    CodeMeta { code: "${code}", domain: "${m.domain}", title: "${rsStr(m.title)}", retriable: ${m.retriable}, action: ${action} },`);
   }
   lines.push('];', '');
+  lines.push('/// The stable RFC 9457 `title` for a code (falls back to a generic label for an unknown code).');
+  lines.push('#[must_use]');
+  lines.push('pub fn title_for(code: &str) -> &\'static str {');
+  lines.push('    ERROR_CODES.iter().find(|m| m.code == code).map_or("Error", |m| m.title)');
+  lines.push('}', '');
   // Typed arg structs (A4) for codes that carry args.
   for (const [code, m] of Object.entries(reg.codes)) {
     if (!(m.args ?? []).length) continue;

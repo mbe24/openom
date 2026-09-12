@@ -474,6 +474,9 @@ pub enum ApiError {
         status: StatusCode,
         code: &'static str,
         detail: String,
+        /// Optional RFC 9457 extension member rendered under `args` — a JSON object of typed interpolation
+        /// values (e.g. `quota_exceeded`'s role-gated `{limit, used}`). `Null` for the common no-args case.
+        args: serde_json::Value,
     },
     Internal(String),
 }
@@ -487,6 +490,7 @@ impl ApiError {
             status: StatusCode::CONFLICT,
             code,
             detail: detail.into(),
+            args: serde_json::Value::Null,
         }
     }
 
@@ -495,8 +499,9 @@ impl ApiError {
     pub fn reaped(detail: impl Into<String>) -> Self {
         Self::Coded {
             status: StatusCode::GONE,
-            code: "below_gc_floor",
+            code: crate::error_codes::BELOW_GC_FLOOR,
             detail: detail.into(),
+            args: serde_json::Value::Null,
         }
     }
 }
@@ -510,42 +515,52 @@ impl IntoResponse for ApiError {
         // bytes or backend causes — zero-knowledge). A 429 additionally carries Retry-After. Internal causes
         // are logged, never sent. (QuotaExceeded stays a 403 — entitlement is an authorization decision,
         // not a payment handshake, §9.9 — but now also a machine code.)
-        let (status, code, detail, retry_after): (StatusCode, &'static str, String, Option<u64>) = match self
-        {
-            Self::Forbidden => (StatusCode::FORBIDDEN, ec::ACCESS_DENIED, "forbidden".into(), None),
-            Self::NotFound => (StatusCode::NOT_FOUND, ec::NOT_FOUND, "not found".into(), None),
-            Self::Conflict => (
-                StatusCode::CONFLICT,
-                ec::VERSION_CONFLICT,
-                "version conflict — pull the current snapshot and retry".into(),
-                None,
-            ),
-            Self::QuotaExceeded => (
-                StatusCode::FORBIDDEN,
-                ec::QUOTA_EXCEEDED,
-                "account resource limit reached".into(),
-                None,
-            ),
-            Self::TooManyRequests(secs) => (
-                StatusCode::TOO_MANY_REQUESTS,
-                ec::RATE_LIMITED,
-                "append rate exceeded — retry after the indicated delay".into(),
-                Some(secs),
-            ),
-            Self::Gone(m) => (StatusCode::GONE, ec::BELOW_GC_FLOOR, m, None),
-            Self::BadRequest(m) => (StatusCode::BAD_REQUEST, ec::INVALID_REQUEST, m, None),
-            Self::Coded { status, code, detail } => (status, code, detail, None),
-            Self::Internal(m) => {
-                tracing::error!(error = %m, "tree handler internal error");
-                (StatusCode::INTERNAL_SERVER_ERROR, ec::UNAVAILABLE, "internal error".into(), None)
-            }
-        };
-        let body = serde_json::json!({
+        let null = serde_json::Value::Null;
+        let (status, code, detail, retry_after, args): (StatusCode, &'static str, String, Option<u64>, serde_json::Value) =
+            match self {
+                Self::Forbidden => (StatusCode::FORBIDDEN, ec::ACCESS_DENIED, "forbidden".into(), None, null),
+                Self::NotFound => (StatusCode::NOT_FOUND, ec::NOT_FOUND, "not found".into(), None, null),
+                Self::Conflict => (
+                    StatusCode::CONFLICT,
+                    ec::VERSION_CONFLICT,
+                    "version conflict — pull the current snapshot and retry".into(),
+                    None,
+                    null,
+                ),
+                Self::QuotaExceeded => (
+                    StatusCode::FORBIDDEN,
+                    ec::QUOTA_EXCEEDED,
+                    "account resource limit reached".into(),
+                    None,
+                    null,
+                ),
+                Self::TooManyRequests(secs) => (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    ec::RATE_LIMITED,
+                    "append rate exceeded — retry after the indicated delay".into(),
+                    Some(secs),
+                    null,
+                ),
+                Self::Gone(m) => (StatusCode::GONE, ec::BELOW_GC_FLOOR, m, None, null),
+                Self::BadRequest(m) => (StatusCode::BAD_REQUEST, ec::INVALID_REQUEST, m, None, null),
+                Self::Coded { status, code, detail, args } => (status, code, detail, None, args),
+                Self::Internal(m) => {
+                    tracing::error!(error = %m, "tree handler internal error");
+                    (StatusCode::INTERNAL_SERVER_ERROR, ec::UNAVAILABLE, "internal error".into(), None, null)
+                }
+            };
+        // RFC 9457: `title` is the STABLE per-type summary (from the registry), `detail` the per-occurrence
+        // explanation; `args` (a typed object) rides as an extension member only when present.
+        let mut body = serde_json::json!({
             "type": format!("/errors/{code}"),
-            "title": detail,
+            "title": ec::title_for(code),
             "status": status.as_u16(),
             "code": code,
+            "detail": detail,
         });
+        if !args.is_null() {
+            body["args"] = args;
+        }
         let mut resp = (status, axum::Json(body)).into_response();
         resp.headers_mut().insert(
             CONTENT_TYPE,
