@@ -3,6 +3,7 @@
 // sync driver (debounce/poll/online → worker.syncNow). The worker owns the engine, DEK, sync loop, and
 // durable store; this side is UI + these seams.
 import * as Comlink from '../vendor/comlink.js';
+import { normalizeUnknown, isAppError } from './errorModel.js';
 
 let workerRef = null;
 let apiRef = null;
@@ -71,6 +72,15 @@ export function startSyncDriver(worker, docId, { subscribeEdits, onStatus, onAut
   const DEBOUNCE_MS = 800;
   const POLL_MS = 30_000;
 
+  // Route a tick failure (an AppError from the worker, or a worker/Comlink death) to the right callback:
+  // an auth-required error re-gates; a transient error keeps the driver polling silently ('offline'); a
+  // permanent one surfaces ('error'). The AppError rides along so the UI localizes on its code (OPE-418).
+  function routeError(raw) {
+    const err = isAppError(raw) ? raw : normalizeUnknown(raw);
+    if (err.code === 'auth_required') { onAuthError?.(err); return; }
+    onStatus?.({ state: err.retriable ? 'offline' : 'error', error: err });
+  }
+
   async function tick() {
     if (stopped) return;
     if (inflight) { dirty = true; return; }
@@ -81,10 +91,10 @@ export function startSyncDriver(worker, docId, { subscribeEdits, onStatus, onAut
         const res = await worker.syncNow(docId);
         if (stopped) return;
         if (res?.state === 'ok') onStatus?.({ state: 'synced', at: Date.now(), anomalies: res.anomalies ?? 0 });
-        else if (res?.state === 'error') onStatus?.({ state: 'offline', message: res.message });
+        else if (res?.state === 'error') routeError(res.error);
       } while (dirty && !stopped);
     } catch (e) {
-      onStatus?.({ state: 'offline', message: String(e?.message ?? e) });
+      routeError(e);
     } finally {
       inflight = false;
     }

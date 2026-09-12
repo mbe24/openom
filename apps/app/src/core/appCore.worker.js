@@ -9,7 +9,7 @@
 // concurrent ticks safe — the Rust core is never re-entered mid-borrow because each step runs to
 // completion before the next `await`.
 import * as Comlink from '../vendor/comlink.js';
-import { makeError, normalizeUnknown } from './errorModel.js';
+import { makeError, normalizeUnknown, isAppError } from './errorModel.js';
 import init, {
   AppCoreHandle,
   provision as wasmProvision,
@@ -824,7 +824,10 @@ async function runTick(c) {
     // `anomalies` (quarantined / undecodable / §B3-rejected entries) is surfaced, never swallowed.
     return { state: 'ok', pending: c.handle.pendingCount(), anomalies: c.handle.anomalies() };
   } catch (e) {
-    return { state: 'error', message: String(e?.message ?? e) };
+    // The transport (main-thread RemoteStore) now throws plain AppErrors, which survive the Comlink hop back
+    // into the worker; anything else (an internal tick bug) is normalized. The driver classifies on
+    // `error.retriable` and localizes on `error.code` (OPE-418).
+    return { state: 'error', error: isAppError(e) ? e : normalizeUnknown(e) };
   } finally {
     c.syncing = false;
   }

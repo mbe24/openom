@@ -9,18 +9,60 @@
 // ETag. SyncStore owns the mapping between the two.
 
 import { ConflictError, AuthError } from './store.js';
+import { makeError, isAppError } from './errorModel.js';
+import { ERROR_CODES } from './errorCodes.generated.js';
 
 const unquote = (etag) => (etag ? etag.replace(/^"|"$/g, '') : null);
 const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) : new Uint8Array(0));
 
-// A thrown HTTP error carrying its `status`, so syncOutcome.classifyError can tell a PERMANENT refusal
-// (403 quota/forbidden, 400) from a transient one (5xx/429) — a bare Error("HTTP 403") is
-// indistinguishable from offline, which is exactly how a permanent failure used to hide behind an
-// infinite silent backoff.
+// Per-request deadline: a hung Lambda cold-start / half-open socket must fail, not hang the sync driver
+// forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
+const REQUEST_TIMEOUT_MS = 20_000;
+
+// A thrown HTTP error carrying its `status`, so the OLD snapshot/keyring stack (syncStore/sealedStore) can
+// tell a permanent refusal from a transient one. The NEW blob channel (below) throws AppErrors instead.
 function httpError(label, status, detail = '') {
   const e = new Error(`${label}: HTTP ${status}${detail ? ` — ${detail}` : ''}`);
   e.status = status;
   return e;
+}
+
+// ---- blob-channel error normalization (OPE-418 client adapter) ----
+// The data channel crosses the Comlink worker↔main boundary, so its failures must be PLAIN AppErrors
+// (a custom Error subclass loses its props in transit). Parse the server's RFC 9457 body into a code; a
+// bodyless/infra failure synthesizes one from the status or the network condition.
+
+/** An HTTP error RESPONSE (`!res.ok`) → AppError, reading the 9457 `code`/`args`/`detail` when present. */
+async function httpAppError(res) {
+  let body = null;
+  try { body = await res.json(); } catch { /* not a JSON/problem+json body (infra error) */ }
+  const retryAfter = Number(res.headers.get('retry-after')) || undefined;
+  const code = body?.code;
+  if (code && Object.prototype.hasOwnProperty.call(ERROR_CODES, code)) {
+    return makeError(code, { args: body.args, retryAfter, httpStatus: res.status, cause: body.detail });
+  }
+  return makeError(statusFallbackCode(res.status), { retryAfter, httpStatus: res.status });
+}
+
+/** A fetch REJECTION (network throw / timeout / a bubbled AuthError) → AppError. */
+function netAppError(e) {
+  if (isAppError(e)) return e; // already normalized
+  if (e instanceof AuthError) return makeError('auth_required', { httpStatus: 401 });
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return makeError('timeout', { cause: 'request timed out' });
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  return makeError(offline ? 'offline' : 'request_failed', { cause: String(e?.message ?? e) });
+}
+
+/** A code for a status with no usable 9457 body (an infra 5xx, a gateway error, etc.). */
+function statusFallbackCode(status) {
+  if (status === 401) return 'auth_required';
+  if (status === 403) return 'access_denied';
+  if (status === 404) return 'not_found';
+  if (status === 409) return 'version_conflict';
+  if (status === 410) return 'below_gc_floor';
+  if (status === 429) return 'rate_limited';
+  if (status >= 500) return 'unavailable';
+  return 'invalid_request';
 }
 
 /**
@@ -85,7 +127,16 @@ export class RemoteStore {
   async #send(url, { method, extraHeaders = {}, body } = {}) {
     const attempt = async (forceRefresh) => {
       const headers = await this.#headers(extraHeaders, { forceRefresh });
-      return this.#fetch(url, { method, headers, body });
+      // Per-request deadline (C2): abort the fetch if it hasn't resolved in time, so a hung backend surfaces
+      // as an error (blob channel → the `timeout` code) instead of hanging the driver. The abort reason is a
+      // TimeoutError; the only abort source on this path is this timer, so netAppError reads any abort as a timeout.
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(new DOMException('request timed out', 'TimeoutError')), REQUEST_TIMEOUT_MS);
+      try {
+        return await this.#fetch(url, { method, headers, body, signal: ctl.signal });
+      } finally {
+        clearTimeout(timer);
+      }
     };
     let res = await attempt(false);
     if (res.status === 401) {
@@ -107,11 +158,13 @@ export class RemoteStore {
    * `runTick` can tell a permanent refusal from offline). `id` is the tree UUID (the same id `#tree` routes on).
    */
   async createTree(id) {
-    const res = await this.#send(this.#tree(id), { method: 'POST' });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`createTree ${id}`, res.status, detail);
+    let res;
+    try {
+      res = await this.#send(this.#tree(id), { method: 'POST' });
+    } catch (e) {
+      throw netAppError(e);
     }
+    if (!res.ok) throw await httpAppError(res);
   }
 
   async readSnapshot(id) {
@@ -219,18 +272,28 @@ export class RemoteStore {
     // no prefix at all) omits the query param, which is today's whole-tree behavior unchanged.
     const sub = slash === -1 ? '' : prefix.slice(slash + 1).replace(/\/$/, '');
     const qs = sub ? `?prefix=${encodeURIComponent(sub)}` : '';
-    const res = await this.#send(`${this.#tree(tree)}/blobs${qs}`, { method: 'GET' });
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(tree)}/blobs${qs}`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
     if (res.status === 404) return [];
-    if (!res.ok) throw httpError(`blobList ${tree}`, res.status);
+    if (!res.ok) throw await httpAppError(res);
     const j = await res.json();
     return (j.keys ?? []).map((k) => ({ key: `${tree}/${k.key}`, etag: k.etag }));
   }
 
   /** Fetch one object's bytes, or `null` if absent. */
   async blobGet(key) {
-    const res = await this.#send(this.#blobUrl(key), { method: 'GET' });
+    let res;
+    try {
+      res = await this.#send(this.#blobUrl(key), { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
     if (res.status === 404) return null;
-    if (!res.ok) throw httpError(`blobGet ${key}`, res.status);
+    if (!res.ok) throw await httpAppError(res);
     return new Uint8Array(await res.arrayBuffer());
   }
 
@@ -241,12 +304,14 @@ export class RemoteStore {
   async blobPut(key, bytes, pointer, covered) {
     const extraHeaders = { 'content-type': 'application/octet-stream', ...(pointer ? {} : { 'if-none-match': '*' }) };
     if (covered) extraHeaders['x-openom-covered'] = btoa(covered); // ASCII JSON (hex keys + numbers) → btoa is safe
-    const res = await this.#send(this.#blobUrl(key), { method: 'PUT', extraHeaders, body: bytes });
-    if (res.status === 412) return; // immutable object already present — idempotent
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`blobPut ${key}`, res.status, detail);
+    let res;
+    try {
+      res = await this.#send(this.#blobUrl(key), { method: 'PUT', extraHeaders, body: bytes });
+    } catch (e) {
+      throw netAppError(e);
     }
+    if (res.status === 412) return; // immutable object already present — idempotent
+    if (!res.ok) throw await httpAppError(res);
   }
 
   /**
@@ -257,15 +322,17 @@ export class RemoteStore {
    * identity. PUT /v1/trees/{id}/frontier. A failure is non-fatal to sync — the worker swallows it.
    */
   async putFrontier(id, frontier) {
-    const res = await this.#send(`${this.#tree(id)}/frontier`, {
-      method: 'PUT',
-      extraHeaders: { 'content-type': 'application/json' },
-      body: JSON.stringify({ frontier }),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`putFrontier ${id}`, res.status, detail);
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/frontier`, {
+        method: 'PUT',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify({ frontier }),
+      });
+    } catch (e) {
+      throw netAppError(e);
     }
+    if (!res.ok) throw await httpAppError(res);
   }
 
   // ---- keyring surface (GET /trees/{id}/keyring) ----
