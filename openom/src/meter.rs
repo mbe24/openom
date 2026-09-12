@@ -125,6 +125,15 @@ pub trait Meter: Send + Sync {
         axis: WriteAxis,
     ) -> Result<(), MeterError>;
 
+    /// Rate-gate a create-tree (OPE-408): a per-ACCOUNT token bucket, committed independently (its own tx via
+    /// `pool`) so even a rejected create (over-quota / forbidden) still consumes a token — else POST /trees, the
+    /// only otherwise-ungated write, could be hammered with no backoff. Refills at the account's
+    /// `log_rate`/`log_burst`. An unknown account (no row) is not gated — the handler forbids it anyway.
+    ///
+    /// # Errors
+    /// [`MeterError::RateLimited`] on an empty bucket; [`MeterError::Internal`] if the gate SQL fails.
+    async fn charge_create(&self, pool: &PgPool, account: Uuid) -> Result<(), MeterError>;
+
     /// OBSERVE only (no gate today): count `read_ops`/`bytes_read` for `(account, tree, member, month)`. `bytes`
     /// from `tree_blob_index` before the store fetch; `None` for a LIST. Best-effort — a metering hiccup must
     /// never fail a read, so a store error is logged, not returned.
@@ -189,6 +198,13 @@ impl Meter for PgMeter {
         // (owner-pays sets the budget, the member holds the state), lazily created full on first write; the
         // WHERE guard on the UPDATE branch re-derives the balance so check and debit can't race (0 rows →
         // over). Ported verbatim from the former `log::charge_metering`.
+        //
+        // SIZING (OPE-408): the default log_rate=10/s, log_burst=200 (migration 0004) is comfortably above the
+        // real client cadence, so a normal multi-PUT sync tick (a delta or few + a heads pointer + sometimes a
+        // snapshot) never false-429s: same-key rewrites are already floored at >=1s by the client (OPE-410), so
+        // sustained legit writes stay well under 10/s, and a reconnect/backlog burst is absorbed by the 200-token
+        // headroom then drains at 10/s. A runaway per-member loop is still capped at 10/s (owner-pays, and now a
+        // hard-removable member per OPE-421). A single generous bucket, per the owner decision (4-B).
         let (m_rate, m_burst): (f64, i32) =
             sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
                 .bind(cx.account)
@@ -258,6 +274,47 @@ impl Meter for PgMeter {
         record_write(tx, cx, size_bytes)
             .await
             .map_err(|e| MeterError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn charge_create(&self, pool: &PgPool, account: Uuid) -> Result<(), MeterError> {
+        // A per-account token bucket in its OWN committed statement, so a rejected create still spends a token
+        // (the create handler rolls its entitlement tx back on a 403, so a shared tx would refund the debit and
+        // defeat the anti-hammer purpose). Refill uses the account's log_rate/log_burst; the WHERE guard makes
+        // check-and-debit atomic per row (0 rows → over), exactly as the per-member data bucket above.
+        let Some((rate, burst)): Option<(f64, i32)> =
+            sqlx::query_as("SELECT log_rate, log_burst FROM accounts WHERE id = $1")
+                .bind(account)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| MeterError::Internal(e.to_string()))?
+        else {
+            return Ok(()); // unknown account — the handler forbids it; nothing to rate-gate
+        };
+        let ok = sqlx::query(
+            "INSERT INTO account_create_rate (account_id, tokens, refilled_at)
+             VALUES ($1, $2::float8 - 1, now())
+             ON CONFLICT (account_id) DO UPDATE
+               SET tokens = LEAST($2::float8, account_create_rate.tokens
+                                  + EXTRACT(EPOCH FROM (now() - account_create_rate.refilled_at)) * $3) - 1,
+                   refilled_at = now()
+               WHERE LEAST($2::float8, account_create_rate.tokens
+                           + EXTRACT(EPOCH FROM (now() - account_create_rate.refilled_at)) * $3) >= 1",
+        )
+        .bind(account)
+        .bind(burst)
+        .bind(rate)
+        .execute(pool)
+        .await
+        .map_err(|e| MeterError::Internal(e.to_string()))?;
+        if ok.rows_affected() != 1 {
+            // The create caller is always the tree owner (creating their own tree), so the exact 1/rate
+            // retry-after leaks nothing (it's their own plan rate).
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let retry_after_secs = if rate > 0.0 { (1.0 / rate).ceil() as u64 } else { 60 };
+            tracing::info!(event = "rate_rejected", resource = "create_tree", owner = %account);
+            return Err(MeterError::RateLimited { retry_after_secs });
+        }
         Ok(())
     }
 

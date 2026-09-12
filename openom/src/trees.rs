@@ -211,6 +211,11 @@ pub async fn create_tree(
     let _p = crate::prof::span("tree.create");
     let caller = identity.member_id;
 
+    // OPE-408: rate-gate the create in its own committed per-account bucket BEFORE the entitlement tx, so even a
+    // rejected attempt (over-quota / forbidden) consumes a token — POST /trees is otherwise the only write with
+    // no backoff, a scriptable DB-load vector. 429s the caller when the bucket is empty.
+    state.meter.charge_create(&state.db, caller).await?;
+
     // Serialize concurrent creates for this owner by locking the accounts row for the duration of the
     // check-and-insert. A bare `count(*) < max_trees` guard then INSERT races under READ COMMITTED: two
     // concurrent creates of DIFFERENT ids by the same owner each read the pre-insert count and both pass,

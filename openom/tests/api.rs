@@ -2202,6 +2202,45 @@ async fn create_tree_then_get_tree_404s_gracefully() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_is_rate_limited_per_account() {
+    // OPE-408: POST /trees is rate-gated per account. With a 1-token bucket (and ~no refill), the first create
+    // spends the token and the second is 429 — independent of the entitlement gate (max_trees is 1000 here, so
+    // it's the RATE gate firing, not the quota). Closes the "scriptable create with no backoff" DB-load vector.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 0.001, 1).await; // 1-token create bucket, negligible refill
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "first create spends the one token");
+    let (s, h, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "the second create is rate-limited, not entitlement-blocked");
+    assert!(h.get("retry-after").is_some(), "the 429 carries Retry-After");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn create_tree_rate_debits_even_a_rejected_attempt() {
+    // The debit is committed independently of the create tx, so an attempt that is REJECTED downstream still
+    // spends a token — else a hammer hitting the entitlement 403 would face no backoff. With max_trees=1 and a
+    // 2-token bucket: create #1 succeeds (token 2→1), create #2 is over-quota 403 (token 1→0), create #3 is
+    // 429 (bucket empty) — proving the 403 attempt consumed its token.
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    seed_account(&db, owner, 1 << 30, 0.001, 2).await; // 2-token bucket, negligible refill
+    sqlx::query("UPDATE accounts SET max_trees = 1 WHERE id = $1").bind(owner).execute(&db).await.unwrap();
+
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::CREATED, "create #1 succeeds (token 2->1)");
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "create #2 is over-quota (403) but still spends a token (1->0)");
+    let (s, _, _) = send(&app, post_as(format!("/v1/trees/{}", Uuid::new_v4()), owner)).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS, "create #3 is 429 — the rejected #2 consumed its token");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn blob_put_get_roundtrip_pointer() {
     let app = router().await;
     let db = db().await;
