@@ -379,6 +379,50 @@ impl<S: BlobStore> SyncClient<S> {
     pub fn pull_frontier(&self) -> docsync::Frontier {
         self.inner.frontier().clone()
     }
+
+    /// How many dots the OPE-421 look-behind has DROPPED and not yet purged. See
+    /// [`docsync::BlobSyncClient::dropped_count`].
+    #[must_use]
+    pub fn dropped_count(&self) -> usize {
+        self.inner.dropped_count()
+    }
+
+    /// The dropped-dot coordinates awaiting review — the opt-in soft-removal queue (OPE-426), a departed
+    /// member's trailing edits. See [`docsync::BlobSyncClient::dropped_dots`].
+    #[must_use]
+    pub fn dropped_dots(&self) -> Vec<(String, u64)> {
+        self.inner.dropped_dots()
+    }
+
+    /// Read the raw sealed envelope of a dropped dot (soft-removal review preview). See
+    /// [`docsync::BlobSyncClient::read_dropped`].
+    ///
+    /// # Errors
+    /// Returns an error if the blob read fails.
+    pub fn read_dropped(&self, replica: &str, counter: u64) -> Result<Option<Vec<u8>>> {
+        self.inner.read_dropped(replica, counter)
+    }
+
+    /// APPROVE a dropped dot (soft removal, OPE-426): `vouch` re-checks it (covered-accept predicate) and, if it
+    /// passes, the delta is merged + un-tracked so the next compaction pins it. See
+    /// [`docsync::BlobSyncClient::approve_dropped`].
+    ///
+    /// # Errors
+    /// Returns an error if the blob read fails.
+    pub fn approve_dropped(
+        &mut self,
+        replica: &str,
+        counter: u64,
+        vouch: impl FnOnce(&[u8], &[u8]) -> bool,
+    ) -> Result<bool> {
+        self.inner.approve_dropped(replica, counter, vouch)
+    }
+
+    /// DISCARD a dropped dot (soft removal, OPE-426): stop tracking it as pending (it stays suppressed). See
+    /// [`docsync::BlobSyncClient::discard_dropped`].
+    pub fn discard_dropped(&mut self, replica: &str, counter: u64) -> bool {
+        self.inner.discard_dropped(replica, counter)
+    }
 }
 
 impl<S: BlobStore> std::fmt::Debug for SyncClient<S> {

@@ -459,6 +459,81 @@ impl<S: BlobStore> AppCore<S> {
         self.undecodable + self.client.quarantined_count() + self.rejected
     }
 
+    /// The pending soft-removal review queue (OPE-426), as JSON `[{replica, counter, authorMemberId, kind}]`.
+    /// These are a departed member's trailing edits the head look-behind refused (dropped): valid at their
+    /// governing revision but authored by someone since demoted/removed. An administrator reviews them and
+    /// either [`approve_pending`](Self::approve_pending) (keep — the reactive analog of compact-before-remove)
+    /// or [`discard_pending`](Self::discard_pending). Never contains a generic forgery (those are rejected, not
+    /// dropped). The UI drives this; the core just surfaces the queue + the two decisions.
+    #[must_use]
+    pub fn pending_reviews(&self) -> String {
+        let items: Vec<Value> = self
+            .client
+            .dropped_dots()
+            .into_iter()
+            .filter_map(|(replica, counter)| {
+                let env = self.client.read_dropped(&replica, counter).ok()??;
+                let envelope = Envelope::decode(env.as_slice()).ok()?;
+                let header = envelope.header.as_ref()?;
+                Some(serde_json::json!({
+                    "replica": replica,
+                    "counter": counter,
+                    "authorMemberId": header.author_member_id,
+                    "kind": header.kind,
+                }))
+            })
+            .collect();
+        serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Approve a pending trailing edit (OPE-426): a current administrator VOUCHES for it. The delta is merged
+    /// iff it passes the covered-accept predicate — a valid signature by a key the author ACTUALLY held and a
+    /// kind their strongest-ever role permits, resolved from OUR membership ([`MembershipResolver::ever_member_info`]),
+    /// never the entry — the same gate the self-heal cover reader applies. Once merged, the next compaction pins
+    /// it, so every replica recovers it via snapshot adoption. Returns whether it was approved (false if the dot
+    /// is unknown, gone, or fails the vouch). Idempotent.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the store read fails.
+    pub fn approve_pending(&mut self, replica: &str, counter: u64) -> Result<bool, CoreError> {
+        let membership = self.membership.as_deref();
+        let approved = self.client.approve_dropped(replica, counter, |env, pt| {
+            let Some(m) = membership else {
+                return true; // solo/unshared — only the DEK holder writes, so an opened entry is trusted
+            };
+            let Ok(envelope) = Envelope::decode(env) else {
+                return false;
+            };
+            let Some(header) = envelope.header.as_ref() else {
+                return false;
+            };
+            // Re-run §B3 and accept iff the disposition is Accept OR Drop. A dropped dot is governing-valid but
+            // head-invalid, so Drop is the expected verdict; both Accept and Drop mean the signature verifies
+            // against the author's key at the governing revision — engine-neutral (the chain resolves the
+            // retained governing keyring; it has no dag-style `ever_member_info`). This re-checks the signature
+            // (guarding a BYO store where the object could be swapped), while the administrator supplies the
+            // head-authority override by choosing to approve. A Reject (forgery) or Hold declines.
+            matches!(
+                openom_vault::verify_ingest(
+                    envelope.version,
+                    m,
+                    header,
+                    &header.governing_ref,
+                    &header.key_id,
+                    || Ok::<_, ()>(pt.to_vec()),
+                ),
+                Disposition::Accept | Disposition::Drop
+            )
+        })?;
+        Ok(approved)
+    }
+
+    /// Discard a pending trailing edit (OPE-426): the administrator declines to keep it. It stays suppressed.
+    /// Returns whether it was present in the pending queue.
+    pub fn discard_pending(&mut self, replica: &str, counter: u64) -> bool {
+        self.client.discard_dropped(replica, counter)
+    }
+
     /// Install (or refresh) the §B3 governing membership. The worker calls this on unlock and after every
     /// keyring sync, passing a resolver ([`openom_vault::ChainMembershipResolver`] /
     /// [`openom_vault::DagMembershipResolver`])

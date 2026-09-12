@@ -239,6 +239,26 @@ test('app-core: chain co-owner demote through the worker — hard + preserves pr
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
+test('app-core: opt-in soft removal — a demoted member\'s trailing edit is queued, approved, and preserved', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+
+  await page.goto('/e2e/sync-worker-harness.html');
+  await page.waitForFunction(() => (window as any).__ready === true, null, { timeout: 25_000 });
+
+  const r = await page.evaluate(() => (window as any).__syncWorker.softRemovalApprove());
+
+  // OPE-426: the demoted member's trailing edit was DROPPED into the pending-review queue (not silently lost,
+  // not merged) — attributed to the member.
+  expect(r.pendingAuthors).toContain('acct-member');
+  expect(r.liveBeforeApprove).not.toContain('pLate'); // dropped, so not projected before review
+  // The admin APPROVED it: it folds live, and survives a cold reload (recovered from the pin).
+  expect(r.approvedAny).toBe(true);
+  expect(r.liveAfterApprove).toContain('pLate');
+  expect(r.seenAfterReload).toContain('pLate');
+  expect(errors, 'no uncaught page errors').toEqual([]);
+});
+
 test('app-core: reset clears the tree for a clean reseed', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));

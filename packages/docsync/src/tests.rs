@@ -704,6 +704,42 @@ fn blob_compact_does_not_regress_a_peer_snapshots_covered() {
     assert!(cov.get("replica-B").copied().unwrap_or(0) >= 1, "B now covered too");
 }
 
+#[test]
+fn blob_soft_removal_approve_and_discard_a_dropped_dot() {
+    // OPE-426 opt-in soft removal: a dropped dot (a departed member's trailing edit) can be APPROVED by an
+    // administrator (vouch → merge + un-track, so the next compaction pins it) or DISCARDED (un-track, stays
+    // suppressed). Proves the two review decisions over the `dropped` queue.
+    let store = Arc::new(MemoryBlob::new());
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.apply("keep-me".into()).unwrap(); // B:0
+    b.apply("drop-me".into()).unwrap(); // B:1
+
+    // X drops both of B's entries (B is a since-departed member at X's head).
+    let mut x = blob_client(store.clone(), "replica-X");
+    x.pull_verified(|_e, _p, r, _c| if r == "replica-B" { Verdict::Drop } else { Verdict::Accept }, NO_COVER)
+        .unwrap();
+    assert_eq!(x.dropped_count(), 2);
+    assert_eq!(x.dropped_dots().len(), 2, "both trailing edits are in the review queue");
+    assert!(!x.engine().lines.contains("keep-me"), "a dropped dot is not folded");
+    assert!(x.read_dropped("replica-B", 0).unwrap().is_some(), "the raw envelope is readable for review");
+
+    // APPROVE B:0 (vouch passes) → merged + un-tracked.
+    assert!(x.approve_dropped("replica-B", 0, |_env, _pt| true).unwrap());
+    assert!(x.engine().lines.contains("keep-me"), "an approved trailing edit is folded");
+    assert_eq!(x.dropped_count(), 1, "the approved dot leaves the queue");
+
+    // A vouch that DECLINES leaves the dot dropped + unmerged.
+    assert!(!x.approve_dropped("replica-B", 1, |_e, _p| false).unwrap());
+    assert!(!x.engine().lines.contains("drop-me"));
+    assert_eq!(x.dropped_count(), 1);
+
+    // DISCARD B:1 → un-tracked, never folded; a subsequent approve is a no-op (unknown dot).
+    assert!(x.discard_dropped("replica-B", 1));
+    assert!(!x.engine().lines.contains("drop-me"));
+    assert_eq!(x.dropped_count(), 0);
+    assert!(!x.approve_dropped("replica-B", 1, |_e, _p| true).unwrap(), "discarded dot is no longer approvable");
+}
+
 /// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object
 /// (distinct from a plain absent key). Everything else delegates.
 struct GoneFor {

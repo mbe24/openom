@@ -344,6 +344,32 @@ impl AppCoreHandle {
         self.inner.anomalies()
     }
 
+    /// The opt-in soft-removal review queue (OPE-426) as JSON `[{replica, counter, authorMemberId, kind}]` — a
+    /// departed member's trailing edits the head look-behind refused, for an administrator to approve/discard.
+    #[wasm_bindgen(js_name = pendingReviews)]
+    #[must_use]
+    pub fn pending_reviews(&self) -> String {
+        self.inner.pending_reviews()
+    }
+
+    /// Approve a pending trailing edit (OPE-426): vouch for it, merging it iff it passes covered-accept, so the
+    /// next compaction pins it. `replica` is the dot's replica id, `counter` its per-replica counter (both from
+    /// [`pendingReviews`](Self::pending_reviews)). Returns whether it was approved.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the store read fails.
+    #[wasm_bindgen(js_name = approvePending)]
+    pub fn approve_pending(&mut self, replica: &str, counter: u64) -> Result<bool, JsError> {
+        self.inner.approve_pending(replica, counter).map_err(to_js)
+    }
+
+    /// Discard a pending trailing edit (OPE-426): decline to keep it (it stays suppressed). Returns whether it
+    /// was present in the queue.
+    #[wasm_bindgen(js_name = discardPending)]
+    pub fn discard_pending(&mut self, replica: &str, counter: u64) -> bool {
+        self.inner.discard_pending(replica, counter)
+    }
+
     // --- reads -------------------------------------------------------------------------------------
 
     /// The materialized read model as a JSON string.

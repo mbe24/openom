@@ -936,6 +936,34 @@ const api = {
   oplog(docId) {
     return core(docId).handle.oplog();
   },
+
+  // --- soft-removal review (OPE-426): a departed member's trailing edits, for an admin to approve/discard ---
+
+  /** The pending review queue as parsed JSON: [{ replica, counter, authorMemberId, kind }]. Empty when hard
+   *  removal left nothing pending (the common case). The UI reads this to offer approve/discard. */
+  pendingReviews(docId) {
+    return JSON.parse(core(docId).handle.pendingReviews());
+  },
+
+  /** Approve a pending trailing edit: an admin vouches for it → it is folded (if it passes covered-accept),
+   *  then compacted + synced so the pin propagates and every replica recovers it. Returns whether approved. */
+  async approvePending(docId, { replica, counter }) {
+    const c = core(docId);
+    const approved = c.handle.approvePending(replica, BigInt(counter));
+    if (approved) {
+      await persistBlobs(c);
+      if (transportFor(docId)) await syncData(c, 1); // pin the vouched delta + push it so peers recover it
+    }
+    return approved;
+  },
+
+  /** Discard a pending trailing edit (it stays suppressed). Returns whether it was present in the queue. */
+  async discardPending(docId, { replica, counter }) {
+    const c = core(docId);
+    const discarded = c.handle.discardPending(replica, BigInt(counter));
+    if (discarded) await persistBlobs(c);
+    return discarded;
+  },
   liveRecords(docId) {
     return core(docId).handle.liveRecords();
   },

@@ -483,6 +483,81 @@
         return { ownerLiveSees, seenAfterReload };
       },
 
+      // OPE-426 opt-in soft removal, end to end through the worker: a co-owner writes a TRAILING edit around
+      // their demotion (their local core hasn't synced the demotion, so it seals as co-owner); the owner pulls
+      // it under the post-demote head, where the look-behind DROPS it into the pending-review queue. The owner
+      // then APPROVES it — vouching → folding → pinning — and it is projected live AND survives a cold reload.
+      // (The in-page transport is a dumb store with no server ACL, i.e. the BYO case where the server gate
+      // isn't the backstop and the client-side review is the mechanism.)
+      async softRemovalApprove() {
+        const transport = makeTransport();
+        const treeId = new Uint8Array(16).fill(11);
+        const ownerDoc = `soft-owner-${crypto.randomUUID()}`;
+        const memberDoc = `soft-member-${crypto.randomUUID()}`;
+        const ownerPass = 'owner passphrase here';
+        const memberPass = 'member passphrase here';
+
+        const owner = spawnWorker();
+        await owner.warm();
+        await owner.clearPersisted(ownerDoc);
+        await owner.provisionCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        await owner.attachTransport(ownerDoc, Comlink.proxy(transport));
+        const pin = await owner.keyringHash(ownerDoc);
+
+        const member = spawnWorker();
+        await member.warm();
+        await member.clearPersisted(memberDoc);
+        const acct = await member.provisionMember(memberPass);
+        await owner.addMember(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', minRevision: 1,
+          newMemberId: 'acct-member', role: 'editor',
+          memberAuthorPublic: acct.authorPublicKey, memberHpkePublic: acct.hpkePublicKey,
+        });
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'co-owner',
+        });
+
+        // Member joins as co-owner. It does NOT sync again, so it stays co-owner locally through the write below.
+        await member.attachTransport(memberDoc, Comlink.proxy(transport));
+        await member.joinAsMember({
+          treeId, docId: memberDoc, passphrase: memberPass, memberId: 'acct-member',
+          memberKdfParams: acct.kdfParams, pinnedRevision: pin.revision, pinnedHash: pin.hash,
+        });
+
+        // Owner DEMOTES the co-owner to editor.
+        await owner.changeRole(ownerDoc, {
+          passphrase: ownerPass, treeId, ownerMemberId: 'acct-owner', targetMemberId: 'acct-member', newRole: 'editor',
+        });
+
+        // The member (still co-owner LOCALLY) writes a trailing edit and pushes it (the dumb store accepts it).
+        await member.assertAnchor(memberDoc, 'pLate', PERSON);
+        await member.commit(memberDoc);
+        await member.syncNow(memberDoc);
+
+        // Owner pulls it under the post-demote head → the look-behind DROPS it into the pending queue.
+        await owner.syncNow(ownerDoc);
+        const pending = await owner.pendingReviews(ownerDoc);
+        const liveBeforeApprove = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // Owner APPROVES every pending trailing edit → folded + pinned.
+        let approvedAny = false;
+        for (const p of pending) {
+          if (await owner.approvePending(ownerDoc, { replica: p.replica, counter: p.counter })) approvedAny = true;
+        }
+        const liveAfterApprove = JSON.parse(await owner.project(ownerDoc)).people.map((p) => p.id);
+
+        // Cold reload: the approved edit survives (recovered from the pin).
+        const reloaded = spawnWorker();
+        await reloaded.warm();
+        await reloaded.unlockCore({ passphrase: ownerPass, treeId, memberId: 'acct-owner', docId: ownerDoc });
+        const seenAfterReload = JSON.parse(await reloaded.project(ownerDoc)).people.map((p) => p.id);
+
+        return {
+          pendingAuthors: pending.map((p) => p.authorMemberId),
+          liveBeforeApprove, approvedAny, liveAfterApprove, seenAfterReload,
+        };
+      },
+
       // THE dag distribution loop through the real worker: an owner provisions a DAG tree, admits a member,
       // and the member JOINS by verifying a self-contained anchor against an OOB pin (no per-revision walk) —
       // then verify-on-ingest accepts the owner's signed write AND the member's own maintainer write across
