@@ -2368,6 +2368,83 @@ async fn blob_list_by_prefix() {
 
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn blob_http_conformance() {
+    // OPE-403: the HTTP-level analog of store-blob's conformance suite (packages/store-blob/src/conformance.rs).
+    // The managed backend deliberately does NOT `impl store_blob::BlobStore` — that trait is SYNCHRONOUS (for
+    // in-process Fs/Memory backends); this backend is async Axum handlers over R2 (bytes) + Neon (index/CAS)
+    // that realize the SAME get / put(precondition) / list contract over HTTP. So we assert the contract at the
+    // endpoints, clause-for-clause against conformance::run, using a MemoryBlob as the etag oracle.
+    use store_blob::{BlobStore, MemoryBlob, Precondition};
+
+    let app = router().await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_tree(&app, &db, owner).await;
+    let blob = |k: &str| format!("/v1/trees/{tree}/blobs/{k}");
+    let oracle = MemoryBlob::new(); // the reference impl the Fs/Memory conformance runs against
+
+    // get_missing_is_none → a missing key is 404 (the HTTP analog of `None`).
+    let (s, _, _) = send(&app, get_as(blob("heads/missing"), owner)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "get of a missing key is 404 (None)");
+
+    // put_then_get_roundtrips + ETAG PARITY: the managed etag equals what the reference MemoryBlob yields for
+    // the same bytes (both are hex(sha256)), so a client reading R2 sees the SAME etag as one reading
+    // MemoryBlob/FsBlob — the cross-store etag convention the whole sync layer relies on.
+    let (s, h, _) = send(&app, put_bytes_as(blob("heads/rA"), b"hello", owner, false)).await;
+    assert_eq!(s, StatusCode::OK, "pointer put (Precondition::Any)");
+    let put_etag = etag(&h);
+    assert_eq!(
+        put_etag,
+        oracle.put("heads/rA", b"hello", Precondition::Any).unwrap(),
+        "managed etag matches the store-blob reference convention (cross-store parity)"
+    );
+    let (s, h2, body) = send(&app, get_as(blob("heads/rA"), owner)).await;
+    assert_eq!(s, StatusCode::OK, "get roundtrips");
+    assert_eq!(body, b"hello", "get returns the put bytes");
+    assert_eq!(etag(&h2), put_etag, "get etag matches put etag");
+
+    // idempotent_put_same_etag → identical content (Precondition::Any) yields the same etag.
+    let (_, h3, _) = send(&app, put_bytes_as(blob("heads/rA"), b"hello", owner, false)).await;
+    assert_eq!(etag(&h3), put_etag, "identical content yields the same etag");
+
+    // if_absent_creates_then_conflicts → IfAbsent creates; a conflicting IfAbsent 412s carrying the existing
+    // etag; the first value stands.
+    let (s, hc, _) = send(&app, put_bytes_as(blob("log/rA/0"), b"v1", owner, true)).await;
+    assert_eq!(s, StatusCode::OK, "IfAbsent create");
+    let created = etag(&hc);
+    let (s, hc2, _) = send(&app, put_bytes_as(blob("log/rA/0"), b"v2", owner, true)).await;
+    assert_eq!(s, StatusCode::PRECONDITION_FAILED, "IfAbsent on an existing key conflicts");
+    assert_eq!(etag(&hc2), created, "the 412 carries the existing etag");
+    let (_, _, body) = send(&app, get_as(blob("log/rA/0"), owner)).await;
+    assert_eq!(body, b"v1", "the conflicting write did not land");
+
+    // list_by_prefix → a prefix scopes the listing; the empty prefix lists everything under the tree.
+    send(&app, put_bytes_as(blob("log/rA/1"), b"v", owner, true)).await;
+    let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/blobs?prefix=log/"), owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    let mut keys: Vec<String> = serde_json::from_slice::<Value>(&b).unwrap()["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["key"].as_str().unwrap().to_string())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["log/rA/0".to_string(), "log/rA/1".to_string()], "list returns only the prefix");
+    let (_, _, ball) = send(&app, get_as(format!("/v1/trees/{tree}/blobs"), owner)).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&ball).unwrap()["keys"].as_array().unwrap().len(),
+        3,
+        "the empty prefix lists everything (heads/rA + log/rA/0 + log/rA/1)"
+    );
+
+    // if_match_cas + delete_semantics: N/A on this surface, by design. IfMatch has no wire representation — the
+    // client flows use only Any (LWW pointers/snapshots) + IfAbsent (immutable log dots), and server-side
+    // monotonicity is enforced with `SELECT ... FOR UPDATE` locks, not a client-driven etag CAS. There is no
+    // DELETE route — reclamation is server-internal GC (gc.rs), never a client operation.
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn blob_metering_capacity_gates_immutable_only() {
     // §3.1: the byte-capacity meter fires only on an IfAbsent (immutable, accumulating) put; a pointer
     // (Precondition::Any) overwrite is capacity-exempt.

@@ -71,6 +71,9 @@ openom-keyring-chain = { workspace = true, features = ["test-util"] }
 keyeo-crypto.workspace = true
 # Metering tests seed accounts with tiny caps directly, to drive the rate/capacity gates.
 sqlx.workspace = true
+# The blob HTTP conformance test uses store-blob's MemoryBlob as the etag oracle (the managed backend follows
+# the same hex(sha256) etag convention as the reference impls, so a client sees identical etags across stores).
+store-blob.workspace = true
 
 [lints]
 workspace = true
