@@ -461,6 +461,7 @@ fn blob_bootstrap_verified_does_not_merge_a_rejected_tail() {
     c.bootstrap_verified(
         |_e, pt, _r, _co| if pt == b"forged" { Verdict::Reject } else { Verdict::Accept },
         NO_COVER,
+        |_e, _b| Verdict::Accept,
     )
     .unwrap();
     assert!(c.engine().lines.contains("keep"), "snapshot content is adopted");
@@ -495,7 +496,7 @@ fn blob_gc_simulation_subsumed_frontier_prevents_loss() {
 
     // A fresh replica bootstraps: snapshot (a0,a1 — A's folded state, NOT "held") + the surviving tail (B:0).
     let mut c = blob_client(store.clone(), "replica-C");
-    c.bootstrap_verified(|_e, _p, _r, _co| Verdict::Accept, NO_COVER).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _co| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     let expected: BTreeSet<String> = ["a0", "a1", "held"].into_iter().map(String::from).collect();
     assert_eq!(
         c.engine().lines,
@@ -587,7 +588,7 @@ fn blob_mirror_skips_gone_objects_and_carries_the_snapshot() {
 
     // A fresh replica bootstraps from the mirrored store: snapshot (a0,a1,a2) + tail (empty above A:3) = complete.
     let mut c = blob_client(dst.clone(), "replica-C");
-    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     let expected: BTreeSet<String> = ["a0", "a1", "a2"].into_iter().map(String::from).collect();
     assert_eq!(c.engine().lines, expected, "no loss: bootstrap over the reaped hole via the carried snapshot");
 }
@@ -643,7 +644,7 @@ fn blob_needs_snapshot_adoption_signals_missing_state() {
 
     let mut c = blob_client(store.clone(), "replica-C");
     assert!(c.needs_snapshot_adoption().unwrap(), "a fresh client (subsumed 0) must adopt the {{A:2}} snapshot");
-    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap();
+    c.bootstrap_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
     assert!(!c.needs_snapshot_adoption().unwrap(), "after adoption it holds the snapshot's coverage");
 }
 

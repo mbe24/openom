@@ -169,7 +169,9 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if the store read or a merge fails.
     pub fn bootstrap(&mut self) -> Result<(), CoreError> {
-        self.verify_gated(|client, classify, fold_cover| client.bootstrap_verified(classify, fold_cover))?;
+        self.verify_gated(|client, classify, fold_cover, classify_snapshot| {
+            client.bootstrap_verified(classify, fold_cover, classify_snapshot)
+        })?;
         Ok(())
     }
 
@@ -274,7 +276,7 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store read fails (a broken backend — not one bad entry).
     pub fn fold(&mut self) -> Result<usize, CoreError> {
-        Ok(self.verify_gated(|client, classify, fold_cover| client.pull_verified(classify, fold_cover))?)
+        Ok(self.verify_gated(|client, classify, fold_cover, _cs| client.pull_verified(classify, fold_cover))?)
     }
 
     /// Re-attempt every STALLED dot (a pinned blocker: `Unopenable`/`MergeFailed`/`Rejected`/`Vanished`)
@@ -289,7 +291,7 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store read fails.
     pub fn retry_stalled(&mut self) -> Result<usize, CoreError> {
-        Ok(self.verify_gated(|client, classify, fold_cover| client.retry_stalled(classify, fold_cover))?)
+        Ok(self.verify_gated(|client, classify, fold_cover, _cs| client.retry_stalled(classify, fold_cover))?)
     }
 
     /// Run a verified-pull op (`pull_verified` / `bootstrap_verified`) behind the §B3 gate closures, shared by
@@ -303,6 +305,7 @@ impl<S: BlobStore> AppCore<S> {
             &mut SyncClient<Arc<S>>,
             &mut dyn FnMut(&[u8], &[u8], &str, u64) -> Verdict,
             &mut dyn FnMut(&[u8], &[u8], &str, u64),
+            &mut dyn FnMut(&[u8], &[u8]) -> Verdict,
         ) -> R,
     ) -> R {
         use std::cell::{Cell, RefCell};
@@ -325,7 +328,16 @@ impl<S: BlobStore> AppCore<S> {
                     rejected.set(rejected.get() + 1);
                 }
             };
-            run(&mut self.client, &mut classify, &mut fold_cover)
+            // OPE-421: the snapshot-adoption gate — a snapshot's bulk state is trusted only if its author held
+            // the role at head (the same §B3 look-behind, no covered-accept). A rejection counts as an anomaly.
+            let mut classify_snapshot = |env: &[u8], body: &[u8]| {
+                let v = classify_snapshot_entry(membership, env, body);
+                if v == Verdict::Reject {
+                    rejected.set(rejected.get() + 1);
+                }
+                v
+            };
+            run(&mut self.client, &mut classify, &mut fold_cover, &mut classify_snapshot)
         };
         self.covered = covered.into_inner();
         self.cover_envelopes = cover_envs.into_inner();
@@ -720,6 +732,36 @@ fn classify_entry(
         }
     }
     disposition_to_verdict(verdict)
+}
+
+/// Verify a `Snapshot` envelope for adoption (OPE-421 Slice 1): route it through the SAME §B3 gate as a Delta
+/// — the head look-behind — so a snapshot's bulk state is trusted only if its author held the required role
+/// (Maintainer, for `Kind::Snapshot`) at the CURRENT head. This closes the unauthenticated-adoption hole where
+/// a demoted/removed DEK-holder could poison state via a forged snapshot. NO covered-accept rescue: a Cover
+/// blesses one removed member's individual delta; it must never bless a bulk state claim standing in for the
+/// whole log. `membership == None` (solo/unshared) ⇒ Accept (only the DEK holder can write there).
+fn classify_snapshot_entry(
+    membership: Option<&dyn MembershipResolver>,
+    env: &[u8],
+    body: &[u8],
+) -> Verdict {
+    let Some(membership) = membership else {
+        return Verdict::Accept;
+    };
+    let Ok(envelope) = Envelope::decode(env) else {
+        return Verdict::Reject;
+    };
+    let Some(header) = envelope.header.as_ref() else {
+        return Verdict::Reject;
+    };
+    disposition_to_verdict(openom_vault::verify_ingest(
+        envelope.version,
+        membership,
+        header,
+        &header.governing_ref,
+        &header.key_id,
+        || Ok::<_, ()>(body.to_vec()),
+    ))
 }
 
 /// Verify one `Cover` envelope as a current Maintainer+ entry (pin P8) and, if valid, fold its `CoverBody`

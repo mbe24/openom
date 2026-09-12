@@ -535,6 +535,14 @@ pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     /// Total `log/*` objects present at the last [`compact`](Self::compact) — the baseline
     /// [`maybe_compact`](Self::maybe_compact) measures accrual against (0 until the first snapshot).
     log_len_at_snapshot: u64,
+    /// Count of snapshots REJECTED by the OPE-421 auth gate — a checkpoint whose author didn't hold the role
+    /// at head (a forge / a since-demoted or removed member). Surfaced as an anomaly; a rejected snapshot is
+    /// not merged, so the client degrades to a verified full-log tail replay.
+    snapshot_rejections: usize,
+    /// The etag of the last snapshot object rejected by that gate — so a `Gone`-triggered re-bootstrap doesn't
+    /// re-verify/re-adopt the same poisoned pointer in a loop. Cleared when the pointer's etag changes (an
+    /// honest re-compaction overwrites it).
+    rejected_snapshot_etag: Option<String>,
 }
 
 impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
@@ -558,11 +566,20 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             stalled: std::collections::BTreeMap::new(),
             quarantined: 0,
             log_len_at_snapshot: 0,
+            snapshot_rejections: 0,
+            rejected_snapshot_etag: None,
         }
     }
 
     pub const fn engine(&self) -> &E {
         &self.engine
+    }
+
+    /// How many snapshots the OPE-421 auth gate rejected (a checkpoint that couldn't be authenticated). A
+    /// positive count means the client is on a degraded verified-tail-replay path for want of a trusted
+    /// snapshot — the host surfaces it as an anomaly.
+    pub const fn snapshot_rejections(&self) -> usize {
+        self.snapshot_rejections
     }
 
     pub const fn engine_mut(&mut self) -> &mut E {
@@ -990,12 +1007,29 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// is folded, so it no longer blocks `subsumed_frontier`; this also resolves a `Vanished` stall — a dot
     /// reclaimed below a GC floor the snapshot re-supplies). Shared by both bootstrap variants; only the tail
     /// pull differs. Kept dots (at/above covered) are re-fetched + re-judged by that tail pull.
-    fn adopt_snapshot_baseline(&mut self) -> Result<(), SyncError> {
-        if let Some((env, _etag)) = self.store.get(&snapshot_key(&self.doc))? {
+    fn adopt_snapshot_baseline(
+        &mut self,
+        mut classify_snapshot: impl FnMut(&[u8], &[u8]) -> Verdict,
+    ) -> Result<(), SyncError> {
+        if let Some((env, etag)) = self.store.get(&snapshot_key(&self.doc))? {
+            // Loop guard: don't re-verify/re-adopt a pointer we already rejected (a `Gone`-triggered
+            // re-bootstrap would otherwise spin on the same poisoned snapshot). Cleared when the etag changes.
+            if self.rejected_snapshot_etag.as_deref() == Some(etag.as_str()) {
+                return Ok(());
+            }
             let body = self
                 .sealer
                 .open(EntryKind::Snapshot, &env)
                 .map_err(|e| SyncError::Sealer(Box::new(e)))?;
+            // AUTHENTICATE (OPE-421 Slice 1): trust a snapshot's state only if its author held the required
+            // role at the CURRENT head. A rejected snapshot is NOT merged — the client degrades to a verified
+            // full-log tail replay. On a solo/unverified channel the closure returns `Accept` (only the DEK
+            // holder can write, so AEAD-open is sufficient there).
+            if classify_snapshot(&env, &body) != Verdict::Accept {
+                self.snapshot_rejections += 1;
+                self.rejected_snapshot_etag = Some(etag);
+                return Ok(());
+            }
             if let Some((covered, engine_bytes)) = decode_frontier(&body) {
                 self.engine
                     .merge_snapshot(engine_bytes)
@@ -1049,7 +1083,8 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// # Errors
     /// Returns [`SyncError`] if a blob read, an open, or a merge fails.
     pub fn bootstrap(&mut self) -> Result<(), SyncError> {
-        self.adopt_snapshot_baseline()?;
+        // Unverified/solo channel: only the DEK holder can write, so AEAD-open is sufficient — accept.
+        self.adopt_snapshot_baseline(|_env, _body| Verdict::Accept)?;
         self.pull()?;
         Ok(())
     }
@@ -1066,8 +1101,9 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         &mut self,
         classify: impl FnMut(&[u8], &[u8], &str, u64) -> Verdict,
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+        classify_snapshot: impl FnMut(&[u8], &[u8]) -> Verdict,
     ) -> Result<(), SyncError> {
-        self.adopt_snapshot_baseline()?;
+        self.adopt_snapshot_baseline(classify_snapshot)?;
         self.pull_verified(classify, fold_cover)?;
         Ok(())
     }

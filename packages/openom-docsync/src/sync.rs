@@ -335,8 +335,10 @@ impl<S: BlobStore> SyncClient<S> {
         &mut self,
         classify: impl FnMut(&[u8], &[u8], &str, u64) -> docsync::Verdict,
         fold_cover: impl FnMut(&[u8], &[u8], &str, u64),
+        classify_snapshot: impl FnMut(&[u8], &[u8]) -> docsync::Verdict,
     ) -> Result<()> {
-        self.inner.bootstrap_verified(classify, fold_cover)
+        self.inner
+            .bootstrap_verified(classify, fold_cover, classify_snapshot)
     }
 
     /// Re-attempt every STALLED dot — app-invoked on a version upgrade / membership change, NEVER per tick.
