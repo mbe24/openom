@@ -344,9 +344,14 @@ export class RemoteStore {
    * keyring yet) → empty.
    */
   async readKeyring(id, from = 1) {
-    const res = await this.#send(`${this.#tree(id)}/keyring?from=${from}`, { method: 'GET' });
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/keyring?from=${from}`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
     if (res.status === 404) return { revisions: [], head: 0 };
-    if (!res.ok) throw httpError(`readKeyring ${id}`, res.status);
+    if (!res.ok) throw await httpAppError(res);
     const body = await res.json();
     return {
       revisions: (body.revisions ?? []).map((r) => ({ revision: r.revision, bytes: b64decode(r.payload) })),
@@ -363,16 +368,21 @@ export class RemoteStore {
    * accepted `{ revision }`.
    */
   async putKeyring(id, updateBytes) {
-    const res = await this.#send(`${this.#tree(id)}/keyring`, {
-      method: 'PUT',
-      extraHeaders: { 'content-type': 'application/octet-stream' },
-      body: updateBytes,
-    });
-    if (res.status === 409) throw new ConflictError(null, null);
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`putKeyring ${id}`, res.status, detail);
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/keyring`, {
+        method: 'PUT',
+        extraHeaders: { 'content-type': 'application/octet-stream' },
+        body: updateBytes,
+      });
+    } catch (e) {
+      throw netAppError(e);
     }
+    // A 409 stays a ConflictError — it is INTERNAL retry control-flow (the caller pulls the newer head +
+    // re-produces), not a user-facing error; sharing.js branches on its `.name`. Everything else is an
+    // AppError so an offline/5xx/timeout keyring publish surfaces properly through the driver.
+    if (res.status === 409) throw new ConflictError(null, null);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json().catch(() => ({}));
     return { revision: b.revision ?? null };
   }
@@ -386,9 +396,14 @@ export class RemoteStore {
    * keyring PUT and never summary-pushed.
    */
   async getAccess(id) {
-    const res = await this.#send(`${this.#tree(id)}/access`, { method: 'GET' });
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/access`, { method: 'GET' });
+    } catch (e) {
+      throw netAppError(e);
+    }
     if (res.status === 404) return null;
-    if (!res.ok) throw httpError(`getAccess ${id}`, res.status);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
     return {
       members: (b.members ?? []).map((m) => ({ memberId: m.member_id, role: m.role })),
@@ -409,16 +424,20 @@ export class RemoteStore {
       expected_generation: expectedGeneration,
       members: members.map((m) => ({ member_id: m.memberId, role: m.role })),
     };
-    const res = await this.#send(`${this.#tree(id)}/access`, {
-      method: 'PUT',
-      extraHeaders: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (res.status === 409) throw new ConflictError(expectedGeneration, null);
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw httpError(`putAccess ${id}`, res.status, detail);
+    let res;
+    try {
+      res = await this.#send(`${this.#tree(id)}/access`, {
+        method: 'PUT',
+        extraHeaders: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      throw netAppError(e);
     }
+    // 409 stays a ConflictError — stale-generation retry control-flow (membershipSummary branches on
+    // `.name`); other failures are AppErrors for the display path.
+    if (res.status === 409) throw new ConflictError(expectedGeneration, null);
+    if (!res.ok) throw await httpAppError(res);
     const b = await res.json();
     return { generation: b.generation ?? null, unchanged: !!b.unchanged };
   }
