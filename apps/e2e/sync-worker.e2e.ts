@@ -109,6 +109,14 @@ test('app-core: an owner shares a tree and a member joins + verifies through the
   expect(r.sync.state).toBe('ok');
   // Verify-on-ingest ACCEPTED the owner's signed write on the shared tree — the member sees it.
   expect(r.memberPeople).toContain('pShared');
+  // OPE-293: addMember asserted the resolved membership to the advisory /access — owner + the new member,
+  // each with a role, plus a CAS generation and a non-empty basis frontier.
+  expect(r.access, 'membership summary was pushed to /access').not.toBeNull();
+  expect(r.access.generation).toBeGreaterThanOrEqual(1);
+  expect(r.access.basis.length).toBeGreaterThan(0);
+  const ids = r.access.members.map((m: any) => m.memberId).sort();
+  expect(ids).toEqual(['acct-member', 'acct-owner']);
+  expect(r.access.members.every((m: any) => typeof m.role === 'number')).toBe(true);
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
@@ -128,6 +136,13 @@ test('app-core: an owner removes a member through the worker — rotate, re-unlo
   expect(r.ownerAfter).toContain('pShared'); // pre-removal history intact
   expect(r.ownerAfter).toContain('pAfter'); // the post-removal signed write landed
   expect(r.lockedOut).toBe(true); // the removed member can no longer unlock the rotated tree
+  // OPE-293: removeMember asserted the rotated membership to /access — the removed member is dropped from the
+  // advisory view (the owner remains), and the generation advanced past the add.
+  expect(r.accessAfterRemoval, 'rotated membership was pushed to /access').not.toBeNull();
+  const idsAfter = r.accessAfterRemoval.members.map((m: any) => m.memberId);
+  expect(idsAfter).toContain('acct-owner');
+  expect(idsAfter).not.toContain('acct-member');
+  expect(r.accessAfterRemoval.generation).toBeGreaterThanOrEqual(2); // add (gen 1) then remove (gen 2+)
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 

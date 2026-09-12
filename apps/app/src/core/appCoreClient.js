@@ -97,6 +97,11 @@ export function remoteTransport(remoteStore) {
     readKeyring: (treeUuid, from) => remoteStore.readKeyring(treeUuid, from),
     // Publish a produced keyring revision (a wrapped KeyringUpdate) so peers can pull + verify it.
     putKeyring: (treeUuid, updateBytes) => remoteStore.putKeyring(treeUuid, updateBytes),
+    // The advisory membership channel (OPE-293): GET the server's stored summary (for the CAS generation +
+    // coverage check) and PUT this device's resolved {members, basis} view. Server-side this is the coarse
+    // ACL for collaboration features — never the security boundary (the keyring is).
+    getAccess: (treeUuid) => remoteStore.getAccess(treeUuid),
+    putAccess: (treeUuid, body) => remoteStore.putAccess(treeUuid, body),
   };
 }
 

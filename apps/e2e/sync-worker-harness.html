@@ -55,6 +55,14 @@
       let keyringHead = 0;
       let snapshotCovered = null; // the last x-openom-covered header seen on a snapshot PUT (OPE-409)
       let reportedFrontier = null; // the last PULL frontier reported to PUT /frontier (OPE-409 gate 2)
+      // The advisory membership summary (OPE-293): a faithful in-memory stand-in for the server's /access —
+      // generation CAS + an unchanged-check, in the CLIENT shape RemoteStore.getAccess/putAccess use.
+      let access = null; // { members: [{memberId, role}], generation, basis }
+      const canonAccess = (members, basis) => JSON.stringify({
+        m: [...members].map((x) => ({ memberId: x.memberId, role: x.role }))
+          .sort((a, b) => (a.memberId < b.memberId ? -1 : a.memberId > b.memberId ? 1 : 0)),
+        b: [...basis],
+      });
       return {
         // Explicit create-tree (OPE-407): the managed server mints a `trees` row here; this fake blob store
         // has no tree-row concept (it's a plain Map), so it's a no-op. Present so the owner's first tick,
@@ -92,6 +100,27 @@
         // Gate-2 liveness telemetry (OPE-409): the worker reports its PULL frontier here; record the last one.
         async putFrontier(_tree, frontier) {
           reportedFrontier = frontier;
+        },
+        // The advisory /access channel (OPE-293), CLIENT shape (RemoteStore already maps server↔client).
+        async getAccess(_id) {
+          return access
+            ? { members: access.members.map((m) => ({ ...m })), generation: access.generation, basis: [...access.basis] }
+            : null;
+        },
+        async putAccess(_id, { basis, expectedGeneration = null, members }) {
+          const cur = access ? access.generation : null;
+          if ((expectedGeneration ?? null) !== (cur ?? null)) {
+            const e = new Error('generation conflict'); e.name = 'ConflictError'; throw e; // 409 → orchestrator re-GETs
+          }
+          if (access && canonAccess(access.members, access.basis) === canonAccess(members, basis)) {
+            return { generation: access.generation, unchanged: true }; // no-op → no generation bump
+          }
+          const generation = (cur ?? 0) + 1;
+          access = { members: members.map((m) => ({ ...m })), generation, basis: [...basis] };
+          return { generation, unchanged: false };
+        },
+        _access() {
+          return access; // { members, generation, basis } or null — for the harness assertions
         },
         // The count of DATA log objects (deltas + covers) — pointers (heads/snapshot) are excluded, so this
         // counts settled writes the way the old scalar log length did.
@@ -308,6 +337,8 @@
           sync,
           memberPeople: memberProj.people.map((p) => p.id),
           serverKeyringHead: (await transport.readKeyring(ownerDoc, 1)).head,
+          // OPE-293: after the share, the owner's addMember asserted the resolved membership to /access.
+          access: transport._access(),
         };
       },
 
@@ -385,7 +416,12 @@
           lockedOut = true;
         }
 
-        return { beforeRemoval, headBefore, headAfter, pushState: push.state, ownerAfter, lockedOut };
+        return {
+          beforeRemoval, headBefore, headAfter, pushState: push.state, ownerAfter, lockedOut,
+          // OPE-293: the owner's removeMember asserted the rotated membership to /access — the removed member
+          // is dropped from the advisory view, the owner remains.
+          accessAfterRemoval: transport._access(),
+        };
       },
 
       // THE dag distribution loop through the real worker: an owner provisions a DAG tree, admits a member,

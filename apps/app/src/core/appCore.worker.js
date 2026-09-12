@@ -37,6 +37,8 @@ import init, {
   backfillRrk as wasmBackfillRrk,
   resolvedOwnerKey as wasmResolvedOwnerKey,
   recoveryConfirmed as wasmRecoveryConfirmed,
+  keyringSummary as wasmKeyringSummary,
+  keyringCovers as wasmKeyringCovers,
 } from '../vendor/app-core/openom_app_core.js';
 import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
@@ -44,6 +46,8 @@ import {
   joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
   joinDagAnchor, publishDagAnchor, syncDagAnchor,
 } from './sharing.js';
+import { pushMembershipSummary } from './membershipSummary.js';
+import { MembershipAsserts } from './membershipAsserts.js';
 
 let ready = null;
 const ensureInit = () => (ready ??= init());
@@ -253,6 +257,105 @@ async function syncKeyringForTick(c) {
 async function refreshMembershipAndEpochs(c, engine, head) {
   await installMembership(c, c.docId, engine, head);
   c.handle.adoptEpochs(head);
+}
+
+// --- Advisory membership-summary push (OPE-293) ----------------------------------------------------------
+//
+// After a locally-verified keyring membership change, a SIGNER (owner / co-owner) asserts its resolved
+// `{members, basis}` view to the managed server's advisory /access channel — the coarse ACL the server uses
+// for collaboration features (notifications, server-side revocation, proposal routing), NEVER the security
+// boundary (the signed keyring is that). The push MECHANISM (CAS on `generation`, an at-most-once coverage
+// refresh, retry-on-409) lives in `membershipSummary.js`; this wires it to the engine (`keyringSummary` /
+// `keyringCovers`, both chain + dag) and triggers it, ordered to UNDER-grant.
+//
+// Durability: the intent is recorded BEFORE the network call in a store that survives a Worker restart, so a
+// crash between the keyring write and the push self-heals on the next flush (tick / reconnect / startup). The
+// keyring itself is the authoritative durable source — the view is always recomputable from it.
+
+// One JSON blob in the IndexedDb meta store holds the whole `openom.ma.*` map (a few members + a short basis
+// per tree — tiny). A write-through in-memory cache keeps `MembershipAsserts`' synchronous get/set interface
+// while persisting durably in a Worker (no localStorage here). Hydrated once, lazily.
+const MA_SLOT = 'membership-asserts';
+function makeDurableAssertStore() {
+  const cache = new Map();
+  let hydrated = null; // a once-promise
+  let writing = Promise.resolve(); // serialize slot writes so their CAS never races itself
+  return {
+    ensureHydrated() {
+      return (hydrated ??= (async () => {
+        try {
+          const s = await store().readSnapshot(MA_SLOT);
+          if (s?.bytes?.length) {
+            const obj = JSON.parse(new TextDecoder().decode(s.bytes));
+            for (const [k, v] of Object.entries(obj)) cache.set(k, v);
+          }
+        } catch {
+          /* fresh / unreadable → start empty; the keyring recompute still self-heals */
+        }
+      })());
+    },
+    getItem: (k) => (cache.has(k) ? cache.get(k) : null),
+    setItem: (k, v) => {
+      cache.set(k, v);
+      writing = writing.then(async () => {
+        try {
+          const prev = await store().readSnapshot(MA_SLOT);
+          const bytes = new TextEncoder().encode(JSON.stringify(Object.fromEntries(cache)));
+          await store().putSnapshot(MA_SLOT, bytes, prev?.version ?? null);
+        } catch {
+          /* best-effort: a lost CAS / storage hiccup just leaves the cache un-persisted this round */
+        }
+      });
+    },
+  };
+}
+const assertStore = makeDurableAssertStore();
+const membershipAsserts = new MembershipAsserts(assertStore);
+
+// Assert this device's current resolved membership to the server's /access (managed-only). `docId` IS the
+// tree UUID string the access channel keys on. Best-effort + NEVER throws — the durable intent stays marked
+// for a later flush if the network (or a 404 before the tree row exists, a 403 for a non-signer) fails.
+async function pushMembership(docId, engine) {
+  try {
+    await assertStore.ensureHydrated();
+    const head = await keyringStore().loadHead(docId);
+    if (!head) return;
+    const eng = head.engine || engine;
+    const s = JSON.parse(wasmKeyringSummary(eng, head.bytes));
+    const current = { view: s.members, basis: s.basis };
+    if (membershipAsserts.isConfirmed(docId, current)) return; // steady state: the server already has it
+    // Record the intent DURABLY before any network — BEFORE the transport check too, so an OFFLINE signer
+    // action still leaves a `desired` for the tick flush to push once a transport attaches. Only a signer's
+    // own change reaches here, so `desired` is the flush's "this device is a signer" signal (no 403 spam).
+    membershipAsserts.mark(docId, current);
+    const transport = transportFor(docId);
+    if (!transport) return; // managed-only + offline: nothing to push now; the tick flush retries
+    const pushed = await pushMembershipSummary(transport, docId, current, {
+      coversBasis: (storedBasis) => wasmKeyringCovers(eng, head.bytes, storedBasis),
+      refresh: async () => {
+        // We're behind the server's basis: pull the newer keyring, then recompute from the fresh head.
+        const c = cores.get(docId);
+        if (c) await syncKeyringForTick(c);
+        const h = await keyringStore().loadHead(docId);
+        const s2 = JSON.parse(wasmKeyringSummary(h.engine || eng, h.bytes));
+        return { view: s2.members, basis: s2.basis };
+      },
+    });
+    if (pushed) membershipAsserts.confirm(docId, current); // server acked (changed or unchanged) → de-dup
+  } catch {
+    /* swallow: intent (if marked) is flushed later; the keyring stays the authoritative source */
+  }
+}
+
+// Retry a pending assert whose intent was recorded but not yet confirmed (a crash/offline/404 between the
+// keyring write and the server ack). Gated on a recorded `desired` — which ONLY a signer's own change writes
+// — so a plain member's tick never attempts a push it isn't authorized for (the server gates /access to
+// signers). Cheap: a no-op in the steady state.
+async function flushPendingMembership(c) {
+  if (!c || !transportFor(c.docId)) return;
+  await assertStore.ensureHydrated();
+  if (membershipAsserts.desired(c.docId) == null) return; // this device never asserted → not a signer here
+  await pushMembership(c.docId, c.engine);
 }
 
 // Map a wasm keyring/unlock error to a specific AppError. A failed anti-rollback check ("rollback" / "rolled
@@ -571,6 +674,9 @@ const api = {
     // the owner publishes on the next explicit publish / sync — the local state stands. Chain publishes the
     // revision tail; the dag PUTs the full self-contained anchor as the next slot.
     await publishMembership(docId, eng, treeId);
+    // Under-grant ordering (OPE-293): on an ADD the keyring op is published FIRST (above), THEN the advisory
+    // summary — so the server's coarse ACL never lists the new member before the crypto that authorizes them.
+    await pushMembership(docId, eng);
   },
 
   /**
@@ -621,6 +727,10 @@ const api = {
     } finally {
       re.free();
     }
+    // Under-grant ordering (OPE-293): on a REMOVAL the advisory summary is pushed FIRST — so the server's
+    // coarse ACL drops the removed member as early as possible — and only THEN the keyring op below. A crash
+    // in between leaves the advisory ACL MORE restrictive than the keyring, never less.
+    await pushMembership(docId, eng);
     // Publish the rotated keyring so members adopt the removal. Best-effort.
     await publishMembership(docId, eng, treeId);
     // Push the self-heal cover (and any other pending local objects) to the DATA channel so peers covered-accept
@@ -839,6 +949,9 @@ async function runTick(c) {
       await syncData(c);
     } while (c.dirty);
     if (c.aborted) return { state: 'stopped' }; // torn down mid-tick — don't touch the (maybe-freed) handle
+    // OPE-293: flush a signer's pending advisory-summary assert (self-heals a crash/offline/pre-create-tree
+    // 404 between the keyring change and the push). A no-op unless this device recorded an unconfirmed intent.
+    await flushPendingMembership(c);
     // `anomalies` (quarantined / undecodable / §B3-rejected entries) is surfaced, never swallowed.
     return { state: 'ok', pending: c.handle.pendingCount(), anomalies: c.handle.anomalies() };
   } catch (e) {
