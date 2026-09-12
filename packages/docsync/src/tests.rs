@@ -581,6 +581,89 @@ fn blob_drain_vanished_dot_is_stalled_not_leaked() {
     );
 }
 
+#[test]
+fn blob_a_dropped_pre_demote_delta_is_recovered_from_the_authenticated_snapshot() {
+    // OPE-421 F2 (the frontier split): a legit pre-demote delta HELD then DROPPED under a new (demoted) head
+    // must NOT be lost. The admin's authenticated snapshot pinned it (Slice 3 compact-before-demote), so the
+    // dropped-below-covered dot triggers `needs_snapshot_adoption` and adoption recovers its content. Proves
+    // `dropped` is NON-pinning for GC (subsumed advances past it) yet ADOPTION-triggering (so no divergence).
+    let store = Arc::new(MemoryBlob::new());
+
+    // Member B writes a legit pre-demote delta; admin A folds it + compacts (the Slice-3 pin covers B:0).
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.apply("legit".into()).unwrap(); // B:0
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.apply("owner-write".into()).unwrap(); // A:0
+    a.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // A folds B:0
+    a.compact().unwrap(); // snapshot covers {A:1, B:1}, contains "legit" + "owner-write"
+
+    // Replica X first HOLDS B:0 (keyring behind), then — after the demote lands — the drain re-classifies it to
+    // DROP (B's author is demoted at head). The Cell flips the verdict between the two drains.
+    let demoted = std::cell::Cell::new(false);
+    let classify = |_e: &[u8], pt: &[u8], r: &str, _c: u64| {
+        if r == "replica-B" && pt == b"legit" {
+            if demoted.get() { Verdict::Drop } else { Verdict::Hold }
+        } else {
+            Verdict::Accept
+        }
+    };
+    let mut x = blob_client(store.clone(), "replica-X");
+    x.pull_verified(&classify, NO_COVER).unwrap(); // holds B:0, merges owner-write
+    assert_eq!(x.held_count(), 1, "B:0 is held pre-demote");
+
+    // The demote lands: the drain re-classifies B:0 → Drop.
+    demoted.set(true);
+    x.pull_verified(&classify, NO_COVER).unwrap();
+    assert_eq!(x.held_count(), 0, "no longer held");
+    assert_eq!(x.dropped_count(), 1, "B:0 dropped");
+    assert_eq!(x.stalled_count(), 0, "a Drop does not stall/pin (unlike Reject/Vanished)");
+    assert_eq!(
+        x.subsumed_frontier().get("replica-B").copied(),
+        Some(1),
+        "dropped is NON-pinning — subsumed advanced past B:0"
+    );
+    assert!(!x.engine().lines.contains("legit"), "X did not merge the dropped delta directly");
+    assert!(
+        x.needs_snapshot_adoption().unwrap(),
+        "a dropped dot below covered MUST trigger adoption (else legit history is lost)"
+    );
+
+    // Adopt the authenticated pin: recovers "legit", purges the drop, converges.
+    x.bootstrap_verified(&classify, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    assert!(x.engine().lines.contains("legit"), "the pin recovered the dropped pre-demote delta");
+    assert!(x.engine().lines.contains("owner-write"));
+    assert_eq!(x.dropped_count(), 0, "the drop is purged below covered — no adoption churn");
+    assert!(!x.needs_snapshot_adoption().unwrap(), "converged — no further adoption needed");
+}
+
+#[test]
+fn blob_a_forge_above_covered_stays_dropped_without_adoption_churn() {
+    // A demoted member's NEW forge (past the admin's pinned covered frontier) is dropped and stays INERT: it is
+    // non-pinning AND does not trigger adoption (its counter >= covered), so there is no re-adoption churn —
+    // while the legit pre-demote dot BELOW covered is still recovered. The two cases split exactly at covered.
+    let store = Arc::new(MemoryBlob::new());
+    let mut b = blob_client(store.clone(), "replica-B");
+    b.apply("legit".into()).unwrap(); // B:0 — legit pre-demote
+    let mut a = blob_client(store.clone(), "replica-A");
+    a.pull_verified(|_e, _p, _r, _c| Verdict::Accept, NO_COVER).unwrap(); // A folds B:0
+    a.compact().unwrap(); // covered {B:1} — covers B:0 only
+    b.apply("forge".into()).unwrap(); // B:1 — a post-demote forge, ABOVE covered
+
+    // X drops every B entry (author demoted): B:0 (below covered) and B:1 (above covered).
+    let drop_b =
+        |_e: &[u8], _p: &[u8], r: &str, _c: u64| if r == "replica-B" { Verdict::Drop } else { Verdict::Accept };
+    let mut x = blob_client(store.clone(), "replica-X");
+    x.pull_verified(&drop_b, NO_COVER).unwrap();
+    assert_eq!(x.dropped_count(), 2, "both B dots dropped");
+    assert!(x.needs_snapshot_adoption().unwrap(), "B:0 (< covered) triggers adoption");
+
+    x.bootstrap_verified(&drop_b, NO_COVER, |_e, _b| Verdict::Accept).unwrap();
+    assert!(x.engine().lines.contains("legit"), "the below-covered legit dot recovered from the pin");
+    assert!(!x.engine().lines.contains("forge"), "the forge is never merged");
+    assert_eq!(x.dropped_count(), 1, "only the below-covered drop is purged; the forge (>= covered) stays dropped");
+    assert!(!x.needs_snapshot_adoption().unwrap(), "no churn: the remaining forge is at/above covered");
+}
+
 /// A `MemoryBlob` whose named keys return `BlobError::Gone` from `get` — models a GC-reaped remote object
 /// (distinct from a plain absent key). Everything else delegates.
 struct GoneFor {

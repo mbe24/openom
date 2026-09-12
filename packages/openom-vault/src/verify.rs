@@ -79,8 +79,17 @@ pub enum Disposition {
     Accept,
     /// Valid but its governing keyring isn't retained yet — buffer and re-verify after a keyring sync.
     Hold,
-    /// Forged / unattributed-on-shared / illegitimate — drop it (never let it stall the tail).
+    /// Forged / unattributed-on-shared / illegitimate — reject it. A `Reject` is RETRYABLE: it pins the
+    /// subsumed frontier (so it can't forge coverage over an unmerged dot) and is re-attempted on a membership
+    /// change (a later cover / retained keyring can turn it valid).
     Reject,
+    /// Valid at its governing revision but its author no longer holds the required role/key at the CURRENT head
+    /// (OPE-421 look-behind) — a backdated forge by a since-demoted or since-removed member. TERMINAL and
+    /// NON-resurrecting, distinct from `Reject`: never merged, NOT re-attempted by `retry_stalled` (a re-promote
+    /// must re-mint fresh, never resurrect a backdated dot at its old HLC), and NON-pinning for GC (a forge must
+    /// not freeze the subsumed frontier). A dropped coordinate BELOW an authenticated snapshot's covered frontier
+    /// still triggers adoption, so a legit HELD pre-demote delta dropped here is recovered from the pin, not lost.
+    Drop,
 }
 
 /// The engine-NEUTRAL §B3 decision for one entry (a faithful port of `entryVerifier.js`).
@@ -111,11 +120,9 @@ pub fn verify_ingest<E>(
         (true, Governing::Resolved { view, expected_key_id, head_view, .. }) => {
             // Governing-revision verification first (Reject-precedence for real forgeries), THEN the OPE-421
             // head look-behind: an otherwise-valid entry whose author no longer holds the role at head is a
-            // backdated forge by a since-demoted/removed member.
+            // backdated forge by a since-demoted/removed member → `Drop` (terminal, non-resurrecting).
             match verify_or_reject(version, header, &view, &expected_key_id, open) {
-                Disposition::Accept if !head_authorized(header, &view, head_view.as_ref()) => {
-                    Disposition::Reject
-                }
+                Disposition::Accept => head_disposition(header, &view, head_view.as_ref()),
                 d => d,
             }
         }
@@ -137,21 +144,24 @@ pub fn verify_ingest<E>(
 /// same-`member_id` member). `head_view = None` (the dag, always-current) ⇒ always authorized (the governing
 /// check already used the current role).
 ///
-/// SLICE-1 kind gate: applied only to `Kind::Snapshot` for now (rejecting a snapshot is loss-free — state is
-/// re-derivable). Slice 2 removes the gate so the look-behind also covers deltas (which needs the
-/// delta-preservation machinery in place).
-fn head_authorized(header: &Header, governing: &MembershipView, head_view: Option<&MembershipView>) -> bool {
+/// Applies to ALL role-gated kinds (Slice 2 un-gated it from the Slice-1 snapshot-only). Called ONLY on an
+/// entry that already passed the governing check (`verify_or_reject == Accept`), so `Kind::try_from` and
+/// `required_role_for_kind` cannot actually fail here (`verify_entry` already rejected `UnsupportedKind`); those
+/// arms are defensive and map to `Reject` (malformed), never `Drop`. A genuine look-behind failure — author
+/// under-role, key-mismatched, or absent at head — is a backdated forge → `Drop` (terminal, non-resurrecting).
+fn head_disposition(
+    header: &Header,
+    governing: &MembershipView,
+    head_view: Option<&MembershipView>,
+) -> Disposition {
     let Some(head_view) = head_view else {
-        return true; // dag / always-current — the governing check already enforced the current role
+        return Disposition::Accept; // dag / always-current — the governing check already enforced the current role
     };
     let Ok(kind) = Kind::try_from(header.kind) else {
-        return false;
+        return Disposition::Reject; // defensive: verify_entry already gated this
     };
-    if kind != Kind::Snapshot {
-        return true; // Slice 1: snapshot-only
-    }
     let Some(required) = required_role_for_kind(kind) else {
-        return false;
+        return Disposition::Reject; // defensive: Unspecified was already rejected by verify_entry
     };
     let governing_key = governing
         .members
@@ -164,10 +174,14 @@ fn head_authorized(header: &Header, governing: &MembershipView, head_view: Optio
         .find(|m| m.member_id == header.author_member_id)
     {
         // Present at head, strong enough, AND the same key that verified the signature at the governing view.
-        Some(hm) => {
-            hm.role <= required && Some(hm.author_public_key.as_slice()) == governing_key
+        Some(hm)
+            if hm.role <= required && Some(hm.author_public_key.as_slice()) == governing_key =>
+        {
+            Disposition::Accept
         }
-        None => false, // absent at head (removed) — a backdated forge
+        // Under-role / key-mismatched (a re-admitted same-id member with a fresh key), or absent at head
+        // (removed) — a backdated forge by a since-demoted or since-removed member.
+        _ => Disposition::Drop,
     }
 }
 
@@ -552,10 +566,11 @@ mod tests {
         assert_eq!(ingest(m.as_ref(), &h, b"payload"), Disposition::Accept);
     }
 
-    // ── OPE-421 Slice 1: the snapshot look-behind (role at head) — the head_authorized prototype ──
+    // ── OPE-421: the governing_ref look-behind (role at head). Slice 1 gated it to Snapshot; Slice 2 un-gated
+    //    it to all kinds and a failure is now `Drop` (terminal, non-resurrecting) rather than `Reject`. ──
 
     #[test]
-    fn a_demoted_authors_backdated_snapshot_is_rejected() {
+    fn a_demoted_authors_backdated_snapshot_is_dropped() {
         // carol is a Maintainer at rev 3 (governing) but demoted to Editor at head rev 4. A Snapshot she signs
         // stamping the pre-demote ref passes the governing-revision check but MUST fail the head look-behind.
         let owner = generate_identity().unwrap();
@@ -570,7 +585,7 @@ mod tests {
         ]);
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let snap = signed(Kind::Snapshot, "carol", &carol, 3, b"snap");
-        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Reject, "backdated snapshot by a demoted member");
+        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Drop, "backdated snapshot by a demoted member");
     }
 
     #[test]
@@ -600,13 +615,14 @@ mod tests {
         ]);
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let snap = signed(Kind::Snapshot, "carol", &carol_old, 3, b"snap");
-        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Reject, "revoked key laundered via a re-admit");
+        assert_eq!(ingest(&m, &snap, b"snap"), Disposition::Drop, "revoked key laundered via a re-admit");
     }
 
     #[test]
-    fn slice1_kind_gate_defers_the_delta_look_behind() {
-        // Slice 1 gates only Snapshot. A demoted member's backdated DELTA still passes here (the delta
-        // look-behind is Slice 2, which needs the delta-preservation machinery). Proves the kind gate.
+    fn a_demoted_authors_backdated_delta_is_dropped() {
+        // Slice 2: the look-behind now covers DELTAs (not just snapshots). carol is a Maintainer at rev 3 but
+        // demoted to Editor at head rev 4; a Delta she signs stamping the pre-demote ref passes the governing
+        // check but fails the head look-behind → Drop (terminal, non-resurrecting), NOT Reject.
         let owner = generate_identity().unwrap();
         let carol = generate_identity().unwrap();
         let gov3 = keyring(3, true, vec![
@@ -619,7 +635,25 @@ mod tests {
         ]);
         let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
         let delta = signed(Kind::Delta, "carol", &carol, 3, b"d");
-        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Accept, "delta look-behind deferred to Slice 2");
+        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Drop, "demoted member's backdated delta");
+    }
+
+    #[test]
+    fn a_removed_members_backdated_delta_is_dropped() {
+        // Chain removal: bob is a Maintainer at rev 3 (governing) but ABSENT at head rev 4 (removed). His delta
+        // stamping the pre-removal ref passes the governing check but fails the head look-behind (absent at
+        // head) → Drop. This is the deliberate Slice-2 regression: chain removal is now lossy in-transit for a
+        // not-yet-folded delta, bounded by Slice 3's compact-before-remove.
+        let owner = generate_identity().unwrap();
+        let bob = generate_identity().unwrap();
+        let gov3 = keyring(3, true, vec![
+            member("owner", MemberRole::Owner, &owner),
+            member("bob", MemberRole::Admin, &bob),
+        ]);
+        let head4 = keyring(4, true, vec![member("owner", MemberRole::Owner, &owner)]); // bob removed
+        let m = cm(&head4, &[(3, &gov3), (4, &head4)]);
+        let delta = signed(Kind::Delta, "bob", &bob, 3, b"d");
+        assert_eq!(ingest(&m, &delta, b"d"), Disposition::Drop, "removed member's backdated delta");
     }
 
     #[test]

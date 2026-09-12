@@ -387,14 +387,26 @@ impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
 
 /// A classifier's decision on a fetched peer delta (the caller's §B3 verify/attribution gate lives here —
 /// `docsync` stays ignorant of what "valid" means; the client opens the envelope and passes the classifier
-/// both the raw envelope, for attribution, and the opened plaintext). `Accept` merges it; `Hold` keeps the
-/// dot for a later retry (e.g. its author isn't a known member YET) WITHOUT blocking the frontier; `Reject`
-/// drops it.
+/// both the raw envelope, for attribution, and the opened plaintext).
+///
+/// The QUADCHOTOMY every below-frontier dot lands in — `subsumed_frontier` and GC depend on it:
+/// - `Accept` merges it (absorbed — no longer a blocker).
+/// - `Hold` keeps the dot for a later retry (its author isn't a known member YET) WITHOUT blocking the
+///   frontier; a membership op can un-hold it (the OPE-382 drain).
+/// - `Reject` is a RETRYABLE terminal: it PINS the subsumed frontier (so it can't forge coverage over an
+///   unmerged dot) and is re-attempted by `retry_stalled` on a membership change (a later cover / retained
+///   keyring can turn it valid).
+/// - `Drop` is a NON-resurrecting terminal (OPE-421 head look-behind): a backdated forge by a since-demoted or
+///   removed member. Never merged, NEVER re-attempted, and — unlike `Reject` — NON-pinning for GC (a forge
+///   must not freeze the subsumed frontier). A dropped coordinate BELOW an authenticated snapshot's covered
+///   frontier still triggers adoption, so a legit HELD pre-demote delta dropped here is recovered from the
+///   pin, not lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Accept,
     Hold,
     Reject,
+    Drop,
 }
 
 /// A per-replica sync FRONTIER: `replica_id -> the count of that replica's log entries` — i.e. the next
@@ -531,6 +543,13 @@ pub struct BlobSyncClient<E: Engine, K: Sealer, S: BlobStore> {
     /// Together with `held`, these are the blockers of [`subsumed_frontier`](Self::subsumed_frontier) — the
     /// honest coverage a compactor may publish (C3). See [`StallCause`].
     stalled: std::collections::BTreeMap<(String, u64), StallCause>,
+    /// Dots DROPPED by the OPE-421 head look-behind (a backdated forge by a since-demoted/removed member). A
+    /// terminal, non-resurrecting bucket distinct from `held`/`stalled`: it is NOT a `subsumed_frontier` blocker
+    /// (a forge must not freeze GC) and is never re-pulled (each sits below `pull_frontier`, which advanced past
+    /// it when it was dropped). Its ONLY job is to keep [`needs_snapshot_adoption`](Self::needs_snapshot_adoption)
+    /// honest: a dropped dot below an authenticated snapshot's covered frontier means a legit HELD pre-demote
+    /// delta was dropped here — adopt the pin to recover its content. Purged below `covered` on adoption.
+    dropped: std::collections::BTreeSet<(String, u64)>,
     quarantined: usize,
     /// Total `log/*` objects present at the last [`compact`](Self::compact) — the baseline
     /// [`maybe_compact`](Self::maybe_compact) measures accrual against (0 until the first snapshot).
@@ -564,6 +583,7 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
             pull_frontier: Frontier::new(),
             held: std::collections::BTreeSet::new(),
             stalled: std::collections::BTreeMap::new(),
+            dropped: std::collections::BTreeSet::new(),
             quarantined: 0,
             log_len_at_snapshot: 0,
             snapshot_rejections: 0,
@@ -792,6 +812,13 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                     self.held.remove(&dot);
                     self.stalled.insert(dot, StallCause::Rejected);
                 }
+                // OPE-421 head look-behind failure: a since-demoted/removed author's backdated dot. Terminal +
+                // non-pinning — record it (so a below-covered drop still triggers snapshot adoption) but do NOT
+                // stall it (a forge must not freeze the subsumed frontier / GC).
+                Verdict::Drop => {
+                    self.held.remove(&dot);
+                    self.dropped.insert(dot);
+                }
                 Verdict::Hold => {} // stays held for the next drain
             }
         }
@@ -843,8 +870,9 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         }
 
         // Phase 2: classify each buffered Delta now that every cover in this tick has folded. Every dot ends
-        // in exactly one bucket — absorbed (merged), `held`, or `stalled` — so `subsumed_frontier` can never
-        // claim coverage over a dot not folded into the engine (the C3 invariant).
+        // in exactly one bucket — absorbed (merged), `held`, `stalled`, or `dropped` — so `subsumed_frontier`
+        // can never claim coverage over a dot not folded into the engine (the C3 invariant); `dropped` is the
+        // only bucket that is NOT a subsumed blocker (a forge, see [`Verdict::Drop`]).
         for (replica, c, env, pt) in deltas {
             match classify(&env, &pt, &replica, c) {
                 Verdict::Accept => {
@@ -862,6 +890,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 // self-heal Cover is this; pinning stops GC deleting it before the Cover can rescue it).
                 Verdict::Reject => {
                     self.stalled.insert((replica, c), StallCause::Rejected);
+                }
+                // Drop (OPE-421 head look-behind): a backdated forge — record it but do NOT pin (non-freezing).
+                Verdict::Drop => {
+                    self.dropped.insert((replica, c));
                 }
             }
         }
@@ -890,8 +922,10 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
     /// coverage a compactor may honestly publish (C3) — every dot below it is in engine state, so a GC that
     /// deletes below a published subsumed frontier never deletes an entry the snapshot doesn't contain. Derived
     /// (not a stored cursor), hence correct by construction whenever every below-frontier dot is in exactly one
-    /// bucket (absorbed / held / stalled), which [`pull`](Self::pull)/[`pull_verified`](Self::pull_verified)
-    /// enforce.
+    /// bucket (absorbed / held / stalled / dropped), which [`pull`](Self::pull)/[`pull_verified`](Self::pull_verified)
+    /// enforce. `dropped` (a backdated forge, [`Verdict::Drop`]) is deliberately NOT a blocker here — a forge
+    /// must not freeze GC — so a dropped dot's content is never claimed as covered, and its recovery-if-legit
+    /// runs through [`needs_snapshot_adoption`](Self::needs_snapshot_adoption), not this frontier.
     pub fn subsumed_frontier(&self) -> Frontier {
         let mut out = self.pull_frontier.clone();
         let blockers = self
@@ -932,21 +966,38 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         Ok(decode_frontier(&body).map(|(covered, _)| covered))
     }
 
-    /// Whether the current snapshot covers state this client lacks — its covered frontier exceeds our
-    /// `subsumed_frontier` for some replica. When true the sync must ADOPT it (`bootstrap_verified`) rather than
-    /// merely fold the tail, or a fresh/straggler client would miss the reaped-below-floor state that lives only
-    /// in the snapshot (OPE-409 layer 3). False when we already hold at least what the snapshot covers.
+    /// Whether the current snapshot covers state this client lacks — so the sync must ADOPT it
+    /// (`bootstrap_verified`) rather than merely fold the tail, or a fresh/straggler client would miss the
+    /// reaped-below-floor state that lives only in the snapshot (OPE-409 layer 3). True when EITHER:
+    /// - the covered frontier exceeds our `subsumed_frontier` for some replica (the classic straggler case), OR
+    /// - a DROPPED dot sits below the covered frontier (OPE-421): the look-behind dropped a delta the
+    ///   authenticated pin DOES contain — a legit HELD pre-demote delta of a since-demoted/removed member that
+    ///   the compacting admin folded before the demote. We must adopt to recover its content (a plain tail pull
+    ///   would just re-drop it). A forge dropped ABOVE covered never triggers this — the honest compactor
+    ///   publishes only its own subsumed frontier, so `covered` never reaches a forge beyond the admin's fold.
     ///
     /// # Errors
     /// Returns [`SyncError`] if the snapshot read/open fails.
     pub fn needs_snapshot_adoption(&self) -> Result<bool, SyncError> {
         let subsumed = self.subsumed_frontier();
         Ok(match self.snapshot_covered_frontier()? {
-            Some(covered) => covered
-                .iter()
-                .any(|(r, c)| *c > subsumed.get(r).copied().unwrap_or(0)),
+            Some(covered) => {
+                covered
+                    .iter()
+                    .any(|(r, c)| *c > subsumed.get(r).copied().unwrap_or(0))
+                    || self
+                        .dropped
+                        .iter()
+                        .any(|(r, c)| *c < covered.get(r).copied().unwrap_or(0))
+            }
             None => false,
         })
+    }
+
+    /// How many dots the OPE-421 head look-behind has DROPPED and not yet purged (a backdated forge, or a legit
+    /// pre-demote delta awaiting recovery from an authenticated snapshot). Surfaced for observability.
+    pub fn dropped_count(&self) -> usize {
+        self.dropped.len()
     }
 
     /// This replica's inbound frontier — the next counter it will pull from each replica.
@@ -1088,6 +1139,15 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                     // gone and the snapshot supplies its state (the Vanished-heal); a present dot stays pinned.
                     self.held.retain(|(r, hc)| !(r == replica && *hc < c));
                     self.stalled.retain(|(r, sc), _| !(r == replica && *sc < c));
+                    // Purge DROPPED dots below the covered frontier (capped at the observed head, OPE-421): the
+                    // authenticated snapshot's merged state contains them, so the drop record has done its job
+                    // (it triggered this adoption) and must be cleared — otherwise it would re-trigger adoption
+                    // every tick even though the content is now folded. Bounded by `cap` (not the absent-only
+                    // `c`) because a legit dropped dot's object may still be PRESENT (it was held, then dropped);
+                    // the pin's merged state supersedes it regardless. A dropped dot was necessarily pulled, so
+                    // its counter < observed head < `cap`-or-`claimed` alike. A forge dropped ABOVE covered is
+                    // untouched (inert).
+                    self.dropped.retain(|(r, dc)| !(r == replica && *dc < cap));
                 }
             }
         }
@@ -1168,6 +1228,16 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
                 Verdict::Hold => {
                     self.stalled.remove(&dot);
                     self.held.insert(dot); // now holdable — let the ordinary drain retry it
+                    cleared += 1;
+                }
+                // A membership change turned this into an OPE-421 look-behind failure (its author was since
+                // demoted/removed): move it from `stalled` to the terminal `dropped` bucket — UNPIN it (a forge
+                // must not freeze the frontier) and stop retrying it. A legit pre-demote dot lands here too and
+                // is recovered from the authenticated snapshot via `needs_snapshot_adoption`, never resurrected
+                // at its old position by a later re-promote.
+                Verdict::Drop => {
+                    self.stalled.remove(&dot);
+                    self.dropped.insert(dot);
                     cleared += 1;
                 }
                 // Accept whose merge still fails, or still Reject — keep the pin.

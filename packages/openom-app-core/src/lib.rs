@@ -674,6 +674,9 @@ const fn disposition_to_verdict(d: Disposition) -> Verdict {
         Disposition::Accept => Verdict::Accept,
         Disposition::Hold => Verdict::Hold,
         Disposition::Reject => Verdict::Reject,
+        // OPE-421 head look-behind failure: a since-demoted/removed author's backdated dot. Terminal +
+        // non-resurrecting + non-pinning — docsync routes it to its `dropped` bucket.
+        Disposition::Drop => Verdict::Drop,
     }
 }
 
