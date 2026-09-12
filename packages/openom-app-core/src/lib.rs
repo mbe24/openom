@@ -156,15 +156,39 @@ impl<S: BlobStore> AppCore<S> {
             .adopt_epochs(adopted.epochs, adopted.write_key_id, adopted.governing_ref))
     }
 
-    /// Rebuild the engine from the local durable log (snapshot + tail) — call once on open, after a
-    /// reload. This is what makes an offline mint survive a reload: the mint is durable in the local
-    /// store, so it re-enters the engine here and is re-offered by [`outbound`](Self::outbound).
+    /// Rebuild the engine from the local durable log on open/reload — adopt the snapshot's covered baseline,
+    /// purge the held/stalled dots it subsumes, then re-classify the tail through the §B3 gate
+    /// (`bootstrap_verified`, OPE-409 review #1). With no snapshot present (the pre-compaction state) this
+    /// degrades to a plain verified fold, so an offline mint still survives a reload. NEVER a plain fold: a
+    /// `Gone`-triggered re-bootstrap over a GC-reaped hole must RE-VERIFY the tail, not merge it unauthorized.
     ///
     /// # Errors
     /// Returns [`CoreError`] if the store read or a merge fails.
     pub fn bootstrap(&mut self) -> Result<(), CoreError> {
-        self.fold()?; // re-scan the whole local store through the §B3 gate (a fresh client's frontier is empty)
+        self.verify_gated(|client, classify, fold_cover| client.bootstrap_verified(classify, fold_cover))?;
         Ok(())
+    }
+
+    /// Fold current engine state into a snapshot at `{doc}/snapshot`, publishing the SUBSUMED frontier
+    /// (OPE-409 C3) as the covered marker — only entries actually folded, so a GC deleting below it never
+    /// deletes an entry no snapshot holds. Held/rejected/quarantined dots (a not-yet-covered removed member's
+    /// tail, a version-skew entry) PIN the frontier, so compaction cannot cover them until they resolve. The
+    /// app sends the SAME map as the plaintext `x-openom-covered` header on the snapshot PUT
+    /// ([`subsumed_frontier`](Self::subsumed_frontier)).
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if sealing or the blob write fails.
+    pub fn compact(&mut self) -> Result<(), CoreError> {
+        self.client.compact()?;
+        Ok(())
+    }
+
+    /// The SUBSUMED frontier — the ONLY coverage this device may honestly publish (OPE-409 C3), sent as the
+    /// plaintext `x-openom-covered` header on the snapshot PUT so the server's GC gate 1 can trust it.
+    /// `{replica_hex: counter}`.
+    #[must_use]
+    pub fn subsumed_frontier(&self) -> BTreeMap<String, u64> {
+        self.client.subsumed_frontier()
     }
 
     /// The moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
@@ -226,35 +250,48 @@ impl<S: BlobStore> AppCore<S> {
     /// # Errors
     /// Returns [`CoreError`] if a local store read fails (a broken backend — not one bad entry).
     pub fn fold(&mut self) -> Result<usize, CoreError> {
+        Ok(self.verify_gated(|client, classify, fold_cover| client.pull_verified(classify, fold_cover))?)
+    }
+
+    /// Run a verified-pull op (`pull_verified` / `bootstrap_verified`) behind the §B3 gate closures, shared by
+    /// [`fold`](Self::fold) and [`bootstrap`](Self::bootstrap). `classify` verifies each peer `Delta`
+    /// (accept/hold/reject + the SH-2 covered-accept rescue); `fold_cover` verifies and folds each `Cover`.
+    /// The two closures share `covered`/`cover_envelopes`, taken into interior-mutable locals for the call and
+    /// restored after; `membership` is a disjoint field borrowed shared while `self.client` is borrowed mut.
+    fn verify_gated<R>(
+        &mut self,
+        run: impl FnOnce(
+            &mut SyncClient<Arc<S>>,
+            &mut dyn FnMut(&[u8], &[u8], &str, u64) -> Verdict,
+            &mut dyn FnMut(&[u8], &[u8], &str, u64),
+        ) -> R,
+    ) -> R {
         use std::cell::{Cell, RefCell};
-        // `covered`/`cover_envelopes` are shared by the two closures (classify reads, fold_cover writes), so
-        // take them into interior-mutable locals for the call; `membership` is a disjoint field, borrowed
-        // shared, while `self.client` is borrowed mut by pull_verified.
         let membership = self.membership.as_deref();
         let covered = RefCell::new(std::mem::take(&mut self.covered));
         let cover_envs = RefCell::new(std::mem::take(&mut self.cover_envelopes));
         let rejected = Cell::new(0_usize);
-        let n = {
-            let classify = |env: &[u8], pt: &[u8], _r: &str, _c: u64| {
+        let out = {
+            let mut classify = |env: &[u8], pt: &[u8], _r: &str, _c: u64| {
                 let v = classify_entry(membership, &covered.borrow(), env, pt);
                 if v == Verdict::Reject {
                     rejected.set(rejected.get() + 1);
                 }
                 v
             };
-            let fold_cover = |env: &[u8], body: &[u8], _r: &str, _c: u64| {
+            let mut fold_cover = |env: &[u8], body: &[u8], _r: &str, _c: u64| {
                 if fold_cover_entry(membership, &mut covered.borrow_mut(), env, body) {
                     cover_envs.borrow_mut().push(env.to_vec());
                 } else {
                     rejected.set(rejected.get() + 1);
                 }
             };
-            self.client.pull_verified(classify, fold_cover)?
+            run(&mut self.client, &mut classify, &mut fold_cover)
         };
         self.covered = covered.into_inner();
         self.cover_envelopes = cover_envs.into_inner();
         self.rejected += rejected.get();
-        Ok(n)
+        out
     }
 
     // --- durable persistence: the local BlobStore mirrored to a durable tier -----------------------

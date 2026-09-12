@@ -60,6 +60,27 @@ impl AppCoreHandle {
         self.inner.bootstrap().map_err(to_js)
     }
 
+    /// Compact current engine state into a snapshot at `{doc}/snapshot`, publishing the SUBSUMED frontier
+    /// (OPE-409 C3). The worker uploads the resulting snapshot object with the mandatory `x-openom-covered`
+    /// header = [`subsumedFrontier`](Self::subsumed_frontier).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if sealing or the blob write fails.
+    #[wasm_bindgen]
+    pub fn compact(&mut self) -> Result<(), JsError> {
+        self.inner.compact().map_err(to_js)
+    }
+
+    /// The SUBSUMED covered frontier as a JSON `{replica_hex: counter}` string — the value the worker base64s
+    /// into the `x-openom-covered` header on the snapshot PUT so the server's GC gate 1 can trust it.
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the frontier can't be serialized.
+    #[wasm_bindgen(js_name = subsumedFrontier)]
+    pub fn subsumed_frontier(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)
+    }
+
     /// Set the moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     #[wasm_bindgen(js_name = setModerators)]
     pub fn set_moderators(&mut self, dids: Vec<String>) {

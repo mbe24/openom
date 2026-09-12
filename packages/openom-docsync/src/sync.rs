@@ -291,6 +291,18 @@ impl<S: BlobStore> SyncClient<S> {
         self.inner.pull_verified(classify, fold_cover)
     }
 
+    /// Fold current engine state into a snapshot covering this client's SUBSUMED frontier, and write it to
+    /// `{doc}/snapshot` (OPE-409 C3). The covered frontier the snapshot publishes is `subsumed_frontier()` —
+    /// only entries actually folded into state — so a GC deleting below it can never delete an entry no
+    /// snapshot holds. The app plumbs the same map as the plaintext `x-openom-covered` header on the snapshot
+    /// PUT. See [`docsync::BlobSyncClient::compact`].
+    ///
+    /// # Errors
+    /// Returns an error if sealing or the blob write fails.
+    pub fn compact(&mut self) -> Result<()> {
+        self.inner.compact()
+    }
+
     /// Like [`pull_verified`](Self::pull_verified) but the post-snapshot tail is re-classified after adopting
     /// the snapshot's covered baseline — the shared data channel's cold-start / `Gone`-recovery path (OPE-409
     /// C3). A plain `bootstrap` (fold only) merges the tail WITHOUT the §B3 gate, so the verified channel MUST

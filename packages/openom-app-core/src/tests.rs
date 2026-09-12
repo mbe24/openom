@@ -76,6 +76,26 @@ fn log_len(store: &Arc<MemoryBlob>) -> usize {
     store.list("tree/log/").unwrap().len()
 }
 
+#[test]
+fn compact_writes_a_snapshot_and_publishes_the_subsumed_frontier() {
+    // Layer-1 compaction over the REAL crypto sealer (not the passthrough): a committed edit compacts to a
+    // snapshot object, and subsumed_frontier() covers this replica's own (folded) entry — the map the worker
+    // sends as the x-openom-covered header (OPE-409 C3).
+    let dek = generate_dek().unwrap();
+    let store = Arc::new(MemoryBlob::new());
+    let mut a = core(b"replica-A", dek, store.clone());
+    a.tree_mut().assert_anchor("p1", PERSON, 1).unwrap();
+    a.commit().unwrap();
+
+    a.compact().unwrap();
+    assert!(store.get("tree/snapshot").unwrap().is_some(), "compaction wrote a snapshot object");
+    let covered = a.subsumed_frontier();
+    assert!(!covered.is_empty(), "subsumed frontier is non-empty after compaction");
+    // Own entries are always coverable (folded on commit), so the frontier covers this replica.
+    let replica_hex: String = b"replica-A".iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(covered.get(&replica_hex).copied(), Some(1), "covers this replica's own committed entry");
+}
+
 fn live_ids(core: &AppCore<MemoryBlob>) -> BTreeSet<String> {
     core.live_records()
         .unwrap()
