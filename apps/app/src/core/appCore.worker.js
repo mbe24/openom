@@ -144,6 +144,7 @@ class Core {
     this.dirty = false; // an edit/commit arrived mid-tick — re-run before returning
     this.aborted = false;
     this.treeEnsured = false; // OPE-407: skip the durable needs-create-tree check once satisfied this session
+    this.reportedFrontier = null; // OPE-409 gate 2: the last pull frontier reported to the server (change-guard)
   }
 }
 
@@ -831,6 +832,20 @@ async function syncData(c) {
   }
   if (c.aborted) return;
   await persistBlobs(c);
+
+  // Report our PULL frontier as gate-2 liveness telemetry so the server's log-GC keeps a slow member's
+  // un-pulled log tail alive (OPE-409 gate 2). Advisory + best-effort: only when it advanced (change-guarded),
+  // and a failure NEVER fails the tick — the floor just stays conservatively low for this member.
+  if (c.aborted) return;
+  const pull = c.handle.pullFrontier(); // JSON `{replica_hex: counter}`
+  if (pull && pull !== '{}' && pull !== c.reportedFrontier) {
+    try {
+      await transport.putFrontier(c.treeKey, JSON.parse(pull));
+      c.reportedFrontier = pull;
+    } catch {
+      /* advisory telemetry — swallow; gate 2 stays conservative without this report */
+    }
+  }
 }
 
 Comlink.expose(api);

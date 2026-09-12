@@ -249,6 +249,25 @@ export class RemoteStore {
     }
   }
 
+  /**
+   * Report this member's own PULL frontier — `{replica: counter}`, how far it has fetched each replica's log.
+   * Advisory gate-2 liveness telemetry for the server's log-GC floor: the server pins reclamation down to the
+   * slowest in-window member so an un-pulled tail is never reaped from under a member (OPE-409 gate 2). `id`
+   * is the tree UUID (the same id `#tree` routes on); rows are keyed by `(member, replica)` from the auth
+   * identity. PUT /v1/trees/{id}/frontier. A failure is non-fatal to sync — the worker swallows it.
+   */
+  async putFrontier(id, frontier) {
+    const res = await this.#send(`${this.#tree(id)}/frontier`, {
+      method: 'PUT',
+      extraHeaders: { 'content-type': 'application/json' },
+      body: JSON.stringify({ frontier }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw httpError(`putFrontier ${id}`, res.status, detail);
+    }
+  }
+
   // ---- keyring surface (GET /trees/{id}/keyring) ----
 
   /**

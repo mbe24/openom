@@ -367,6 +367,16 @@ impl<S: BlobStore> SyncClient<S> {
     pub fn stalled_count(&self) -> usize {
         self.inner.stalled_count()
     }
+
+    /// The PULL frontier — the next-exclusive per-replica counter this client has FETCHED so far (`{replica:
+    /// counter}`), whether or not each entry folded. The worker reports this to the server's `PUT /frontier`
+    /// as the gate-2 liveness input: the GC floor is pinned down to the slowest current member's pull point,
+    /// so a member's not-yet-pulled log tail is never reaped out from under it (OPE-409 gate 2). Distinct from
+    /// [`subsumed_frontier`](Self::subsumed_frontier), which is the narrower coverage a snapshot may publish.
+    #[must_use]
+    pub fn pull_frontier(&self) -> docsync::Frontier {
+        self.inner.frontier().clone()
+    }
 }
 
 impl<S: BlobStore> std::fmt::Debug for SyncClient<S> {

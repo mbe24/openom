@@ -2,13 +2,17 @@
 //! (`plan/sync/design.ope398-managed-server.md` §4, build-order step 5).
 //!
 //! `PUT` lets a member advisorally report its own `BlobSyncClient::frontier()` (what it has
-//! PULLED/FOLDED so far, `docsync/src/lib.rs:800-803`) per replica; `GET` (Administer-gated) reads the raw
-//! reports back. **PLUMBING ONLY: nothing consumes this yet to gate deletion.** The two-gate GC floor
-//! (safety = the server snapshot's PUBLISHED covered frontier; liveness = every current member's
-//! last-reported pull frontier, within a grace window) and the F3 self-heal-before-GC ordering invariant
-//! are a follow-up, security-reviewed slice (§4, §5.6/#12) — deliberately out of scope here. This table +
-//! these handlers are advisory and client-asserted, never authoritative — the same trust model as
-//! `access.rs`'s membership summary.
+//! PULLED/FOLDED so far) per replica; `GET` (Administer-gated) reads the raw reports back. The worker
+//! reports on every sync tick whose pull frontier advanced (`appCore.worker.js` `syncData`).
+//!
+//! This is now the **gate-2 (liveness) input** to the two-gate log-GC floor: `gc::mark_tree` takes, per
+//! replica, the MIN reported frontier over the current members who reported inside the activity window, and
+//! the floor is `max(gc_floor, min(gate1_covered, gate2_seen))` (see `gc.rs`). So a member's un-pulled log
+//! tail is never reaped from under it while it stays active; a member silent past the window drops out of
+//! the min and must re-bootstrap from the snapshot instead (safe — the snapshot's covered frontier is the
+//! gate-1 safety input). These reports are advisory and client-asserted, never authoritative: over-claiming
+//! only pins THIS member's own floor higher (it can't force deletion), the same trust model as `access.rs`'s
+//! membership summary.
 
 use std::collections::BTreeMap;
 
@@ -46,10 +50,13 @@ pub struct FrontierBody {
 
 /// `PUT /v1/trees/{tree_id}/frontier` — upsert the caller's own reported frontier, one row per replica.
 ///
-/// **Flagged gate choice** (not specified by the design beyond "same shape as `access.rs`"): `Access::Read`
-/// — any current member may self-report their own pull progress. Unlike `access.rs`'s membership summary
-/// (which mutates the security-adjacent advisory ACL and so is signer-gated), this is pure telemetry
-/// nothing yet acts on, so the ordinary tree-membership gate is enough.
+/// **Gate choice**: `Access::Read` — any current member may self-report its own pull progress. Unlike
+/// `access.rs`'s membership summary (which mutates the security-adjacent advisory ACL and so is
+/// signer-gated), a frontier report can never cause DATA LOSS: gate 2 only ever pulls the floor DOWN
+/// (`floor = min(gate1_covered, gate2_seen)`), so no report — honest, stale, or forged — can push the floor
+/// above gate 1, the snapshot's covered-frontier safety line, and nothing below a published snapshot is ever
+/// lost (a straggler re-adopts it). At worst a bad report costs the reporter its own extra re-bootstrap. So
+/// the ordinary tree-membership gate is enough.
 ///
 /// # Errors
 /// Returns [`ApiError`] if the caller isn't authorized, the report is oversized, or the store access fails.

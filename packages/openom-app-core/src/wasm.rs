@@ -81,6 +81,17 @@ impl AppCoreHandle {
         serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)
     }
 
+    /// The PULL frontier as a JSON `{replica_hex: counter}` string — what this device has fetched so far. The
+    /// worker reports it to `PUT /v1/trees/{tree}/frontier` so the server's GC gate 2 keeps a slow member's
+    /// un-pulled log tail alive (OPE-409 gate 2).
+    ///
+    /// # Errors
+    /// Returns a [`JsError`] if the frontier can't be serialized.
+    #[wasm_bindgen(js_name = pullFrontier)]
+    pub fn pull_frontier(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.inner.pull_frontier()).map_err(to_js)
+    }
+
 
     /// Set the moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     #[wasm_bindgen(js_name = setModerators)]

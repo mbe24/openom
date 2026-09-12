@@ -54,6 +54,7 @@
       const keyrings = new Map(); // revision -> MembershipEnvelope bytes (the walk's per-revision body)
       let keyringHead = 0;
       let snapshotCovered = null; // the last x-openom-covered header seen on a snapshot PUT (OPE-409)
+      let reportedFrontier = null; // the last PULL frontier reported to PUT /frontier (OPE-409 gate 2)
       return {
         // Explicit create-tree (OPE-407): the managed server mints a `trees` row here; this fake blob store
         // has no tree-row concept (it's a plain Map), so it's a no-op. Present so the owner's first tick,
@@ -88,6 +89,10 @@
           }
           return { revisions, head: keyringHead };
         },
+        // Gate-2 liveness telemetry (OPE-409): the worker reports its PULL frontier here; record the last one.
+        async putFrontier(_tree, frontier) {
+          reportedFrontier = frontier;
+        },
         // The count of DATA log objects (deltas + covers) — pointers (heads/snapshot) are excluded, so this
         // counts settled writes the way the old scalar log length did.
         _size() {
@@ -98,6 +103,9 @@
         },
         _snapshotCovered() {
           return snapshotCovered; // the covered header (raw {replica:counter} JSON) of the last snapshot PUT
+        },
+        _reportedFrontier() {
+          return reportedFrontier; // the last PULL frontier reported to PUT /frontier (gate-2, {replica:counter})
         },
       };
     }
@@ -133,7 +141,14 @@
 
         const aProj = JSON.parse(await a.project(DOC));
         const bProj = JSON.parse(await b.project(DOC));
-        return { aPush, bPull, serverSize: transport._size(), aPeople: aProj.people, bPeople: bProj.people };
+        return {
+          aPush,
+          bPull,
+          serverSize: transport._size(),
+          aPeople: aProj.people,
+          bPeople: bProj.people,
+          reportedFrontier: transport._reportedFrontier(), // OPE-409 gate 2: the pull frontier a tick reported
+        };
       },
 
       // Compaction (OPE-409): with a low K, a few commits trigger a snapshot upload on the sync tick, carrying

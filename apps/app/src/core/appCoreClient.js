@@ -47,6 +47,9 @@ export function remoteTransport(remoteStore) {
     blobList: (prefix) => remoteStore.blobList(prefix),
     blobGet: (key) => remoteStore.blobGet(key),
     blobPut: (key, bytes, pointer, covered) => remoteStore.blobPut(key, bytes, pointer, covered),
+    // Report this device's PULL frontier (`{replica: counter}`) as gate-2 liveness telemetry so the server's
+    // log-GC keeps a slow member's un-pulled tail alive (OPE-409 gate 2). `tree` is the data-channel tree key.
+    putFrontier: (tree, frontier) => remoteStore.putFrontier(tree, frontier),
     // The keyring revision chain from `from` (inclusive) — for a member JOIN's genesis-walk. Returns
     // { revisions: [{ revision, bytes }], head }; bytes = the opaque signed keyring (a MembershipEnvelope).
     readKeyring: (treeUuid, from) => remoteStore.readKeyring(treeUuid, from),

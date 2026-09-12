@@ -202,6 +202,15 @@ impl<S: BlobStore> AppCore<S> {
         self.client.subsumed_frontier()
     }
 
+    /// The PULL frontier — the per-replica counter this device has FETCHED up to (`{replica_hex: counter}`).
+    /// The worker reports it to `PUT /frontier` so the server's GC gate 2 pins the reclamation floor down to
+    /// the slowest current member's pull point — a member's un-pulled log tail is never reaped before it can
+    /// pull it (OPE-409 gate 2). Distinct from [`subsumed_frontier`](Self::subsumed_frontier).
+    #[must_use]
+    pub fn pull_frontier(&self) -> BTreeMap<String, u64> {
+        self.client.pull_frontier()
+    }
+
     /// The moderator `did:key`s (Maintainer+) whose Remove/Supersede/Revoke ops the fold honors.
     pub fn set_moderators(&mut self, moderators: BTreeSet<String>) {
         self.client.set_moderators(moderators);

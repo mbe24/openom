@@ -20,6 +20,13 @@ test('app-core: two devices converge through the server', async ({ page }) => {
   // B, which minted nothing, sees A's person + name after one pull — the loop converged.
   expect(r.bPeople.map((p: any) => p.id)).toContain('pA');
   expect(r.bPeople[0].names?.length ?? 0).toBeGreaterThan(0);
+  // Gate-2 liveness (OPE-409): a sync tick reported its PULL frontier to PUT /frontier — a non-empty
+  // {replica: counter} map, so the server's log-GC can pin its floor to the slowest member's pull point.
+  expect(r.reportedFrontier, 'a tick reported a pull frontier').toBeTruthy();
+  expect(
+    Object.values(r.reportedFrontier).some((v: any) => v > 0),
+    'the reported frontier is a non-empty {replica:counter} map',
+  ).toBe(true);
   expect(errors, 'no uncaught page errors').toEqual([]);
 });
 
