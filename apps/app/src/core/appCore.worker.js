@@ -165,7 +165,11 @@ async function hydrate(core) {
 function persistBlobs(core) {
   if (!core.persist) return Promise.resolve();
   core.persistLock = core.persistLock.then(async () => {
-    await store().putBlobs(core.docId, core.handle.export());
+    try {
+      await store().putBlobs(core.docId, core.handle.export());
+    } catch (e) {
+      throw storageError(e); // a full/blocked IndexedDB surfaces as storage_quota/storage_blocked, not internal
+    }
   });
   return core.persistLock;
 }
@@ -260,6 +264,13 @@ function vaultError(e) {
   const msg = String(e?.message ?? e ?? '');
   if (/roll(?:ed)? ?back/i.test(msg)) return makeError('revision_rollback', { cause: msg });
   return normalizeUnknown(e);
+}
+
+// Map an IndexedDB/OPFS failure (a DOMException from the durable store) to a storage AppError, so a full or
+// blocked local store surfaces meaningfully instead of as a generic internal error (C4 storage adapter).
+function storageError(e) {
+  if (e?.name === 'QuotaExceededError') return makeError('storage_quota', { cause: e.name });
+  return makeError('storage_blocked', { cause: String(e?.message ?? e) });
 }
 
 const api = {
