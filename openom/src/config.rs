@@ -99,6 +99,11 @@ pub struct Config {
     pub otlp_endpoint: String,
     /// Extra OTLP headers as `k1=v1,k2=v2` — a secret, never logged.
     pub otlp_headers: Option<String>,
+    /// Shared secret gating the internal scheduled-GC trigger (`POST /internal/gc`, OPE-415). `None` (unset)
+    /// → the trigger is refused (fail-closed): only a deployment that sets `OPENOM_INTERNAL_GC_TOKEN` — and
+    /// the EventBridge/scheduler caller that presents it in `x-openom-internal-token` — can run the sweep.
+    /// Never logged.
+    pub internal_gc_token: Option<String>,
 }
 
 impl Config {
@@ -173,6 +178,7 @@ impl Config {
             otlp_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:4318".into()),
             otlp_headers: env::var("OTEL_EXPORTER_OTLP_HEADERS").ok(),
+            internal_gc_token: env::var("OPENOM_INTERNAL_GC_TOKEN").ok().filter(|s| !s.trim().is_empty()),
         };
         config.validate();
         config

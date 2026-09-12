@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 
 use axum::extract::{Query, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -249,23 +250,55 @@ async fn reap_marked(state: &AppState, grace_secs: i64) -> Result<(u64, i64), Ap
     Ok((reaped, reclaimed))
 }
 
-/// The whole sweep: MARK every tree that has `log/*` objects (each under its own per-tree lock), then REAP
-/// the marked rows past the grace. Returns `(marked, reaped, reclaimed_bytes)`.
-async fn run_log_gc(
+/// The whole sweep: MARK the batch of trees that have `log/*` objects (each under its own per-tree lock),
+/// then REAP the marked rows past the grace. Returns `(marked, reaped, reclaimed_bytes)`.
+///
+/// `max_trees` BATCHES the MARK phase (OPE-415): `Some(n)` marks the `n` least-recently-swept trees
+/// (`trees.last_gc_at NULLS FIRST`, stamping each as it goes) so a scheduled run never blows the Lambda
+/// budget and successive runs rotate through every tree; `None` marks all of them (the dev route). REAP is
+/// always global — it's grace-gated and cheap, and a marked row must be reaped regardless of which batch
+/// marked it.
+///
+/// `pub(crate)` so the scheduled internal trigger (`internal_gc`) can drive it; the local dev route calls it
+/// with `None`.
+pub(crate) async fn run_log_gc(
     state: &AppState,
     window_secs: i64,
     grace_secs: i64,
+    max_trees: Option<i64>,
 ) -> Result<(u64, u64, i64), ApiError> {
-    let trees: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT tree_id FROM tree_blob_index WHERE split_part(key, '/', 1) = 'log'",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(internal)?;
+    let trees: Vec<(Uuid,)> = match max_trees {
+        // Batched: the least-recently-swept trees first (new trees — last_gc_at NULL — sort first).
+        Some(n) => sqlx::query_as(
+            "SELECT t.id FROM trees t
+              WHERE EXISTS (SELECT 1 FROM tree_blob_index b
+                             WHERE b.tree_id = t.id AND split_part(b.key, '/', 1) = 'log')
+              ORDER BY t.last_gc_at NULLS FIRST
+              LIMIT $1",
+        )
+        .bind(n)
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal)?,
+        None => sqlx::query_as(
+            "SELECT DISTINCT tree_id FROM tree_blob_index WHERE split_part(key, '/', 1) = 'log'",
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(internal)?,
+    };
 
     let mut marked = 0u64;
     for (tree_id,) in &trees {
         marked += mark_tree(state, *tree_id, window_secs).await?;
+        if max_trees.is_some() {
+            // Advance the round-robin cursor so the next batch picks up where this one left off.
+            sqlx::query("UPDATE trees SET last_gc_at = now() WHERE id = $1")
+                .bind(tree_id)
+                .execute(&state.db)
+                .await
+                .map_err(internal)?;
+        }
     }
     let (reaped, reclaimed) = reap_marked(state, grace_secs).await?;
     Ok((marked, reaped, reclaimed))
@@ -290,6 +323,7 @@ pub async fn gc_dev(State(state): State<AppState>, Query(p): Query<GcParams>) ->
         &state,
         p.activity_window_secs.unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
         p.deletion_grace_secs.unwrap_or(DEFAULT_DELETION_GRACE_SECS),
+        None, // dev: sweep every tree (no batch cap)
     )
     .await?;
     tracing::info!(event = "log_gc", marked, reaped, reclaimed_bytes = reclaimed, "log GC sweep");
@@ -297,6 +331,118 @@ pub async fn gc_dev(State(state): State<AppState>, Query(p): Query<GcParams>) ->
         "marked": marked,
         "reaped": reaped,
         "reclaimed_bytes": reclaimed,
+    }))
+    .into_response())
+}
+
+/// The HTTP header the scheduled caller (`EventBridge` → this Lambda) presents its shared secret in.
+const INTERNAL_TOKEN_HEADER: &str = "x-openom-internal-token";
+/// How many trees one scheduled run marks — bounds a single invocation's DB work + wall-clock so it fits the
+/// Lambda budget. Successive runs rotate through the rest via the `last_gc_at` cursor. A quiet system with
+/// fewer trees simply marks them all every run.
+const DEFAULT_MAX_TREES_PER_RUN: i64 = 500;
+
+/// Constant-time byte compare so the token check leaks no timing signal beyond the (random-token) length.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Authenticate the internal caller against the configured shared secret. FAIL-CLOSED: an unset secret means
+/// the trigger is disabled and every call is refused (a uniform 403 — never reveals whether the secret is
+/// unset vs. wrong, and never distinguishes route-absent from token-bad).
+fn authorize_internal(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = state.config.internal_gc_token.as_deref() else {
+        return Err(ApiError::Forbidden);
+    };
+    let presented = headers
+        .get(INTERNAL_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if ct_eq(presented.as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+/// Optional overrides the scheduled caller may send as a JSON body; every field defaults, so an empty
+/// invocation runs a sensible bounded sweep of both GCs.
+#[derive(Deserialize, Default)]
+pub struct InternalGcRequest {
+    /// Batch cap for the log-GC MARK phase (round-robin via `trees.last_gc_at`). Defaults to
+    /// [`DEFAULT_MAX_TREES_PER_RUN`]; `0` or negative is treated as the default (never unbounded here).
+    max_trees: Option<i64>,
+    /// Gate-2 activity window (seconds). Default 30d.
+    activity_window_secs: Option<i64>,
+    /// Log-GC mark→reap deletion grace (seconds). Default 7d.
+    deletion_grace_secs: Option<i64>,
+    /// Media tombstone grace (seconds). Default 30d.
+    tombstone_grace_secs: Option<i64>,
+    /// Media pending-intent expiry (seconds). Default 1h.
+    pending_expiry_secs: Option<i64>,
+}
+
+/// `POST /internal/gc` — the SCHEDULED, AUTHENTICATED production trigger (OPE-415). Registered on the main
+/// Lambda in every deployment but gated by a shared secret in `x-openom-internal-token`
+/// (`OPENOM_INTERNAL_GC_TOKEN`); with no secret set it fail-closes. `EventBridge` (or any scheduler) presents
+/// the secret on a cron cadence and this runs BOTH sweeps — media GC (`media::sweep_with_defaults`) and log
+/// GC (`run_log_gc`, batched) — returning per-sweep counters for observability. Backoff on transient failure is
+/// the scheduler's job: a DB/store error surfaces as a 500 so `EventBridge`'s retry policy re-drives it.
+///
+/// # Errors
+/// Returns [`ApiError::Forbidden`] if the caller isn't authenticated, or the underlying [`ApiError`] if a
+/// sweep's DB/store access fails.
+pub async fn internal_gc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<InternalGcRequest>>,
+) -> Result<Response, ApiError> {
+    authorize_internal(&state, &headers)?;
+    let p = body.map(|Json(b)| b).unwrap_or_default();
+
+    // Media GC first (schedulable independent of the log-GC floor), then log GC (its OPE-409 layer-3 gate is
+    // satisfied, so reaping is now safe behind the 7d grace). Media owns its own default windows behind
+    // sweep_with_defaults — this orchestrator only forwards the caller's optional overrides.
+    let (media_deleted, media_expired, proposals_expired) =
+        crate::media::sweep_with_defaults(&state, p.tombstone_grace_secs, p.pending_expiry_secs).await?;
+
+    let batch = match p.max_trees {
+        Some(n) if n > 0 => n,
+        _ => DEFAULT_MAX_TREES_PER_RUN,
+    };
+    let (marked, reaped, reclaimed) = run_log_gc(
+        &state,
+        p.activity_window_secs.unwrap_or(DEFAULT_ACTIVITY_WINDOW_SECS),
+        p.deletion_grace_secs.unwrap_or(DEFAULT_DELETION_GRACE_SECS),
+        Some(batch),
+    )
+    .await?;
+
+    tracing::info!(
+        event = "internal_gc",
+        log_marked = marked,
+        log_reaped = reaped,
+        log_reclaimed_bytes = reclaimed,
+        media_deleted,
+        media_pending_expired = media_expired,
+        proposals_expired,
+        batch,
+        "scheduled GC sweep"
+    );
+    Ok(Json(json!({
+        "log": { "marked": marked, "reaped": reaped, "reclaimed_bytes": reclaimed, "batch": batch },
+        "media": {
+            "physically_deleted": media_deleted,
+            "pending_expired": media_expired,
+            "proposals_expired": proposals_expired,
+        },
     }))
     .into_response())
 }

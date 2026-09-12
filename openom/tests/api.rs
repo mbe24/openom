@@ -40,6 +40,13 @@ async fn router() -> Router {
     openom::app(state)
 }
 
+/// A GC sweep mutates GLOBAL state: the reaper physically deletes EVERY marked log row / tombstoned blob past
+/// its grace, across all trees — not just the tree under test. So a test that drives a sweep, or asserts on a
+/// marked/tombstoned row that must survive, cannot run concurrently with another such test: one test's
+/// grace-0 reap would delete the other's freshly-marked rows. This process-wide lock serializes exactly those
+/// GC tests (acquire it as the first line); every non-GC test still runs fully in parallel.
+static GC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// One in-process request; returns status, headers, and the collected body.
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>) {
     let resp = app
@@ -1586,6 +1593,7 @@ async fn proposals_caps() {
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn proposals_ttl_swept() {
+    let _gc = GC_TEST_LOCK.lock().await;
     let app = router().await;
     let db = db().await;
     let owner = Uuid::new_v4();
@@ -1798,6 +1806,7 @@ async fn log_capacity_403() {
 #[tokio::test]
 #[ignore = "requires the local Postgres + MinIO stack; see module doc"]
 async fn media_lifecycle_and_gc() {
+    let _gc = GC_TEST_LOCK.lock().await;
     let app = router().await;
     let tree = Uuid::new_v4();
     send(
@@ -2771,6 +2780,7 @@ async fn log_write_guards_below_floor_and_immutability() {
 async fn log_get_states_absent_present_marked() {
     // get_blob's three states for a GC-managed log key: not-yet-written → 404, present → 200, and a
     // marked-pending row (floor advanced but not yet reaped) → still 200 (M4).
+    let _gc = GC_TEST_LOCK.lock().await;
     let app = router().await;
     let db = db().await;
     let owner = Uuid::new_v4();
@@ -2834,6 +2844,7 @@ async fn log_get_states_absent_present_marked() {
 async fn gc_sweep_reaps_credits_and_gones() {
     // The full mark → grace → reap: two log dots below the floor are physically reaped, the byte meter is
     // credited back, and a subsequent get of a reaped dot → 410 below_gc_floor.
+    let _gc = GC_TEST_LOCK.lock().await;
     let app = router().await;
     let db = db().await;
     let owner = Uuid::new_v4();
@@ -2905,6 +2916,121 @@ async fn gc_sweep_reaps_credits_and_gones() {
     let (s, _, b) = send(&app, get_as(format!("/v1/trees/{tree}/blobs/log/rG/0"), owner)).await;
     assert_eq!(s, StatusCode::GONE, "reaped dot is 410");
     assert_eq!(body_code(&b), "below_gc_floor");
+}
+
+/// Build a router whose config has the internal-GC shared secret set (the env var is unset under test), so
+/// the `POST /internal/gc` trigger is enabled and authenticated by it.
+async fn router_with_internal_token(token: &str) -> Router {
+    let mut config = openom::config::Config::from_env();
+    config.internal_gc_token = Some(token.to_string());
+    let state = openom::build_state(&config).await.expect("build_state");
+    openom::app(state)
+}
+
+/// A `POST /internal/gc` with an optional token header and a JSON body of overrides.
+fn internal_gc_req(token: Option<&str>, json: &Value) -> Request<Body> {
+    let mut b = Request::builder()
+        .method("POST")
+        .uri("/internal/gc")
+        .header("content-type", "application/json");
+    if let Some(t) = token {
+        b = b.header("x-openom-internal-token", t);
+    }
+    b.body(Body::from(json.to_string())).unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn internal_gc_requires_configured_token() {
+    // The scheduled trigger is registered in every deployment but FAIL-CLOSED: no secret configured ⇒ every
+    // call is refused; a wrong/absent token ⇒ refused; only the exact secret runs it.
+    let _gc = GC_TEST_LOCK.lock().await;
+    let empty = serde_json::json!({});
+
+    // No secret configured (the default router() — env unset): even presenting a token is refused.
+    let app = router().await;
+    let (s, _, _) = send(&app, internal_gc_req(Some("anything"), &empty)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "trigger inert without a configured secret");
+
+    // Secret configured: absent header, wrong token → 403; exact token → 200.
+    let app = router_with_internal_token("s3cret-token").await;
+    let (s, _, _) = send(&app, internal_gc_req(None, &empty)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "no token header");
+    let (s, _, _) = send(&app, internal_gc_req(Some("wrong"), &empty)).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "wrong token");
+    let (s, _, _) = send(&app, internal_gc_req(Some("s3cret-token"), &empty)).await;
+    assert_eq!(s, StatusCode::OK, "exact token runs the sweep");
+}
+
+#[tokio::test]
+#[ignore = "requires the local Postgres + MinIO stack; see module doc"]
+async fn internal_gc_drives_both_sweeps() {
+    // The authenticated trigger runs BOTH the log GC (batched, stamping the round-robin cursor) and the media
+    // GC in one call — the same reap path the dev route exercises, reached through the production seam.
+    let _gc = GC_TEST_LOCK.lock().await;
+    let token = "s3cret-token";
+    let app = router_with_internal_token(token).await;
+    let db = db().await;
+    let owner = Uuid::new_v4();
+    let tree = new_blob_tree(&app, &db, owner).await;
+
+    // Two log dots below a published, covered, in-window frontier — the reapable setup from the dev sweep.
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rI/0"), b"delta-zero", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/log/rI/1"), b"delta-one", owner, true)).await;
+    send(&app, put_bytes_as(format!("/v1/trees/{tree}/blobs/heads/rI"), b"2", owner, false)).await;
+    send(
+        &app,
+        put_json_as(
+            format!("/v1/trees/{tree}/frontier"),
+            &serde_json::json!({ "frontier": { "rI": 2 } }),
+            owner,
+        ),
+    )
+    .await;
+    send(
+        &app,
+        put_bytes_with_headers_as(
+            format!("/v1/trees/{tree}/blobs/snapshot"),
+            b"snap",
+            owner,
+            &[("x-openom-covered", &covered_b64(&[("rI", 2)]))],
+        ),
+    )
+    .await;
+
+    // Drive both sweeps with zero grace so the two dots reap in this run (deterministic under GC_TEST_LOCK —
+    // no sibling sweep runs concurrently).
+    let (s, _, sb) = send(
+        &app,
+        internal_gc_req(
+            Some(token),
+            &serde_json::json!({ "deletion_grace_secs": 0, "tombstone_grace_secs": 0 }),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "internal sweep");
+    let sj: Value = serde_json::from_slice(&sb).unwrap();
+    assert!(sj["log"].is_object(), "log section reported: {sj}");
+    assert!(sj["media"].is_object(), "media section reported: {sj}");
+
+    // The round-robin batch cursor was stamped for the swept tree.
+    let stamped: bool =
+        sqlx::query_scalar("SELECT last_gc_at IS NOT NULL FROM trees WHERE id = $1")
+            .bind(tree)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(stamped, "last_gc_at cursor advanced for the swept tree");
+
+    // Both dots were reaped: their index rows are gone (log-GC ran end-to-end through the internal seam).
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tree_blob_index WHERE tree_id = $1 AND key LIKE 'log/rI/%'",
+    )
+    .bind(tree)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0, "reaped log rows removed from the index");
 }
 
 #[tokio::test]

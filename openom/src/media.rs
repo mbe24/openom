@@ -456,6 +456,26 @@ pub struct SweepParams {
 const DEFAULT_TOMBSTONE_GRACE_SECS: i64 = 30 * 24 * 3600;
 const DEFAULT_PENDING_EXPIRY_SECS: i64 = 3600;
 
+/// Run the media sweep, applying THIS module's default windows for any override the caller omits. The shared
+/// entry point for both drivers — the local dev route and the scheduled internal trigger (`gc::internal_gc`,
+/// OPE-415) — so the media-GC policy defaults stay owned here and the log-GC orchestrator needs no knowledge
+/// of them. Returns `(physically_deleted, pending_expired, proposals_expired)`.
+///
+/// # Errors
+/// Returns [`ApiError`] if the store or DB access fails.
+pub(crate) async fn sweep_with_defaults(
+    state: &AppState,
+    tombstone_grace_secs: Option<i64>,
+    pending_expiry_secs: Option<i64>,
+) -> Result<(usize, usize, usize), ApiError> {
+    run_sweep(
+        state,
+        tombstone_grace_secs.unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
+        pending_expiry_secs.unwrap_or(DEFAULT_PENDING_EXPIRY_SECS),
+    )
+    .await
+}
+
 /// `POST /dev/media/gc` (local only) — run the physical sweep. In production this logic is
 /// driven by a scheduled trigger (`EventBridge` → an authenticated internal call), not
 /// a public route.
@@ -466,13 +486,8 @@ pub async fn sweep_dev(
     State(state): State<AppState>,
     Query(p): Query<SweepParams>,
 ) -> Result<Response, ApiError> {
-    let (deleted, expired, proposals_expired) = run_sweep(
-        &state,
-        p.tombstone_grace_secs
-            .unwrap_or(DEFAULT_TOMBSTONE_GRACE_SECS),
-        p.pending_expiry_secs.unwrap_or(DEFAULT_PENDING_EXPIRY_SECS),
-    )
-    .await?;
+    let (deleted, expired, proposals_expired) =
+        sweep_with_defaults(&state, p.tombstone_grace_secs, p.pending_expiry_secs).await?;
     Ok(Json(json!({
         "physically_deleted": deleted,
         "pending_expired": expired,
@@ -484,7 +499,8 @@ pub async fn sweep_dev(
 /// Physical GC: delete tombstoned blobs past their grace window (crediting the meter
 /// back — the *only* place usage is returned, §9.9a), expire abandoned pending
 /// intents (releasing the reservation + the staging object), and reclaim expired
-/// proposals + stale day-count ledger rows.
+/// proposals + stale day-count ledger rows. Callers reach it through [`sweep_with_defaults`], which owns the
+/// default windows.
 async fn run_sweep(
     state: &AppState,
     tombstone_grace_secs: i64,

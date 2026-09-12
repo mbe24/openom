@@ -162,6 +162,11 @@ pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        // The scheduled production GC trigger (OPE-415): registered in EVERY deployment (unlike /dev/*), but
+        // authenticated by a shared secret in-handler and fail-closed when unset — so it's inert until a
+        // deployment sets OPENOM_INTERNAL_GC_TOKEN and wires an EventBridge caller. Ops, not the public wire,
+        // so it sits outside /v1.
+        .route("/internal/gc", post(gc::internal_gc))
         .nest("/v1", v1);
     if state.config.dev_routes_enabled() {
         // Dev-only routes are local-only (never registered under Lambda) and grouped by concern,
