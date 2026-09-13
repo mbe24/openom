@@ -136,6 +136,17 @@ pub fn chain_wm_pinned(revision: u32, write_key_id: &[u8], write_dek_hash: &[u8]
     wm
 }
 
+/// The inverse of the revision half of [`chain_wm_pinned`]: read a chain watermark's scalar revision floor —
+/// its first 4 big-endian bytes (empty / too-short = 0). The chain-only membership ops pass this scalar floor
+/// to the `vault::*` functions as the anti-rollback minimum.
+#[must_use]
+pub fn chain_watermark_floor(watermark: &[u8]) -> u32 {
+    watermark
+        .get(..4)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_be_bytes)
+}
+
 // --- summary DTOs (serde) --------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]

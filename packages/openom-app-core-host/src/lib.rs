@@ -108,6 +108,25 @@ pub struct MemberAccount {
     pub hpke_public_key: Vec<u8>,
 }
 
+/// The OOB-verified joiner an owner admits via [`AppCoreHost::add_member`] — the id + role + the two public
+/// keys the joiner shared out of band (from their [`MemberAccount`]). NOT trust-bearing custody: these are the
+/// owner's own OOB-verified inputs, distinct from the keyring/floor the host sources natively.
+#[derive(serde::Deserialize)]
+pub struct MemberToAdd {
+    pub member_id: String,
+    pub role: String,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
+}
+
+/// The result of [`AppCoreHost::add_member`] — the opaque new keyring revision for the webview to PUBLISH (so
+/// peers + the joiner can pull it). The owner's running core has already been re-opened in place on the shared
+/// keyring (so its sealer now signs). Publish keyring FIRST, then the advisory summary (OPE-293 add ordering).
+#[derive(serde::Serialize)]
+pub struct AddedMember {
+    pub keyring: Vec<u8>,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -325,6 +344,76 @@ impl<St: VaultStore> AppCoreHost<St> {
             author_public_key: m.author_public_key,
             hpke_public_key: m.hpke_public_key,
         })
+    }
+
+    /// Admit an OOB-verified `member` to a shared tree (owner action): produce a new keyring revision that
+    /// HPKE-wraps the tree DEK to the joiner + records them (the shared `sharing::add_member` math), RE-OPEN the
+    /// owner's running core on that shared keyring (a solo→shared transition — the solo sealer doesn't sign, so
+    /// a signing sealer + a §B3 resolver are installed), and swap it IN PLACE under the per-doc lock held for
+    /// the whole op (so no concurrent sync folds/seals against a mid-change core — design-review F1/F3). The
+    /// keyring + watermark are committed natively only AFTER the re-open succeeds (candidate-core-before-commit,
+    /// F9). Returns the opaque keyring revision the webview PUBLISHES (keyring FIRST, then the advisory summary,
+    /// OPE-293 add ordering). Publish-pending durability is the follow-up shared with `remove_member` (F1/Q3).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the owner tree isn't open; [`HostError::NoKeyring`] if none is stored;
+    /// [`HostError::Vault`] on a wrong owner passphrase / bad joiner key / unauthorized add; [`HostError::Core`]
+    /// on the re-open / resolver / hydrate; [`HostError::Store`] on a store fault.
+    pub fn add_member(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        owner_member_id: &str,
+        owner_passphrase: &Passphrase,
+        member: &MemberToAdd,
+    ) -> Result<AddedMember, HostError> {
+        // Hold the owner core's per-doc lock across the WHOLE op — a concurrent sync/session op that grabbed the
+        // same Arc must not interleave with the keyring change + in-place re-open (design-review F1/F3).
+        let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let floor = openom_vault::sharing::chain_watermark_floor(
+            &self.store.watermark(doc).map_err(HostError::Store)?,
+        );
+        let added = openom_vault::sharing::add_member(
+            self.engine,
+            &keyring,
+            owner_passphrase,
+            tree_id,
+            owner_member_id,
+            &fresh_replica()?,
+            floor,
+            &member.member_id,
+            &member.role,
+            &member.author_public_key,
+            &member.hpke_public_key,
+        )?;
+        // Candidate-core-before-commit (F9): re-open the owner on the shared keyring (fallible), install §B3, and
+        // hydrate the durable log BEFORE persisting the new keyring — a failure leaves store + core consistent.
+        let re = openom_app_core::unlock(
+            self.doc_store(doc)?,
+            self.engine,
+            owner_passphrase,
+            tree_id,
+            owner_member_id,
+            &fresh_replica()?,
+            &added.keyring,
+            doc.to_string(),
+        )?;
+        let mut new_core = re.core;
+        let resolver = openom_vault::resolver_from(self.engine, &added.keyring, &[])?;
+        new_core.set_membership(resolver)?;
+        new_core.bootstrap()?;
+        self.store
+            .commit_keyring(doc, &added.keyring, &added.watermark)
+            .map_err(HostError::Store)?;
+        *guard = new_core; // in-place swap under the held lock
+        Ok(AddedMember { keyring: added.keyring })
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
@@ -638,6 +727,44 @@ mod tests {
         assert!(!m.kdf_params.is_empty(), "codec-encoded KDF params to persist + replay at unlock");
         assert!(!m.author_public_key.is_empty(), "the Ed25519 author key to hand the owner");
         assert!(!m.hpke_public_key.is_empty(), "the X25519 HPKE key to hand the owner");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_member_admits_a_joiner_and_re_opens_the_owner_core_in_place() {
+        use super::MemberToAdd;
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let tree_id = [5u8; 16];
+        host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+
+        // A joiner mints their account OOB; the owner admits them.
+        let joiner = host
+            .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
+            .unwrap();
+        let member = MemberToAdd {
+            member_id: "bob".into(),
+            role: "editor".into(),
+            author_public_key: joiner.author_public_key,
+            hpke_public_key: joiner.hpke_public_key,
+        };
+        let added = host.add_member("t", &tree_id, "owner", &owner_pass, &member).unwrap();
+        assert!(!added.keyring.is_empty(), "a new keyring revision to publish");
+        assert!(
+            host.store().load_keyring("t").unwrap().unwrap() == added.keyring,
+            "the shared keyring is persisted natively"
+        );
+
+        // The owner core was re-opened IN PLACE on the shared keyring — it still mints + projects, proof it
+        // came back as a signing, §B3-gated shared core (not the stale solo sealer).
+        host.assert_anchor("t", "pAlice", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+        assert!(
+            host.project("t").unwrap().contains("pAlice"),
+            "the re-opened shared owner core still writes + folds its own attributed mint"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

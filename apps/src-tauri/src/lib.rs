@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AppCoreHost, MemberAccount, PassphraseChanged, Provisioned, Recovered, Unlocked,
+    AddedMember, AppCoreHost, MemberAccount, MemberToAdd, PassphraseChanged, Provisioned, Recovered,
+    Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -150,6 +151,34 @@ async fn core_provision_member(
     .map_err(e)?
 }
 
+/// Admit an OOB-verified member to a shared tree (owner action): the host produces the new keyring revision,
+/// re-opens the owner core in place on the shared keyring, and persists it natively. Returns the opaque keyring
+/// revision the webview PUBLISHES (keyring first, then the advisory summary). Argon2id (re-open), so
+/// `spawn_blocking`.
+#[tauri::command]
+async fn core_add_member(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    owner_member_id: String,
+    owner_passphrase: String,
+    member: MemberToAdd,
+) -> Result<AddedMember, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.add_member(
+            &doc,
+            &tree_id,
+            &owner_member_id,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &member,
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -228,6 +257,7 @@ pub fn run() {
             core_recover,
             core_change_passphrase,
             core_provision_member,
+            core_add_member,
             core_bootstrap,
             core_assert_anchor,
             core_commit,
