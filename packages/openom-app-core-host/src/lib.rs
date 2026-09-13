@@ -215,6 +215,12 @@ pub struct AppCoreHost<St: VaultStore> {
     data_dir: PathBuf,
     engine: EngineKind,
     cores: Mutex<CoreMap>,
+    /// Per-doc EXCLUSIVE operation lock. Every op that opens a core or writes the keyring (the provision /
+    /// unlock / recover / change-passphrase / join / member-unlock / membership / keyring-sync paths) holds it
+    /// across its whole body, so a re-open's check-then-commit can't be raced by another open of the same doc
+    /// (the join re-join-guard TOCTOU) and store writes never interleave. This coarser lock closes the
+    /// no-core-yet window the core `Arc`'s own `Mutex` can't cover.
+    op_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl<St: VaultStore> AppCoreHost<St> {
@@ -225,7 +231,19 @@ impl<St: VaultStore> AppCoreHost<St> {
             data_dir: data_dir.into(),
             engine,
             cores: Mutex::new(HashMap::new()),
+            op_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// This doc's exclusive op-lock (created on first use). Callers hold the returned guard for the whole op.
+    fn op_lock(&self, doc: &str) -> Arc<Mutex<()>> {
+        Arc::clone(
+            self.op_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(doc.to_string())
+                .or_default(),
+        )
     }
 
     /// The keyring/watermark store (for the Tauri command layer to reach the native custody).
@@ -345,6 +363,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         member_id: &str,
         passphrase: &Passphrase,
     ) -> Result<Provisioned, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = openom_app_core::provision(
             self.doc_store(doc)?,
             self.engine,
@@ -384,6 +404,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         member_id: &str,
         passphrase: &Passphrase,
     ) -> Result<Unlocked, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let anchor = self
             .store
             .load_keyring(doc)
@@ -424,6 +446,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
     ) -> Result<Recovered, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let anchor = self
             .store
             .load_keyring(doc)
@@ -469,6 +493,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
     ) -> Result<PassphraseChanged, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let anchor = self
             .store
             .load_keyring(doc)
@@ -530,7 +556,10 @@ impl<St: VaultStore> AppCoreHost<St> {
         member: &MemberToAdd,
     ) -> Result<AddedMember, HostError> {
         // Hold the owner core's per-doc lock across the WHOLE op — a concurrent sync/session op that grabbed the
-        // same Arc must not interleave with the keyring change + in-place re-open (design-review F1/F3).
+        // same Arc must not interleave with the keyring change + in-place re-open (design-review F1/F3). The
+        // op-lock also serializes the store writes below against a concurrent open of the same doc.
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
         let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -555,16 +584,13 @@ impl<St: VaultStore> AppCoreHost<St> {
             &member.author_public_key,
             &member.hpke_public_key,
         )?;
-        // Retain the new revision natively before building the resolver, so the §B3 look-behind can judge writes
-        // under it after any future rotation (F5).
-        self.retain_revision(
-            doc,
-            openom_vault::sharing::chain_watermark_floor(&added.watermark),
-            &added.keyring,
-        )?;
+        // The §B3 look-behind needs the new revision retained; but persist it only AFTER the fallible candidate
+        // build succeeds (F9) — feed it to the resolver IN MEMORY here rather than requiring a prior disk write.
+        let new_rev = openom_vault::sharing::chain_watermark_floor(&added.watermark);
+        let mut retained = self.retained_revisions(doc)?;
+        retained.push((new_rev, added.keyring.clone()));
         // Candidate-core-before-commit (F9): re-open the owner on the shared keyring (fallible), install §B3
-        // (over the retained revisions), and hydrate BEFORE persisting the new keyring — a failure leaves store
-        // + core consistent.
+        // (over the retained revisions incl. the new one), and hydrate BEFORE persisting anything.
         let re = openom_app_core::unlock(
             self.doc_store(doc)?,
             self.engine,
@@ -576,10 +602,11 @@ impl<St: VaultStore> AppCoreHost<St> {
             doc.to_string(),
         )?;
         let mut new_core = re.core;
-        let resolver =
-            openom_vault::resolver_from(self.engine, &added.keyring, &self.retained_revisions(doc)?)?;
+        let resolver = openom_vault::resolver_from(self.engine, &added.keyring, &retained)?;
         new_core.set_membership(resolver)?;
         new_core.bootstrap()?;
+        // Candidate good → NOW persist retention + the keyring (the sole commit point).
+        self.retain_revision(doc, new_rev, &added.keyring)?;
         self.store
             .commit_keyring(doc, &added.keyring, &added.watermark)
             .map_err(HostError::Store)?;
@@ -613,7 +640,9 @@ impl<St: VaultStore> AppCoreHost<St> {
         owner_passphrase: &Passphrase,
         remove_member_id: &str,
     ) -> Result<RemovedMember, HostError> {
-        // Hold the owner core's per-doc lock across the WHOLE op (F1/F3).
+        // Hold the owner core's per-doc lock across the WHOLE op (F1/F3) + the op-lock to serialize store writes.
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
         let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -644,14 +673,12 @@ impl<St: VaultStore> AppCoreHost<St> {
             floor,
             remove_member_id,
         )?;
-        // Retain the rotated revision natively before building the resolver, so the §B3 look-behind can judge the
-        // departing member's PRE-rotation writes against the revision that governed them (F5 — without the prior
-        // revisions retained, a pre-rotation write is Dropped as an unjudgeable backdated forge).
-        self.retain_revision(
-            doc,
-            openom_vault::sharing::chain_watermark_floor(&removed.watermark),
-            &removed.keyring,
-        )?;
+        // The §B3 look-behind must judge the departing member's PRE-rotation writes against the revision that
+        // governed them (F5). Feed the rotated revision to the resolver in memory; persist retention only after
+        // the candidate build succeeds (F9).
+        let new_rev = openom_vault::sharing::chain_watermark_floor(&removed.watermark);
+        let mut retained = self.retained_revisions(doc)?;
+        retained.push((new_rev, removed.keyring.clone()));
         // Candidate-core-before-commit (F9): re-open the owner under the NEW epoch (the old sealer is now stale),
         // install §B3 (over the retained revisions), hydrate, then author the self-heal cover.
         let re = openom_app_core::unlock(
@@ -665,11 +692,11 @@ impl<St: VaultStore> AppCoreHost<St> {
             doc.to_string(),
         )?;
         let mut new_core = re.core;
-        let resolver =
-            openom_vault::resolver_from(self.engine, &removed.keyring, &self.retained_revisions(doc)?)?;
+        let resolver = openom_vault::resolver_from(self.engine, &removed.keyring, &retained)?;
         new_core.set_membership(resolver)?;
         new_core.bootstrap()?;
         new_core.author_cover()?; // dag self-heal over the removed member's stored history (no-op on chain)
+        self.retain_revision(doc, new_rev, &removed.keyring)?;
         self.store
             .commit_keyring(doc, &removed.keyring, &removed.watermark)
             .map_err(HostError::Store)?;
@@ -700,6 +727,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         target_member_id: &str,
         new_role: &str,
     ) -> Result<RoleChanged, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
         let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -729,20 +758,19 @@ impl<St: VaultStore> AppCoreHost<St> {
             target_member_id,
             new_role,
         )?;
-        self.retain_revision(
-            doc,
-            openom_vault::sharing::chain_watermark_floor(&changed.watermark),
-            &changed.keyring,
-        )?;
+        // Refresh the §B3 resolver on the RUNNING core (no re-open — no epoch rotation, the sealer is unchanged);
+        // this re-judges existing writes under the new membership (a demote drops the member's over-authority
+        // commits, keeps their authorized-then history via the retained revisions). Build + install it BEFORE
+        // persisting (F9): feed the new revision to the resolver in memory, and only retain/commit on success.
+        let new_rev = openom_vault::sharing::chain_watermark_floor(&changed.watermark);
+        let mut retained = self.retained_revisions(doc)?;
+        retained.push((new_rev, changed.keyring.clone()));
+        let resolver = openom_vault::resolver_from(self.engine, &changed.keyring, &retained)?;
+        guard.set_membership(resolver)?;
+        self.retain_revision(doc, new_rev, &changed.keyring)?;
         self.store
             .commit_keyring(doc, &changed.keyring, &changed.watermark)
             .map_err(HostError::Store)?;
-        // Refresh the §B3 resolver on the RUNNING core (no re-open — no epoch rotation, the sealer is unchanged);
-        // this re-judges existing writes under the new membership (a demote drops the member's over-authority
-        // commits, keeps their authorized-then history via the retained revisions).
-        let resolver =
-            openom_vault::resolver_from(self.engine, &changed.keyring, &self.retained_revisions(doc)?)?;
-        guard.set_membership(resolver)?;
         Ok(RoleChanged { keyring: changed.keyring, demote })
     }
 
@@ -769,6 +797,11 @@ impl<St: VaultStore> AppCoreHost<St> {
         pinned_revision: u32,
         pinned_hash: &[u8],
     ) -> Result<MemberUnlocked, HostError> {
+        // Hold the doc's op-lock across the WHOLE join (check-then-commit): two concurrent joins (a double
+        // invoke, or a compromised webview racing two invite payloads) must not both pass the re-join guard and
+        // both write, the later silently winning — the exact attacker-redirect the guard exists to prevent.
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Re-join guard: never overwrite an already-established trust relationship (native custody is the trust
         // root, so an overwrite would let a compromised webview redirect the member to an attacker tree).
         if self.store.load_keyring(doc).map_err(HostError::Store)?.is_some() {
@@ -802,6 +835,12 @@ impl<St: VaultStore> AppCoreHost<St> {
             .map_err(HostError::Store)?;
         let did_key = m.did_key.clone();
         self.register(doc, m.core);
+        // Self-heal cover over any since-removed member's history already in the local store (design-review #6):
+        // a no-op on a fresh join, real work on a re-open that carries removed-member deltas.
+        self.with_core(doc, |c| {
+            c.author_cover()?;
+            Ok(())
+        })?;
         Ok(MemberUnlocked { did_key })
     }
 
@@ -821,6 +860,8 @@ impl<St: VaultStore> AppCoreHost<St> {
         member_id: &str,
         passphrase: &Passphrase,
     ) -> Result<MemberUnlocked, HostError> {
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let keyring = self
             .store
             .load_keyring(doc)
@@ -848,6 +889,12 @@ impl<St: VaultStore> AppCoreHost<St> {
         )?;
         let did_key = m.did_key.clone();
         self.register(doc, m.core);
+        // Self-heal cover over any since-removed member's history already in the local store (design-review #6):
+        // a no-op on a fresh join, real work on a re-open that carries removed-member deltas.
+        self.with_core(doc, |c| {
+            c.author_cover()?;
+            Ok(())
+        })?;
         Ok(MemberUnlocked { did_key })
     }
 
@@ -869,6 +916,8 @@ impl<St: VaultStore> AppCoreHost<St> {
                 "dag keyring adoption is the anchor merge, not this chain-walk path".into(),
             ));
         }
+        let op = self.op_lock(doc);
+        let _op = op.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
         let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
@@ -877,12 +926,17 @@ impl<St: VaultStore> AppCoreHost<St> {
             .load_keyring(doc)
             .map_err(HostError::Store)?
             .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
-        let anchor_rev = openom_vault::sharing::chain_watermark_floor(
-            &self.store.watermark(doc).map_err(HostError::Store)?,
-        );
+        let old_watermark = self.store.watermark(doc).map_err(HostError::Store)?;
+        let anchor_rev = openom_vault::sharing::chain_watermark_floor(&old_watermark);
         let accepted = openom_vault::sharing::accept_remote_keyring(&anchor, tree_id, hops)?;
+        // CARRY the OPE-286 write-epoch pin forward (accept returns a bare revision, which would erase it and
+        // weaken a later recover's write-epoch authentication — design-review #2).
+        let watermark = openom_vault::sharing::chain_watermark_carry(
+            openom_vault::sharing::chain_watermark_floor(&accepted.watermark),
+            &old_watermark,
+        );
         self.store
-            .commit_keyring(doc, &accepted.keyring, &accepted.watermark)
+            .commit_keyring(doc, &accepted.keyring, &watermark)
             .map_err(HostError::Store)?;
         // Retain each newly-accepted revision (unwrap the wrapped hop to its raw body; hop i is anchor_rev+1+i).
         for (idx, (_i, wrapped)) in Self::unframe_revisions(hops)?.into_iter().enumerate() {
@@ -893,11 +947,21 @@ impl<St: VaultStore> AppCoreHost<St> {
                 .ok_or_else(|| HostError::Store("keyring revision overflow".into()))?;
             self.retain_revision(doc, revision, &raw)?;
         }
-        // Adopt any rotated epoch + refresh the §B3 resolver on the running core.
+        // REFRESH the member-context trusted_signers from the newly-accepted head (design-review #3): a legit
+        // signer-set rotation (co-owner promote/demote) must not leave a frozen join-time pin that would lock
+        // this member out at the next unlock. Owner cores have no member-context → skip.
+        if let Some((kdf, _stale)) = self.load_member_context(doc)? {
+            let signers = openom_vault::sharing::chain_head_signers_flat(&accepted.keyring)?;
+            self.save_member_context(doc, &kdf, &signers)?;
+        }
+        // Adopt any rotated epoch + refresh the §B3 resolver on the running core, then re-author the self-heal
+        // cover so a removed member's history that arrived on this tick is covered (design-review #6), not only
+        // when THIS device did the removal.
         guard.adopt_epochs(&accepted.keyring)?;
         let resolver =
             openom_vault::resolver_from(self.engine, &accepted.keyring, &self.retained_revisions(doc)?)?;
         guard.set_membership(resolver)?;
+        guard.author_cover()?;
         Ok(())
     }
 
@@ -1164,9 +1228,20 @@ impl<St: VaultStore> AppCoreHost<St> {
         f(&mut guard)
     }
 
+    /// Register a freshly-opened core for `doc`. If a core is ALREADY live for this doc (a re-open while a
+    /// previous session's core is still registered — a recover / unlock / join / member-unlock), swap the new
+    /// core in IN PLACE through the existing `Arc` rather than inserting a fresh one, so any op holding a clone
+    /// `Arc` (e.g. a background sync) is serialized against the swap and never keeps running on the stale core
+    /// (design-review F1/F3). Callers hold this doc's op-lock, so two opens never race here.
     fn register(&self, doc: &str, core: AppCore<FsBlob>) {
-        self.lock_cores()
-            .insert(doc.to_string(), Arc::new(Mutex::new(core)));
+        let existing = self.lock_cores().get(doc).cloned();
+        if let Some(handle) = existing {
+            let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = core;
+        } else {
+            self.lock_cores()
+                .insert(doc.to_string(), Arc::new(Mutex::new(core)));
+        }
     }
 
     /// Lock the registry, recovering from a poisoned mutex (a panic in one op must not brick every later op —

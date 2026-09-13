@@ -150,6 +150,33 @@ pub fn chain_watermark_floor(watermark: &[u8]) -> u32 {
         .map_or(0, u32::from_be_bytes)
 }
 
+/// Build a watermark for `revision` that CARRIES FORWARD the OPE-286 write-epoch pin (`key_id ‖ H(DEK)`) from a
+/// previously-`stored` pinned watermark, instead of emitting a bare revision. A keyring accept (member sync)
+/// doesn't open the DEK, so it can't recompute the pin — dropping to a bare revision would erase it and make a
+/// later `recover()` fail its write-epoch authentication. Carries only when `stored` is the full pinned length
+/// (else revision-only); a remote epoch ROTATION makes the carried pin stale, which correctly leaves recover
+/// fail-closed until the next unlock refreshes it.
+#[must_use]
+pub fn chain_watermark_carry(revision: u32, stored: &[u8]) -> Vec<u8> {
+    let mut wm = revision.to_be_bytes().to_vec();
+    if stored.len() == 4 + 16 + 32 {
+        wm.extend_from_slice(&stored[4..]);
+    }
+    wm
+}
+
+/// The current authorized SIGNER public keys of a chain keyring head, concatenated (32 bytes each) — the
+/// `trusted_signers` a member unlock validates against. Derived from the head itself (`KeyringAnchor::from_keyring`),
+/// so it stays current across a co-owner promote/demote rather than freezing at join.
+///
+/// # Errors
+/// Returns [`VaultError`] if `head_keyring` isn't a decodable chain keyring.
+pub fn chain_head_signers_flat(head_keyring: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let kr = Keyring::decode(head_keyring).map_err(|e| err(format!("bad keyring: {e}")))?;
+    let anchor = openom_keyring_chain::KeyringAnchor::from_keyring(&kr);
+    Ok(anchor.trusted_signers.iter().flat_map(|s| s.public_key.iter().copied()).collect())
+}
+
 // --- summary DTOs (serde) --------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
