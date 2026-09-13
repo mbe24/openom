@@ -22,6 +22,16 @@ pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
 /// The per-doc registry, keyed by doc id.
 type CoreMap = HashMap<String, CoreHandle>;
 
+/// Wall-clock milliseconds for mint timestamps (the native analog of the wasm veneer's `now_millis`).
+fn now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 /// A host failure: a keyring-engine error, a keyring-store I/O error, or an operation on a tree the host has no
 /// keyring for.
 #[derive(Debug, thiserror::Error)]
@@ -29,12 +39,21 @@ pub enum HostError {
     /// The keyring engine rejected the lifecycle op (wrong passphrase, stale keyring, malformed anchor).
     #[error(transparent)]
     Vault(#[from] openom_app_core::VaultError),
+    /// The core (fold / commit / bootstrap / sync) failed — a local store I/O or engine fault.
+    #[error(transparent)]
+    Core(#[from] openom_app_core::CoreError),
+    /// The claim engine rejected a mint (un-canonicalizable value, malformed op).
+    #[error(transparent)]
+    Tree(#[from] openom_data_tree::TreeError),
     /// The native keyring/watermark store failed (I/O, CAS).
     #[error("keyring store: {0}")]
     Store(String),
     /// No keyring is stored for this tree — the host can't unlock a tree it never provisioned/joined.
     #[error("no keyring stored for {0}")]
     NoKeyring(String),
+    /// No live core for this tree — provision or unlock it first.
+    #[error("no live core for {0}")]
+    NoCore(String),
 }
 
 /// The result of [`AppCoreHost::provision`] — the durable core is registered in the host; the caller gets only
@@ -160,9 +179,64 @@ impl<St: VaultStore> AppCoreHost<St> {
         })
     }
 
-    /// The live core for `doc` (for mint/sync/read ops), if it has been provisioned/unlocked this session.
+    /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
+    /// so a mint committed offline in a previous session is folded back in. (A re-open uses a FRESH replica id,
+    /// so the previous session's entries are pulled as a peer rather than skipped as "our own".)
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] on a store/merge fault.
+    pub fn bootstrap(&self, doc: &str) -> Result<(), HostError> {
+        self.with_core(doc, |c| Ok(c.bootstrap()?))
+    }
+
+    /// Buffer an identity-anchor mint into `doc`'s intention; [`commit`](Self::commit) seals + persists it.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Tree`] if the mint can't be canonicalized.
+    pub fn assert_anchor(&self, doc: &str, id: &str, type_uri: &str) -> Result<(), HostError> {
+        self.with_core(doc, |c| Ok(c.tree_mut().assert_anchor(id, type_uri, now_millis())?))
+    }
+
+    /// Seal + persist `doc`'s buffered mint batch to its local store (advancing the log + head pointer).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] if sealing/persisting fails.
+    pub fn commit(&self, doc: &str) -> Result<(), HostError> {
+        self.with_core(doc, |c| Ok(c.commit()?))
+    }
+
+    /// Fold `doc`'s local store through the §B3 gate — merges own + peer writes into the projection. Returns
+    /// how many entries folded.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] on a store read fault.
+    pub fn fold(&self, doc: &str) -> Result<usize, HostError> {
+        self.with_core(doc, |c| Ok(c.fold()?))
+    }
+
+    /// `doc`'s materialized read model as a JSON string (the webview renders it).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] if the projection can't be serialized.
+    pub fn project(&self, doc: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| Ok(c.project_json()?))
+    }
+
+    /// The live core for `doc` (for the ops not yet surfaced as host methods), if it has been
+    /// provisioned/unlocked this session.
     pub fn core(&self, doc: &str) -> Option<CoreHandle> {
         self.lock_cores().get(doc).cloned()
+    }
+
+    /// Run `f` against `doc`'s locked core (poison-tolerant).
+    fn with_core<T>(
+        &self,
+        doc: &str,
+        f: impl FnOnce(&mut AppCore<FsBlob>) -> Result<T, HostError>,
+    ) -> Result<T, HostError> {
+        let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut guard)
     }
 
     fn register(&self, doc: &str, core: AppCore<FsBlob>) {
@@ -250,6 +324,36 @@ mod tests {
             host.unlock("doc-unknown", &tree_id, "acct-owner", &replica_id, &pass),
             Err(HostError::NoKeyring(_))
         ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    const PERSON: &str = "openom.org/core/person/v1";
+
+    #[test]
+    fn an_offline_mint_survives_a_native_re_open_under_a_fresh_replica() {
+        // OPE-431: provision + mint + commit OFFLINE (no sync), then re-open the SAME tree under a FRESH replica
+        // id (as a returning device does) and bootstrap — the mint is recovered from the durable local store.
+        // Reusing the SAME replica on re-open would skip its own persisted entries; a fresh replica pulls them
+        // as a peer. push_delta already writes the local head pointer on commit, so nothing else is needed.
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+        let tree_id = [3u8; 16];
+
+        host.provision("t", &tree_id, "acct-owner", &[10u8; 16], &pass).unwrap();
+        host.assert_anchor("t", "pAlice", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+        assert!(host.project("t").unwrap().contains("pAlice"), "the source session projects its own mint");
+
+        // Re-open under a FRESH replica (the durable keyring is read natively) + bootstrap.
+        host.unlock("t", &tree_id, "acct-owner", &[11u8; 16], &pass).unwrap();
+        host.bootstrap("t").unwrap();
+        assert!(
+            host.project("t").unwrap().contains("pAlice"),
+            "the offline mint survives a native re-open under a fresh replica"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

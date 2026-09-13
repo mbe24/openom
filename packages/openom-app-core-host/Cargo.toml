@@ -23,6 +23,8 @@ openom-vault-host = { path = "../openom-vault-host" }
 store-blob = { path = "../store-blob" }
 openom-crypto = { path = "../openom-crypto" }
 openom-keyring-api = { path = "../openom-keyring-api" }
+# The claim engine's error type (the host's mint methods go through AppCore::tree_mut).
+openom-data-tree.workspace = true
 thiserror.workspace = true
 
 [features]
