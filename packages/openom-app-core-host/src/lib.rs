@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use openom_app_core::{AppCore, StoredObject};
-use openom_crypto::Passphrase;
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::VaultStore;
 use store_blob::FsBlob;
@@ -75,6 +75,16 @@ pub struct Unlocked {
     pub needs_backfill: bool,
     pub needs_rrk_backfill: bool,
     pub write_epoch_unreachable: bool,
+}
+
+/// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
+/// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
+#[derive(serde::Serialize)]
+pub struct Recovered {
+    pub recovery_code: String,
+    pub did_key: String,
+    pub needs_reseal: bool,
+    pub needs_backfill: bool,
 }
 
 /// The native app-core host. `store` holds the keyring anchor + anti-rollback watermark per tree; `data_dir`
@@ -181,6 +191,52 @@ impl<St: VaultStore> AppCoreHost<St> {
         })
     }
 
+    /// Recover owner access on a device that already has the tree provisioned/joined: load the stored keyring +
+    /// watermark FROM THE NATIVE STORE (never a webview argument), recover under a new passphrase, PERSIST the
+    /// fresh keyring + watermark natively, and register the new core. Returns the new recovery code + identity.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if the tree isn't stored; [`HostError::Vault`] on a wrong recovery code / stale
+    /// keyring; [`HostError::Store`] on a store read/write failure.
+    pub fn recover(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        replica_id: &[u8],
+        recovery_code: &RecoveryCode,
+        new_passphrase: &Passphrase,
+    ) -> Result<Recovered, HostError> {
+        let anchor = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let floor = self.store.watermark(doc).map_err(HostError::Store)?;
+        let r = openom_app_core::recover(
+            self.doc_store(doc)?,
+            self.engine,
+            recovery_code,
+            new_passphrase,
+            tree_id,
+            member_id,
+            replica_id,
+            &anchor,
+            &floor,
+            doc.to_string(),
+        )?;
+        self.store
+            .commit_keyring(doc, &r.keyring, &r.watermark)
+            .map_err(HostError::Store)?;
+        self.register(doc, r.core);
+        Ok(Recovered {
+            recovery_code: r.recovery_code,
+            did_key: r.did_key,
+            needs_reseal: r.needs_reseal,
+            needs_backfill: r.needs_backfill,
+        })
+    }
+
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
     /// so a mint committed offline in a previous session is folded back in. (A re-open uses a FRESH replica id,
     /// so the previous session's entries are pulled as a peer rather than skipped as "our own".)
@@ -272,7 +328,7 @@ impl<St: VaultStore> AppCoreHost<St> {
 #[cfg(test)]
 mod tests {
     use super::{AppCoreHost, HostError, VaultStore};
-    use openom_crypto::Passphrase;
+    use openom_crypto::{Passphrase, RecoveryCode};
     use openom_keyring_api::EngineKind;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -404,5 +460,35 @@ mod tests {
 
         std::fs::remove_dir_all(&dir_a).ok();
         std::fs::remove_dir_all(&dir_b).ok();
+    }
+
+    #[test]
+    fn recover_re_keys_natively_and_the_new_passphrase_unlocks() {
+        // Recovery loads the stored keyring + watermark from NATIVE custody (never a webview arg), re-keys under
+        // a new passphrase using the provision recovery code, and persists the fresh keyring — so the new
+        // passphrase unlocks and the old one no longer does.
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let tree_id = [9u8; 16];
+        let old = Passphrase::new(b"the old passphrase here".to_vec());
+        let p = host.provision("t", &tree_id, "owner", &[30u8; 16], &old).unwrap();
+
+        let new = Passphrase::new(b"a brand new passphrase".to_vec());
+        let r = host
+            .recover("t", &tree_id, "owner", &[31u8; 16], &RecoveryCode::new(p.recovery_code), &new)
+            .unwrap();
+        assert!(!r.recovery_code.is_empty(), "recovery rotates the recovery code");
+        assert!(!r.did_key.is_empty(), "and yields the (freshly minted) owner identity");
+
+        assert!(
+            host.unlock("t", &tree_id, "owner", &[32u8; 16], &new).is_ok(),
+            "the new passphrase unlocks the re-keyed keyring from native custody"
+        );
+        assert!(
+            host.unlock("t", &tree_id, "owner", &[33u8; 16], &old).is_err(),
+            "the old passphrase no longer unlocks"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

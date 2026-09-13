@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use openom_app_core_host::{AppCoreHost, Provisioned, Unlocked};
-use openom_crypto::Passphrase;
+use openom_app_core_host::{AppCoreHost, Provisioned, Recovered, Unlocked};
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::sqlite::SqliteVaultStore;
 use openom_vault_host::VaultStore;
@@ -93,6 +93,35 @@ async fn core_unlock(
     .map_err(e)?
 }
 
+/// Recover owner access under a new passphrase using the recovery code: the host loads the stored keyring +
+/// watermark from native custody, re-keys, PERSISTS the fresh keyring, and registers the new core. Returns the
+/// rotated recovery code + the (freshly minted) owner identity.
+#[tauri::command]
+async fn core_recover(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    member_id: String,
+    replica_id: Vec<u8>,
+    recovery_code: String,
+    new_passphrase: String,
+) -> Result<Recovered, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.recover(
+            &doc,
+            &tree_id,
+            &member_id,
+            &replica_id,
+            &RecoveryCode::new(recovery_code),
+            &Passphrase::new(new_passphrase.into_bytes()),
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -168,6 +197,7 @@ pub fn run() {
             core_has_keyring,
             core_provision,
             core_unlock,
+            core_recover,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

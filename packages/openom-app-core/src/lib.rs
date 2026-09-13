@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use openom_crypto::Passphrase;
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_data_tree::{OpView, Tree, TreeError};
 use openom_docsync::{EveryNUpdates, SnapshotPolicy, SyncClient, Verdict};
 use openom_keyring_api::EngineKind;
@@ -182,6 +182,55 @@ pub fn unlock<S: BlobStore>(
         needs_backfill: u.needs_backfill,
         needs_rrk_backfill: u.needs_rrk_backfill,
         write_epoch_unreachable: u.write_epoch_unreachable,
+    })
+}
+
+/// The result of [`recover`]: a ready [`AppCore`] under a freshly-minted owner identity, plus the NEW keyring
+/// anchor + recovery code the host persists/shows and the two advisory repair flags.
+pub struct Recovered<S: BlobStore> {
+    pub core: AppCore<S>,
+    pub keyring: Vec<u8>,
+    pub recovery_code: String,
+    pub did_key: String,
+    pub watermark: Vec<u8>,
+    pub needs_reseal: bool,
+    pub needs_backfill: bool,
+}
+
+/// Recover owner access with the recovery code under a NEW passphrase (mints a fresh owner identity and
+/// re-wraps every DEK to it), and open a ready core over `store`. `anchor` is the stored keyring; `floor` is
+/// the persisted anti-rollback watermark. Returns the new keyring + a new recovery code to persist. Recovery
+/// mints a fresh escrow and reaches every epoch, so it introduces no rotation orphan and no unreachable write
+/// epoch (hence only the reseal/backfill flags surface).
+///
+/// # Errors
+/// Returns [`VaultError`] if the engine can't recover the anchor (wrong recovery code / stale keyring).
+#[allow(clippy::too_many_arguments)]
+pub fn recover<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    recovery_code: &RecoveryCode,
+    new_passphrase: &Passphrase,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+    doc: impl Into<String>,
+) -> Result<Recovered<S>, VaultError> {
+    let (tree, member, replica) =
+        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let r = AppVault::from_kind(engine).recover(&ctx, anchor, recovery_code, new_passphrase, floor)?;
+    let did = r.did_key.into_string();
+    Ok(Recovered {
+        core: AppCore::new(did.clone(), r.sealer, Arc::new(store), doc, replica_id),
+        keyring: r.anchor,
+        recovery_code: r.recovery_code.into_string(),
+        did_key: did,
+        watermark: r.watermark,
+        needs_reseal: r.needs_reseal,
+        needs_backfill: r.needs_backfill,
     })
 }
 

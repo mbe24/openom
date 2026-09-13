@@ -574,31 +574,27 @@ pub fn recover(
     floor: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsValue> {
-    let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let r = vault
-        .recover(
-            &ctx,
-            anchor,
-            &RecoveryCode::new(recovery_code),
-            &Passphrase::new(new_passphrase.into_bytes()),
-            floor,
-        )
-        .map_err(|e| vault_err_to_js(&e))?;
-    let did = r.did_key.into_string();
-    let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), r.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
-    };
+    // Shared rlib construction (crate::recover) over the wasm worker's in-memory store, so this veneer and the
+    // native host can't drift. recover mints a fresh escrow reaching every epoch → no rotation orphan / no
+    // unreachable write epoch, so those two flags are always false here.
+    let r = crate::recover(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &RecoveryCode::new(recovery_code),
+        &Passphrase::new(new_passphrase.into_bytes()),
+        tree_id,
+        member_id,
+        replica_id,
+        anchor,
+        floor,
+        doc,
+    )
+    .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
-        handle: Some(handle),
-        keyring: r.anchor,
-        recovery_code: r.recovery_code.into_string(),
-        did_key: did,
+        handle: Some(AppCoreHandle { inner: r.core }),
+        keyring: r.keyring,
+        recovery_code: r.recovery_code,
+        did_key: r.did_key,
         watermark: r.watermark,
         needs_reseal: r.needs_reseal,
         needs_backfill: r.needs_backfill,
