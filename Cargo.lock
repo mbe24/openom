@@ -3663,6 +3663,7 @@ dependencies = [
  "openom-vault",
  "openom-vault-host",
  "serde",
+ "serde_json",
  "store-blob",
  "thiserror 2.0.20",
 ]

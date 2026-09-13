@@ -26,6 +26,8 @@ store-blob = { path = "../store-blob" }
 openom-vault = { path = "../openom-vault" }
 openom-crypto = { path = "../openom-crypto" }
 openom-keyring-api = { path = "../openom-keyring-api" }
+# Claim values cross the invoke boundary as JSON strings (as they do the wasm veneer); parse them here.
+serde_json.workspace = true
 # The claim engine's error type (the host's mint methods go through AppCore::tree_mut).
 openom-data-tree.workspace = true
 thiserror.workspace = true

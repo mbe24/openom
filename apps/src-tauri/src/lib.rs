@@ -334,6 +334,125 @@ fn core_project(state: State<'_, Host>, doc: String) -> Result<String, String> {
     state.project(&doc).map_err(e)
 }
 
+// ---- claim edits (buffered into the intention; core_commit seals them) ----
+
+#[tauri::command]
+fn core_assert_claim(
+    state: State<'_, Host>,
+    doc: String,
+    target: String,
+    predicate: String,
+    value_json: String,
+) -> Result<(), String> {
+    state.assert_claim(&doc, &target, &predicate, &value_json).map_err(e)
+}
+
+#[tauri::command]
+fn core_supersede_claim(
+    state: State<'_, Host>,
+    doc: String,
+    prior: String,
+    target: String,
+    predicate: String,
+    value_json: String,
+) -> Result<(), String> {
+    state.supersede_claim(&doc, &prior, &target, &predicate, &value_json).map_err(e)
+}
+
+#[tauri::command]
+fn core_remove_record(state: State<'_, Host>, doc: String, target: String) -> Result<String, String> {
+    state.remove_record(&doc, &target).map_err(e)
+}
+
+#[tauri::command]
+fn core_revoke(state: State<'_, Host>, doc: String, removal_op_id: String) -> Result<(), String> {
+    state.revoke(&doc, &removal_op_id).map_err(e)
+}
+
+#[tauri::command]
+fn core_reset(state: State<'_, Host>, doc: String) -> Result<(), String> {
+    state.reset(&doc).map_err(e)
+}
+
+#[tauri::command]
+fn core_set_moderators(state: State<'_, Host>, doc: String, moderators: Vec<String>) -> Result<(), String> {
+    state.set_moderators(&doc, moderators).map_err(e)
+}
+
+#[tauri::command]
+fn core_close(state: State<'_, Host>, doc: String) {
+    state.close(&doc);
+}
+
+// ---- reads (JSON strings the webview parses, as the wasm veneer returns) ----
+
+#[tauri::command]
+fn core_oplog(state: State<'_, Host>, doc: String) -> Result<String, String> {
+    state.oplog(&doc).map_err(e)
+}
+
+#[tauri::command]
+fn core_live_records(state: State<'_, Host>, doc: String) -> Result<String, String> {
+    state.live_records(&doc).map_err(e)
+}
+
+#[tauri::command]
+fn core_live_claims_of(
+    state: State<'_, Host>,
+    doc: String,
+    target: String,
+    predicate: String,
+) -> Result<String, String> {
+    state.live_claims_of(&doc, &target, &predicate).map_err(e)
+}
+
+#[tauri::command]
+fn core_live_claims_of_any(state: State<'_, Host>, doc: String, target: String) -> Result<String, String> {
+    state.live_claims_of_any(&doc, &target).map_err(e)
+}
+
+#[tauri::command]
+fn core_resolve_id(state: State<'_, Host>, doc: String, anchor: String) -> Result<Option<String>, String> {
+    state.resolve_id(&doc, &anchor).map_err(e)
+}
+
+#[tauri::command]
+fn core_pending_count(state: State<'_, Host>, doc: String) -> Result<usize, String> {
+    state.pending_count(&doc).map_err(e)
+}
+
+#[tauri::command]
+fn core_anomalies(state: State<'_, Host>, doc: String) -> Result<usize, String> {
+    state.anomalies(&doc).map_err(e)
+}
+
+// ---- soft-removal review queue (OPE-426) ----
+
+#[tauri::command]
+fn core_pending_reviews(state: State<'_, Host>, doc: String) -> Result<String, String> {
+    state.pending_reviews(&doc).map_err(e)
+}
+
+#[tauri::command]
+fn core_approve_pending(
+    state: State<'_, Host>,
+    doc: String,
+    replica: String,
+    counter: u64,
+) -> Result<bool, String> {
+    state.approve_pending(&doc, &replica, counter).map_err(e)
+}
+
+#[tauri::command]
+fn core_discard_pending(
+    state: State<'_, Host>,
+    doc: String,
+    replica: String,
+    counter: u64,
+) -> Result<bool, String> {
+    state.discard_pending(&doc, &replica, counter).map_err(e)
+}
+
 /// Adopt newer keyring revisions the webview fetched (a member/device keyring sync): the host validates the
 /// successor `hops` against the stored anchor, persists + retains them, adopts any rotated epoch on the running
 /// core (via the retained member secret), and refreshes its §B3 resolver. No Argon2 (pure verification), so a
@@ -393,6 +512,23 @@ pub fn run() {
             core_commit,
             core_fold,
             core_project,
+            core_assert_claim,
+            core_supersede_claim,
+            core_remove_record,
+            core_revoke,
+            core_reset,
+            core_set_moderators,
+            core_close,
+            core_oplog,
+            core_live_records,
+            core_live_claims_of,
+            core_live_claims_of_any,
+            core_resolve_id,
+            core_pending_count,
+            core_anomalies,
+            core_pending_reviews,
+            core_approve_pending,
+            core_discard_pending,
             core_sync_keyring,
             core_sync
         ])

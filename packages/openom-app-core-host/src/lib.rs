@@ -83,6 +83,7 @@ pub enum HostError {
 /// The result of [`AppCoreHost::provision`] — the durable core is registered in the host; the caller gets only
 /// what it shows the user (the recovery code) + the author identity.
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Provisioned {
     pub recovery_code: String,
     pub did_key: String,
@@ -93,6 +94,7 @@ pub struct Provisioned {
 // Four INDEPENDENT repair signals, mirroring the core's `Unlocked` — not a state enum.
 #[derive(serde::Serialize)]
 #[allow(clippy::struct_excessive_bools)]
+#[serde(rename_all = "camelCase")]
 pub struct Unlocked {
     pub did_key: String,
     pub needs_reseal: bool,
@@ -104,6 +106,7 @@ pub struct Unlocked {
 /// A joining member's minted account (from [`AppCoreHost::provision_member`]): the codec-encoded KDF params to
 /// persist + replay at member unlock, and the two OOB-shareable public keys the owner needs to admit them.
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemberAccount {
     pub kdf_params: Vec<u8>,
     pub author_public_key: Vec<u8>,
@@ -114,6 +117,7 @@ pub struct MemberAccount {
 /// keys the joiner shared out of band (from their [`MemberAccount`]). NOT trust-bearing custody: these are the
 /// owner's own OOB-verified inputs, distinct from the keyring/floor the host sources natively.
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemberToAdd {
     pub member_id: String,
     pub role: String,
@@ -137,6 +141,7 @@ pub struct AddedMember {
 /// removal the webview publishes the ADVISORY summary FIRST, then the keyring (OPE-293 remove ordering), then a
 /// data sync to push the self-heal cover.
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemovedMember {
     pub keyring: Vec<u8>,
     pub history_preserved: bool,
@@ -156,6 +161,7 @@ pub struct RoleChanged {
 /// The result of [`AppCoreHost::join_as_member`] / [`AppCoreHost::unlock_as_member`] — the member's author
 /// identity; the ready member core is registered in the host.
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MemberUnlocked {
     pub did_key: String,
 }
@@ -163,6 +169,7 @@ pub struct MemberUnlocked {
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Recovered {
     pub recovery_code: String,
     pub did_key: String,
@@ -173,6 +180,7 @@ pub struct Recovered {
 /// The result of [`AppCoreHost::change_passphrase`] — the rotated recovery code; the re-wrapped keyring +
 /// watermark are persisted natively. The DEK is unchanged, so the running core keeps working (no re-open).
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PassphraseChanged {
     pub recovery_code: String,
 }
@@ -869,6 +877,171 @@ impl<St: VaultStore> AppCoreHost<St> {
             openom_vault::resolver_from(self.engine, &accepted.keyring, &self.retained_revisions(doc)?)?;
         guard.set_membership(resolver)?;
         Ok(())
+    }
+
+    /// Assert a claim about `target` (`value_json` = the claim value as a JSON string, as the wasm veneer takes
+    /// it). Buffered into the intention; [`commit`](Self::commit) seals it.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`]; [`HostError::Store`] if `value_json` is invalid; [`HostError::Tree`] if the claim
+    /// can't be canonicalized.
+    pub fn assert_claim(&self, doc: &str, target: &str, predicate: &str, value_json: &str) -> Result<(), HostError> {
+        let value = serde_json::from_str(value_json)
+            .map_err(|e| HostError::Store(format!("bad claim value json: {e}")))?;
+        self.with_core(doc, |c| {
+            c.tree_mut().assert_claim(target, predicate, value, now_millis())?;
+            Ok(())
+        })
+    }
+
+    /// Supersede `prior` with a fresh claim value (an atomic edit).
+    ///
+    /// # Errors
+    /// As [`assert_claim`](Self::assert_claim).
+    pub fn supersede_claim(
+        &self,
+        doc: &str,
+        prior: &str,
+        target: &str,
+        predicate: &str,
+        value_json: &str,
+    ) -> Result<(), HostError> {
+        let value = serde_json::from_str(value_json)
+            .map_err(|e| HostError::Store(format!("bad claim value json: {e}")))?;
+        self.with_core(doc, |c| {
+            c.tree_mut().supersede_claim(prior, target, predicate, value, now_millis())?;
+            Ok(())
+        })
+    }
+
+    /// Remove one of this author's records by id — returns the Remove op's own id (for a later [`revoke`]).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Tree`].
+    pub fn remove_record(&self, doc: &str, target: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| Ok(c.tree_mut().remove(target, now_millis())?))
+    }
+
+    /// Undo a same-author Remove by its op id.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Tree`].
+    pub fn revoke(&self, doc: &str, removal_op_id: &str) -> Result<(), HostError> {
+        self.with_core(doc, |c| {
+            c.tree_mut().revoke(removal_op_id, now_millis())?;
+            Ok(())
+        })
+    }
+
+    /// Clear the tree + local durable store (demo reseed / hard local reset). Keeps the DEK.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Core`].
+    pub fn reset(&self, doc: &str) -> Result<(), HostError> {
+        self.with_core(doc, |c| Ok(c.reset()?))
+    }
+
+    /// Set the §B3 moderator `did:key`s (Maintainer+).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn set_moderators(&self, doc: &str, moderators: Vec<String>) -> Result<(), HostError> {
+        self.with_core(doc, |c| {
+            c.set_moderators(moderators.into_iter().collect());
+            Ok(())
+        })
+    }
+
+    /// The operations log as a JSON string.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Core`].
+    pub fn oplog(&self, doc: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| Ok(c.oplog_json()?))
+    }
+
+    /// Every live record as a JSON-array string.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Core`]; [`HostError::Store`] if it can't serialize.
+    pub fn live_records(&self, doc: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| {
+            serde_json::to_string(&c.live_records()?).map_err(|e| HostError::Store(e.to_string()))
+        })
+    }
+
+    /// The live claims about `target` under `predicate`, as a JSON-array string.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`]; [`HostError::Store`] if it can't serialize.
+    pub fn live_claims_of(&self, doc: &str, target: &str, predicate: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| {
+            serde_json::to_string(&c.live_claims_of(target, predicate))
+                .map_err(|e| HostError::Store(e.to_string()))
+        })
+    }
+
+    /// Every live claim about `target`, whatever the predicate, as a JSON-array string.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`]; [`HostError::Store`] if it can't serialize.
+    pub fn live_claims_of_any(&self, doc: &str, target: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| {
+            serde_json::to_string(&c.live_claims_of_any(target)).map_err(|e| HostError::Store(e.to_string()))
+        })
+    }
+
+    /// The canonical person id an anchor resolves to, or `None`.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn resolve_id(&self, doc: &str, anchor: &str) -> Result<Option<String>, HostError> {
+        self.with_core(doc, |c| Ok(c.resolve_id(anchor)))
+    }
+
+    /// How many mints are buffered, uncommitted.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn pending_count(&self, doc: &str) -> Result<usize, HostError> {
+        self.with_core(doc, |c| Ok(c.pending_count()))
+    }
+
+    /// Data-integrity anomalies observed (undecodable / quarantined / §B3-rejected).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn anomalies(&self, doc: &str) -> Result<usize, HostError> {
+        self.with_core(doc, |c| Ok(c.anomalies()))
+    }
+
+    /// The soft-removal review queue as a JSON string (OPE-426).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn pending_reviews(&self, doc: &str) -> Result<String, HostError> {
+        self.with_core(doc, |c| Ok(c.pending_reviews()))
+    }
+
+    /// Approve a pending trailing edit (OPE-426); returns whether it was approved.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::Core`].
+    pub fn approve_pending(&self, doc: &str, replica: &str, counter: u64) -> Result<bool, HostError> {
+        self.with_core(doc, |c| Ok(c.approve_pending(replica, counter)?))
+    }
+
+    /// Discard a pending trailing edit (OPE-426); returns whether it was present.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn discard_pending(&self, doc: &str, replica: &str, counter: u64) -> Result<bool, HostError> {
+        self.with_core(doc, |c| Ok(c.discard_pending(replica, counter)))
+    }
+
+    /// Close a doc: drop its live core (and DEK) from the registry — the identity-change / lock hook. Idempotent.
+    pub fn close(&self, doc: &str) {
+        self.lock_cores().remove(doc);
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
