@@ -434,6 +434,43 @@ mod lifecycle_tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn media_seals_at_rest_and_round_trips() {
+        // OPE-436: media bytes are sealed under the tree DEK — never plaintext at rest. The content address is
+        // over the PLAINTEXT (stable / the media_link value), the stored envelope is opaque, and open recovers
+        // the exact bytes across a fresh AEAD nonce each time.
+        let dir = temp_dir();
+        let (tree_id, replica_id) = ([9u8; 16], [2u8; 16]);
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+        let p = super::provision(
+            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, "doc",
+        )
+        .unwrap();
+
+        let jpeg: &[u8] = b"\xff\xd8\xff\xe0 pretend-jpeg-bytes \x00\x01\x02 secret-birth-certificate";
+        let (hash, sealed) = p.core.seal_media(jpeg).unwrap();
+
+        // Content address = hex SHA-256 of the PLAINTEXT (64 hex chars), independent of the nonced ciphertext.
+        assert_eq!(hash.len(), 64, "sha-256 hex");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        // Encrypted at rest: the plaintext must NOT survive anywhere in the sealed envelope.
+        assert!(
+            !sealed.windows(jpeg.len()).any(|w| w == jpeg),
+            "plaintext must not appear in the sealed bytes"
+        );
+        // Open recovers the exact bytes.
+        assert_eq!(p.core.open_media(&sealed).unwrap(), jpeg);
+
+        // Re-sealing the same bytes yields the SAME address (dedup key stable) but DIFFERENT ciphertext (nonce).
+        let (hash2, sealed2) = p.core.seal_media(jpeg).unwrap();
+        assert_eq!(hash, hash2, "content address is stable across re-seal");
+        assert_ne!(sealed, sealed2, "a fresh AEAD nonce makes each ciphertext distinct");
+        assert_eq!(p.core.open_media(&sealed2).unwrap(), jpeg);
+
+        drop(p);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// This replica's keyspace folder — the raw id as lowercase hex, so a random binary replica id maps to a
@@ -482,6 +519,34 @@ impl<S: BlobStore> AppCore<S> {
     #[must_use]
     pub fn store(&self) -> &Arc<S> {
         &self.store
+    }
+
+    /// Seal opaque media bytes under this tree's DEK (OPE-436) for at-rest confidentiality. Returns the
+    /// content address — the lowercase-hex SHA-256 of the **plaintext**, stable across re-seal and key
+    /// rotation, and the value a `media_link` claim carries — together with the sealed envelope the host
+    /// persists in its per-doc media store. The plaintext is never written to disk; the host opens on read.
+    /// Media is a LOCAL, non-synced cache: this never touches the op-log or the sync frontier.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if sealing fails.
+    pub fn seal_media(&self, plaintext: &[u8]) -> Result<(String, Vec<u8>), CoreError> {
+        use std::fmt::Write as _;
+        let digest = Sha256::digest(plaintext);
+        let hash = digest.iter().fold(String::with_capacity(64), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        let sealed = self.client.seal_media(&digest, plaintext)?;
+        Ok((hash, sealed))
+    }
+
+    /// Open a media envelope sealed by [`seal_media`](Self::seal_media), routing across epochs so a photo
+    /// added before a rotation still opens. Returns the plaintext bytes.
+    ///
+    /// # Errors
+    /// Returns [`CoreError`] if the envelope is out of scope, names an unreachable epoch, or fails to open.
+    pub fn open_media(&self, sealed: &[u8]) -> Result<Vec<u8>, CoreError> {
+        Ok(self.client.open_media(sealed)?)
     }
 
     /// Retain the member's epoch-adopt secret (OPE-393) — set by the wasm veneer at a MEMBER unlock so the

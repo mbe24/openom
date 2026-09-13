@@ -360,6 +360,12 @@ impl<E: Engine, K: Sealer, S: BlobStore> BlobSyncClient<E, K, S> {
         &mut self.sealer
     }
 
+    /// Shared access to the sealer — for caller-specific read/seal operations docsync doesn't generalize
+    /// (e.g. sealing/opening an out-of-band media blob under the same DEK, off the sync log).
+    pub const fn sealer(&self) -> &K {
+        &self.sealer
+    }
+
     /// Open a `Delta` envelope to its plaintext WITHOUT merging — for a caller that must inspect an entry
     /// (e.g. §B3 author verification) before accepting it.
     ///

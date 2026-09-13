@@ -441,6 +441,9 @@ class App {
     const { tree, focusId } = opened;
     this.tree = tree;
     tree.blobs = this.blobs;
+    // Bind the active tree so the native blob store seals/opens photos under THIS doc's DEK (OPE-436); the
+    // in-memory web store ignores it. Cleared on lock (TauriBlobStore.lock unbinds).
+    this.blobs?.bindDoc?.(docId ?? seedDataset ?? null);
     this.focusId = focusId;
     this.transfer = new TreeTransfer(tree);
     tree.onRevision(() => this.render());

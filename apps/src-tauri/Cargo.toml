@@ -26,8 +26,6 @@ openom-crypto = { path = "../../packages/openom-crypto" }
 tauri = { version = "2.11.5", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The native media blob store (OPE-435): a durable content-addressed SQLite table for photos/attachments.
-store-media = { path = "../../packages/store-media" }
 
 [features]
 # Von tauri-cli beim Erzeugen des Release-Builds gesetzt.

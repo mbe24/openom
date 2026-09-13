@@ -27,7 +27,7 @@ use openom_sealer::{EntryKind, SealContext, SealerError, SealerSet};
 use openom_data_tree::{Tree, TreeError};
 use serde_json::Value;
 
-use crate::Result;
+use crate::{Result, SyncError};
 
 /// Transport-side codec bits: the wire [`FORMAT`](codec::FORMAT) tag, plus the batch `encode` re-exported
 /// from [`openom_data_crdt::codec`] — the one place the op-batch codec lives, shared with the `openom-data-tree`
@@ -207,6 +207,37 @@ impl<S: BlobStore> SyncClient<S> {
     /// Returns a [`TreeError`] if the live set can't be serialized.
     pub fn live_records(&self) -> std::result::Result<Vec<Value>, TreeError> {
         self.inner.engine().0.live_records()
+    }
+
+    /// Seal an opaque media blob under this tree's write-epoch DEK (OPE-436). `blob_id` is the content
+    /// address (SHA-256 of the plaintext) the header records; the returned wire envelope is what the host's
+    /// local media store persists. Media is NOT a sync entry: it never enters the op-log, is never folded or
+    /// pushed, and carries no chain state — this seals through the raw `SealerSet`, off the docsync loop.
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if sealing fails.
+    pub fn seal_media(&self, blob_id: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.inner
+            .sealer()
+            .0
+            .seal_entry(&SealContext::media(blob_id.to_vec()), plaintext)
+            .map(|out| out.envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
+    }
+
+    /// Open a media envelope sealed by [`seal_media`](Self::seal_media), routing across epochs so a photo
+    /// added before a key rotation still opens. Returns the plaintext bytes (held in memory, never spilled to
+    /// disk by the caller).
+    ///
+    /// # Errors
+    /// Returns [`SyncError::Sealer`] if the envelope is out of scope, names an unreachable epoch, is the wrong
+    /// kind, or fails to AEAD-open.
+    pub fn open_media(&self, envelope: &[u8]) -> Result<Vec<u8>> {
+        self.inner
+            .sealer()
+            .0
+            .open_entry(EntryKind::Media, envelope)
+            .map_err(|e| SyncError::Sealer(Box::new(e)))
     }
 
     /// Seal a batch of channel items as one `Kind::Delta` / `Format::OpenomOps` entry, apply it to the

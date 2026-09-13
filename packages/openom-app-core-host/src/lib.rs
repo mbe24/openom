@@ -16,6 +16,8 @@ use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::VaultStore;
 use store_blob::{BlobStore, FsBlob, Precondition};
+pub use store_media::{BlobData, BlobMeta};
+use store_media::MediaStore;
 
 /// A live core: an `AppCore` behind its own `Mutex` (Tauri invokes race on a thread pool).
 pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
@@ -241,6 +243,9 @@ pub struct AppCoreHost<St: VaultStore> {
     /// (the join re-join-guard TOCTOU) and store writes never interleave. This coarser lock closes the
     /// no-core-yet window the core `Arc`'s own `Mutex` can't cover.
     op_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-doc media stores (photos/attachments), opened lazily and cached. Each is a `{doc}.media.sqlite`
+    /// under `data_dir` holding blobs SEALED under that doc's DEK (OPE-435/436) — see [`media_store`](Self::media_store).
+    media_stores: Mutex<HashMap<String, Arc<MediaStore>>>,
 }
 
 impl<St: VaultStore> AppCoreHost<St> {
@@ -252,6 +257,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             engine,
             cores: Mutex::new(HashMap::new()),
             op_locks: Mutex::new(HashMap::new()),
+            media_stores: Mutex::new(HashMap::new()),
         }
     }
 
@@ -346,6 +352,23 @@ impl<St: VaultStore> AppCoreHost<St> {
             .map(|(b, _etag)| b)
             .unwrap_or_default();
         Ok(Some((kdf, signers)))
+    }
+
+    /// This doc's MEDIA store — a `{doc}.media.sqlite` under `data_dir`, holding photos/attachments SEALED
+    /// under the doc's DEK (OPE-435/436). Opened lazily and cached (a `SQLite` connection per doc), so repeat
+    /// `blob_*` calls reuse one handle. Sibling file (`.media.sqlite` can't collide with a `{doc}` dir or the
+    /// `.kr`/`.mc` custody dirs: `checked_doc` forbids `.`).
+    fn media_store(&self, doc: &str) -> Result<Arc<MediaStore>, HostError> {
+        let doc = checked_doc(doc)?;
+        let mut map = self.media_stores.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(store) = map.get(doc) {
+            return Ok(Arc::clone(store));
+        }
+        std::fs::create_dir_all(&self.data_dir).map_err(|e| HostError::Store(e.to_string()))?;
+        let path = self.data_dir.join(format!("{doc}.media.sqlite"));
+        let store = Arc::new(MediaStore::open(path).map_err(HostError::Store)?);
+        map.insert(doc.to_string(), Arc::clone(&store));
+        Ok(store)
     }
 
     /// Unframe a `[u32-be len][body]…` run (the walk's `bodies_framed`, ascending from genesis) into
@@ -1208,6 +1231,79 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// Close a doc: drop its live core (and DEK) from the registry — the identity-change / lock hook. Idempotent.
     pub fn close(&self, doc: &str) {
         self.lock_cores().remove(doc);
+    }
+
+    // ── Media blob store (OPE-435/436): photos/attachments, SEALED under the doc's DEK ────────────────────
+    // The webview's TauriBlobStore (apps/app/src/core/blobs.js) drives these. A put/get needs the doc's LIVE
+    // core (it holds the DEK) — so media can only be attached to / read from an UNLOCKED tree; has/meta/delete/
+    // list are plain store reads over the opaque bytes. The content address is the SHA-256 of the plaintext.
+
+    /// Seal `bytes` under `doc`'s DEK and store them content-addressed; returns the hex SHA-256 address. The
+    /// plaintext is hashed + sealed by the live core, then only the opaque envelope is persisted — nothing
+    /// plaintext reaches disk. Idempotent: identical bytes map to one entry.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if `doc` is locked/closed; [`HostError::Core`] on a seal failure; [`HostError::Store`]
+    /// on a persist failure.
+    pub fn blob_put(
+        &self,
+        doc: &str,
+        bytes: &[u8],
+        mime: Option<String>,
+        w: Option<u32>,
+        h: Option<u32>,
+    ) -> Result<String, HostError> {
+        let size = bytes.len() as u64;
+        let (hash, sealed) = self.with_core(doc, |c| Ok(c.seal_media(bytes)?))?;
+        let meta = store_media::PutMeta { mime, w, h, size, created: now_millis() };
+        self.media_store(doc)?.put(&hash, &sealed, meta).map_err(HostError::Store)?;
+        Ok(hash)
+    }
+
+    /// Fetch + decrypt `hash` under `doc`'s DEK, or `None` if absent. Returns the plaintext bytes + mime (held
+    /// in memory; the webview wraps them in a `Blob`).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if `doc` is locked/closed; [`HostError::Core`] if the sealed bytes fail to open;
+    /// [`HostError::Store`] on a read failure.
+    pub fn blob_get(&self, doc: &str, hash: &str) -> Result<Option<BlobData>, HostError> {
+        let Some((sealed, mime)) = self.media_store(doc)?.get_sealed(hash).map_err(HostError::Store)? else {
+            return Ok(None);
+        };
+        let bytes = self.with_core(doc, |c| Ok(c.open_media(&sealed)?))?;
+        Ok(Some(BlobData { bytes, mime }))
+    }
+
+    /// Whether `doc` has a blob for `hash` (no decryption).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] on a read failure.
+    pub fn blob_has(&self, doc: &str, hash: &str) -> Result<bool, HostError> {
+        self.media_store(doc)?.has(hash).map_err(HostError::Store)
+    }
+
+    /// `hash`'s metadata (mime / dimensions / plaintext size / created), or `None` (no decryption).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] on a read failure.
+    pub fn blob_meta(&self, doc: &str, hash: &str) -> Result<Option<BlobMeta>, HostError> {
+        self.media_store(doc)?.meta(hash).map_err(HostError::Store)
+    }
+
+    /// Delete `hash` from `doc`'s media store (idempotent; no decryption).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] on a write failure.
+    pub fn blob_delete(&self, doc: &str, hash: &str) -> Result<(), HostError> {
+        self.media_store(doc)?.delete(hash).map_err(HostError::Store)
+    }
+
+    /// Every stored blob hash for `doc` (no decryption).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] on a read failure.
+    pub fn blob_list(&self, doc: &str) -> Result<Vec<String>, HostError> {
+        self.media_store(doc)?.list().map_err(HostError::Store)
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,

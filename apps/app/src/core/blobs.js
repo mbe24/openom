@@ -18,6 +18,10 @@ export class MemoryBlobStore {
     return { durable: false, remote: false };
   }
 
+  /** No-op: the in-memory store isn't scoped per doc (bytes are decrypted in the JS heap, cleared on lock),
+      so there's no DEK to bind. Present for a uniform call site with TauriBlobStore.bindDoc. */
+  bindDoc(_doc) {}
+
   async put(bytes, meta = {}) {
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const hash = await sha256(data);
@@ -69,27 +73,42 @@ export class MemoryBlobStore {
   }
 }
 
-/** Rust-Seite: blobs(hash TEXT PRIMARY KEY, mime, w, h, bytes BLOB, created). */
+/**
+ * Rust-Seite: blobs(hash TEXT PRIMARY KEY, mime, w, h, size, bytes BLOB, created) je Dokument.
+ * Die Bytes liegen unter der Baum-DEK VERSCHLÜSSELT auf der Platte (OPE-436) — der Host siegelt beim put und
+ * öffnet beim get; Klartext erreicht nie die Platte. Deshalb braucht jeder Aufruf das aktive `doc` (dessen
+ * DEK), das die App nach dem Entsperren via bindDoc setzt.
+ */
 export class TauriBlobStore {
   #invoke;
+  #doc = null;
   #urls = new Map();
 
   constructor(invoke) { this.#invoke = invoke; }
 
   caps() { return { durable: true, remote: false }; }
 
+  /** Bind the active tree (its DEK seals/opens the blobs). Set on enterApp, cleared on lock. */
+  bindDoc(doc) { this.#doc = doc; }
+
+  #requireDoc() {
+    if (!this.#doc) throw new Error('TauriBlobStore: no active doc bound (call bindDoc after unlock)');
+    return this.#doc;
+  }
+
   async put(bytes, meta = {}) {
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     return this.#invoke('blob_put', {
+      doc: this.#requireDoc(),
       args: { bytes: Array.from(data), mime: meta.mime ?? null, w: meta.w ?? null, h: meta.h ?? null }
     });
   }
 
-  async has(hash) { return this.#invoke('blob_has', { hash }); }
-  async meta(hash) { return this.#invoke('blob_meta', { hash }); }
+  async has(hash) { return this.#invoke('blob_has', { doc: this.#requireDoc(), hash }); }
+  async meta(hash) { return this.#invoke('blob_meta', { doc: this.#requireDoc(), hash }); }
 
   async get(hash) {
-    const res = await this.#invoke('blob_get', { hash });
+    const res = await this.#invoke('blob_get', { doc: this.#requireDoc(), hash });
     return res ? new Blob([new Uint8Array(res.bytes)], { type: res.mime }) : null;
   }
 
@@ -105,16 +124,17 @@ export class TauriBlobStore {
   async delete(hash) {
     const url = this.#urls.get(hash);
     if (url) { URL.revokeObjectURL(url); this.#urls.delete(hash); }
-    return this.#invoke('blob_delete', { hash });
+    return this.#invoke('blob_delete', { doc: this.#requireDoc(), hash });
   }
 
-  async list() { return this.#invoke('blob_list'); }
+  async list() { return this.#invoke('blob_list', { doc: this.#requireDoc() }); }
 
-  /** On lock: drop the object URLs only. The bytes stay in durable SQLite and are re-fetched
-      after unlock — nothing to clear here. */
+  /** On lock: drop the object URLs and unbind the doc. The bytes stay in durable (sealed) SQLite and are
+      re-fetched after the next unlock re-binds the doc — nothing decrypted is left addressable. */
   async lock() {
     for (const url of this.#urls.values()) URL.revokeObjectURL(url);
     this.#urls.clear();
+    this.#doc = null;
   }
 }
 

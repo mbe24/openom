@@ -21,6 +21,9 @@ openom-app-core = { path = "../openom-app-core" }
 openom-vault-host = { path = "../openom-vault-host" }
 # The native local device store (a real BlobStore that passes the conformance suite).
 store-blob = { path = "../store-blob" }
+# The durable media blob store (photos/attachments): the host seals each blob under the tree DEK, then
+# persists the opaque bytes here — one {doc}.media.sqlite per doc (OPE-435/436).
+store-media = { workspace = true }
 # The shared keyring/member MATH (sharing::provision_member / add_member / remove_member / change_role) — the
 # SAME fns the wasm veneer + the thin-custody VaultHost call, so the member ops don't re-derive the crypto.
 openom-vault = { path = "../openom-vault" }

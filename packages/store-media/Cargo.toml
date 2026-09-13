@@ -7,10 +7,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# The durable store: rusqlite (bundled SQLite). sha2 for content addressing. serde so the Tauri command layer
-# returns the blob metadata/bytes structs straight to the webview.
+# The durable store: rusqlite (bundled SQLite). serde so the Tauri command layer returns the blob
+# metadata/bytes structs straight to the webview. Content addressing (SHA-256) is the host's job now — it
+# hashes the plaintext before sealing — so this crate no longer depends on sha2.
 rusqlite = { workspace = true }
-sha2.workspace = true
 serde = { workspace = true }
 
 [lints]

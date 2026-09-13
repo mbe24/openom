@@ -110,6 +110,24 @@ impl SealContext {
             blob_id: Vec::new(),
         }
     }
+
+    /// A standalone media blob (OPE-436): opaque [`Format::RawBytes`] sealed under the write epoch and
+    /// addressed by `blob_id` — the caller's content hash (SHA-256 of the plaintext), recorded in the header,
+    /// never re-derived from the ciphertext. Carries NO chain state (`replica_counter`/`prev` are zero/empty):
+    /// media is a local, non-synced cache that never joins a replica's op-log, so it needs no §8a chain link.
+    /// The opened envelope still checks `(tree_id, key_id)` scope + `Media` kind, binding a photo to its tree.
+    #[must_use]
+    pub fn media(blob_id: Vec<u8>) -> Self {
+        Self {
+            kind: EntryKind::Media,
+            format: Format::RawBytes,
+            compression: Compression::None,
+            replica_counter: 0,
+            prev_ciphertext_hash: Vec::new(),
+            covers_through_seq: 0,
+            blob_id,
+        }
+    }
 }
 
 /// The result of sealing one entry: the complete, wire-ready envelope bytes to upload,

@@ -2,11 +2,9 @@
 
 use std::sync::Arc;
 
-use store_media::{BlobData, BlobMeta, MediaStore};
-
 use openom_app_core_host::{
-    AddedMember, AppCoreHost, MemberAccount, MemberToAdd, MemberUnlocked, PassphraseChanged,
-    Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AddedMember, AppCoreHost, BlobData, BlobMeta, MemberAccount, MemberToAdd, MemberUnlocked,
+    PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -517,12 +515,12 @@ fn core_sync(
     state.sync(&doc, &remote, compact_k).map_err(e)
 }
 
-// ---- media blob store (OPE-435): durable content-addressed photos/attachments (apps/…/blobs.js) ----
+// ---- media blob store (OPE-435/436): durable content-addressed photos/attachments (apps/…/blobs.js) ----
+// Each blob is SEALED under its doc's DEK by the host, so a put/get needs the doc UNLOCKED; the content
+// address is the SHA-256 of the plaintext. The webview binds the active doc (TauriBlobStore.bindDoc), so
+// every call carries `doc`.
 
-/// The managed native media store.
-type Media = Arc<MediaStore>;
-
-/// `blob_put`'s payload — the webview sends `{ args: { bytes, mime, w, h } }`; the host computes the hash.
+/// `blob_put`'s payload — the webview sends `{ args: { bytes, mime, w, h } }`; the host hashes + seals.
 #[derive(serde::Deserialize)]
 struct BlobPutArgs {
     bytes: Vec<u8>,
@@ -532,43 +530,33 @@ struct BlobPutArgs {
 }
 
 #[tauri::command]
-fn blob_put(state: State<'_, Media>, args: BlobPutArgs) -> Result<String, String> {
-    state.put(&args.bytes, args.mime, args.w, args.h, media_now_millis())
+fn blob_put(state: State<'_, Host>, doc: String, args: BlobPutArgs) -> Result<String, String> {
+    state.blob_put(&doc, &args.bytes, args.mime, args.w, args.h).map_err(e)
 }
 
 #[tauri::command]
-fn blob_has(state: State<'_, Media>, hash: String) -> Result<bool, String> {
-    state.has(&hash)
+fn blob_has(state: State<'_, Host>, doc: String, hash: String) -> Result<bool, String> {
+    state.blob_has(&doc, &hash).map_err(e)
 }
 
 #[tauri::command]
-fn blob_meta(state: State<'_, Media>, hash: String) -> Result<Option<BlobMeta>, String> {
-    state.meta(&hash)
+fn blob_meta(state: State<'_, Host>, doc: String, hash: String) -> Result<Option<BlobMeta>, String> {
+    state.blob_meta(&doc, &hash).map_err(e)
 }
 
 #[tauri::command]
-fn blob_get(state: State<'_, Media>, hash: String) -> Result<Option<BlobData>, String> {
-    state.get(&hash)
+fn blob_get(state: State<'_, Host>, doc: String, hash: String) -> Result<Option<BlobData>, String> {
+    state.blob_get(&doc, &hash).map_err(e)
 }
 
 #[tauri::command]
-fn blob_delete(state: State<'_, Media>, hash: String) -> Result<(), String> {
-    state.delete(&hash)
+fn blob_delete(state: State<'_, Host>, doc: String, hash: String) -> Result<(), String> {
+    state.blob_delete(&doc, &hash).map_err(e)
 }
 
 #[tauri::command]
-fn blob_list(state: State<'_, Media>) -> Result<Vec<String>, String> {
-    state.list()
-}
-
-/// Wall-clock milliseconds for a stored blob's `created` stamp.
-fn media_now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok())
-        .unwrap_or(0)
+fn blob_list(state: State<'_, Host>, doc: String) -> Result<Vec<String>, String> {
+    state.blob_list(&doc).map_err(e)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -583,9 +571,8 @@ pub fn run() {
             let vault = SqliteVaultStore::open(dir.join("vault.sqlite")).expect("open vault store");
             let host = AppCoreHost::new(vault, dir.join("docs"), keyring_engine());
             app.manage(Arc::new(host));
-            // The media blob store (photos/attachments) — its own blobs.sqlite (OPE-435).
-            let media = MediaStore::open(dir.join("blobs.sqlite")).expect("open media store");
-            app.manage(Arc::new(media));
+            // Media (photos/attachments) lives in per-doc {doc}.media.sqlite files the host opens on demand,
+            // each blob SEALED under its doc's DEK (OPE-435/436) — no separate managed store.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
