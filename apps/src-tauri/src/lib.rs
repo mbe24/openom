@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openom_app_core_host::{
     AddedMember, AppCoreHost, MemberAccount, MemberToAdd, PassphraseChanged, Provisioned, Recovered,
-    RemovedMember, Unlocked,
+    RemovedMember, RoleChanged, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -207,6 +207,36 @@ async fn core_remove_member(
     .map_err(e)?
 }
 
+/// Change a member's role (owner action): promote to co-owner or demote. No epoch rotation — the host refreshes
+/// the owner core's §B3 resolver in place and persists the new keyring. Returns the opaque keyring for the
+/// webview to publish (promote keyring-first, demote advisory-first) + whether it was a demote. Argon2id, so
+/// `spawn_blocking`.
+#[tauri::command]
+async fn core_change_role(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    owner_member_id: String,
+    owner_passphrase: String,
+    target_member_id: String,
+    new_role: String,
+) -> Result<RoleChanged, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.change_role(
+            &doc,
+            &tree_id,
+            &owner_member_id,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &target_member_id,
+            &new_role,
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -287,6 +317,7 @@ pub fn run() {
             core_provision_member,
             core_add_member,
             core_remove_member,
+            core_change_role,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

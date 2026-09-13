@@ -140,6 +140,17 @@ pub struct RemovedMember {
     pub history_preserved: bool,
 }
 
+/// The result of [`AppCoreHost::change_role`] — the opaque new keyring revision for the webview to publish, and
+/// whether it was a DEMOTE. No epoch rotation (a role change touches signing authority, not keys), so the
+/// owner's running core keeps its sealer; only its §B3 resolver refreshes. The webview publishes a PROMOTE
+/// keyring-first, but a DEMOTE advisory-FIRST — the restrictive change must land before the crypto that
+/// authorizes it (design-review F8 / OPE-293).
+#[derive(serde::Serialize)]
+pub struct RoleChanged {
+    pub keyring: Vec<u8>,
+    pub demote: bool,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -569,6 +580,75 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(RemovedMember { keyring: removed.keyring, history_preserved })
     }
 
+    /// Change an existing member's role (owner action, OPE-364): `new_role == "co-owner"` PROMOTES to the signer
+    /// set, any other role DEMOTES. A role change touches signing authority, NOT keys — no epoch rotation — so
+    /// the owner's running core keeps its sealer and is NOT re-opened; only its §B3 resolver refreshes (over the
+    /// retained revisions, so a demoted member's pre-demote history is judged against the revision that governed
+    /// it). A DEMOTE first pins the member's already-folded pre-demote history (compact-before-demote — a cold
+    /// replica would otherwise Drop it as un-vouched, same as removal; chain demote is forward-secure for the
+    /// commit capability via the OPE-421 look-behind, dag via the resolver's `StrongDemote` rule). The whole op
+    /// holds the per-doc lock (F1/F3). Returns the new keyring + whether it was a demote (the webview publishes a
+    /// promote keyring-first, a demote advisory-first — F8).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the tree isn't open; [`HostError::NoKeyring`] if none is stored;
+    /// [`HostError::Vault`] on a wrong owner passphrase / unknown-or-owner target / unauthorized change;
+    /// [`HostError::Core`] on the compact / resolver refresh; [`HostError::Store`] on a store fault.
+    pub fn change_role(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        owner_member_id: &str,
+        owner_passphrase: &Passphrase,
+        target_member_id: &str,
+        new_role: &str,
+    ) -> Result<RoleChanged, HostError> {
+        let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let floor = openom_vault::sharing::chain_watermark_floor(
+            &self.store.watermark(doc).map_err(HostError::Store)?,
+        );
+        let demote = new_role != "co-owner";
+        if demote {
+            // compact-before-demote: pin the member's already-folded pre-demote history (same look-behind
+            // requirement as removal — a cold replica would else Drop it as un-vouched).
+            guard.fold()?;
+            guard.compact()?;
+        }
+        let changed = openom_vault::sharing::change_role(
+            self.engine,
+            &keyring,
+            owner_passphrase,
+            tree_id,
+            owner_member_id,
+            &fresh_replica()?,
+            floor,
+            target_member_id,
+            new_role,
+        )?;
+        self.retain_revision(
+            doc,
+            openom_vault::sharing::chain_watermark_floor(&changed.watermark),
+            &changed.keyring,
+        )?;
+        self.store
+            .commit_keyring(doc, &changed.keyring, &changed.watermark)
+            .map_err(HostError::Store)?;
+        // Refresh the §B3 resolver on the RUNNING core (no re-open — no epoch rotation, the sealer is unchanged);
+        // this re-judges existing writes under the new membership (a demote drops the member's over-authority
+        // commits, keeps their authorized-then history via the retained revisions).
+        let resolver =
+            openom_vault::resolver_from(self.engine, &changed.keyring, &self.retained_revisions(doc)?)?;
+        guard.set_membership(resolver)?;
+        Ok(RoleChanged { keyring: changed.keyring, demote })
+    }
+
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
     /// so a mint committed offline in a previous session is folded back in. (A re-open uses a FRESH replica id,
     /// so the previous session's entries are pulled as a peer rather than skipped as "our own".)
@@ -962,6 +1042,47 @@ mod tests {
         let proj = host.project("t").unwrap();
         assert!(proj.contains("pCarol"), "post-removal owner write projects under the rotated epoch");
         assert!(proj.contains("pAlice"), "pre-removal history still projects after the rotation");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn change_role_promotes_then_demotes_without_rotating_the_epoch() {
+        use super::MemberToAdd;
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let tree_id = [7u8; 16];
+        host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+        let joiner = host
+            .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
+            .unwrap();
+        let bob = MemberToAdd {
+            member_id: "bob".into(),
+            role: "editor".into(),
+            author_public_key: joiner.author_public_key,
+            hpke_public_key: joiner.hpke_public_key,
+        };
+        host.add_member("t", &tree_id, "owner", &owner_pass, &bob).unwrap();
+        host.assert_anchor("t", "pAlice", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+
+        // Promote bob to co-owner, then demote back to editor — both change the keyring but NOT the epoch.
+        let promoted = host.change_role("t", &tree_id, "owner", &owner_pass, "bob", "co-owner").unwrap();
+        assert!(!promoted.demote, "co-owner is a promote");
+        let demoted = host.change_role("t", &tree_id, "owner", &owner_pass, "bob", "editor").unwrap();
+        assert!(demoted.demote, "a non-co-owner role is a demote");
+        assert!(demoted.keyring != promoted.keyring, "each role change is a fresh keyring revision");
+
+        // No re-open, no epoch rotation: the owner core keeps writing and prior history stays projected.
+        host.assert_anchor("t", "pBob", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+        let proj = host.project("t").unwrap();
+        assert!(
+            proj.contains("pAlice") && proj.contains("pBob"),
+            "history survives the promote + demote (no epoch rotation)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
