@@ -1,8 +1,8 @@
 # openom-app-core — THE web app's one Rust core, meant to run in a single Web Worker (wasm). It owns the
 # claim engine (openom-data-tree), the DEK sealer session (openom-vault / openom-sealer), the docsync sync
-# loop, and one LOCAL durable DocStore (store-log). A thin Rust `Replicator` bridges that local log to the
-# server; the only async is a ~1-screen JS worker-driver that does `fetch` around the core's synchronous
-# steps. JS shrinks to UI + one network transport. See plan/sync/design.max-rust-app-core.md.
+# loop, and one LOCAL durable BlobStore (store-blob). The core mirrors that local log to the server; the only
+# async is a ~1-screen JS worker-driver that does `fetch` around the core's synchronous steps. JS shrinks to UI
+# + one network transport. See plan/sync/design.max-rust-app-core.md.
 [package]
 name = "openom-app-core"
 description = "The web app's one Rust core (engine + sealer + docsync + local store + a local⇄server replicator), built for a single Web Worker. JS = UI + one fetch transport."

@@ -24,7 +24,6 @@ members = [
     "packages/openom-sealer",
     "packages/openom-vault",
     "packages/openom-vault-host",
-    "packages/store-log",
     "packages/openom-docsync",
     "packages/keyeo-core",
     "packages/keyeo-chain",
@@ -85,7 +84,6 @@ openom-data-model = { path = "packages/openom-data-model" }
 openom-data-projection = { path = "packages/openom-data-projection" }
 openom-data-crdt = { path = "packages/openom-data-crdt" }
 openom-data-tree = { path = "packages/openom-data-tree" }
-store-log = { path = "packages/store-log" }
 store-blob = { path = "packages/store-blob" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
 # roles/signing/keys onto keyeo-dag's seams in openom-keyring-dag; keyeo-dag itself never gains an openom dep.

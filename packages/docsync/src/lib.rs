@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 use store_blob::BlobStore;
-use store_log::{DocStore, StoreError};
 
 /// Kind of a sealed log entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,9 +110,7 @@ impl SnapshotPolicy for NeverCompact {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    /// A blob-store transport failure (the [`BlobSyncClient`] path).
+    /// A blob-store transport failure.
     #[error("blob store: {0}")]
     Blob(#[from] store_blob::BlobError),
     #[error("engine: {0}")]
@@ -122,268 +119,6 @@ pub enum SyncError {
     Sealer(Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// One device's view of one document: a local [`Engine`], a [`Sealer`], and a shared [`DocStore`]. Owns
-/// this replica's outbound chain (counter + prev hash) and the inbound cursor.
-pub struct SyncClient<E: Engine, K: Sealer, S: DocStore> {
-    engine: E,
-    sealer: K,
-    store: S,
-    doc: String,
-    next_counter: u64,
-    prev_hash: Vec<u8>,
-    pull_cursor: Option<u64>,
-    snapshot_version: Option<String>,
-    /// The log seq this client's last snapshot covered — for [`SnapshotPolicy`] length triggers.
-    snapshot_covered: Option<u64>,
-    /// Sealed-but-not-yet-appended envelopes (write-ahead queue): sealed once, re-appended on retry
-    /// (idempotent on peers).
-    pending: Vec<Vec<u8>>,
-    /// Count of log entries [`pull`](Self::pull) skipped because they would not open or merge — a
-    /// corrupt / wrong-key / future-format envelope. Surfaced (not fatal) so one bad entry from an
-    /// untrusted server can't wedge sync for the whole tree.
-    quarantined: usize,
-}
-
-impl<E: Engine, K: Sealer, S: DocStore> SyncClient<E, K, S> {
-    pub fn new(engine: E, sealer: K, store: S, doc: impl Into<String>) -> Self {
-        Self {
-            engine,
-            sealer,
-            store,
-            doc: doc.into(),
-            next_counter: 0,
-            prev_hash: Vec::new(),
-            pull_cursor: None,
-            snapshot_version: None,
-            snapshot_covered: None,
-            quarantined: 0,
-            pending: Vec::new(),
-        }
-    }
-
-    pub const fn engine(&self) -> &E {
-        &self.engine
-    }
-
-    /// Mutable access to the engine — for caller-specific operations docsync doesn't generalize (e.g. a
-    /// domain version cursor, or a workflow-specific commit).
-    pub const fn engine_mut(&mut self) -> &mut E {
-        &mut self.engine
-    }
-
-    /// Mutable access to the sealer — for caller-specific key-material operations docsync doesn't generalize
-    /// (e.g. splicing a newly-reachable epoch DEK into a running member's set after a rotation).
-    pub const fn sealer_mut(&mut self) -> &mut K {
-        &mut self.sealer
-    }
-
-    /// Apply a local edit and immediately push it.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the edit cannot be applied or sealed.
-    pub fn apply(&mut self, edit: E::Edit) -> Result<(), SyncError> {
-        let delta = self.engine.apply_local(edit);
-        self.push(EntryKind::Delta, &delta, 0)
-    }
-
-    /// Seal an already-encoded delta payload and append it — the same path as [`apply`](Self::apply)
-    /// minus `apply_local`. For an engine that mints the batch bytes itself (its own id/clock/author
-    /// logic) and has already folded them into its own state, so re-merging here would be redundant.
-    /// An empty payload is a no-op.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if sealing or the store append fails.
-    pub fn push_delta(&mut self, plaintext: &[u8]) -> Result<(), SyncError> {
-        self.push(EntryKind::Delta, plaintext, 0)
-    }
-
-    /// Seal a self-heal `Cover` marker in this replica's chain (advancing the counter + prev-hash like any
-    /// entry, so it never collides with a delta) but do NOT store it locally — a Cover must not enter the
-    /// claim log (`pull` would try to open it as a Delta and quarantine it). The caller pushes the returned
-    /// envelope to the server's log directly; peers fold it into their covered set on ingest.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if sealing fails.
-    pub fn seal_cover(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, SyncError> {
-        let ctx = SealCtx {
-            kind: EntryKind::Cover,
-            replica_counter: self.next_counter,
-            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
-            covers_through_seq: 0,
-        };
-        let out = self
-            .sealer
-            .seal(&ctx, plaintext)
-            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-        self.next_counter += 1;
-        self.prev_hash = out.ciphertext_hash;
-        Ok(out.envelope)
-    }
-
-    fn push(&mut self, kind: EntryKind, plaintext: &[u8], covers: u64) -> Result<(), SyncError> {
-        if plaintext.is_empty() {
-            return Ok(());
-        }
-        let ctx = SealCtx {
-            kind,
-            replica_counter: self.next_counter,
-            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
-            covers_through_seq: covers,
-        };
-        let out = self
-            .sealer
-            .seal(&ctx, plaintext)
-            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-        self.next_counter += 1;
-        self.prev_hash = out.ciphertext_hash;
-        self.pending.push(out.envelope);
-        self.flush()
-    }
-
-    /// Append every queued envelope (oldest first); a failed append leaves the rest queued for an
-    /// idempotent retry.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the store push fails.
-    pub fn flush(&mut self) -> Result<(), SyncError> {
-        while let Some(env) = self.pending.first() {
-            self.store.append(&self.doc, std::slice::from_ref(env))?;
-            self.pending.remove(0);
-        }
-        Ok(())
-    }
-
-    pub const fn pending_count(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Pull + merge every log entry newer than the last pull. Returns the count.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the store read or a merge fails.
-    pub fn pull(&mut self) -> Result<usize, SyncError> {
-        let (updates, new_cursor) = self.store.read_updates(&self.doc, self.pull_cursor)?;
-        let mut merged = 0;
-        for env in &updates {
-            // Per-entry fault isolation: a single un-openable / un-mergeable entry (corrupt, wrong
-            // key, future format, or a malicious write to the untrusted log) is quarantined and the
-            // cursor still advances past it — one bad entry can't wedge sync for the whole tree. A
-            // *store* read failure above is still fatal (a broken local backend, not one bad entry).
-            match self.sealer.open(EntryKind::Delta, env) {
-                Ok(bytes) => match self.engine.merge(&bytes) {
-                    Ok(()) => merged += 1,
-                    Err(_) => self.quarantined += 1,
-                },
-                Err(_) => self.quarantined += 1,
-            }
-        }
-        self.pull_cursor = Some(new_cursor);
-        Ok(merged)
-    }
-
-    /// Total log entries [`pull`](Self::pull) has quarantined (skipped as un-openable / un-mergeable)
-    /// over this client's life — a caller surfaces a non-zero count as a data-integrity anomaly.
-    pub const fn quarantined_count(&self) -> usize {
-        self.quarantined
-    }
-
-    /// Open a `Delta` envelope to its plaintext WITHOUT merging — for a caller that must inspect an
-    /// entry (e.g. §B3 author verification) before deciding whether to accept it into the store.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the sealer can't open the envelope (wrong key / corrupt).
-    pub fn try_open_delta(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
-        self.sealer
-            .open(EntryKind::Delta, envelope)
-            .map_err(|e| SyncError::Sealer(Box::new(e)))
-    }
-
-    /// Open a `Cover` envelope (the self-heal marker) to its plaintext without merging — so a caller can
-    /// verify + fold its body into the covered set. A Cover is a normal sealed entry under the tree DEK; only
-    /// its header `kind` differs, so the sealer must be told to expect `Cover` (a `Delta`-kind open rejects it).
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the sealer can't open the envelope (wrong key / corrupt / wrong kind).
-    pub fn try_open_cover(&self, envelope: &[u8]) -> Result<Vec<u8>, SyncError> {
-        self.sealer
-            .open(EntryKind::Cover, envelope)
-            .map_err(|e| SyncError::Sealer(Box::new(e)))
-    }
-
-    /// Fold state into a snapshot and CAS it, recording the seq it covers.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if snapshotting or the store write fails.
-    pub fn compact(&mut self) -> Result<u64, SyncError> {
-        let covered = match self.pull_cursor {
-            Some(c) => c,
-            None => self.store.read_updates(&self.doc, None)?.1,
-        };
-        let snap = self.engine.snapshot();
-        let ctx = SealCtx {
-            kind: EntryKind::Snapshot,
-            replica_counter: self.next_counter,
-            prev_ciphertext_hash: std::mem::take(&mut self.prev_hash),
-            covers_through_seq: covered,
-        };
-        let out = self
-            .sealer
-            .seal(&ctx, &snap)
-            .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-        let version =
-            self.store
-                .put_snapshot(&self.doc, &out.envelope, self.snapshot_version.as_deref())?;
-        self.snapshot_version = Some(version);
-        self.snapshot_covered = Some(covered);
-        self.next_counter += 1;
-        self.prev_hash = out.ciphertext_hash;
-        Ok(covered)
-    }
-
-    /// Compact iff the [`SnapshotPolicy`] says so, given how much log has accrued since the last
-    /// snapshot. Returns the covered seq if it compacted. The length estimate uses the pull cursor, so
-    /// call after [`pull`](Self::pull) for an up-to-date view.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if a triggered compaction fails.
-    pub fn maybe_compact(
-        &mut self,
-        policy: &impl SnapshotPolicy,
-    ) -> Result<Option<u64>, SyncError> {
-        let head = self.pull_cursor.unwrap_or(0);
-        let state = CompactionState {
-            updates_since_snapshot: head.saturating_sub(self.snapshot_covered.unwrap_or(0)),
-            has_snapshot: self.snapshot_version.is_some(),
-        };
-        if policy.should_compact(&state) {
-            Ok(Some(self.compact()?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Bring a fresh client current: load the snapshot (if any), then pull only the tail after the seq it
-    /// covers. Idempotent.
-    ///
-    /// # Errors
-    /// Returns [`SyncError`] if the store read or a merge fails.
-    pub fn bootstrap(&mut self) -> Result<(), SyncError> {
-        if let Some(snap) = self.store.read_snapshot(&self.doc)? {
-            let covered = self.sealer.covers_through_seq(&snap.bytes);
-            let plaintext = self
-                .sealer
-                .open(EntryKind::Snapshot, &snap.bytes)
-                .map_err(|e| SyncError::Sealer(Box::new(e)))?;
-            self.engine
-                .merge_snapshot(&plaintext)
-                .map_err(|e| SyncError::Engine(Box::new(e)))?;
-            self.snapshot_version = Some(snap.version);
-            self.pull_cursor = Some(covered);
-        }
-        self.pull()?;
-        Ok(())
-    }
-}
 
 /// A classifier's decision on a fetched peer delta (the caller's §B3 verify/attribution gate lives here —
 /// `docsync` stays ignorant of what "valid" means; the client opens the envelope and passes the classifier
@@ -502,9 +237,9 @@ fn decode_frontier(bytes: &[u8]) -> Option<(Frontier, &[u8])> {
 /// scalar: `pull` discovers every replica's objects, fetches only the gap past the frontier, merges, and
 /// advances it. Order-independent set-union merge means the fetch order doesn't matter.
 ///
-/// This increment covers DELTA sync (the contract-freezing two-replica convergence). Snapshot / compaction /
-/// bootstrap over a covered-frontier snapshot are the next increment; the existing [`SyncClient`] keeps the
-/// `DocStore` path until consumers migrate onto this one.
+/// Covers the full sync loop: DELTA sync (the contract-freezing two-replica convergence) plus snapshot /
+/// compaction / bootstrap over a covered-frontier snapshot. This is the ONE sync client — the older
+/// `DocStore`-backed `SyncClient` it once coexisted with was removed once every consumer migrated here.
 /// Why a dot below `pull_frontier` was dispositioned WITHOUT being folded into engine state. Each such dot
 /// pins its replica's [`subsumed_frontier`](BlobSyncClient::subsumed_frontier) — the compactor must never claim
 /// coverage over a dot no snapshot contains (the covered-⊆-subsumed invariant). Never silently evicted: an

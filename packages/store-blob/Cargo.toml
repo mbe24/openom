@@ -1,6 +1,6 @@
 [package]
 name = "store-blob"
-description = "The storage swap seam: a content-addressable blob store with per-object compare-and-swap, below store-log::DocStore. Backends (managed R2/Lambda, BYO Google Drive/Dropbox, memory, local-fs) are interchangeable BlobStore impls. Domain- and crypto-agnostic; stores opaque bytes."
+description = "The storage swap seam: a content-addressable blob store with per-object compare-and-swap, under the docsync sync loop. Backends (managed R2/Lambda, BYO Google Drive/Dropbox, memory, local-fs) are interchangeable BlobStore impls. Domain- and crypto-agnostic; stores opaque bytes."
 version.workspace = true
 license.workspace = true
 edition.workspace = true

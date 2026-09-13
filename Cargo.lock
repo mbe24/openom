@@ -1226,7 +1226,6 @@ name = "docsync"
 version = "0.1.0"
 dependencies = [
  "store-blob",
- "store-log",
  "thiserror 2.0.20",
 ]
 
@@ -5665,16 +5664,6 @@ dependencies = [
  "data-encoding",
  "sha2 0.10.9",
  "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "store-log"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
  "thiserror 2.0.20",
 ]
 
