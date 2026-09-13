@@ -32,6 +32,7 @@ members = [
     "packages/openom-keyring-dag",
     "packages/docsync",
     "packages/openom-app-core",
+    "packages/openom-app-core-host",
     "packages/store-blob",
     "openom",
     "apps/src-tauri",

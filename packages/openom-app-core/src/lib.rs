@@ -12,7 +12,9 @@ use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
 use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
-use openom_vault::{AppVault, Disposition, MembershipResolver, VaultError};
+use openom_vault::{AppVault, Disposition, MembershipResolver};
+// Re-export so the native host (and other rlib consumers) can name the lifecycle API's error type.
+pub use openom_vault::VaultError;
 use sha2::{Digest, Sha256};
 use serde_json::Value;
 use store_blob::{BlobError, BlobStore, MemoryBlob, Precondition};

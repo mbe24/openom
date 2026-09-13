@@ -1,0 +1,30 @@
+# openom-app-core-host — the NATIVE (Tauri desktop/mobile) host that runs openom-app-core as a native Rust
+# core: the DEK + claim engine + local device store all live natively, and the keyring/watermark are held in a
+# VaultStore (SQLite on Tauri), so the webview never sees the keyring anchor or the anti-rollback floor
+# (OPE-427 full-native-core, Full-A). The Tauri #[command]s are thin wrappers over this host; the logic here is
+# plain, cargo-tested Rust. One AppCore per doc, Mutex-guarded (Tauri dispatches invokes on a thread pool).
+[package]
+name = "openom-app-core-host"
+description = "Native (Tauri) host running openom-app-core natively — DEK + engine + local store native, keyring/watermark via VaultStore."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one session core (rlib — never the wasm veneer): its store-generic lifecycle + AppCore.
+openom-app-core = { path = "../openom-app-core" }
+# The keyring/watermark custody seam (VaultStore) + the durable SQLite impl — reused, not re-derived.
+openom-vault-host = { path = "../openom-vault-host" }
+# The native local device store (a real BlobStore that passes the conformance suite).
+store-blob = { path = "../store-blob" }
+openom-crypto = { path = "../openom-crypto" }
+openom-keyring-api = { path = "../openom-keyring-api" }
+thiserror.workspace = true
+
+[features]
+# Durable keyring/watermark via SQLite (the Tauri deployment). Tests use an in-memory fake VaultStore.
+sqlite = ["openom-vault-host/sqlite"]

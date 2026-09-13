@@ -1,0 +1,256 @@
+//! The native (Tauri) host that runs [`openom_app_core::AppCore`] natively — DEK + engine + local device store
+//! all native — with the keyring anchor + anti-rollback watermark held in a [`VaultStore`]. The webview never
+//! supplies the keyring or the floor: it FETCHES the keyring over the network (ciphertext), and the host
+//! accepts and persists it (OPE-427 review fix 1 — ferry in the webview, accept in native). One `AppCore` per
+//! doc, `Mutex`-guarded because Tauri dispatches invokes on a thread pool.
+//!
+//! This is plain, cargo-tested Rust; the Tauri `#[command]`s are thin wrappers over it (a later slice), which
+//! run the heavy Argon2id paths under `spawn_blocking`.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use openom_app_core::AppCore;
+use openom_crypto::Passphrase;
+use openom_keyring_api::EngineKind;
+use openom_vault_host::VaultStore;
+use store_blob::FsBlob;
+
+/// A live core: an `AppCore` behind its own `Mutex` (Tauri invokes race on a thread pool).
+pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
+/// The per-doc registry, keyed by doc id.
+type CoreMap = HashMap<String, CoreHandle>;
+
+/// A host failure: a keyring-engine error, a keyring-store I/O error, or an operation on a tree the host has no
+/// keyring for.
+#[derive(Debug, thiserror::Error)]
+pub enum HostError {
+    /// The keyring engine rejected the lifecycle op (wrong passphrase, stale keyring, malformed anchor).
+    #[error(transparent)]
+    Vault(#[from] openom_app_core::VaultError),
+    /// The native keyring/watermark store failed (I/O, CAS).
+    #[error("keyring store: {0}")]
+    Store(String),
+    /// No keyring is stored for this tree — the host can't unlock a tree it never provisioned/joined.
+    #[error("no keyring stored for {0}")]
+    NoKeyring(String),
+}
+
+/// The result of [`AppCoreHost::provision`] — the durable core is registered in the host; the caller gets only
+/// what it shows the user (the recovery code) + the author identity.
+pub struct Provisioned {
+    pub recovery_code: String,
+    pub did_key: String,
+}
+
+/// The result of [`AppCoreHost::unlock`] — the core is registered in the host; the caller gets the author
+/// identity + the four advisory repair flags.
+// Four INDEPENDENT repair signals, mirroring the core's `Unlocked` — not a state enum.
+#[allow(clippy::struct_excessive_bools)]
+pub struct Unlocked {
+    pub did_key: String,
+    pub needs_reseal: bool,
+    pub needs_backfill: bool,
+    pub needs_rrk_backfill: bool,
+    pub write_epoch_unreachable: bool,
+}
+
+/// The native app-core host. `store` holds the keyring anchor + anti-rollback watermark per tree; `data_dir`
+/// roots each doc's local device `FsBlob`; `engine` is the keyring engine for NEW trees (existing trees carry
+/// their own in the keyring). Live cores are held per-doc behind a `Mutex`.
+pub struct AppCoreHost<St: VaultStore> {
+    store: St,
+    data_dir: PathBuf,
+    engine: EngineKind,
+    cores: Mutex<CoreMap>,
+}
+
+impl<St: VaultStore> AppCoreHost<St> {
+    /// A host over `store` (keyring/watermark custody), rooting each doc's local device store under `data_dir`.
+    pub fn new(store: St, data_dir: impl Into<PathBuf>, engine: EngineKind) -> Self {
+        Self {
+            store,
+            data_dir: data_dir.into(),
+            engine,
+            cores: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The keyring/watermark store (for the Tauri command layer to reach the native custody).
+    pub const fn store(&self) -> &St {
+        &self.store
+    }
+
+    /// This doc's local device store: a `FsBlob` under `data_dir/{doc}`.
+    fn doc_store(&self, doc: &str) -> Result<FsBlob, HostError> {
+        let dir = self.data_dir.join(doc);
+        std::fs::create_dir_all(&dir).map_err(|e| HostError::Store(e.to_string()))?;
+        Ok(FsBlob::new(dir))
+    }
+
+    /// Provision a fresh tree: open a core over the native store, PERSIST the keyring + watermark natively (one
+    /// atomic `commit_keyring`), and register the core. Returns the recovery code + author `did:key`.
+    ///
+    /// # Errors
+    /// [`HostError::Vault`] if provisioning fails; [`HostError::Store`] if the keyring can't be persisted.
+    pub fn provision(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        replica_id: &[u8],
+        passphrase: &Passphrase,
+    ) -> Result<Provisioned, HostError> {
+        let p = openom_app_core::provision(
+            self.doc_store(doc)?,
+            self.engine,
+            passphrase,
+            tree_id,
+            member_id,
+            replica_id,
+            doc.to_string(),
+        )?;
+        self.store
+            .commit_keyring(doc, &p.keyring, &p.watermark)
+            .map_err(HostError::Store)?;
+        self.register(doc, p.core);
+        Ok(Provisioned {
+            recovery_code: p.recovery_code,
+            did_key: p.did_key,
+        })
+    }
+
+    /// Unlock an existing tree: load the keyring anchor FROM THE NATIVE STORE (never a webview argument — this
+    /// is the boundary that stops an XSS feeding a stale/forged keyring), open the core, and register it.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if the tree was never provisioned/joined; [`HostError::Vault`] on a wrong
+    /// passphrase / stale keyring; [`HostError::Store`] on a store read failure.
+    pub fn unlock(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        replica_id: &[u8],
+        passphrase: &Passphrase,
+    ) -> Result<Unlocked, HostError> {
+        let anchor = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let u = openom_app_core::unlock(
+            self.doc_store(doc)?,
+            self.engine,
+            passphrase,
+            tree_id,
+            member_id,
+            replica_id,
+            &anchor,
+            doc.to_string(),
+        )?;
+        self.register(doc, u.core);
+        Ok(Unlocked {
+            did_key: u.did_key,
+            needs_reseal: u.needs_reseal,
+            needs_backfill: u.needs_backfill,
+            needs_rrk_backfill: u.needs_rrk_backfill,
+            write_epoch_unreachable: u.write_epoch_unreachable,
+        })
+    }
+
+    /// The live core for `doc` (for mint/sync/read ops), if it has been provisioned/unlocked this session.
+    pub fn core(&self, doc: &str) -> Option<CoreHandle> {
+        self.lock_cores().get(doc).cloned()
+    }
+
+    fn register(&self, doc: &str, core: AppCore<FsBlob>) {
+        self.lock_cores()
+            .insert(doc.to_string(), Arc::new(Mutex::new(core)));
+    }
+
+    /// Lock the registry, recovering from a poisoned mutex (a panic in one op must not brick every later op —
+    /// the map itself is not left in a torn state).
+    fn lock_cores(&self) -> std::sync::MutexGuard<'_, CoreMap> {
+        self.cores.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppCoreHost, HostError, VaultStore};
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    type Rows = HashMap<String, (Vec<u8>, Vec<u8>)>;
+
+    /// An in-memory [`VaultStore`] fake — the same shape the durable `SQLite` impl backs.
+    #[derive(Default)]
+    struct MemStore {
+        rows: Mutex<Rows>,
+    }
+    impl VaultStore for MemStore {
+        fn load_keyring(&self, tree_key: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.rows.lock().unwrap().get(tree_key).map(|(k, _)| k.clone()))
+        }
+        fn watermark(&self, tree_key: &str) -> Result<Vec<u8>, String> {
+            Ok(self.rows.lock().unwrap().get(tree_key).map(|(_, w)| w.clone()).unwrap_or_default())
+        }
+        fn commit_keyring(&self, tree_key: &str, anchor: &[u8], watermark: &[u8]) -> Result<(), String> {
+            self.rows
+                .lock()
+                .unwrap()
+                .insert(tree_key.to_string(), (anchor.to_vec(), watermark.to_vec()));
+            Ok(())
+        }
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "openom-host-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn provision_persists_the_keyring_natively_and_unlock_reads_it_not_from_the_webview() {
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+        let (tree_id, replica_id) = ([9u8; 16], [2u8; 16]);
+
+        let p = host.provision("doc-1", &tree_id, "acct-owner", &replica_id, &pass).unwrap();
+        assert!(!p.recovery_code.is_empty(), "provision returns a recovery code to show the user");
+        assert!(!p.did_key.is_empty(), "and the author did:key");
+        // The keyring is persisted NATIVELY — in this model the webview never holds it.
+        assert!(host.store().load_keyring("doc-1").unwrap().is_some(), "keyring persisted natively on provision");
+        assert!(host.core("doc-1").is_some(), "the provisioned core is registered");
+
+        // Unlock reads the keyring FROM THE NATIVE STORE — no webview-supplied anchor — and re-derives the same
+        // identity. (This is the security boundary: an XSS calling unlock can't substitute a stale/forged
+        // keyring, because the host ignores any client-supplied anchor and reads its own.)
+        let u = host.unlock("doc-1", &tree_id, "acct-owner", &replica_id, &pass).unwrap();
+        assert_eq!(u.did_key, p.did_key, "unlock re-derives the same identity from the native keyring");
+
+        // A wrong passphrase is refused.
+        assert!(matches!(
+            host.unlock("doc-1", &tree_id, "acct-owner", &replica_id, &Passphrase::new(b"wrong".to_vec())),
+            Err(HostError::Vault(_))
+        ));
+        // A tree the host has no keyring for can't be unlocked.
+        assert!(matches!(
+            host.unlock("doc-unknown", &tree_id, "acct-owner", &replica_id, &pass),
+            Err(HostError::NoKeyring(_))
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
