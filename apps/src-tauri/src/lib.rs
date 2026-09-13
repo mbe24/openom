@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use openom_app_core_host::{AppCoreHost, PassphraseChanged, Provisioned, Recovered, Unlocked};
+use openom_app_core_host::{
+    AppCoreHost, MemberAccount, PassphraseChanged, Provisioned, Recovered, Unlocked,
+};
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::sqlite::SqliteVaultStore;
@@ -133,6 +135,21 @@ async fn core_change_passphrase(
     .map_err(e)?
 }
 
+/// Mint a joining member's account from their passphrase (stateless): returns the KDF params to persist + the
+/// two OOB-shareable public keys the owner needs to admit them. Argon2id, so `spawn_blocking`.
+#[tauri::command]
+async fn core_provision_member(
+    state: State<'_, Host>,
+    passphrase: String,
+) -> Result<MemberAccount, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -210,6 +227,7 @@ pub fn run() {
             core_unlock,
             core_recover,
             core_change_passphrase,
+            core_provision_member,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

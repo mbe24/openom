@@ -3660,6 +3660,7 @@ dependencies = [
  "openom-crypto",
  "openom-data-tree",
  "openom-keyring-api",
+ "openom-vault",
  "openom-vault-host",
  "serde",
  "store-blob",

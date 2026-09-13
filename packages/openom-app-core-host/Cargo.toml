@@ -21,6 +21,9 @@ openom-app-core = { path = "../openom-app-core" }
 openom-vault-host = { path = "../openom-vault-host" }
 # The native local device store (a real BlobStore that passes the conformance suite).
 store-blob = { path = "../store-blob" }
+# The shared keyring/member MATH (sharing::provision_member / add_member / remove_member / change_role) — the
+# SAME fns the wasm veneer + the thin-custody VaultHost call, so the member ops don't re-derive the crypto.
+openom-vault = { path = "../openom-vault" }
 openom-crypto = { path = "../openom-crypto" }
 openom-keyring-api = { path = "../openom-keyring-api" }
 # The claim engine's error type (the host's mint methods go through AppCore::tree_mut).

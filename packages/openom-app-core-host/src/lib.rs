@@ -99,6 +99,15 @@ pub struct Unlocked {
     pub write_epoch_unreachable: bool,
 }
 
+/// A joining member's minted account (from [`AppCoreHost::provision_member`]): the codec-encoded KDF params to
+/// persist + replay at member unlock, and the two OOB-shareable public keys the owner needs to admit them.
+#[derive(serde::Serialize)]
+pub struct MemberAccount {
+    pub kdf_params: Vec<u8>,
+    pub author_public_key: Vec<u8>,
+    pub hpke_public_key: Vec<u8>,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -299,6 +308,23 @@ impl<St: VaultStore> AppCoreHost<St> {
             .commit_keyring(doc, &re.keyring, &re.watermark)
             .map_err(HostError::Store)?;
         Ok(PassphraseChanged { recovery_code: re.recovery_code })
+    }
+
+    /// Mint a joining member's account from their passphrase (stateless — no tree, no store, no core): the first
+    /// step of the member flow, before an owner admits them. Returns the codec-encoded KDF params + the two
+    /// OOB-shareable public keys. (Account-level NATIVE custody of the KDF params — so they never round-trip
+    /// through the webview — is the F6 follow-up; for now the caller persists them as the wasm worker does.)
+    ///
+    /// # Errors
+    /// [`HostError::Vault`] if the member secret derivation fails.
+    #[allow(clippy::unused_self)] // account-level today; becomes stateful when it persists native account custody (F6)
+    pub fn provision_member(&self, passphrase: &Passphrase) -> Result<MemberAccount, HostError> {
+        let m = openom_vault::sharing::provision_member(passphrase)?;
+        Ok(MemberAccount {
+            kdf_params: m.kdf_params,
+            author_public_key: m.author_public_key,
+            hpke_public_key: m.hpke_public_key,
+        })
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
@@ -598,6 +624,20 @@ mod tests {
                 "the traversal/invalid doc id {bad:?} is refused"
             );
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn provision_member_mints_an_account_from_a_passphrase() {
+        // The joining member's first step (before an owner admits them): stateless, no tree touched.
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let m = host
+            .provision_member(&Passphrase::new(b"a joining member passphrase".to_vec()))
+            .unwrap();
+        assert!(!m.kdf_params.is_empty(), "codec-encoded KDF params to persist + replay at unlock");
+        assert!(!m.author_public_key.is_empty(), "the Ed25519 author key to hand the owner");
+        assert!(!m.hpke_public_key.is_empty(), "the X25519 HPKE key to hand the owner");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
