@@ -339,6 +339,26 @@ fn core_project(state: State<'_, Host>, doc: String) -> Result<String, String> {
     state.project(&doc).map_err(e)
 }
 
+// ---- keyring publish + advisory + invite (all read the NATIVE stored keyring) ----
+
+/// The opaque payload to PUT to the server's keyring channel (the wrapped current keyring / dag anchor).
+#[tauri::command]
+fn core_keyring_publish_payload(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> {
+    state.keyring_publish_payload(&doc).map_err(e)
+}
+
+/// The advisory membership summary JSON (OPE-293) to PUT to the server's /access channel.
+#[tauri::command]
+fn core_membership_summary(state: State<'_, Host>, doc: String) -> Result<String, String> {
+    state.membership_summary(&doc).map_err(e)
+}
+
+/// The OOB invite pin for the current keyring (the joiner verifies the walk against it).
+#[tauri::command]
+fn core_invite_pin(state: State<'_, Host>, doc: String) -> Result<Vec<u8>, String> {
+    state.invite_pin(&doc).map_err(e)
+}
+
 // ---- claim edits (buffered into the intention; core_commit seals them) ----
 
 #[tauri::command]
@@ -526,6 +546,9 @@ pub fn run() {
             core_commit,
             core_fold,
             core_project,
+            core_keyring_publish_payload,
+            core_membership_summary,
+            core_invite_pin,
             core_assert_claim,
             core_supersede_claim,
             core_remove_record,

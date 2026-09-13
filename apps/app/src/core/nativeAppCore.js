@@ -60,6 +60,29 @@ export function createNativeAppCore() {
   const reportedFrontier = new Map(); // last pull-frontier reported per doc (change-guard for the GC telemetry)
   const remember = (docId, treeId) => treeKeys.set(docId, hexKey(treeId));
 
+  // Publish a membership change to the server (OPE-433/434, review C2): the KEYRING channel (the crypto
+  // revocation — the server serves the rotated keyring, so a removed member can no longer decrypt new content)
+  // and the advisory /access summary (the coarse ACL). Best-effort + ordered to UNDER-grant (add/promote:
+  // keyring→advisory; remove/demote: advisory→keyring — a crash between leaves the ACL more restrictive than
+  // the crypto, never less). Both read the NATIVE keyring (never a webview-supplied one). The advisory CAS/
+  // generation retry and the PULL side (keyring-before-data adoption on sync) are runtime-verified follow-ups
+  // tracked on OPE-433/434.
+  async function publishAfterMembership(docId, advisoryFirst) {
+    const transport = transports.get(docId);
+    if (!transport) return; // local-only: nothing to publish
+    const publishKeyring = async () =>
+      transport.putKeyring(docId, new Uint8Array(await call('core_keyring_publish_payload', { doc: docId })));
+    const pushAdvisory = async () =>
+      transport.putAccess(docId, JSON.parse(await call('core_membership_summary', { doc: docId })));
+    try {
+      if (advisoryFirst) { await pushAdvisory(); await publishKeyring(); }
+      else { await publishKeyring(); await pushAdvisory(); }
+    } catch (err) {
+      // The local keyring change stands (native custody is authoritative); a later tick re-publishes.
+      console.warn('[openom] native membership publish (best-effort) failed', err);
+    }
+  }
+
   const api = {
     // --- session lifecycle (host owns the DEK; no engine arg — the host picks it) ---
     ping: () => Promise.resolve(true), // the native host is in-process; always alive
@@ -143,20 +166,26 @@ export function createNativeAppCore() {
         doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase,
         member: { memberId: newMemberId, role, authorPublicKey: bytes(memberAuthorPublic), hpkePublicKey: bytes(memberHpkePublic) },
       });
+      await publishAfterMembership(docId, false); // add: keyring-first, then advisory
       return { keyring: u8(out.keyring) };
     },
     async removeMember(docId, { passphrase, treeId, ownerMemberId, removeMemberId }) {
       const out = await call('core_remove_member', {
         doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase, removeMemberId,
       });
+      await publishAfterMembership(docId, true); // remove: advisory-first, then the rotated keyring
       return { keyring: u8(out.keyring), historyPreserved: out.historyPreserved };
     },
     async changeRole(docId, { passphrase, treeId, ownerMemberId, targetMemberId, newRole }) {
       const out = await call('core_change_role', {
         doc: docId, treeId: bytes(treeId), ownerMemberId, ownerPassphrase: passphrase, targetMemberId, newRole,
       });
+      await publishAfterMembership(docId, out.demote); // demote: advisory-first; promote: keyring-first
       return { keyring: u8(out.keyring), demote: out.demote };
     },
+    // NOTE (review H1 / OPE-434): the worker's joinAsMember FETCHES the keyring walk itself (transport.readKeyring);
+    // this native version currently expects the caller to pass pre-fetched `hops`. When the join/invite UI lands,
+    // wire the internal fetch here (readKeyring → frame) so the two clients present the same contract.
     async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, hops, pinnedRevision, pinnedHash }) {
       remember(docId, treeId);
       const out = await call('core_join_as_member', {

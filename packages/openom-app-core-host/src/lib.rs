@@ -987,6 +987,55 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(())
     }
 
+    /// The opaque payload to PUT to the server's keyring channel for `doc` — the CURRENT stored keyring, wrapped
+    /// as the wire `KeyringUpdate` on the chain, or the raw anchor on the dag. Read from native custody (never a
+    /// webview-supplied keyring), so a compromised webview can only publish the head the host actually holds.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if none is stored; [`HostError::Vault`] if the keyring can't be wrapped.
+    pub fn keyring_publish_payload(&self, doc: &str) -> Result<Vec<u8>, HostError> {
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        Ok(match self.engine {
+            EngineKind::Chain => openom_vault::sharing::wrap_chain_keyring_update(&keyring)?,
+            EngineKind::Dag => keyring, // the dag PUTs the full self-contained anchor
+        })
+    }
+
+    /// The advisory membership summary (OPE-293) for `doc` as a JSON string — the coarse `{members, basis}` view
+    /// the webview PUTs to the server's `/access` channel. Computed from the NATIVE stored keyring.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if none is stored; [`HostError::Vault`] on a malformed keyring.
+    pub fn membership_summary(&self, doc: &str) -> Result<String, HostError> {
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        Ok(openom_vault::sharing::keyring_summary(self.engine, &keyring)?)
+    }
+
+    /// The OOB invite pin for `doc`'s current keyring — the `(revision, hash)`-binding hash a joining member
+    /// verifies the walk against (chain), or the opaque anchor pin (dag). From native custody.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if none is stored; [`HostError::Vault`] on a malformed keyring.
+    pub fn invite_pin(&self, doc: &str) -> Result<Vec<u8>, HostError> {
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        Ok(match self.engine {
+            EngineKind::Chain => openom_vault::sharing::chain_keyring_pin(&keyring)?,
+            EngineKind::Dag => openom_vault::sharing::dag_anchor_pin(&keyring)?,
+        })
+    }
+
     /// Assert a claim about `target` (`value_json` = the claim value as a JSON string, as the wasm veneer takes
     /// it). Buffered into the intention; [`commit`](Self::commit) seals it.
     ///
