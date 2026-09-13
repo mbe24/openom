@@ -1319,4 +1319,89 @@ mod tests {
         std::fs::remove_dir_all(&dir_o).ok();
         std::fs::remove_dir_all(&dir_b).ok();
     }
+
+    #[test]
+    fn a_removed_member_can_no_longer_unlock_the_rotated_keyring() {
+        use super::MemberToAdd;
+        let (dir_o, dir_b) = (temp_dir(), temp_dir());
+        let owner_host = AppCoreHost::new(MemStore::default(), &dir_o, EngineKind::Chain);
+        let bob_host = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Chain);
+        let tree_id = [14u8; 16];
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
+
+        let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
+        let bob_member = MemberToAdd {
+            member_id: "acct-bob".into(),
+            role: "maintainer".into(),
+            author_public_key: bob_acct.author_public_key.clone(),
+            hpke_public_key: bob_acct.hpke_public_key.clone(),
+        };
+        let added = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+        let genesis = owner_host
+            .retained_revisions("t")
+            .unwrap()
+            .into_iter()
+            .find(|(r, _)| *r == 1)
+            .unwrap()
+            .1;
+        let hops =
+            openom_vault::sharing::frame_keyring_hops(&[genesis.clone(), added.keyring.clone()]);
+        let pin = openom_vault::sharing::chain_keyring_pin(&genesis).unwrap();
+        bob_host
+            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .unwrap();
+        assert!(
+            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(),
+            "bob unlocks while he is still a member"
+        );
+
+        // Owner removes bob (a forward-secure epoch rotation).
+        let removed = owner_host.remove_member("t", &tree_id, "acct-owner", &owner_pass, "acct-bob").unwrap();
+
+        // Bob accepts the rotated keyring into his custody (as a keyring sync would) and can no longer unlock:
+        // his DEK wrap is gone from the fresh epoch, so the member unwrap fails (forward secrecy).
+        let bob_wm = bob_host.store().watermark("t").unwrap();
+        bob_host.store().commit_keyring("t", &removed.keyring, &bob_wm).unwrap();
+        assert!(
+            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_err(),
+            "a removed member cannot unlock the rotated keyring (forward-secure)"
+        );
+
+        std::fs::remove_dir_all(&dir_o).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
+    }
+
+    #[test]
+    fn a_membership_op_swaps_the_core_in_place_not_a_fresh_arc() {
+        use super::MemberToAdd;
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let tree_id = [15u8; 16];
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
+        let bob = host
+            .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
+            .unwrap();
+        let member = MemberToAdd {
+            member_id: "acct-bob".into(),
+            role: "editor".into(),
+            author_public_key: bob.author_public_key,
+            hpke_public_key: bob.hpke_public_key,
+        };
+
+        // The per-doc core handle BEFORE the membership op...
+        let before = host.core("t").unwrap();
+        host.add_member("t", &tree_id, "acct-owner", &owner_pass, &member).unwrap();
+        let after = host.core("t").unwrap();
+        // ...is the SAME Arc afterward: add_member replaced the inner AppCore IN PLACE under the held lock, never
+        // inserted a fresh Arc — so a concurrent op that already cloned `before` is serialized against the swap
+        // rather than left running on a stale, pre-rotation core (design-review F1/F3).
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "a membership op swaps the core in place, preserving the per-doc Arc"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
