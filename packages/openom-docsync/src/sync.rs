@@ -138,8 +138,9 @@ impl docsync::Sealer for SealerAdapter {
     }
 }
 
-/// One device's view of a claim-model tree — a facade over [`docsync::SyncClient`] wired with a
-/// [`SyncTree`] (delegating to [`openom_data_tree::Tree`]) and openom's sealer.
+/// One device's view of a claim-model tree — a facade over [`docsync::BlobSyncClient`] (the OPE-397
+/// `BlobStore`-native core) wired with a [`SyncTree`] (delegating to [`openom_data_tree::Tree`]) and openom's
+/// sealer.
 ///
 /// Preserves the claim-model API (`push_claims` / `pull_claims` / `compact_claims` / `bootstrap_claims` /
 /// `set_moderators`), and exposes the wrapped [`Tree`] for the app's mint + projection paths.
