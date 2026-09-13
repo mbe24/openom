@@ -489,25 +489,23 @@ pub fn provision(
     replica_id: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsError> {
-    let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let p = vault
-        .provision(&ctx, &Passphrase::new(passphrase.into_bytes()))
-        .map_err(to_js)?;
-    let did = p.did_key.into_string();
-    let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), p.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
-    };
+    // The construction lives in the shared store-generic rlib fn (crate::provision) so this veneer and the
+    // native host share ONE implementation; here we supply the wasm worker's in-memory store + wrap the result.
+    let p = crate::provision(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &Passphrase::new(passphrase.into_bytes()),
+        tree_id,
+        member_id,
+        replica_id,
+        doc,
+    )
+    .map_err(to_js)?;
     Ok(OpenResult {
-        handle: Some(handle),
-        keyring: p.anchor,
-        recovery_code: p.recovery_code.into_string(),
-        did_key: did,
+        handle: Some(AppCoreHandle { inner: p.core }),
+        keyring: p.keyring,
+        recovery_code: p.recovery_code,
+        did_key: p.did_key,
         watermark: p.watermark,
         needs_reseal: false, // a fresh tree's single genesis epoch is never stale
         needs_backfill: false,
@@ -530,28 +528,25 @@ pub fn unlock(
     anchor: &[u8],
     doc: String,
 ) -> Result<OpenResult, JsValue> {
-    let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let u = vault
-        .unlock(&ctx, anchor, &Passphrase::new(passphrase.into_bytes()))
-        .map_err(|e| vault_err_to_js(&e))?;
-    let did = u.did_key.into_string();
-    // No bootstrap here — hydration is host-driven and uniform: the worker `importLog`s the durably
-    // persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here would be dead work
-    // and would conflate a bad passphrase with one corrupt log entry.
-    let handle = AppCoreHandle {
-        inner: AppCore::new(did.clone(), u.sealer, Arc::new(MemoryBlob::new()), doc, replica_id),
-    };
+    // Shared rlib construction (crate::unlock). No bootstrap here — hydration is host-driven and uniform: the
+    // worker `importLog`s the durably persisted log, THEN `bootstrap`s. Bootstrapping the fresh empty store here
+    // would be dead work and would conflate a bad passphrase with one corrupt log entry.
+    let u = crate::unlock(
+        MemoryBlob::new(),
+        parse_engine(engine)?,
+        &Passphrase::new(passphrase.into_bytes()),
+        tree_id,
+        member_id,
+        replica_id,
+        anchor,
+        doc,
+    )
+    .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
-        handle: Some(handle),
+        handle: Some(AppCoreHandle { inner: u.core }),
         keyring: Vec::new(),
         recovery_code: String::new(),
-        did_key: did,
+        did_key: u.did_key,
         watermark: u.watermark,
         needs_reseal: u.needs_reseal,
         needs_backfill: u.needs_backfill,

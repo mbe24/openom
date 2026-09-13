@@ -3,12 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use openom_crypto::Passphrase;
 use openom_data_tree::{OpView, Tree, TreeError};
 use openom_docsync::{EveryNUpdates, SnapshotPolicy, SyncClient, Verdict};
+use openom_keyring_api::EngineKind;
+use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_protocol::v1::{CoverBody, CoveredEntry, Envelope, Kind};
 use openom_protocol::Message;
 use openom_sealer::SealerSet;
-use openom_vault::{Disposition, MembershipResolver};
+use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+use openom_vault::{AppVault, Disposition, MembershipResolver, VaultError};
 use sha2::{Digest, Sha256};
 use serde_json::Value;
 use store_blob::{BlobError, BlobStore, MemoryBlob, Precondition};
@@ -86,6 +90,165 @@ pub struct AppCore<S: BlobStore> {
 fn _assert_app_core_send_sync<S: BlobStore + Send + Sync + 'static>() {
     const fn is_send_sync<T: Send + Sync>() {}
     is_send_sync::<AppCore<S>>();
+}
+
+// ── Keyring lifecycle (store-generic rlib API) ─────────────────────────────────────────────────────────
+// The ONE implementation of provision/unlock the wasm veneer AND the native (Tauri) host both call, so the two
+// runtimes can't drift (OPE-429). `store` is the caller's local device BlobStore — MemoryBlob for the wasm
+// worker, FsBlob/SQLite for the native host. Membership + the other lifecycle ops follow this shape.
+
+/// The result of [`provision`]: a ready [`AppCore`] + the durable outputs the host persists (keyring anchor +
+/// anti-rollback watermark) and shows the user (recovery code + the author `did:key`).
+pub struct Provisioned<S: BlobStore> {
+    pub core: AppCore<S>,
+    pub keyring: Vec<u8>,
+    pub recovery_code: String,
+    pub did_key: String,
+    pub watermark: Vec<u8>,
+}
+
+/// The result of [`unlock`]: a ready [`AppCore`] + the watermark and the four advisory repair flags the host
+/// surfaces.
+// The four flags are INDEPENDENT repair signals (reseal / backfill / rrk-backfill / write-epoch-unreachable),
+// mirroring `OpenResult` — not a state enum, so keep them separate.
+#[allow(clippy::struct_excessive_bools)]
+pub struct Unlocked<S: BlobStore> {
+    pub core: AppCore<S>,
+    pub did_key: String,
+    pub watermark: Vec<u8>,
+    pub needs_reseal: bool,
+    pub needs_backfill: bool,
+    pub needs_rrk_backfill: bool,
+    pub write_epoch_unreachable: bool,
+}
+
+/// Provision a fresh tree (genesis) and open a ready core over `store`.
+///
+/// # Errors
+/// Returns [`VaultError`] if the keyring engine provisioning fails.
+pub fn provision<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    passphrase: &Passphrase,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    doc: impl Into<String>,
+) -> Result<Provisioned<S>, VaultError> {
+    let (tree, member, replica) =
+        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let p = AppVault::from_kind(engine).provision(&ctx, passphrase)?;
+    let did = p.did_key.into_string();
+    Ok(Provisioned {
+        core: AppCore::new(did.clone(), p.sealer, Arc::new(store), doc, replica_id),
+        keyring: p.anchor,
+        recovery_code: p.recovery_code.into_string(),
+        did_key: did,
+        watermark: p.watermark,
+    })
+}
+
+/// Re-open an existing tree from its trusted keyring `anchor` + passphrase, over `store`. No bootstrap here —
+/// the host imports the durably-persisted log THEN calls [`AppCore::bootstrap`].
+///
+/// # Errors
+/// Returns [`VaultError`] if the engine can't unlock the anchor (wrong passphrase / stale keyring).
+// The flat lifecycle argument list (engine + passphrase + the three ids + anchor + doc) is the veneer/host
+// calling convention shared with the wasm export, not a struct to bundle.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    passphrase: &Passphrase,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    doc: impl Into<String>,
+) -> Result<Unlocked<S>, VaultError> {
+    let (tree, member, replica) =
+        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let u = AppVault::from_kind(engine).unlock(&ctx, anchor, passphrase)?;
+    let did = u.did_key.into_string();
+    Ok(Unlocked {
+        core: AppCore::new(did.clone(), u.sealer, Arc::new(store), doc, replica_id),
+        did_key: did,
+        watermark: u.watermark,
+        needs_reseal: u.needs_reseal,
+        needs_backfill: u.needs_backfill,
+        needs_rrk_backfill: u.needs_rrk_backfill,
+        write_epoch_unreachable: u.write_epoch_unreachable,
+    })
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use openom_crypto::Passphrase;
+    use openom_keyring_api::EngineKind;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use store_blob::FsBlob;
+
+    // A unique temp dir per test run (no tempfile dep) — the native local BlobStore both provision + unlock
+    // share so the committed log persists across the re-open, exactly as the native (Tauri) host will.
+    fn temp_dir() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "openom-appcore-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn provision_then_unlock_roundtrips_natively_over_fsblob() {
+        // OPE-429: the store-generic rlib lifecycle drives a REAL provision/unlock over a native FsBlob store
+        // (the wasm veneer uses the same fns over MemoryBlob) — the "one core, two runtimes" foundation.
+        let dir = temp_dir();
+        let (tree_id, replica_id) = ([7u8; 16], [1u8; 16]);
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+
+        // provision yields a working core over the native store: mint + commit + project round-trips in-core.
+        let mut p = super::provision(
+            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, "doc",
+        )
+        .unwrap();
+        assert!(!p.keyring.is_empty(), "provision yields a keyring anchor");
+        assert!(!p.recovery_code.is_empty(), "and a recovery code");
+        assert!(!p.did_key.is_empty(), "and the author did:key");
+        p.core.tree_mut().assert_anchor("pAlice", "https://openom.example/person", 1_000_000).unwrap();
+        p.core.commit().unwrap();
+        // Own entries fold on commit, so the subsumed frontier now covers this replica — proof the provisioned
+        // core is fully wired (engine + sealer + local store), not just constructed.
+        assert!(!p.core.subsumed_frontier().is_empty(), "the provisioned core folds its own committed mint");
+        let (did, keyring) = (p.did_key.clone(), p.keyring.clone());
+        drop(p); // release the FsBlob handle before re-opening the dir
+
+        // unlock reconstructs the SAME identity from the keyring anchor over a fresh native store, and
+        // bootstrap runs clean. (Recovering a committed-but-unsynced mint across a native re-open needs the
+        // host's persist step — the heads pointer — which is the native-host slice's job, like the wasm
+        // worker's import+bootstrap; the e2e reload tests already prove that flow in the wasm topology.)
+        let mut u = super::unlock(
+            FsBlob::new(dir.clone()), EngineKind::Chain, &pass, &tree_id, "acct-owner", &replica_id, &keyring, "doc",
+        )
+        .unwrap();
+        assert_eq!(u.did_key, did, "same identity across provision + unlock");
+        u.core.bootstrap().unwrap();
+
+        assert!(
+            super::unlock(
+                FsBlob::new(dir.clone()), EngineKind::Chain, &Passphrase::new(b"wrong".to_vec()),
+                &tree_id, "acct-owner", &replica_id, &keyring, "doc",
+            )
+            .is_err(),
+            "a wrong passphrase is refused"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// This replica's keyspace folder — the raw id as lowercase hex, so a random binary replica id maps to a

@@ -20,15 +20,14 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 default = []
-# The wasm veneer (AppCoreHandle + provision/unlock + the docId registry) + its glue — off by default so
-# native test builds skip it. Pulls in openom-crypto (Passphrase) + openom-keyring-api (EngineKind) for the
-# keyring lifecycle, and js-sys/web-sys (wall clock + OPFS handles). openom-vault is a hard rlib dep (below).
+# The wasm veneer (AppCoreHandle + the docId registry) + its glue — off by default so native test builds skip
+# it. Pulls in js-sys/web-sys (wall clock + OPFS handles). openom-vault is a hard rlib dep (below); the keyring
+# lifecycle (provision/unlock/... over openom-crypto Passphrase + openom-keyring-api EngineKind) is now a
+# STORE-GENERIC rlib API both veneers call, so those two are non-optional deps (below), not wasm-gated.
 wasm = [
     "dep:wasm-bindgen",
     "dep:js-sys",
     "dep:web-sys",
-    "dep:openom-crypto",
-    "dep:openom-keyring-api",
 ]
 
 [dependencies]
@@ -59,13 +58,13 @@ keyeo-crypto = { path = "../keyeo-crypto" }
 [dependencies.openom-vault]
 path = "../openom-vault"
 
+# Non-optional: the store-generic keyring lifecycle (provision/unlock/...) in the rlib names Passphrase +
+# EngineKind, so both the wasm veneer and the native host share ONE implementation.
 [dependencies.openom-crypto]
 path = "../openom-crypto"
-optional = true
 
 [dependencies.openom-keyring-api]
 path = "../openom-keyring-api"
-optional = true
 
 [dependencies.wasm-bindgen]
 version = "0.2"
@@ -80,9 +79,5 @@ version = "0.3"
 optional = true
 
 [dev-dependencies]
-openom-crypto = { path = "../openom-crypto" }
 openom-data-model = { path = "../openom-data-model" }
-# The §B3 share→verify integration test drives the real keyring lifecycle + sharing ops: EngineKind for the
-# engine tag (keyeo-crypto — for encoding the member KDF params the way the wasm boundary does — is now a
-# direct dependency above).
-openom-keyring-api = { path = "../openom-keyring-api" }
+# (openom-crypto + openom-keyring-api are now non-optional deps above — the tests use them from there.)
