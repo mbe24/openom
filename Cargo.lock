@@ -3833,6 +3833,7 @@ dependencies = [
  "openom-vault-host",
  "serde",
  "serde_json",
+ "store-media",
  "tauri",
  "tauri-build",
 ]
@@ -5665,6 +5666,15 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "store-media"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "sha2 0.10.9",
 ]
 
 [[package]]

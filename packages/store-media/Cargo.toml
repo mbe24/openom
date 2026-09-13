@@ -1,0 +1,17 @@
+[package]
+name = "store-media"
+description = "openom — the durable media blob store: a content-addressed (sha256) SQLite table for photos/attachments, the Tauri host's local (non-synced) image cache. The web build uses an in-memory equivalent; this persists across a relaunch. Opaque bytes, dedup."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The durable store: rusqlite (bundled SQLite). sha2 for content addressing. serde so the Tauri command layer
+# returns the blob metadata/bytes structs straight to the webview.
+rusqlite = { workspace = true }
+sha2.workspace = true
+serde = { workspace = true }
+
+[lints]
+workspace = true

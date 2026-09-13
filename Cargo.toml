@@ -33,6 +33,7 @@ members = [
     "packages/openom-app-core",
     "packages/openom-app-core-host",
     "packages/store-blob",
+    "packages/store-media",
     "openom",
     "apps/src-tauri",
 ]
@@ -85,6 +86,7 @@ openom-data-projection = { path = "packages/openom-data-projection" }
 openom-data-crdt = { path = "packages/openom-data-crdt" }
 openom-data-tree = { path = "packages/openom-data-tree" }
 store-blob = { path = "packages/store-blob" }
+store-media = { path = "packages/store-media" }
 # Vendored generic DAG group-membership crate (kept publishable, no openom deps). openom wires its own
 # roles/signing/keys onto keyeo-dag's seams in openom-keyring-dag; keyeo-dag itself never gains an openom dep.
 keyeo-dag = { path = "packages/keyeo-dag" }

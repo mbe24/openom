@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use store_media::{BlobData, BlobMeta, MediaStore};
+
 use openom_app_core_host::{
     AddedMember, AppCoreHost, MemberAccount, MemberToAdd, MemberUnlocked, PassphraseChanged,
     Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
@@ -515,6 +517,60 @@ fn core_sync(
     state.sync(&doc, &remote, compact_k).map_err(e)
 }
 
+// ---- media blob store (OPE-435): durable content-addressed photos/attachments (apps/…/blobs.js) ----
+
+/// The managed native media store.
+type Media = Arc<MediaStore>;
+
+/// `blob_put`'s payload — the webview sends `{ args: { bytes, mime, w, h } }`; the host computes the hash.
+#[derive(serde::Deserialize)]
+struct BlobPutArgs {
+    bytes: Vec<u8>,
+    mime: Option<String>,
+    w: Option<u32>,
+    h: Option<u32>,
+}
+
+#[tauri::command]
+fn blob_put(state: State<'_, Media>, args: BlobPutArgs) -> Result<String, String> {
+    state.put(&args.bytes, args.mime, args.w, args.h, media_now_millis())
+}
+
+#[tauri::command]
+fn blob_has(state: State<'_, Media>, hash: String) -> Result<bool, String> {
+    state.has(&hash)
+}
+
+#[tauri::command]
+fn blob_meta(state: State<'_, Media>, hash: String) -> Result<Option<BlobMeta>, String> {
+    state.meta(&hash)
+}
+
+#[tauri::command]
+fn blob_get(state: State<'_, Media>, hash: String) -> Result<Option<BlobData>, String> {
+    state.get(&hash)
+}
+
+#[tauri::command]
+fn blob_delete(state: State<'_, Media>, hash: String) -> Result<(), String> {
+    state.delete(&hash)
+}
+
+#[tauri::command]
+fn blob_list(state: State<'_, Media>) -> Result<Vec<String>, String> {
+    state.list()
+}
+
+/// Wall-clock milliseconds for a stored blob's `created` stamp.
+fn media_now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -527,6 +583,9 @@ pub fn run() {
             let vault = SqliteVaultStore::open(dir.join("vault.sqlite")).expect("open vault store");
             let host = AppCoreHost::new(vault, dir.join("docs"), keyring_engine());
             app.manage(Arc::new(host));
+            // The media blob store (photos/attachments) — its own blobs.sqlite (OPE-435).
+            let media = MediaStore::open(dir.join("blobs.sqlite")).expect("open media store");
+            app.manage(Arc::new(media));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -568,7 +627,13 @@ pub fn run() {
             core_approve_pending,
             core_discard_pending,
             core_sync_keyring,
-            core_sync
+            core_sync,
+            blob_put,
+            blob_has,
+            blob_meta,
+            blob_get,
+            blob_delete,
+            blob_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running openom");
