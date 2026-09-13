@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openom_app_core_host::{
     AddedMember, AppCoreHost, MemberAccount, MemberToAdd, PassphraseChanged, Provisioned, Recovered,
-    Unlocked,
+    RemovedMember, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -179,6 +179,34 @@ async fn core_add_member(
     .map_err(e)?
 }
 
+/// Remove a member (owner action) with forward-secure revocation: the host pins the departing member's history,
+/// rotates the epoch, re-opens the owner core under it in place, and persists it natively. Returns the opaque
+/// rotated keyring for the webview to publish (advisory summary FIRST, then keyring, then a data sync to push
+/// the cover) + whether the history was pinned. Argon2id (re-open), so `spawn_blocking`.
+#[tauri::command]
+async fn core_remove_member(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    owner_member_id: String,
+    owner_passphrase: String,
+    remove_member_id: String,
+) -> Result<RemovedMember, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.remove_member(
+            &doc,
+            &tree_id,
+            &owner_member_id,
+            &Passphrase::new(owner_passphrase.into_bytes()),
+            &remove_member_id,
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -258,6 +286,7 @@ pub fn run() {
             core_change_passphrase,
             core_provision_member,
             core_add_member,
+            core_remove_member,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

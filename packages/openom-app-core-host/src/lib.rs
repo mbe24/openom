@@ -15,7 +15,7 @@ use openom_app_core::{AppCore, StoredObject};
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::VaultStore;
-use store_blob::FsBlob;
+use store_blob::{BlobStore, FsBlob, Precondition};
 
 /// A live core: an `AppCore` behind its own `Mutex` (Tauri invokes race on a thread pool).
 pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
@@ -127,6 +127,19 @@ pub struct AddedMember {
     pub keyring: Vec<u8>,
 }
 
+/// The result of [`AppCoreHost::remove_member`] — the opaque ROTATED keyring revision for the webview to
+/// PUBLISH, and whether the departing member's landed history was pinned by a snapshot before the rotation.
+/// `history_preserved == false` means the removal ran before the departing member's writes were pulled/covered
+/// (offline or a very-last-second edit), so in-transit preservation was reduced — the client look-behind still
+/// rejects forgeries, so this is an availability/audit signal, not a security one (design-review Q2). On a
+/// removal the webview publishes the ADVISORY summary FIRST, then the keyring (OPE-293 remove ordering), then a
+/// data sync to push the self-heal cover.
+#[derive(serde::Serialize)]
+pub struct RemovedMember {
+    pub keyring: Vec<u8>,
+    pub history_preserved: bool,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -178,6 +191,40 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(FsBlob::new(dir))
     }
 
+    /// This doc's chain keyring-revision RETENTION store — a native `FsBlob` at `data_dir/{doc}.kr`, holding one
+    /// object per accepted keyring revision keyed by its zero-padded revision number. The §B3 look-behind needs
+    /// these prior revisions to judge a write against the membership that governed it at creation (design-review
+    /// F5): after a rotation the head alone can't say whether a pre-rotation author was authorized THEN. Kept in
+    /// native custody, alongside the head — never fed from the webview. Sibling dir (`.kr` can't collide with
+    /// another doc: `checked_doc` forbids `.`). The dag resolver ignores retention (it resolves from the anchor).
+    fn retention_store(&self, doc: &str) -> Result<FsBlob, HostError> {
+        let dir = self.data_dir.join(format!("{}.kr", checked_doc(doc)?));
+        std::fs::create_dir_all(&dir).map_err(|e| HostError::Store(e.to_string()))?;
+        Ok(FsBlob::new(dir))
+    }
+
+    /// Retain an accepted keyring `revision`'s bytes natively (idempotent).
+    fn retain_revision(&self, doc: &str, revision: u32, keyring: &[u8]) -> Result<(), HostError> {
+        self.retention_store(doc)?
+            .put(&format!("{revision:010}"), keyring, Precondition::Any)
+            .map_err(|e| HostError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// The `(revision, keyring)` pairs retained so far — the prior-revision set the §B3 resolver looks behind to.
+    fn retained_revisions(&self, doc: &str) -> Result<Vec<(u32, Vec<u8>)>, HostError> {
+        let store = self.retention_store(doc)?;
+        let mut out = Vec::new();
+        for (key, _etag) in store.list("").map_err(|e| HostError::Store(e.to_string()))? {
+            if let Ok(rev) = key.parse::<u32>() {
+                if let Some((bytes, _etag)) = store.get(&key).map_err(|e| HostError::Store(e.to_string()))? {
+                    out.push((rev, bytes));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Provision a fresh tree: open a core over the native store, PERSIST the keyring + watermark natively (one
     /// atomic `commit_keyring`), and register the core. Returns the recovery code + author `did:key`.
     ///
@@ -202,6 +249,13 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.store
             .commit_keyring(doc, &p.keyring, &p.watermark)
             .map_err(HostError::Store)?;
+        // Retain the genesis revision for the §B3 look-behind (a later rotation must still judge writes made
+        // under this revision). Chain-meaningful; a harmless unused blob for the dag.
+        self.retain_revision(
+            doc,
+            openom_vault::sharing::chain_watermark_floor(&p.watermark),
+            &p.keyring,
+        )?;
         self.register(doc, p.core);
         Ok(Provisioned {
             recovery_code: p.recovery_code,
@@ -393,8 +447,16 @@ impl<St: VaultStore> AppCoreHost<St> {
             &member.author_public_key,
             &member.hpke_public_key,
         )?;
-        // Candidate-core-before-commit (F9): re-open the owner on the shared keyring (fallible), install §B3, and
-        // hydrate the durable log BEFORE persisting the new keyring — a failure leaves store + core consistent.
+        // Retain the new revision natively before building the resolver, so the §B3 look-behind can judge writes
+        // under it after any future rotation (F5).
+        self.retain_revision(
+            doc,
+            openom_vault::sharing::chain_watermark_floor(&added.watermark),
+            &added.keyring,
+        )?;
+        // Candidate-core-before-commit (F9): re-open the owner on the shared keyring (fallible), install §B3
+        // (over the retained revisions), and hydrate BEFORE persisting the new keyring — a failure leaves store
+        // + core consistent.
         let re = openom_app_core::unlock(
             self.doc_store(doc)?,
             self.engine,
@@ -406,7 +468,8 @@ impl<St: VaultStore> AppCoreHost<St> {
             doc.to_string(),
         )?;
         let mut new_core = re.core;
-        let resolver = openom_vault::resolver_from(self.engine, &added.keyring, &[])?;
+        let resolver =
+            openom_vault::resolver_from(self.engine, &added.keyring, &self.retained_revisions(doc)?)?;
         new_core.set_membership(resolver)?;
         new_core.bootstrap()?;
         self.store
@@ -414,6 +477,96 @@ impl<St: VaultStore> AppCoreHost<St> {
             .map_err(HostError::Store)?;
         *guard = new_core; // in-place swap under the held lock
         Ok(AddedMember { keyring: added.keyring })
+    }
+
+    /// Remove a member (owner action) with FORWARD-SECURE revocation: pin the departing member's landed history
+    /// under the PRE-removal epoch (compact-before-remove — else a cold re-judging replica Drops it as a
+    /// backdated forge, OPE-421 / F2), mint a fresh epoch the removed member can't reach via the shared
+    /// `sharing::remove_member` math, re-open the owner's core under the NEW epoch (the old sealer seals under a
+    /// dead epoch), author the self-heal cover over the removed member's stored history (dag; a no-op on a
+    /// chain-retained tree), and swap it IN PLACE under the per-doc lock held for the WHOLE op (F1/F3 — no
+    /// concurrent sync seals under the dead epoch). Keyring committed only AFTER the re-open succeeds (F9).
+    ///
+    /// The caller (webview) is responsible for pulling the departing member's writes first (a data sync with a
+    /// compaction that UPLOADS the pinning snapshot BEFORE this rotation publishes) and, after this returns,
+    /// publishing the ADVISORY summary FIRST, then the keyring, then a data sync to push the cover. Durable
+    /// re-publish (a removed member keeps server access until the rotated keyring lands) is derived by the sync
+    /// tick from local-head > server-head (F1/Q3), so it needs no marker here.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the tree isn't open; [`HostError::NoKeyring`] if none is stored;
+    /// [`HostError::Vault`] on a wrong owner passphrase / removing the owner / unknown member / unauthorized;
+    /// [`HostError::Core`] on the compact / re-open / cover; [`HostError::Store`] on a store fault.
+    pub fn remove_member(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        owner_member_id: &str,
+        owner_passphrase: &Passphrase,
+        remove_member_id: &str,
+    ) -> Result<RemovedMember, HostError> {
+        // Hold the owner core's per-doc lock across the WHOLE op (F1/F3).
+        let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let floor = openom_vault::sharing::chain_watermark_floor(
+            &self.store.watermark(doc).map_err(HostError::Store)?,
+        );
+
+        // compact-before-remove (F2/OPE-421): fold any already-pulled departing writes + pin them into a
+        // snapshot under the PRE-removal epoch, so the covered frontier vouches for their landed history. The
+        // webview's prior sync pulls + uploads the snapshot; this keeps the local covered frontier current.
+        // history_preserved is best-effort: false ⇒ nothing covered yet (removed before pulling).
+        guard.fold()?;
+        guard.compact()?;
+        let history_preserved = !guard.subsumed_frontier().is_empty();
+
+        let removed = openom_vault::sharing::remove_member(
+            self.engine,
+            &keyring,
+            owner_passphrase,
+            tree_id,
+            owner_member_id,
+            &fresh_replica()?,
+            floor,
+            remove_member_id,
+        )?;
+        // Retain the rotated revision natively before building the resolver, so the §B3 look-behind can judge the
+        // departing member's PRE-rotation writes against the revision that governed them (F5 — without the prior
+        // revisions retained, a pre-rotation write is Dropped as an unjudgeable backdated forge).
+        self.retain_revision(
+            doc,
+            openom_vault::sharing::chain_watermark_floor(&removed.watermark),
+            &removed.keyring,
+        )?;
+        // Candidate-core-before-commit (F9): re-open the owner under the NEW epoch (the old sealer is now stale),
+        // install §B3 (over the retained revisions), hydrate, then author the self-heal cover.
+        let re = openom_app_core::unlock(
+            self.doc_store(doc)?,
+            self.engine,
+            owner_passphrase,
+            tree_id,
+            owner_member_id,
+            &fresh_replica()?,
+            &removed.keyring,
+            doc.to_string(),
+        )?;
+        let mut new_core = re.core;
+        let resolver =
+            openom_vault::resolver_from(self.engine, &removed.keyring, &self.retained_revisions(doc)?)?;
+        new_core.set_membership(resolver)?;
+        new_core.bootstrap()?;
+        new_core.author_cover()?; // dag self-heal over the removed member's stored history (no-op on chain)
+        self.store
+            .commit_keyring(doc, &removed.keyring, &removed.watermark)
+            .map_err(HostError::Store)?;
+        *guard = new_core; // in-place swap under the held lock
+        Ok(RemovedMember { keyring: removed.keyring, history_preserved })
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
@@ -765,6 +918,50 @@ mod tests {
             host.project("t").unwrap().contains("pAlice"),
             "the re-opened shared owner core still writes + folds its own attributed mint"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remove_member_rotates_the_epoch_and_re_opens_the_owner_under_it() {
+        use super::MemberToAdd;
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let tree_id = [6u8; 16];
+        host.provision("t", &tree_id, "owner", &owner_pass).unwrap();
+
+        // Share the tree, THEN mint (so the write is signed under the shared epoch, not the solo sealer).
+        let joiner = host
+            .provision_member(&Passphrase::new(b"the joiner passphrase".to_vec()))
+            .unwrap();
+        let bob = MemberToAdd {
+            member_id: "bob".into(),
+            role: "editor".into(),
+            author_public_key: joiner.author_public_key,
+            hpke_public_key: joiner.hpke_public_key,
+        };
+        let added = host.add_member("t", &tree_id, "owner", &owner_pass, &bob).unwrap();
+        host.assert_anchor("t", "pAlice", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+
+        // Remove bob: forward-secure rotation + owner re-open under the NEW epoch.
+        let removed = host.remove_member("t", &tree_id, "owner", &owner_pass, "bob").unwrap();
+        assert!(!removed.keyring.is_empty(), "a rotated keyring revision to publish");
+        assert!(removed.keyring != added.keyring, "the removal rotated the keyring to a fresh epoch");
+        assert!(
+            host.store().load_keyring("t").unwrap().unwrap() == removed.keyring,
+            "the rotated keyring is persisted natively"
+        );
+
+        // The owner core re-opened under the NEW epoch — it still writes, and prior + post-removal history both
+        // project (proof the re-opened core signs under the fresh epoch and hydrated the pinned history).
+        host.assert_anchor("t", "pCarol", PERSON).unwrap();
+        host.commit("t").unwrap();
+        host.fold("t").unwrap();
+        let proj = host.project("t").unwrap();
+        assert!(proj.contains("pCarol"), "post-removal owner write projects under the rotated epoch");
+        assert!(proj.contains("pAlice"), "pre-removal history still projects after the rotation");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
