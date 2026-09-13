@@ -821,6 +821,56 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(MemberUnlocked { did_key })
     }
 
+    /// Adopt newer keyring revisions pulled from the network (a member/device keyring sync — CHAIN). Validates
+    /// the successor `hops` against the locally-stored anchor (`accept_remote_keyring` — a fork / rollback /
+    /// withheld-hop / rogue-signer run is refused and NOTHING persisted), persists the new head + retains each
+    /// new revision, then on the running core adopts any ROTATED write epoch via the retained epoch-adopt secret
+    /// (OPE-393 — a no-op for an owner/solo core; a soft no-op for a member that discovers it was removed) and
+    /// refreshes the §B3 resolver over the newly-retained revisions. Holds the per-doc lock across the op
+    /// (F1/F3). (Dag keyring adoption is the anchor merge — a separate path, not yet on the host.)
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] / [`HostError::NoKeyring`] if the tree isn't open / stored; [`HostError::Vault`] on
+    /// a rejected keyring run; [`HostError::Core`] on adoption / resolver; [`HostError::Store`] on a store fault
+    /// (or a dag deployment, where this path doesn't apply).
+    pub fn sync_keyring(&self, doc: &str, tree_id: &[u8], hops: &[u8]) -> Result<(), HostError> {
+        if self.engine != EngineKind::Chain {
+            return Err(HostError::Store(
+                "dag keyring adoption is the anchor merge, not this chain-walk path".into(),
+            ));
+        }
+        let handle = self.core(doc).ok_or_else(|| HostError::NoCore(doc.to_string()))?;
+        let mut guard = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let anchor = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let anchor_rev = openom_vault::sharing::chain_watermark_floor(
+            &self.store.watermark(doc).map_err(HostError::Store)?,
+        );
+        let accepted = openom_vault::sharing::accept_remote_keyring(&anchor, tree_id, hops)?;
+        self.store
+            .commit_keyring(doc, &accepted.keyring, &accepted.watermark)
+            .map_err(HostError::Store)?;
+        // Retain each newly-accepted revision (unwrap the wrapped hop to its raw body; hop i is anchor_rev+1+i).
+        for (idx, (_i, wrapped)) in Self::unframe_revisions(hops)?.into_iter().enumerate() {
+            let raw = openom_vault::sharing::unwrap_chain_keyring(&wrapped)?;
+            let revision = anchor_rev
+                .checked_add(1)
+                .and_then(|r| r.checked_add(u32::try_from(idx).ok()?))
+                .ok_or_else(|| HostError::Store("keyring revision overflow".into()))?;
+            self.retain_revision(doc, revision, &raw)?;
+        }
+        // Adopt any rotated epoch + refresh the §B3 resolver on the running core.
+        guard.adopt_epochs(&accepted.keyring)?;
+        let resolver =
+            openom_vault::resolver_from(self.engine, &accepted.keyring, &self.retained_revisions(doc)?)?;
+        guard.set_membership(resolver)?;
+        Ok(())
+    }
+
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
     /// so a mint committed offline in a previous session is folded back in. (A re-open uses a FRESH replica id,
     /// so the previous session's entries are pulled as a peer rather than skipped as "our own".)
@@ -1403,5 +1453,71 @@ mod tests {
             "a membership op swaps the core in place, preserving the per-doc Arc"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_member_adopts_a_newer_keyring_revision_on_sync() {
+        use super::MemberToAdd;
+        let (dir_o, dir_b) = (temp_dir(), temp_dir());
+        let owner_host = AppCoreHost::new(MemStore::default(), &dir_o, EngineKind::Chain);
+        let bob_host = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Chain);
+        let tree_id = [16u8; 16];
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
+
+        // Owner + bob joined (bob's anchor = revision 2).
+        let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
+        let bob_member = MemberToAdd {
+            member_id: "acct-bob".into(),
+            role: "maintainer".into(),
+            author_public_key: bob_acct.author_public_key.clone(),
+            hpke_public_key: bob_acct.hpke_public_key.clone(),
+        };
+        let rev2 = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+        let genesis = owner_host
+            .retained_revisions("t")
+            .unwrap()
+            .into_iter()
+            .find(|(r, _)| *r == 1)
+            .unwrap()
+            .1;
+        let hops =
+            openom_vault::sharing::frame_keyring_hops(&[genesis.clone(), rev2.keyring.clone()]);
+        let pin = openom_vault::sharing::chain_keyring_pin(&genesis).unwrap();
+        bob_host
+            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .unwrap();
+
+        // Owner admits carol (revision 3); bob syncs the keyring (the successor hop).
+        let carol = owner_host
+            .provision_member(&Passphrase::new(b"carol's own passphrase".to_vec()))
+            .unwrap();
+        let carol_member = MemberToAdd {
+            member_id: "acct-carol".into(),
+            role: "editor".into(),
+            author_public_key: carol.author_public_key,
+            hpke_public_key: carol.hpke_public_key,
+        };
+        let rev3 = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &carol_member).unwrap();
+        let successor = openom_vault::sharing::frame_keyring_hops(std::slice::from_ref(&rev3.keyring));
+        bob_host.sync_keyring("t", &tree_id, &successor).unwrap();
+
+        assert_eq!(
+            bob_host.store().load_keyring("t").unwrap().unwrap(),
+            rev3.keyring,
+            "bob adopted the newer keyring head"
+        );
+        assert!(
+            bob_host.retained_revisions("t").unwrap().iter().any(|(r, _)| *r == 3),
+            "bob retained the new revision for the §B3 look-behind"
+        );
+        assert!(
+            bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(),
+            "bob still unlocks under the adopted keyring"
+        );
+
+        std::fs::remove_dir_all(&dir_o).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
     }
 }

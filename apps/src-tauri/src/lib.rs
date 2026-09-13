@@ -334,6 +334,20 @@ fn core_project(state: State<'_, Host>, doc: String) -> Result<String, String> {
     state.project(&doc).map_err(e)
 }
 
+/// Adopt newer keyring revisions the webview fetched (a member/device keyring sync): the host validates the
+/// successor `hops` against the stored anchor, persists + retains them, adopts any rotated epoch on the running
+/// core (via the retained member secret), and refreshes its §B3 resolver. No Argon2 (pure verification), so a
+/// sync command.
+#[tauri::command]
+fn core_sync_keyring(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    hops: Vec<u8>,
+) -> Result<(), String> {
+    state.sync_keyring(&doc, &tree_id, &hops).map_err(e)
+}
+
 /// One sync tick against a remote snapshot the webview fetched: the host mirrors it into `doc`'s local store,
 /// folds/adopts through the §B3 gate, maybe compacts (when `compact_k > 0`), and returns the objects the remote
 /// is missing (for the webview to PUT) plus how many folded. The webview ferries ciphertext + drives the fetch;
@@ -379,6 +393,7 @@ pub fn run() {
             core_commit,
             core_fold,
             core_project,
+            core_sync_keyring,
             core_sync
         ])
         .run(tauri::generate_context!())
