@@ -48,19 +48,12 @@ async fn core_provision(
     doc: String,
     tree_id: Vec<u8>,
     member_id: String,
-    replica_id: Vec<u8>,
     passphrase: String,
 ) -> Result<Provisioned, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.provision(
-            &doc,
-            &tree_id,
-            &member_id,
-            &replica_id,
-            &Passphrase::new(passphrase.into_bytes()),
-        )
-        .map_err(e)
+        host.provision(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
     })
     .await
     .map_err(e)?
@@ -75,19 +68,12 @@ async fn core_unlock(
     doc: String,
     tree_id: Vec<u8>,
     member_id: String,
-    replica_id: Vec<u8>,
     passphrase: String,
 ) -> Result<Unlocked, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.unlock(
-            &doc,
-            &tree_id,
-            &member_id,
-            &replica_id,
-            &Passphrase::new(passphrase.into_bytes()),
-        )
-        .map_err(e)
+        host.unlock(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
     })
     .await
     .map_err(e)?
@@ -102,7 +88,6 @@ async fn core_recover(
     doc: String,
     tree_id: Vec<u8>,
     member_id: String,
-    replica_id: Vec<u8>,
     recovery_code: String,
     new_passphrase: String,
 ) -> Result<Recovered, String> {
@@ -112,7 +97,6 @@ async fn core_recover(
             &doc,
             &tree_id,
             &member_id,
-            &replica_id,
             &RecoveryCode::new(recovery_code),
             &Passphrase::new(new_passphrase.into_bytes()),
         )
@@ -131,7 +115,6 @@ async fn core_change_passphrase(
     doc: String,
     tree_id: Vec<u8>,
     member_id: String,
-    replica_id: Vec<u8>,
     old_passphrase: String,
     new_passphrase: String,
 ) -> Result<PassphraseChanged, String> {
@@ -141,7 +124,6 @@ async fn core_change_passphrase(
             &doc,
             &tree_id,
             &member_id,
-            &replica_id,
             &Passphrase::new(old_passphrase.into_bytes()),
             &Passphrase::new(new_passphrase.into_bytes()),
         )

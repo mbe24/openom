@@ -22,6 +22,28 @@ pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
 /// The per-doc registry, keyed by doc id.
 type CoreMap = HashMap<String, CoreHandle>;
 
+/// A fresh, ephemeral replica id (16 bytes from the OS CSPRNG) minted per open. NEVER a caller argument: a
+/// repeated replica id forks the per-replica counter chain (an anti-fork security property), and a fresh id per
+/// open is also what lets a re-opened core pull its own previously-persisted entries as a peer (OPE-431).
+fn fresh_replica() -> Result<[u8; 16], HostError> {
+    let mut id = [0u8; 16];
+    getrandom::fill(&mut id).map_err(|e| HostError::Store(format!("csprng: {e}")))?;
+    Ok(id)
+}
+
+/// Reject a `doc` id that could escape `data_dir` (the webview supplies it, so `../..` etc. must never reach a
+/// filesystem join). A doc id is a tree key: non-empty and made only of url-safe id characters.
+fn checked_doc(doc: &str) -> Result<&str, HostError> {
+    let ok = !doc.is_empty()
+        && doc.len() <= 128
+        && doc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if ok {
+        Ok(doc)
+    } else {
+        Err(HostError::Store(format!("invalid doc id: {doc:?}")))
+    }
+}
+
 /// Wall-clock milliseconds for mint timestamps (the native analog of the wasm veneer's `now_millis`).
 fn now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -120,9 +142,10 @@ impl<St: VaultStore> AppCoreHost<St> {
         &self.store
     }
 
-    /// This doc's local device store: a `FsBlob` under `data_dir/{doc}`.
+    /// This doc's local device store: a `FsBlob` under `data_dir/{doc}`. The `doc` id is validated first so a
+    /// webview-supplied value can never traverse out of `data_dir`.
     fn doc_store(&self, doc: &str) -> Result<FsBlob, HostError> {
-        let dir = self.data_dir.join(doc);
+        let dir = self.data_dir.join(checked_doc(doc)?);
         std::fs::create_dir_all(&dir).map_err(|e| HostError::Store(e.to_string()))?;
         Ok(FsBlob::new(dir))
     }
@@ -137,7 +160,6 @@ impl<St: VaultStore> AppCoreHost<St> {
         doc: &str,
         tree_id: &[u8],
         member_id: &str,
-        replica_id: &[u8],
         passphrase: &Passphrase,
     ) -> Result<Provisioned, HostError> {
         let p = openom_app_core::provision(
@@ -146,7 +168,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             passphrase,
             tree_id,
             member_id,
-            replica_id,
+            &fresh_replica()?,
             doc.to_string(),
         )?;
         self.store
@@ -170,7 +192,6 @@ impl<St: VaultStore> AppCoreHost<St> {
         doc: &str,
         tree_id: &[u8],
         member_id: &str,
-        replica_id: &[u8],
         passphrase: &Passphrase,
     ) -> Result<Unlocked, HostError> {
         let anchor = self
@@ -184,7 +205,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             passphrase,
             tree_id,
             member_id,
-            replica_id,
+            &fresh_replica()?,
             &anchor,
             doc.to_string(),
         )?;
@@ -210,7 +231,6 @@ impl<St: VaultStore> AppCoreHost<St> {
         doc: &str,
         tree_id: &[u8],
         member_id: &str,
-        replica_id: &[u8],
         recovery_code: &RecoveryCode,
         new_passphrase: &Passphrase,
     ) -> Result<Recovered, HostError> {
@@ -227,7 +247,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             new_passphrase,
             tree_id,
             member_id,
-            replica_id,
+            &fresh_replica()?,
             &anchor,
             &floor,
             doc.to_string(),
@@ -256,7 +276,6 @@ impl<St: VaultStore> AppCoreHost<St> {
         doc: &str,
         tree_id: &[u8],
         member_id: &str,
-        replica_id: &[u8],
         old_passphrase: &Passphrase,
         new_passphrase: &Passphrase,
     ) -> Result<PassphraseChanged, HostError> {
@@ -272,7 +291,7 @@ impl<St: VaultStore> AppCoreHost<St> {
             new_passphrase,
             tree_id,
             member_id,
-            replica_id,
+            &fresh_replica()?,
             &anchor,
             &floor,
         )?;
@@ -418,9 +437,9 @@ mod tests {
         let dir = temp_dir();
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
-        let (tree_id, replica_id) = ([9u8; 16], [2u8; 16]);
+        let tree_id = [9u8; 16];
 
-        let p = host.provision("doc-1", &tree_id, "acct-owner", &replica_id, &pass).unwrap();
+        let p = host.provision("doc-1", &tree_id, "acct-owner", &pass).unwrap();
         assert!(!p.recovery_code.is_empty(), "provision returns a recovery code to show the user");
         assert!(!p.did_key.is_empty(), "and the author did:key");
         // The keyring is persisted NATIVELY — in this model the webview never holds it.
@@ -429,18 +448,19 @@ mod tests {
 
         // Unlock reads the keyring FROM THE NATIVE STORE — no webview-supplied anchor — and re-derives the same
         // identity. (This is the security boundary: an XSS calling unlock can't substitute a stale/forged
-        // keyring, because the host ignores any client-supplied anchor and reads its own.)
-        let u = host.unlock("doc-1", &tree_id, "acct-owner", &replica_id, &pass).unwrap();
+        // keyring, because the host ignores any client-supplied anchor and reads its own; the replica id is
+        // host-minted, so the webview can't pin a fork either.)
+        let u = host.unlock("doc-1", &tree_id, "acct-owner", &pass).unwrap();
         assert_eq!(u.did_key, p.did_key, "unlock re-derives the same identity from the native keyring");
 
         // A wrong passphrase is refused.
         assert!(matches!(
-            host.unlock("doc-1", &tree_id, "acct-owner", &replica_id, &Passphrase::new(b"wrong".to_vec())),
+            host.unlock("doc-1", &tree_id, "acct-owner", &Passphrase::new(b"wrong".to_vec())),
             Err(HostError::Vault(_))
         ));
         // A tree the host has no keyring for can't be unlocked.
         assert!(matches!(
-            host.unlock("doc-unknown", &tree_id, "acct-owner", &replica_id, &pass),
+            host.unlock("doc-unknown", &tree_id, "acct-owner", &pass),
             Err(HostError::NoKeyring(_))
         ));
 
@@ -451,23 +471,23 @@ mod tests {
 
     #[test]
     fn an_offline_mint_survives_a_native_re_open_under_a_fresh_replica() {
-        // OPE-431: provision + mint + commit OFFLINE (no sync), then re-open the SAME tree under a FRESH replica
-        // id (as a returning device does) and bootstrap — the mint is recovered from the durable local store.
-        // Reusing the SAME replica on re-open would skip its own persisted entries; a fresh replica pulls them
-        // as a peer. push_delta already writes the local head pointer on commit, so nothing else is needed.
+        // OPE-431: provision + mint + commit OFFLINE (no sync), then re-open the SAME tree and bootstrap — the
+        // mint is recovered from the durable local store. The host MINTS a fresh replica id per open, so the
+        // re-opened core pulls its own persisted entries as a peer rather than skipping them as "our own"
+        // (reusing the same replica would skip them); push_delta already writes the local head pointer on commit.
         let dir = temp_dir();
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
         let tree_id = [3u8; 16];
 
-        host.provision("t", &tree_id, "acct-owner", &[10u8; 16], &pass).unwrap();
+        host.provision("t", &tree_id, "acct-owner", &pass).unwrap();
         host.assert_anchor("t", "pAlice", PERSON).unwrap();
         host.commit("t").unwrap();
         host.fold("t").unwrap();
         assert!(host.project("t").unwrap().contains("pAlice"), "the source session projects its own mint");
 
-        // Re-open under a FRESH replica (the durable keyring is read natively) + bootstrap.
-        host.unlock("t", &tree_id, "acct-owner", &[11u8; 16], &pass).unwrap();
+        // Re-open (the durable keyring is read natively, a fresh replica is host-minted) + bootstrap.
+        host.unlock("t", &tree_id, "acct-owner", &pass).unwrap();
         host.bootstrap("t").unwrap();
         assert!(
             host.project("t").unwrap().contains("pAlice"),
@@ -487,11 +507,12 @@ mod tests {
         let pass = Passphrase::new(b"correct horse battery staple".to_vec());
         let tree_id = [4u8; 16];
 
-        host_a.provision("t", &tree_id, "owner", &[20u8; 16], &pass).unwrap();
-        // Device B: same owner, the keyring distributed to B's native store (B unlocks it natively).
+        host_a.provision("t", &tree_id, "owner", &pass).unwrap();
+        // Device B: same owner, the keyring distributed to B's native store (B unlocks it natively). Each host
+        // mints its own fresh replica id, so A's and B's cores are distinct peers.
         let keyring = host_a.store().load_keyring("t").unwrap().unwrap();
         host_b.store().commit_keyring("t", &keyring, &[]).unwrap();
-        host_b.unlock("t", &tree_id, "owner", &[21u8; 16], &pass).unwrap();
+        host_b.unlock("t", &tree_id, "owner", &pass).unwrap();
 
         // A mints, commits, and pushes to the shared remote (empty → all of A's objects are uploads).
         host_a.assert_anchor("t", "pAlice", PERSON).unwrap();
@@ -516,21 +537,21 @@ mod tests {
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let tree_id = [9u8; 16];
         let old = Passphrase::new(b"the old passphrase here".to_vec());
-        let p = host.provision("t", &tree_id, "owner", &[30u8; 16], &old).unwrap();
+        let p = host.provision("t", &tree_id, "owner", &old).unwrap();
 
         let new = Passphrase::new(b"a brand new passphrase".to_vec());
         let r = host
-            .recover("t", &tree_id, "owner", &[31u8; 16], &RecoveryCode::new(p.recovery_code), &new)
+            .recover("t", &tree_id, "owner", &RecoveryCode::new(p.recovery_code), &new)
             .unwrap();
         assert!(!r.recovery_code.is_empty(), "recovery rotates the recovery code");
         assert!(!r.did_key.is_empty(), "and yields the (freshly minted) owner identity");
 
         assert!(
-            host.unlock("t", &tree_id, "owner", &[32u8; 16], &new).is_ok(),
+            host.unlock("t", &tree_id, "owner", &new).is_ok(),
             "the new passphrase unlocks the re-keyed keyring from native custody"
         );
         assert!(
-            host.unlock("t", &tree_id, "owner", &[33u8; 16], &old).is_err(),
+            host.unlock("t", &tree_id, "owner", &old).is_err(),
             "the old passphrase no longer unlocks"
         );
 
@@ -545,21 +566,38 @@ mod tests {
         let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
         let tree_id = [12u8; 16];
         let a = Passphrase::new(b"the first passphrase here".to_vec());
-        host.provision("t", &tree_id, "owner", &[40u8; 16], &a).unwrap();
+        host.provision("t", &tree_id, "owner", &a).unwrap();
 
         let b = Passphrase::new(b"the second passphrase now".to_vec());
-        let r = host.change_passphrase("t", &tree_id, "owner", &[41u8; 16], &a, &b).unwrap();
+        let r = host.change_passphrase("t", &tree_id, "owner", &a, &b).unwrap();
         assert!(!r.recovery_code.is_empty(), "change-passphrase rotates the recovery code");
 
         assert!(
-            host.unlock("t", &tree_id, "owner", &[42u8; 16], &b).is_ok(),
+            host.unlock("t", &tree_id, "owner", &b).is_ok(),
             "the new passphrase unlocks the re-wrapped keyring"
         );
         assert!(
-            host.unlock("t", &tree_id, "owner", &[43u8; 16], &a).is_err(),
+            host.unlock("t", &tree_id, "owner", &a).is_err(),
             "the old passphrase no longer unlocks"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_traversal_or_invalid_doc_id_is_refused_before_touching_the_filesystem() {
+        // The webview supplies the doc id, so one that could escape data_dir (or is otherwise malformed) must be
+        // rejected rather than joined onto the FsBlob path.
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let tree_id = [1u8; 16];
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+        for bad in ["../escape", "a/b", "a\\b", "..", ""] {
+            assert!(
+                matches!(host.provision(bad, &tree_id, "owner", &pass), Err(HostError::Store(_))),
+                "the traversal/invalid doc id {bad:?} is refused"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

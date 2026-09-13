@@ -3655,6 +3655,7 @@ dependencies = [
 name = "openom-app-core-host"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "openom-app-core",
  "openom-crypto",
  "openom-data-tree",
