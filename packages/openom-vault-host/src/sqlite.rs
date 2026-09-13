@@ -124,9 +124,6 @@ impl VaultStore for SqliteVaultStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{VaultErrorCode, VaultHost};
-
-    const TREE: &[u8] = b"tree-uuid-16byte";
 
     #[test]
     fn keyring_and_watermark_persist_across_reopen() {
@@ -154,45 +151,5 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));
         }
-    }
-
-    #[test]
-    fn a_vault_host_over_sqlite_provisions_and_unlocks() {
-        // The whole host, over real SQLite: provision persists a keyring; a fresh unlock (as if a
-        // relaunch) re-derives the same DEK and opens data sealed before.
-        let host = VaultHost::new(SqliteVaultStore::in_memory().unwrap());
-        let p = host
-            .provision("my-tree", TREE, "correct horse".into(), "owner")
-            .unwrap();
-        let envelope = host
-            .seal_entry(crate::SealEntryRequest {
-                sealer_id: p.sealer_id.clone(),
-                kind: "snapshot".into(),
-                format: "openom-json".into(),
-                compression: "none".into(),
-                replica_counter: 0,
-                prev_ciphertext_hash: Vec::new(),
-                covers_through_seq: 0,
-                blob_id: Vec::new(),
-                plaintext: b"data".to_vec(),
-            })
-            .unwrap()
-            .envelope;
-        host.lock(&p.sealer_id);
-
-        let u = host
-            .unlock("my-tree", TREE, "correct horse".into(), "owner")
-            .unwrap();
-        assert_eq!(
-            host.open_entry(&u.sealer_id, "snapshot", &envelope)
-                .unwrap(),
-            b"data"
-        );
-        assert_eq!(
-            host.unlock("my-tree", TREE, "wrong".into(), "owner")
-                .unwrap_err()
-                .code,
-            VaultErrorCode::CryptoOpen
-        );
     }
 }

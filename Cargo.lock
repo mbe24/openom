@@ -3645,7 +3645,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "store-blob",
- "store-log",
  "thiserror 2.0.20",
  "wasm-bindgen",
  "web-sys",
@@ -3867,17 +3866,7 @@ dependencies = [
 name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
- "keyeo-crypto",
- "openom-crypto",
- "openom-keyring-api",
- "openom-keyring-chain",
- "openom-protocol",
- "openom-sealer",
- "openom-vault",
  "rusqlite",
- "serde",
- "serde_json",
- "zeroize",
 ]
 
 [[package]]
