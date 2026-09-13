@@ -426,6 +426,15 @@ fn core_anomalies(state: State<'_, Host>, doc: String) -> Result<usize, String> 
     state.anomalies(&doc).map_err(e)
 }
 
+/// This device's pull frontier (`{replica_hex: counter}`) for the server's GC gate-2 liveness report.
+#[tauri::command]
+fn core_pull_frontier(
+    state: State<'_, Host>,
+    doc: String,
+) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    state.pull_frontier(&doc).map_err(e)
+}
+
 // ---- soft-removal review queue (OPE-426) ----
 
 #[tauri::command]
@@ -526,6 +535,7 @@ pub fn run() {
             core_resolve_id,
             core_pending_count,
             core_anomalies,
+            core_pull_frontier,
             core_pending_reviews,
             core_approve_pending,
             core_discard_pending,

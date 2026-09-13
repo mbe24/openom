@@ -1037,6 +1037,15 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.with_core(doc, |c| Ok(c.anomalies()))
     }
 
+    /// This device's PULL frontier (`{replica_hex: counter}`) — reported to the server's GC gate 2 so a slow
+    /// member's un-pulled log tail isn't reaped before it can pull it (OPE-409).
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`].
+    pub fn pull_frontier(&self, doc: &str) -> Result<std::collections::BTreeMap<String, u64>, HostError> {
+        self.with_core(doc, |c| Ok(c.pull_frontier()))
+    }
+
     /// The soft-removal review queue as a JSON string (OPE-426).
     ///
     /// # Errors

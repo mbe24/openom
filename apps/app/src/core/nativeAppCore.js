@@ -45,6 +45,7 @@ export function createNativeAppCore() {
   const treeKeys = new Map();
   const syncing = new Map();
   const treeEnsured = new Set();
+  const reportedFrontier = new Map(); // last pull-frontier reported per doc (change-guard for the GC telemetry)
   const remember = (docId, treeId) => treeKeys.set(docId, hexKey(treeId));
 
   const api = {
@@ -87,6 +88,7 @@ export function createNativeAppCore() {
       transports.delete(docId);
       treeKeys.delete(docId);
       treeEnsured.delete(docId);
+      reportedFrontier.delete(docId);
       return call('core_close', { doc: docId });
     },
 
@@ -206,6 +208,16 @@ export function createNativeAppCore() {
           const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
           await transport.blobPut(remoteKey, new Uint8Array(o.bytes), o.pointer, coveredHeader);
         }
+        // Report the pull frontier for GC gate-2 liveness (OPE-409): change-guarded + best-effort — a failure
+        // NEVER fails the tick, the floor just stays conservatively low for this member without the report.
+        try {
+          const frontier = await call('core_pull_frontier', { doc: docId });
+          const sig = JSON.stringify(frontier);
+          if (sig !== '{}' && sig !== reportedFrontier.get(docId)) {
+            await transport.putFrontier(treeKey, frontier);
+            reportedFrontier.set(docId, sig);
+          }
+        } catch { /* advisory telemetry — swallow; gate 2 stays conservative without it */ }
         return { state: 'ok', anomalies: await api.anomalies(docId) };
       } catch (err) {
         return { state: 'error', error: err };
