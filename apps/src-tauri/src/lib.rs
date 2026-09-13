@@ -14,6 +14,9 @@ use tauri::{Manager, State};
 /// watermark held in a durable `SQLite` `VaultStore`. Every `#[command]` below is a thin wrapper over it.
 type Host = Arc<AppCoreHost<SqliteVaultStore>>;
 
+/// A stored object — `(key, ciphertext bytes)` — the webview↔host sync ferry unit (the host's `StoredObject`).
+type StoredObject = (String, Vec<u8>);
+
 /// Flatten a host error to a string for the webview. (A typed error-code channel — mapping
 /// `HostError`/`VaultError` to stable codes the UI can branch on — is a follow-up; today the message is enough
 /// for the shell's error surface.)
@@ -141,9 +144,9 @@ fn core_project(state: State<'_, Host>, doc: String) -> Result<String, String> {
 fn core_sync(
     state: State<'_, Host>,
     doc: String,
-    remote: Vec<(String, Vec<u8>)>,
+    remote: Vec<StoredObject>,
     compact_k: u32,
-) -> Result<(Vec<(String, Vec<u8>)>, usize), String> {
+) -> Result<(Vec<StoredObject>, usize), String> {
     state.sync(&doc, &remote, compact_k).map_err(e)
 }
 
