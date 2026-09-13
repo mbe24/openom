@@ -26,6 +26,9 @@ openom-keyring-api = { path = "../openom-keyring-api" }
 # The claim engine's error type (the host's mint methods go through AppCore::tree_mut).
 openom-data-tree.workspace = true
 thiserror.workspace = true
+# The lifecycle-result structs (Provisioned/Unlocked) are wire-shaped: the Tauri #[command] veneer returns
+# them straight to the webview, so they derive Serialize here rather than being mirrored crate-side.
+serde.workspace = true
 
 [features]
 # Durable keyring/watermark via SQLite (the Tauri deployment). Tests use an in-memory fake VaultStore.

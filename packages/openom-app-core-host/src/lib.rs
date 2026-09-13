@@ -58,6 +58,7 @@ pub enum HostError {
 
 /// The result of [`AppCoreHost::provision`] — the durable core is registered in the host; the caller gets only
 /// what it shows the user (the recovery code) + the author identity.
+#[derive(serde::Serialize)]
 pub struct Provisioned {
     pub recovery_code: String,
     pub did_key: String,
@@ -66,6 +67,7 @@ pub struct Provisioned {
 /// The result of [`AppCoreHost::unlock`] — the core is registered in the host; the caller gets the author
 /// identity + the four advisory repair flags.
 // Four INDEPENDENT repair signals, mirroring the core's `Unlocked` — not a state enum.
+#[derive(serde::Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Unlocked {
     pub did_key: String,

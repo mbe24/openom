@@ -2,411 +2,175 @@
 
 use std::sync::Arc;
 
-use store_log::{sqlite::SqliteStore, Caps, DocStore, Snapshot, Update};
+use openom_app_core_host::{AppCoreHost, Provisioned, Unlocked};
+use openom_crypto::Passphrase;
+use openom_keyring_api::EngineKind;
 use openom_vault_host::sqlite::SqliteVaultStore;
-use openom_vault_host::{
-    AcceptedKeyring, AddMemberAsCoOwnerRequest, AddMemberRequest, CoOwnerChanged, EngineKind,
-    MemberAdded, MemberProvisioned, MemberRemoved, Provisioned, Recovered, Rekeyed,
-    RemoveMemberAsCoOwnerRequest, Sealed, SealEntryRequest, Unlocked, VaultError, VaultErrorCode,
-    VaultHost,
-};
-use serde::{Deserialize, Serialize};
+use openom_vault_host::VaultStore;
 use tauri::{Manager, State};
 
-pub struct AppStore(pub Box<dyn DocStore>);
-type Vault = Arc<VaultHost<SqliteVaultStore>>;
+/// The one native session host (OPE-427 Full-A): it runs `openom-app-core` natively — the DEK, the claim
+/// engine, and each doc's local device store all live in this process — with the keyring anchor + anti-rollback
+/// watermark held in a durable `SQLite` `VaultStore`. Every `#[command]` below is a thin wrapper over it.
+type Host = Arc<AppCoreHost<SqliteVaultStore>>;
 
-/// The keyring engine for newly provisioned trees (OPE-278), resolved at RUNTIME and owned by the
-/// custody host in Rust — never taken from the (less-trusted) webview. Runtime, not `cfg`, on purpose:
-/// one binary can reach more than one backend (managed Lambda, BYO Google Drive), so a future
-/// dual-engine world maps each backend to its engine here without a rebuild. This is the single plug
-/// point for that; existing trees already carry their own engine in the local head record, so this only
+/// Flatten a host error to a string for the webview. (A typed error-code channel — mapping
+/// `HostError`/`VaultError` to stable codes the UI can branch on — is a follow-up; today the message is enough
+/// for the shell's error surface.)
+fn e(err: impl std::fmt::Display) -> String {
+    err.to_string()
+}
+
+/// The keyring engine for newly provisioned trees (OPE-278), resolved at RUNTIME and owned by the custody host
+/// in Rust — never taken from the (less-trusted) webview. Runtime, not `cfg`, on purpose: one binary can reach
+/// more than one backend (managed Lambda, BYO Google Drive), so a future dual-engine world maps each backend to
+/// its engine here without a rebuild. Existing trees already carry their own engine in the keyring, so this only
 /// picks what to stamp on a NEW tree. Today every backend uses the chain engine; the hidden
-/// `OPENOM_KEYRING_ENGINE=dag` override selects the dag keyring for bring-up.
+/// `OPENOM_KEYRING_ENGINE=dag` override selects the dag keyring for bring-up. Same tag mapping (`EngineKind`'s
+/// `FromStr`) as the web/wasm host, so the two can't drift.
 fn keyring_engine() -> EngineKind {
-    // Same tag mapping as the web/wasm host — EngineKind's FromStr — so the two can't drift. An unset or
-    // unrecognized value falls back to the shipping chain engine.
     std::env::var("OPENOM_KEYRING_ENGINE")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(EngineKind::Chain)
 }
 
-// ----------------------------------------------------------------- doc store (opaque bytes)
+// --------------------------------------------------------------- lifecycle (Argon2id: async spawn_blocking)
 
-#[derive(Serialize)]
-pub struct ReadResult {
-    pub snapshot: Option<Snapshot>,
-    pub updates: Vec<Update>, // Update = Vec<u8>: raw sealed envelopes
-    pub cursor: u64,
-    pub caps: Caps,
-}
-
-#[derive(Deserialize)]
-pub struct AppendArgs {
-    pub doc: String,
-    pub updates: Vec<Update>,
-}
-
+/// Provision a fresh tree: the host opens a core over the native store, PERSISTS the keyring + watermark
+/// natively, and registers the core. Returns the recovery code + author `did:key`.
 #[tauri::command]
-fn store_read(
-    state: State<'_, AppStore>,
+async fn core_provision(
+    state: State<'_, Host>,
     doc: String,
-    since: Option<u64>,
-) -> Result<ReadResult, String> {
-    let s = &state.0;
-    let snapshot = s.read_snapshot(&doc).map_err(|e| e.to_string())?;
-    let (updates, cursor) = s.read_updates(&doc, since).map_err(|e| e.to_string())?;
-    Ok(ReadResult {
-        snapshot,
-        updates,
-        cursor,
-        caps: s.caps(),
+    tree_id: Vec<u8>,
+    member_id: String,
+    replica_id: Vec<u8>,
+    passphrase: String,
+) -> Result<Provisioned, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.provision(
+            &doc,
+            &tree_id,
+            &member_id,
+            &replica_id,
+            &Passphrase::new(passphrase.into_bytes()),
+        )
+        .map_err(e)
     })
+    .await
+    .map_err(e)?
 }
 
+/// Unlock an existing tree: the host loads the keyring FROM THE NATIVE STORE (never a webview argument — the
+/// boundary that stops an XSS feeding a stale/forged keyring), opens the core, and registers it. The webview
+/// then [`core_bootstrap`]s to fold back any mint committed offline in a previous session.
 #[tauri::command]
-fn store_append(state: State<'_, AppStore>, args: AppendArgs) -> Result<u64, String> {
-    state
-        .0
-        .append(&args.doc, &args.updates)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn store_put_snapshot(
-    state: State<'_, AppStore>,
+async fn core_unlock(
+    state: State<'_, Host>,
     doc: String,
-    bytes: Vec<u8>,
-    expected: Option<String>,
-) -> Result<String, String> {
-    state
-        .0
-        .put_snapshot(&doc, &bytes, expected.as_deref())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn store_list(state: State<'_, AppStore>) -> Result<Vec<String>, String> {
-    state.0.list().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn store_delete(state: State<'_, AppStore>, doc: String) -> Result<(), String> {
-    state.0.delete(&doc).map_err(|e| e.to_string())
-}
-
-// ----------------------------------------------------------------- vault (passphrase lifecycle)
-
-fn join_err(e: impl std::fmt::Display) -> VaultError {
-    VaultError::new(VaultErrorCode::Internal, e.to_string())
-}
-
-#[tauri::command]
-fn vault_has_keyring(state: State<'_, Vault>, tree_key: String) -> Result<bool, VaultError> {
-    state.has_keyring(&tree_key)
-}
-
-#[tauri::command]
-async fn vault_provision(
-    state: State<'_, Vault>,
-    tree_key: String,
     tree_id: Vec<u8>,
+    member_id: String,
+    replica_id: Vec<u8>,
     passphrase: String,
-    member_id: String,
-) -> Result<Provisioned, VaultError> {
+) -> Result<Unlocked, String> {
     let host = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        host.provision(&tree_key, &tree_id, passphrase, &member_id)
-    })
-    .await
-    .map_err(join_err)?
-}
-
-#[tauri::command]
-async fn vault_unlock(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    passphrase: String,
-    member_id: String,
-) -> Result<Unlocked, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.unlock(&tree_key, &tree_id, passphrase, &member_id)
-    })
-    .await
-    .map_err(join_err)?
-}
-
-#[tauri::command]
-async fn vault_recover(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    recovery_code: String,
-    new_passphrase: String,
-    member_id: String,
-) -> Result<Recovered, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.recover(
-            &tree_key,
+        host.unlock(
+            &doc,
             &tree_id,
-            recovery_code,
-            new_passphrase,
             &member_id,
+            &replica_id,
+            &Passphrase::new(passphrase.into_bytes()),
         )
+        .map_err(e)
     })
     .await
-    .map_err(join_err)?
+    .map_err(e)?
 }
 
+// --------------------------------------------------------------- session ops (cheap: sync is fine)
+
+/// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
 #[tauri::command]
-async fn vault_change_passphrase(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    old_passphrase: String,
-    new_passphrase: String,
-    member_id: String,
-) -> Result<Rekeyed, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.change_passphrase(
-            &tree_key,
-            &tree_id,
-            old_passphrase,
-            new_passphrase,
-            &member_id,
-        )
-    })
-    .await
-    .map_err(join_err)?
+fn core_has_keyring(state: State<'_, Host>, doc: String) -> Result<bool, String> {
+    state.store().load_keyring(&doc).map(|k| k.is_some()).map_err(e)
 }
 
-// ----------------------------------------------------------------- sharing (Argon2id: async)
-
+/// Rebuild `doc`'s engine from its durable local log — call once after [`core_unlock`] on open.
 #[tauri::command]
-async fn vault_provision_member(
-    state: State<'_, Vault>,
-    passphrase: String,
-) -> Result<MemberProvisioned, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || host.provision_member(passphrase))
-        .await
-        .map_err(join_err)?
+fn core_bootstrap(state: State<'_, Host>, doc: String) -> Result<(), String> {
+    state.bootstrap(&doc).map_err(e)
 }
 
+/// Buffer an identity-anchor mint into `doc`'s intention; [`core_commit`] seals + persists it.
 #[tauri::command]
-async fn vault_add_member(
-    state: State<'_, Vault>,
-    req: AddMemberRequest,
-) -> Result<MemberAdded, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || host.add_member(req))
-        .await
-        .map_err(join_err)?
+fn core_assert_anchor(
+    state: State<'_, Host>,
+    doc: String,
+    id: String,
+    type_uri: String,
+) -> Result<(), String> {
+    state.assert_anchor(&doc, &id, &type_uri).map_err(e)
 }
 
+/// Seal + persist `doc`'s buffered mint batch to its local store.
 #[tauri::command]
-async fn vault_unlock_as_member(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    passphrase: String,
-    member_kdf_params: Vec<u8>,
-    member_id: String,
-    trusted_signers: Vec<Vec<u8>>,
-) -> Result<Unlocked, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.unlock_as_member(
-            &tree_key,
-            &tree_id,
-            passphrase,
-            &member_kdf_params,
-            &member_id,
-            trusted_signers,
-        )
-    })
-    .await
-    .map_err(join_err)?
+fn core_commit(state: State<'_, Host>, doc: String) -> Result<(), String> {
+    state.commit(&doc).map_err(e)
 }
 
+/// Fold `doc`'s local store through the §B3 gate; returns how many entries folded.
 #[tauri::command]
-async fn vault_remove_member(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    owner_passphrase: String,
-    owner_member_id: String,
-    remove_member_id: String,
-) -> Result<MemberRemoved, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member(
-            &tree_key,
-            &tree_id,
-            owner_passphrase,
-            &owner_member_id,
-            &remove_member_id,
-        )
-    })
-    .await
-    .map_err(join_err)?
+fn core_fold(state: State<'_, Host>, doc: String) -> Result<usize, String> {
+    state.fold(&doc).map_err(e)
 }
 
+/// `doc`'s materialized read model as a JSON string (the webview renders it).
 #[tauri::command]
-async fn vault_add_member_as_co_owner(
-    state: State<'_, Vault>,
-    req: AddMemberAsCoOwnerRequest,
-) -> Result<MemberAdded, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || host.add_member_as_co_owner(req))
-        .await
-        .map_err(join_err)?
+fn core_project(state: State<'_, Host>, doc: String) -> Result<String, String> {
+    state.project(&doc).map_err(e)
 }
 
+/// One sync tick against a remote snapshot the webview fetched: the host mirrors it into `doc`'s local store,
+/// folds/adopts through the §B3 gate, maybe compacts (when `compact_k > 0`), and returns the objects the remote
+/// is missing (for the webview to PUT) plus how many folded. The webview ferries ciphertext + drives the fetch;
+/// the DEK, the fold, and the plaintext store stay native.
 #[tauri::command]
-async fn vault_remove_member_as_co_owner(
-    state: State<'_, Vault>,
-    req: RemoveMemberAsCoOwnerRequest,
-) -> Result<MemberRemoved, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.remove_member_as_co_owner(req)
-    })
-    .await
-    .map_err(join_err)?
-}
-
-#[tauri::command]
-async fn vault_add_co_owner(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    founder_passphrase: String,
-    founder_member_id: String,
-    target_member_id: String,
-) -> Result<CoOwnerChanged, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.add_co_owner(
-            &tree_key,
-            &tree_id,
-            founder_passphrase,
-            &founder_member_id,
-            &target_member_id,
-        )
-    })
-    .await
-    .map_err(join_err)?
-}
-
-#[tauri::command]
-async fn vault_remove_co_owner(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    founder_passphrase: String,
-    founder_member_id: String,
-    target_member_id: String,
-    new_role: String,
-) -> Result<CoOwnerChanged, VaultError> {
-    let host = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        host.remove_co_owner(
-            &tree_key,
-            &tree_id,
-            founder_passphrase,
-            &founder_member_id,
-            &target_member_id,
-            &new_role,
-        )
-    })
-    .await
-    .map_err(join_err)?
-}
-
-/// Accept a keyring run pulled from the network (the chain-walk read-side). Sync: it's pure
-/// verification (signatures + hashes), no Argon2, so it won't stall the UI thread meaningfully.
-#[tauri::command]
-fn vault_accept_remote_keyring(
-    state: State<'_, Vault>,
-    tree_key: String,
-    tree_id: Vec<u8>,
-    hops: Vec<Vec<u8>>,
-) -> Result<AcceptedKeyring, VaultError> {
-    state.accept_remote_keyring(&tree_key, &tree_id, hops)
-}
-
-// ----------------------------------------------------------------- sealer (cheap: sync is fine)
-
-#[tauri::command]
-fn sealer_dev(state: State<'_, Vault>, tree_id: Vec<u8>) -> Result<Unlocked, VaultError> {
-    state.dev(&tree_id)
-}
-
-#[tauri::command]
-fn sealer_seal_entry(state: State<'_, Vault>, req: SealEntryRequest) -> Result<Sealed, VaultError> {
-    state.seal_entry(req)
-}
-
-#[tauri::command]
-fn sealer_open_entry(
-    state: State<'_, Vault>,
-    sealer_id: String,
-    kind: String,
-    envelope: Vec<u8>,
-) -> Result<Vec<u8>, VaultError> {
-    state.open_entry(&sealer_id, &kind, &envelope)
-}
-
-#[tauri::command]
-fn sealer_lock(state: State<'_, Vault>, sealer_id: String) {
-    state.lock(&sealer_id);
+fn core_sync(
+    state: State<'_, Host>,
+    doc: String,
+    remote: Vec<(String, Vec<u8>)>,
+    compact_k: u32,
+) -> Result<(Vec<(String, Vec<u8>)>, usize), String> {
+    state.sync(&doc, &remote, compact_k).map_err(e)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // Two durable files in the app data dir: the tree ciphertext, and — kept separate so a
-            // copied/restored tree can't drag the anti-rollback watermark with it — the keyring +
-            // watermark.
+            // The app data dir holds the durable keyring/watermark store (vault.sqlite); each doc's local
+            // device store is a FsBlob rooted under docs/{doc}. Kept separate so a copied/restored tree can't
+            // drag the anti-rollback watermark with it.
             let dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&dir).ok();
-            let tree = SqliteStore::open(dir.join("tree.sqlite")).expect("open tree store");
-            app.manage(AppStore(Box::new(tree)));
             let vault = SqliteVaultStore::open(dir.join("vault.sqlite")).expect("open vault store");
-            app.manage(Arc::new(VaultHost::new(vault).with_engine(keyring_engine())));
+            let host = AppCoreHost::new(vault, dir.join("docs"), keyring_engine());
+            app.manage(Arc::new(host));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            store_read,
-            store_append,
-            store_put_snapshot,
-            store_list,
-            store_delete,
-            vault_has_keyring,
-            vault_provision,
-            vault_unlock,
-            vault_recover,
-            vault_change_passphrase,
-            vault_provision_member,
-            vault_add_member,
-            vault_unlock_as_member,
-            vault_remove_member,
-            vault_add_member_as_co_owner,
-            vault_remove_member_as_co_owner,
-            vault_add_co_owner,
-            vault_remove_co_owner,
-            vault_accept_remote_keyring,
-            sealer_dev,
-            sealer_seal_entry,
-            sealer_open_entry,
-            sealer_lock
+            core_has_keyring,
+            core_provision,
+            core_unlock,
+            core_bootstrap,
+            core_assert_anchor,
+            core_commit,
+            core_fold,
+            core_project,
+            core_sync
         ])
         .run(tauri::generate_context!())
         .expect("error while running openom");

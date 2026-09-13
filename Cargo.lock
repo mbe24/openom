@@ -3660,6 +3660,7 @@ dependencies = [
  "openom-data-tree",
  "openom-keyring-api",
  "openom-vault-host",
+ "serde",
  "store-blob",
  "thiserror 2.0.20",
 ]
@@ -3825,10 +3826,12 @@ dependencies = [
 name = "openom-tauri"
 version = "0.1.0"
 dependencies = [
+ "openom-app-core-host",
+ "openom-crypto",
+ "openom-keyring-api",
  "openom-vault-host",
  "serde",
  "serde_json",
- "store-log",
  "tauri",
  "tauri-build",
 ]
