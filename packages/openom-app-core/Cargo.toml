@@ -38,7 +38,6 @@ store-blob = { path = "../store-blob" }
 openom-data-tree.workspace = true
 openom-data-crdt.workspace = true
 openom-sealer = { path = "../openom-sealer" }
-store-log.workspace = true
 openom-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

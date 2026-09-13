@@ -19,7 +19,7 @@ const b64decode = (s) => (s ? Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) :
 // forever (design C2). #send aborts the fetch after this; the abort surfaces as the `timeout` code.
 const REQUEST_TIMEOUT_MS = 20_000;
 
-// A thrown HTTP error carrying its `status`, so the OLD snapshot/keyring stack (syncStore/sealedStore) can
+// A thrown HTTP error carrying its `status`, so callers (the sync driver's retry/backoff classification) can
 // tell a permanent refusal from a transient one. The NEW blob channel (below) throws AppErrors instead.
 function httpError(label, status, detail = '') {
   const e = new Error(`${label}: HTTP ${status}${detail ? ` — ${detail}` : ''}`);
