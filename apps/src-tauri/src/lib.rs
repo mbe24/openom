@@ -20,11 +20,16 @@ type Host = Arc<AppCoreHost<SqliteVaultStore>>;
 /// A stored object — `(key, ciphertext bytes)` — the webview↔host sync ferry unit (the host's `StoredObject`).
 type StoredObject = (String, Vec<u8>);
 
-/// Flatten a host error to a string for the webview. (A typed error-code channel — mapping
-/// `HostError`/`VaultError` to stable codes the UI can branch on — is a follow-up; today the message is enough
-/// for the shell's error surface.)
-fn e(err: impl std::fmt::Display) -> String {
-    err.to_string()
+/// Map a host error to the structured `{code, message}` JSON the webview adapter normalizes into an `AppError`
+/// (matching the wasm veneer's error channel — so the gate's tamper / rollback / wrong-passphrase distinctions,
+/// and the sync driver's retriable/auth classification, survive on the native host).
+fn e(err: openom_app_core_host::HostError) -> String {
+    serde_json::json!({ "code": openom_app_core_host::error_code(&err), "message": err.to_string() }).to_string()
+}
+
+/// A `spawn_blocking` join failure (a panic/cancel in the worker) in the same structured shape.
+fn join_err(err: impl std::fmt::Display) -> String {
+    serde_json::json!({ "code": "internal", "message": err.to_string() }).to_string()
 }
 
 /// The keyring engine for newly provisioned trees (OPE-278), resolved at RUNTIME and owned by the custody host
@@ -59,7 +64,7 @@ async fn core_provision(
             .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Unlock an existing tree: the host loads the keyring FROM THE NATIVE STORE (never a webview argument — the
@@ -79,7 +84,7 @@ async fn core_unlock(
             .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Recover owner access under a new passphrase using the recovery code: the host loads the stored keyring +
@@ -106,7 +111,7 @@ async fn core_recover(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Change the passphrase: the host loads the stored keyring + watermark, re-wraps under the new passphrase, and
@@ -133,7 +138,7 @@ async fn core_change_passphrase(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Mint a joining member's account from their passphrase (stateless): returns the KDF params to persist + the
@@ -148,7 +153,7 @@ async fn core_provision_member(
         host.provision_member(&Passphrase::new(passphrase.into_bytes())).map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Admit an OOB-verified member to a shared tree (owner action): the host produces the new keyring revision,
@@ -176,7 +181,7 @@ async fn core_add_member(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Remove a member (owner action) with forward-secure revocation: the host pins the departing member's history,
@@ -204,7 +209,7 @@ async fn core_remove_member(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Change a member's role (owner action): promote to co-owner or demote. No epoch rotation — the host refreshes
@@ -234,7 +239,7 @@ async fn core_change_role(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// A joining member's first open: the host verifies the fetched keyring history against the OOB pin, unlocks at
@@ -269,7 +274,7 @@ async fn core_join_as_member(
         .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 /// Re-open a shared tree as a member on a device that already joined: the host loads the keyring + member
@@ -288,7 +293,7 @@ async fn core_unlock_as_member(
             .map_err(e)
     })
     .await
-    .map_err(e)?
+    .map_err(join_err)?
 }
 
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
@@ -296,7 +301,7 @@ async fn core_unlock_as_member(
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
 #[tauri::command]
 fn core_has_keyring(state: State<'_, Host>, doc: String) -> Result<bool, String> {
-    state.store().load_keyring(&doc).map(|k| k.is_some()).map_err(e)
+    state.store().load_keyring(&doc).map(|k| k.is_some()).map_err(join_err)
 }
 
 /// Rebuild `doc`'s engine from its durable local log — call once after [`core_unlock`] on open.

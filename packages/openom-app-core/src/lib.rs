@@ -141,6 +141,34 @@ pub struct Unlocked<S: BlobStore> {
     pub write_epoch_unreachable: bool,
 }
 
+/// Map a [`VaultError`] to its stable UI error-code (the [`error_codes`] registry). Shared by the wasm veneer
+/// and the native (Tauri) host so their two error channels — and thus the gate's tamper/rollback/wrong-pass
+/// distinctions — can't drift.
+#[must_use]
+pub fn vault_error_code(e: &VaultError) -> &'static str {
+    use error_codes as ec;
+    use openom_crypto::CryptoError;
+    match e {
+        VaultError::RevisionRollback { .. } | VaultError::WatermarkRollback { .. } => ec::REVISION_ROLLBACK,
+        VaultError::Crypto(CryptoError::Open) | VaultError::MissingWrap => ec::WRONG_PASSPHRASE,
+        VaultError::Crypto(CryptoError::RecoveryFormat | CryptoError::RecoveryChecksum) => {
+            ec::RECOVERY_CODE_INVALID
+        }
+        VaultError::Crypto(CryptoError::Signature)
+        | VaultError::BadKeyring(_)
+        | VaultError::BadKdfParams
+        | VaultError::RevisionOverflow
+        | VaultError::Sharing(_) => ec::KEYRING_VERIFY_FAILED,
+        VaultError::Crypto(_) | VaultError::Sealer(_) => ec::DECRYPT_FAILED,
+        VaultError::TreeMismatch => ec::TAMPERED_ANCHOR,
+        VaultError::NotAuthorized => ec::ACCESS_DENIED,
+        VaultError::MemberExists | VaultError::MemberNotFound | VaultError::CannotRemoveOwner => {
+            ec::INVALID_REQUEST
+        }
+        VaultError::MalformedWatermark => ec::INTERNAL,
+    }
+}
+
 /// Provision a fresh tree (genesis) and open a ready core over `store`.
 ///
 /// # Errors

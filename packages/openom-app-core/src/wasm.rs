@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use openom_crypto::{CryptoError, Passphrase, RecoveryCode};
+use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
@@ -1335,24 +1335,8 @@ fn to_js(e: impl std::fmt::Display) -> JsError {
 /// code (wrong passphrase vs rollback vs recovery-code vs verify), not by matching a `Display` string
 /// (OPE-420). The mapping lives here in the app veneer, keeping openom-vault / keyeo-crypto free of app codes.
 fn vault_code(e: &VaultError) -> &'static str {
-    use crate::error_codes as ec;
-    match e {
-        VaultError::RevisionRollback { .. } | VaultError::WatermarkRollback { .. } => ec::REVISION_ROLLBACK,
-        // On unlock the KEK (from the passphrase) can't open the DEK wrap → an AEAD Open; a MissingWrap
-        // likewise reads as "can't unlock" to the member.
-        VaultError::Crypto(CryptoError::Open) | VaultError::MissingWrap => ec::WRONG_PASSPHRASE,
-        VaultError::Crypto(CryptoError::RecoveryFormat | CryptoError::RecoveryChecksum) => ec::RECOVERY_CODE_INVALID,
-        VaultError::Crypto(CryptoError::Signature)
-        | VaultError::BadKeyring(_)
-        | VaultError::BadKdfParams
-        | VaultError::RevisionOverflow
-        | VaultError::Sharing(_) => ec::KEYRING_VERIFY_FAILED,
-        VaultError::Crypto(_) | VaultError::Sealer(_) => ec::DECRYPT_FAILED,
-        VaultError::TreeMismatch => ec::TAMPERED_ANCHOR,
-        VaultError::NotAuthorized => ec::ACCESS_DENIED,
-        VaultError::MemberExists | VaultError::MemberNotFound | VaultError::CannotRemoveOwner => ec::INVALID_REQUEST,
-        VaultError::MalformedWatermark => ec::INTERNAL,
-    }
+    // Shared with the native host (crate::vault_error_code) so the two error channels can't drift.
+    crate::vault_error_code(e)
 }
 
 /// A vault failure as a structured JS value `{ code, message }` — the worker reads `.code` (a stable registry

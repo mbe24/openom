@@ -16,6 +16,8 @@
 // best-effort port of the worker tick and is the runtime-iteration target — it is only reached when a managed
 // backend is configured (startSync() early-returns local-only), so it never blocks the local flow.
 
+import { makeError, normalizeUnknown } from './errorModel.js';
+
 const invoke = () => globalThis.__TAURI__?.core?.invoke;
 
 /** Is this a Tauri (native-host) runtime? */
@@ -35,8 +37,18 @@ const hexKey = (treeId) => Array.from(treeId, (b) => b.toString(16).padStart(2, 
 export function createNativeAppCore() {
   const call = (cmd, args) => {
     const inv = invoke();
-    if (!inv) return Promise.reject(new Error('native host unavailable (no __TAURI__.core.invoke)'));
-    return inv(cmd, args);
+    if (!inv) return Promise.reject(makeError('internal', { cause: 'native host unavailable (no __TAURI__.core.invoke)' }));
+    return inv(cmd, args).catch((raw) => {
+      // Tauri rejects our Err(String) with a structured {code,message} JSON — map it to the SAME AppError the
+      // wasm worker throws (via makeError), so the gate's rollback/tamper/wrong-passphrase distinctions and the
+      // sync driver's retriable/auth classification survive on native (design-review C1). Anything else falls
+      // through to the generic normalizer.
+      let parsed = null;
+      if (typeof raw === 'string') { try { parsed = JSON.parse(raw); } catch { parsed = null; } }
+      else if (raw && typeof raw === 'object') parsed = raw;
+      if (parsed && typeof parsed.code === 'string') throw makeError(parsed.code, { cause: parsed.message });
+      throw normalizeUnknown(raw);
+    });
   };
 
   // Per-doc network transport (set by attachTransport) + the doc→treeKey map (the remote keyspace prefix,
@@ -115,7 +127,7 @@ export function createNativeAppCore() {
     anomalies: (docId) => call('core_anomalies', { doc: docId }),
 
     // --- soft-removal review queue (OPE-426) ---
-    pendingReviews: (docId) => call('core_pending_reviews', { doc: docId }),
+    pendingReviews: async (docId) => JSON.parse(await call('core_pending_reviews', { doc: docId })),
     approvePending: (docId, { replica, counter }) =>
       call('core_approve_pending', { doc: docId, replica, counter }),
     discardPending: (docId, { replica, counter }) =>
@@ -174,10 +186,10 @@ export function createNativeAppCore() {
     // back and PUT it (the snapshot carries the covered GC header). Single-flight; failures degrade to
     // {state:'error'} (the driver treats that as offline), never a crash.
     //
-    // NOT YET PORTED (itemized, not hand-waved): the keyring-before-data step (fetch newer keyring revisions →
-    // core_sync_keyring — needed for a SHARED tree's members to adopt rotations on sync), the pull-frontier
-    // GC-liveness telemetry (needs a core_pull_frontier command), and the OPE-293 advisory-summary flush. So a
-    // SOLO owner syncs fully here; a shared-over-server tree needs those three added.
+    // NOT YET PORTED (itemized, not hand-waved), tracked as OPE-433/434: the keyring-before-data step (fetch
+    // newer keyring revisions → core_sync_keyring — needed for a SHARED tree's members to adopt rotations on
+    // sync, and the owner PUBLISH of a produced revision) and the OPE-293 advisory-summary flush. So a SOLO
+    // owner syncs fully here; a shared-over-server tree needs those two. (Pull-frontier telemetry: DONE below.)
     async syncNow(docId) {
       const transport = transports.get(docId);
       const treeKey = treeKeys.get(docId);

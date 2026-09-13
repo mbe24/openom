@@ -80,6 +80,21 @@ pub enum HostError {
     NoCore(String),
 }
 
+/// The stable UI error-code for a [`HostError`] (the app's error registry). The Tauri command layer returns
+/// `{code, message}` so the webview renders the same tamper / rollback / wrong-passphrase distinctions on the
+/// native host as the wasm veneer does — the `AppError` contract, alive on both runtimes.
+#[must_use]
+pub fn error_code(err: &HostError) -> &'static str {
+    match err {
+        HostError::Vault(v) => openom_app_core::vault_error_code(v),
+        HostError::Core(_)
+        | HostError::Tree(_)
+        | HostError::Store(_)
+        | HostError::NoKeyring(_)
+        | HostError::NoCore(_) => openom_app_core::error_codes::INTERNAL,
+    }
+}
+
 /// The result of [`AppCoreHost::provision`] — the durable core is registered in the host; the caller gets only
 /// what it shows the user (the recovery code) + the author identity.
 #[derive(serde::Serialize)]
@@ -192,11 +207,16 @@ pub struct SyncOut {
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::struct_excessive_bools)] // four INDEPENDENT repair signals, mirroring the veneer's OpenResult
 pub struct Recovered {
     pub recovery_code: String,
     pub did_key: String,
     pub needs_reseal: bool,
     pub needs_backfill: bool,
+    /// Recovery mints a fresh escrow reaching every epoch, so these are always `false` — present only so the
+    /// native `recoverCore` result matches the veneer's shape (M2).
+    pub needs_rrk_backfill: bool,
+    pub write_epoch_unreachable: bool,
 }
 
 /// The result of [`AppCoreHost::change_passphrase`] — the rotated recovery code; the re-wrapped keyring +
@@ -475,6 +495,8 @@ impl<St: VaultStore> AppCoreHost<St> {
             did_key: r.did_key,
             needs_reseal: r.needs_reseal,
             needs_backfill: r.needs_backfill,
+            needs_rrk_backfill: false,
+            write_epoch_unreachable: false,
         })
     }
 
