@@ -248,17 +248,26 @@ impl AppCoreHandle {
     /// Returns a [`JsError`] if an element is malformed, or a store/mirror/compaction step fails.
     #[wasm_bindgen]
     pub fn sync(&mut self, remote: &Array, compact_k: u32) -> Result<JsValue, JsError> {
-        let (uploads, folded) = self
+        // Shared enriched tick (crate SyncTick): the pointer flag + covered frontier come from the core, so this
+        // veneer and the native host build the SAME upload metadata from ONE place.
+        let tick = self
             .inner
-            .sync_against(&objects_from_js(remote)?, compact_k)
+            .sync_tick(&objects_from_js(remote)?, compact_k)
             .map_err(to_js)?;
-        let put = objects_to_js(uploads)?;
+        let put = Array::new();
+        for u in tick.uploads {
+            let obj = Object::new();
+            set(&obj, "key", &JsValue::from_str(&u.key))?;
+            set(&obj, "bytes", &Uint8Array::from(u.bytes.as_slice()).into())?;
+            set(&obj, "pointer", &JsValue::from_bool(u.pointer))?;
+            put.push(&obj);
+        }
         let result = Object::new();
         set(&result, "put", &put)?;
         #[allow(clippy::cast_precision_loss)] // fold counts are tiny (entries merged this tick)
-        let folded_f = folded as f64;
+        let folded_f = tick.folded as f64;
         set(&result, "folded", &JsValue::from_f64(folded_f))?;
-        let covered = serde_json::to_string(&self.inner.subsumed_frontier()).map_err(to_js)?;
+        let covered = serde_json::to_string(&tick.covered).map_err(to_js)?;
         set(&result, "covered", &JsValue::from_str(&covered))?;
         Ok(result.into())
     }

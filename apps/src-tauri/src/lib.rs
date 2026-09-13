@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use openom_app_core_host::{
     AddedMember, AppCoreHost, MemberAccount, MemberToAdd, MemberUnlocked, PassphraseChanged,
-    Provisioned, Recovered, RemovedMember, RoleChanged, Unlocked,
+    Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -477,7 +477,7 @@ fn core_sync(
     doc: String,
     remote: Vec<StoredObject>,
     compact_k: u32,
-) -> Result<(Vec<StoredObject>, usize), String> {
+) -> Result<SyncOut, String> {
     state.sync(&doc, &remote, compact_k).map_err(e)
 }
 

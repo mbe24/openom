@@ -23,6 +23,23 @@ use store_blob::{BlobError, BlobStore, MemoryBlob, Precondition};
 /// [`AppCore::import`] / [`AppCore::sync_against`] — a `(key, bytes)` pair the host ferries verbatim.
 pub type StoredObject = (String, Vec<u8>);
 
+/// One object a sync tick must upload: its key, bytes, and whether it is a POINTER (heads/snapshot — overwrites)
+/// vs an immutable log object (writes If-None-Match). The CORE decides `pointer` from the key (`is_pointer_key`),
+/// so the caller never inspects a key to choose a write precondition.
+pub struct Upload {
+    pub key: String,
+    pub bytes: Vec<u8>,
+    pub pointer: bool,
+}
+
+/// The full result of one [`AppCore::sync_tick`]: the objects to upload (each with its `pointer` flag), how many
+/// entries folded, and the covered frontier the caller sends as the snapshot's `x-openom-covered` GC header.
+pub struct SyncTick {
+    pub uploads: Vec<Upload>,
+    pub folded: usize,
+    pub covered: BTreeMap<String, u64>,
+}
+
 #[cfg(feature = "wasm")]
 mod wasm;
 
@@ -762,6 +779,25 @@ impl<S: BlobStore> AppCore<S> {
             }
         }
         Ok((uploads, folded))
+    }
+
+    /// One sync tick with the FULL per-object write metadata the transport needs: [`sync_against`](Self::sync_against)
+    /// plus each upload's `pointer` flag (from the core's `is_pointer_key`) and the covered frontier (from
+    /// [`subsumed_frontier`](Self::subsumed_frontier)). The wasm veneer AND the native host both call THIS, so the
+    /// pointer/covered logic lives in exactly one place and the two runtimes can't drift.
+    ///
+    /// # Errors
+    /// As [`sync_against`](Self::sync_against).
+    pub fn sync_tick(&mut self, remote: &[StoredObject], compact_k: u32) -> Result<SyncTick, CoreError> {
+        let (uploads, folded) = self.sync_against(remote, compact_k)?;
+        let uploads = uploads
+            .into_iter()
+            .map(|(key, bytes)| {
+                let pointer = is_pointer_key(&key);
+                Upload { key, bytes, pointer }
+            })
+            .collect();
+        Ok(SyncTick { uploads, folded, covered: self.subsumed_frontier() })
     }
 
     /// Data-integrity anomalies observed so far: entries whose header wouldn't decode, the fold's quarantined

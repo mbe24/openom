@@ -166,6 +166,28 @@ pub struct MemberUnlocked {
     pub did_key: String,
 }
 
+/// One object the webview must PUT after a sync tick: its key + bytes + whether it's a POINTER (heads/snapshot —
+/// overwrite) vs an immutable log object (If-None-Match). The core decides `pointer` (from the key); the webview
+/// ferries it without inspecting the key.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadObject {
+    pub key: String,
+    pub bytes: Vec<u8>,
+    pub pointer: bool,
+}
+
+/// The result of [`AppCoreHost::sync`] — the objects to upload (each with its `pointer` flag), how many entries
+/// folded, and the `covered` frontier (`{replica: counter}`) the webview sends as the snapshot's
+/// `x-openom-covered` GC header.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncOut {
+    pub uploads: Vec<UploadObject>,
+    pub folded: usize,
+    pub covered: std::collections::BTreeMap<String, u64>,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -1090,7 +1112,9 @@ impl<St: VaultStore> AppCoreHost<St> {
     /// One sync tick against a caller-supplied remote snapshot: mirror the remote's objects into `doc`'s local
     /// store, fold/adopt them through the §B3 gate, maybe compact (when `compact_k > 0`), and return the
     /// objects the remote is missing (for the webview/host to PUT). The webview ferries the ciphertext + drives
-    /// the fetch; the DEK, the fold, and the plaintext store stay native (Full-A). Returns `(uploads, folded)`.
+    /// the fetch; the DEK, the fold, and the plaintext store stay native (Full-A). Returns the [`SyncOut`] the
+    /// webview PUTs: each upload with its `pointer` flag (decided by the core, not a key the webview inspects) +
+    /// the `covered` GC-header frontier for the snapshot.
     ///
     /// # Errors
     /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] on a store/merge fault.
@@ -1099,8 +1123,19 @@ impl<St: VaultStore> AppCoreHost<St> {
         doc: &str,
         remote: &[StoredObject],
         compact_k: u32,
-    ) -> Result<(Vec<StoredObject>, usize), HostError> {
-        self.with_core(doc, |c| Ok(c.sync_against(remote, compact_k)?))
+    ) -> Result<SyncOut, HostError> {
+        self.with_core(doc, |c| {
+            let tick = c.sync_tick(remote, compact_k)?;
+            Ok(SyncOut {
+                uploads: tick
+                    .uploads
+                    .into_iter()
+                    .map(|u| UploadObject { key: u.key, bytes: u.bytes, pointer: u.pointer })
+                    .collect(),
+                folded: tick.folded,
+                covered: tick.covered,
+            })
+        })
     }
 
     /// The live core for `doc` (for the ops not yet surfaced as host methods), if it has been
@@ -1260,7 +1295,8 @@ mod tests {
         // A mints, commits, and pushes to the shared remote (empty → all of A's objects are uploads).
         host_a.assert_anchor("t", "pAlice", PERSON).unwrap();
         host_a.commit("t").unwrap();
-        let (remote, _folded) = host_a.sync("t", &[], 0).unwrap();
+        let remote: Vec<_> =
+            host_a.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
         assert!(!remote.is_empty(), "A has objects to push to the remote");
 
         // B pulls the remote + folds → converges on A's mint.
@@ -1521,7 +1557,8 @@ mod tests {
             .unwrap();
         bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
         bob_host.commit("t").unwrap();
-        let (remote, _folded) = bob_host.sync("t", &[], 0).unwrap();
+        let remote: Vec<_> =
+            bob_host.sync("t", &[], 0).unwrap().uploads.into_iter().map(|u| (u.key, u.bytes)).collect();
 
         // The owner pulls bob's write + folds → converges on the member's ATTRIBUTED collaborator write.
         owner_host.sync("t", &remote, 0).unwrap();

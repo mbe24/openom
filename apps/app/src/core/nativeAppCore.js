@@ -27,6 +27,10 @@ export function isNativeHost() {
 const bytes = (x) => (x == null ? x : Array.from(x));
 // A Vec<u8> result (number array) back to a Uint8Array, the shape the web code expects for keyring bytes.
 const u8 = (x) => (x == null ? x : x instanceof Uint8Array ? x : new Uint8Array(x));
+// The remote (per-tree) blob-key prefix: the 16 tree-id bytes as lowercase hex — the same mapping main.js uses
+// for the tree UUID's byte seam (the worker's `treeKey`). The core's LOCAL keyspace is `{docId}/…`; the shared
+// REMOTE is `{treeKey}/…`, so the sync tick re-keys between them (exactly as appCore.worker.js does).
+const hexKey = (treeId) => Array.from(treeId, (b) => b.toString(16).padStart(2, '0')).join('');
 
 export function createNativeAppCore() {
   const call = (cmd, args) => {
@@ -35,9 +39,13 @@ export function createNativeAppCore() {
     return inv(cmd, args);
   };
 
-  // Per-doc network transport (set by attachTransport), for the sync tick. Keyed by docId.
+  // Per-doc network transport (set by attachTransport) + the doc→treeKey map (the remote keyspace prefix,
+  // recorded whenever a doc is opened) + a single-flight sync guard + the once-per-session create-tree gate.
   const transports = new Map();
-  const syncing = new Map(); // single-flight guard per doc
+  const treeKeys = new Map();
+  const syncing = new Map();
+  const treeEnsured = new Set();
+  const remember = (docId, treeId) => treeKeys.set(docId, hexKey(treeId));
 
   const api = {
     // --- session lifecycle (host owns the DEK; no engine arg — the host picks it) ---
@@ -45,16 +53,20 @@ export function createNativeAppCore() {
     warm: () => Promise.resolve(), // nothing to preload
     hasKeyring: (docId) => call('core_has_keyring', { doc: docId }),
 
-    provisionCore: ({ passphrase, treeId, memberId, docId }) =>
-      call('core_provision', { doc: docId, treeId: bytes(treeId), memberId, passphrase }),
+    provisionCore: ({ passphrase, treeId, memberId, docId }) => {
+      remember(docId, treeId);
+      return call('core_provision', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
+    },
 
     async unlockCore({ passphrase, treeId, memberId, docId }) {
+      remember(docId, treeId);
       const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
       await call('core_bootstrap', { doc: docId }); // hydrate the durable log (the worker's unlockCore does this)
       return out;
     },
 
     async recoverCore({ recoveryCode, newPassphrase, treeId, memberId, docId }) {
+      remember(docId, treeId);
       const out = await call('core_recover', {
         doc: docId, treeId: bytes(treeId), memberId, recoveryCode, newPassphrase,
       });
@@ -73,6 +85,8 @@ export function createNativeAppCore() {
     resetCore: (docId) => call('core_reset', { doc: docId }),
     close: (docId) => {
       transports.delete(docId);
+      treeKeys.delete(docId);
+      treeEnsured.delete(docId);
       return call('core_close', { doc: docId });
     },
 
@@ -130,6 +144,7 @@ export function createNativeAppCore() {
       return { keyring: u8(out.keyring), demote: out.demote };
     },
     async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, hops, pinnedRevision, pinnedHash }) {
+      remember(docId, treeId);
       const out = await call('core_join_as_member', {
         doc: docId, treeId: bytes(treeId), memberId, passphrase,
         memberKdfParams: bytes(memberKdfParams), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
@@ -138,6 +153,7 @@ export function createNativeAppCore() {
       return out;
     },
     async unlockAsMember({ docId, treeId, memberId, passphrase }) {
+      remember(docId, treeId);
       const out = await call('core_unlock_as_member', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
       await call('core_bootstrap', { doc: docId });
       return out;
@@ -145,34 +161,50 @@ export function createNativeAppCore() {
     syncKeyring: (docId, treeId, hops) =>
       call('core_sync_keyring', { doc: docId, treeId: bytes(treeId), hops: bytes(hops) }),
 
-    // --- sync (only reached when a managed backend is configured — startSync() is local-only otherwise).
-    // RUNTIME-ITERATION TARGET: a best-effort port of the worker's data tick. core_sync returns (uploads,
-    // folded); the pointer flag is derived from the key convention here (log objects are immutable, heads/
-    // snapshot pointers overwrite), and the covered-header GC optimization is not yet threaded through
-    // core_sync. Failures degrade to {state:'error'} (the driver treats that as offline), never a crash.
+    // --- sync (only reached when a managed backend is configured — startSync() is local-only otherwise) ---
     attachTransport(docId, transport) {
       transports.set(docId, transport);
     },
+    // The DATA-channel tick, ported faithfully from appCore.worker.js::syncData: fetch the shared remote (under
+    // the per-tree `{treeKey}/` prefix), re-key it into the core's local `{docId}/` namespace, hand it to
+    // core_sync (which mirrors in, folds, compacts, and returns the diff to push — each upload carrying the
+    // CORE's pointer flag, never a key this side inspects — plus the covered frontier), then re-key each upload
+    // back and PUT it (the snapshot carries the covered GC header). Single-flight; failures degrade to
+    // {state:'error'} (the driver treats that as offline), never a crash.
+    //
+    // NOT YET PORTED (itemized, not hand-waved): the keyring-before-data step (fetch newer keyring revisions →
+    // core_sync_keyring — needed for a SHARED tree's members to adopt rotations on sync), the pull-frontier
+    // GC-liveness telemetry (needs a core_pull_frontier command), and the OPE-293 advisory-summary flush. So a
+    // SOLO owner syncs fully here; a shared-over-server tree needs those three added.
     async syncNow(docId) {
       const transport = transports.get(docId);
-      if (!transport) return { state: 'no-transport' };
+      const treeKey = treeKeys.get(docId);
+      if (!transport || !treeKey) return { state: 'no-transport' };
       if (syncing.get(docId)) return { state: 'busy' };
       syncing.set(docId, true);
       try {
-        // The core's local keyspace is `{docId}/…`; the shared remote is `{treeKey}/…`. main.js derives the
-        // doc UUID and the hex tree key from the same 16 bytes, so re-key between them (as the worker does).
-        // The tree key is not known here yet — a follow-up threads it through attachTransport; until then this
-        // uses the docId prefix on both sides, which the two-host convergence path already exercises.
-        const prefix = `${docId}/`;
-        const remote = [];
-        for (const { key } of await transport.blobList(prefix)) {
-          const b = await transport.blobGet(key);
-          if (b) remote.push([key, Array.from(b)]);
+        // First push per session: mint this owner's server `trees` row (OPE-407). Idempotent for the owner;
+        // a joining member 403s here (the owner already created it), so swallow — its blob PUTs still land.
+        if (!treeEnsured.has(docId)) {
+          try { await transport.createTree(docId); } catch { /* member / already exists */ }
+          treeEnsured.add(docId);
         }
-        const [uploads] = await call('core_sync', { doc: docId, remote, compactK: 8 });
-        for (const [key, b] of uploads) {
-          const pointer = key.endsWith('/snapshot') || key.includes('/heads/');
-          await transport.blobPut(key, new Uint8Array(b), pointer, undefined);
+        const localPrefix = `${docId}/`;
+        const remotePrefix = `${treeKey}/`;
+        // PULL: the shared remote, re-keyed into the core's local namespace.
+        const remote = [];
+        for (const { key } of await transport.blobList(remotePrefix)) {
+          const b = await transport.blobGet(key);
+          if (b) remote.push([localPrefix + key.slice(remotePrefix.length), Array.from(b)]);
+        }
+        // The core owns the whole keyspace + head-monotonicity decision; this is a dumb ferry.
+        const { uploads, covered } = await call('core_sync', { doc: docId, remote, compactK: 8 });
+        // PUSH: re-key each upload back to the shared namespace; the CORE decided pointer; the snapshot carries
+        // the covered header (a well-known object key — the one key the worker itself checks, for the header).
+        for (const o of uploads) {
+          const remoteKey = remotePrefix + o.key.slice(localPrefix.length);
+          const coveredHeader = o.key.endsWith('/snapshot') ? covered : undefined;
+          await transport.blobPut(remoteKey, new Uint8Array(o.bytes), o.pointer, coveredHeader);
         }
         return { state: 'ok', anomalies: await api.anomalies(docId) };
       } catch (err) {
