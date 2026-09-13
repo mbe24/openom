@@ -4,6 +4,7 @@
 // durable store; this side is UI + these seams.
 import * as Comlink from '../vendor/comlink.js';
 import { normalizeUnknown, isAppError } from './errorModel.js';
+import { createNativeAppCore, isNativeHost } from './nativeAppCore.js';
 
 let workerRef = null;
 let apiRef = null;
@@ -46,9 +47,19 @@ function startHeartbeat(api) {
   }, HEARTBEAT_INTERVAL_MS);
 }
 
-/** Create (or reuse) the app-core worker and its Comlink proxy. Call `await worker.warm()` early. */
+/**
+ * Create (or reuse) the app-core client and its proxy. Call `await worker.warm()` early.
+ *
+ * Under Tauri (OPE-427 Full-A / OPE-429), returns the NATIVE-mode client — the DEK + engine + local store run
+ * in the Rust host and this drives them over `invoke`; no Web Worker, no wasm on this side. On the web it's the
+ * Comlink-wrapped wasm worker as before. Both present the same method surface, so callers don't branch.
+ */
 export function appCoreWorker() {
   if (apiRef) return apiRef;
+  if (isNativeHost()) {
+    apiRef = createNativeAppCore(); // native full-core host: no worker + no heartbeat (invoke fails directly)
+    return apiRef;
+  }
   workerRef = new Worker(new URL('./appCore.worker.js', import.meta.url), { type: 'module' });
   apiRef = Comlink.wrap(workerRef);
   workerRef.addEventListener('error', (e) => {
