@@ -87,6 +87,13 @@ pub struct Recovered {
     pub needs_backfill: bool,
 }
 
+/// The result of [`AppCoreHost::change_passphrase`] — the rotated recovery code; the re-wrapped keyring +
+/// watermark are persisted natively. The DEK is unchanged, so the running core keeps working (no re-open).
+#[derive(serde::Serialize)]
+pub struct PassphraseChanged {
+    pub recovery_code: String,
+}
+
 /// The native app-core host. `store` holds the keyring anchor + anti-rollback watermark per tree; `data_dir`
 /// roots each doc's local device `FsBlob`; `engine` is the keyring engine for NEW trees (existing trees carry
 /// their own in the keyring). Live cores are held per-doc behind a `Mutex`.
@@ -235,6 +242,44 @@ impl<St: VaultStore> AppCoreHost<St> {
             needs_reseal: r.needs_reseal,
             needs_backfill: r.needs_backfill,
         })
+    }
+
+    /// Change the passphrase on a tree in native custody: load the stored keyring + watermark, re-wrap under
+    /// the new passphrase, and PERSIST the fresh keyring natively. The DEK is unchanged — the running core
+    /// keeps working (no re-open). Returns the rotated recovery code to show once.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if the tree isn't stored; [`HostError::Vault`] on a wrong current passphrase;
+    /// [`HostError::Store`] on a store read/write failure.
+    pub fn change_passphrase(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        replica_id: &[u8],
+        old_passphrase: &Passphrase,
+        new_passphrase: &Passphrase,
+    ) -> Result<PassphraseChanged, HostError> {
+        let anchor = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let floor = self.store.watermark(doc).map_err(HostError::Store)?;
+        let re = openom_app_core::change_passphrase(
+            self.engine,
+            old_passphrase,
+            new_passphrase,
+            tree_id,
+            member_id,
+            replica_id,
+            &anchor,
+            &floor,
+        )?;
+        self.store
+            .commit_keyring(doc, &re.keyring, &re.watermark)
+            .map_err(HostError::Store)?;
+        Ok(PassphraseChanged { recovery_code: re.recovery_code })
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
@@ -486,6 +531,32 @@ mod tests {
         );
         assert!(
             host.unlock("t", &tree_id, "owner", &[33u8; 16], &old).is_err(),
+            "the old passphrase no longer unlocks"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn change_passphrase_re_wraps_natively_and_only_the_new_passphrase_unlocks() {
+        // change-passphrase re-wraps the keyring under a new KEK (the DEK unchanged) and persists it natively —
+        // so the new passphrase unlocks and the old one no longer does, with no re-open of the running core.
+        let dir = temp_dir();
+        let host = AppCoreHost::new(MemStore::default(), &dir, EngineKind::Chain);
+        let tree_id = [12u8; 16];
+        let a = Passphrase::new(b"the first passphrase here".to_vec());
+        host.provision("t", &tree_id, "owner", &[40u8; 16], &a).unwrap();
+
+        let b = Passphrase::new(b"the second passphrase now".to_vec());
+        let r = host.change_passphrase("t", &tree_id, "owner", &[41u8; 16], &a, &b).unwrap();
+        assert!(!r.recovery_code.is_empty(), "change-passphrase rotates the recovery code");
+
+        assert!(
+            host.unlock("t", &tree_id, "owner", &[42u8; 16], &b).is_ok(),
+            "the new passphrase unlocks the re-wrapped keyring"
+        );
+        assert!(
+            host.unlock("t", &tree_id, "owner", &[43u8; 16], &a).is_err(),
             "the old passphrase no longer unlocks"
         );
 

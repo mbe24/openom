@@ -234,6 +234,43 @@ pub fn recover<S: BlobStore>(
     })
 }
 
+/// The result of [`change_passphrase`]: the re-wrapped keyring anchor + rotated recovery code + watermark to
+/// persist. The DEK is unchanged, so there is no new core — the running core keeps working.
+pub struct PassphraseChanged {
+    pub keyring: Vec<u8>,
+    pub recovery_code: String,
+    pub watermark: Vec<u8>,
+}
+
+/// Change the passphrase: re-wrap the keyring under a new KEK and rotate the recovery code. The DEK is
+/// unchanged (the running core keeps working), so this returns no core — just the new keyring + code +
+/// watermark to persist. `anchor` is the stored keyring; `floor` is the persisted watermark.
+///
+/// # Errors
+/// Returns [`VaultError`] if the engine can't re-key the anchor (wrong current passphrase / stale keyring).
+#[allow(clippy::too_many_arguments)]
+pub fn change_passphrase(
+    engine: EngineKind,
+    old_passphrase: &Passphrase,
+    new_passphrase: &Passphrase,
+    tree_id: &[u8],
+    member_id: &str,
+    replica_id: &[u8],
+    anchor: &[u8],
+    floor: &[u8],
+) -> Result<PassphraseChanged, VaultError> {
+    let (tree, member, replica) =
+        (TreeId::new(tree_id), MemberId::new(member_id), ReplicaId::new(replica_id));
+    let ctx = VaultContext { tree_id: &tree, member_id: &member, replica_id: &replica };
+    let re = AppVault::from_kind(engine)
+        .change_passphrase(&ctx, anchor, old_passphrase, new_passphrase, floor)?;
+    Ok(PassphraseChanged {
+        keyring: re.anchor,
+        recovery_code: re.recovery_code.into_string(),
+        watermark: re.watermark,
+    })
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use openom_crypto::Passphrase;

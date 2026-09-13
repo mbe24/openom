@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use openom_app_core_host::{AppCoreHost, Provisioned, Recovered, Unlocked};
+use openom_app_core_host::{AppCoreHost, PassphraseChanged, Provisioned, Recovered, Unlocked};
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_vault_host::sqlite::SqliteVaultStore;
@@ -122,6 +122,35 @@ async fn core_recover(
     .map_err(e)?
 }
 
+/// Change the passphrase: the host loads the stored keyring + watermark, re-wraps under the new passphrase, and
+/// PERSISTS the fresh keyring natively. The DEK is unchanged, so the running core keeps working. Returns the
+/// rotated recovery code.
+#[tauri::command]
+async fn core_change_passphrase(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    member_id: String,
+    replica_id: Vec<u8>,
+    old_passphrase: String,
+    new_passphrase: String,
+) -> Result<PassphraseChanged, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.change_passphrase(
+            &doc,
+            &tree_id,
+            &member_id,
+            &replica_id,
+            &Passphrase::new(old_passphrase.into_bytes()),
+            &Passphrase::new(new_passphrase.into_bytes()),
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -198,6 +227,7 @@ pub fn run() {
             core_provision,
             core_unlock,
             core_recover,
+            core_change_passphrase,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

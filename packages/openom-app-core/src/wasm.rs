@@ -15,7 +15,7 @@ use openom_crypto::{CryptoError, Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
 use openom_protocol::ids::{MemberId, ReplicaId, TreeId};
 use openom_sealer::{Sealer, SealerSet};
-use openom_vault::lifecycle::{KeyringLifecycle, VaultContext};
+use openom_vault::lifecycle::VaultContext;
 use openom_vault::{AppVault, VaultError};
 use store_blob::MemoryBlob;
 use wasm_bindgen::prelude::*;
@@ -623,26 +623,22 @@ pub fn change_passphrase(
     anchor: &[u8],
     floor: &[u8],
 ) -> Result<OpenResult, JsValue> {
-    let vault = AppVault::from_kind(parse_engine(engine)?);
-    let (tree, member, replica) = parse_ids(tree_id, member_id, replica_id);
-    let ctx = VaultContext {
-        tree_id: &tree,
-        member_id: &member,
-        replica_id: &replica,
-    };
-    let re = vault
-        .change_passphrase(
-            &ctx,
-            anchor,
-            &Passphrase::new(old_passphrase.into_bytes()),
-            &Passphrase::new(new_passphrase.into_bytes()),
-            floor,
-        )
-        .map_err(|e| vault_err_to_js(&e))?;
+    // Shared rlib re-key (crate::change_passphrase) so this veneer and the native host can't drift.
+    let re = crate::change_passphrase(
+        parse_engine(engine)?,
+        &Passphrase::new(old_passphrase.into_bytes()),
+        &Passphrase::new(new_passphrase.into_bytes()),
+        tree_id,
+        member_id,
+        replica_id,
+        anchor,
+        floor,
+    )
+    .map_err(|e| vault_err_to_js(&e))?;
     Ok(OpenResult {
         handle: None, // the DEK is unchanged — the running core keeps working
-        keyring: re.anchor,
-        recovery_code: re.recovery_code.into_string(),
+        keyring: re.keyring,
+        recovery_code: re.recovery_code,
         did_key: String::new(),
         watermark: re.watermark,
         needs_reseal: false,
