@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AddedMember, AppCoreHost, MemberAccount, MemberToAdd, PassphraseChanged, Provisioned, Recovered,
-    RemovedMember, RoleChanged, Unlocked,
+    AddedMember, AppCoreHost, MemberAccount, MemberToAdd, MemberUnlocked, PassphraseChanged,
+    Provisioned, Recovered, RemovedMember, RoleChanged, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -237,6 +237,60 @@ async fn core_change_role(
     .map_err(e)?
 }
 
+/// A joining member's first open: the host verifies the fetched keyring history against the OOB pin, unlocks at
+/// the verified head, and establishes native custody (member context + keyring + retention). `hops` is the
+/// framed keyring history the webview fetched; trusted signers are derived from the verified walk, never passed.
+/// Argon2id, so `spawn_blocking`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri invoke convention: the flat argument list IS the JS calling shape
+async fn core_join_as_member(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    member_id: String,
+    passphrase: String,
+    member_kdf_params: Vec<u8>,
+    hops: Vec<u8>,
+    pinned_revision: u32,
+    pinned_hash: Vec<u8>,
+) -> Result<MemberUnlocked, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.join_as_member(
+            &doc,
+            &tree_id,
+            &member_id,
+            &Passphrase::new(passphrase.into_bytes()),
+            &member_kdf_params,
+            &hops,
+            pinned_revision,
+            &pinned_hash,
+        )
+        .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
+/// Re-open a shared tree as a member on a device that already joined: the host loads the keyring + member
+/// context from native custody (no webview trust inputs) and unlocks. Argon2id, so `spawn_blocking`.
+#[tauri::command]
+async fn core_unlock_as_member(
+    state: State<'_, Host>,
+    doc: String,
+    tree_id: Vec<u8>,
+    member_id: String,
+    passphrase: String,
+) -> Result<MemberUnlocked, String> {
+    let host = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        host.unlock_as_member(&doc, &tree_id, &member_id, &Passphrase::new(passphrase.into_bytes()))
+            .map_err(e)
+    })
+    .await
+    .map_err(e)?
+}
+
 // --------------------------------------------------------------- session ops (cheap: sync is fine)
 
 /// Whether a keyring is already stored natively for `doc` (the shell's "provision vs unlock" fork).
@@ -318,6 +372,8 @@ pub fn run() {
             core_add_member,
             core_remove_member,
             core_change_role,
+            core_join_as_member,
+            core_unlock_as_member,
             core_bootstrap,
             core_assert_anchor,
             core_commit,

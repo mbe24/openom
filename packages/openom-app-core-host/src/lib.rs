@@ -21,6 +21,8 @@ use store_blob::{BlobStore, FsBlob, Precondition};
 pub type CoreHandle = Arc<Mutex<AppCore<FsBlob>>>;
 /// The per-doc registry, keyed by doc id.
 type CoreMap = HashMap<String, CoreHandle>;
+/// A member's native custody context: `(kdf_params, flat trusted_signers)`.
+type MemberContext = (Vec<u8>, Vec<u8>);
 
 /// A fresh, ephemeral replica id (16 bytes from the OS CSPRNG) minted per open. NEVER a caller argument: a
 /// repeated replica id forks the per-replica counter chain (an anti-fork security property), and a fresh id per
@@ -151,6 +153,13 @@ pub struct RoleChanged {
     pub demote: bool,
 }
 
+/// The result of [`AppCoreHost::join_as_member`] / [`AppCoreHost::unlock_as_member`] — the member's author
+/// identity; the ready member core is registered in the host.
+#[derive(serde::Serialize)]
+pub struct MemberUnlocked {
+    pub did_key: String,
+}
+
 /// The result of [`AppCoreHost::recover`] — the new recovery code to show once + the author identity + the two
 /// advisory repair flags; the fresh keyring/watermark are persisted natively and the core registered.
 #[derive(serde::Serialize)]
@@ -232,6 +241,64 @@ impl<St: VaultStore> AppCoreHost<St> {
                     out.push((rev, bytes));
                 }
             }
+        }
+        Ok(out)
+    }
+
+    /// This doc's MEMBER-CONTEXT store — a native `FsBlob` at `data_dir/{doc}.mc` holding the joining member's
+    /// account KDF params + the tree's trusted signer set (both trust-bearing, established at JOIN from the
+    /// verified walk), so a later [`unlock_as_member`] reads them from native custody rather than the webview
+    /// (design-review C2 / F5 / F6). Sibling dir (`.mc` can't collide: `checked_doc` forbids `.`).
+    fn member_context_store(&self, doc: &str) -> Result<FsBlob, HostError> {
+        let dir = self.data_dir.join(format!("{}.mc", checked_doc(doc)?));
+        std::fs::create_dir_all(&dir).map_err(|e| HostError::Store(e.to_string()))?;
+        Ok(FsBlob::new(dir))
+    }
+
+    /// Persist the member context (`kdf_params` + the flat `trusted_signers`) natively. Written BEFORE the
+    /// keyring at join, so "keyring present" implies "context present" (F6/F7 crash-ordering — the re-join guard
+    /// keys on the keyring as the sole commit point).
+    fn save_member_context(&self, doc: &str, kdf_params: &[u8], trusted_signers: &[u8]) -> Result<(), HostError> {
+        let store = self.member_context_store(doc)?;
+        store.put("kdf", kdf_params, Precondition::Any).map_err(|e| HostError::Store(e.to_string()))?;
+        store.put("signers", trusted_signers, Precondition::Any).map_err(|e| HostError::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Load the member context `(kdf_params, trusted_signers)` from native custody, or `None` if this device
+    /// never joined as a member (an owner tree has none).
+    fn load_member_context(&self, doc: &str) -> Result<Option<MemberContext>, HostError> {
+        let store = self.member_context_store(doc)?;
+        let Some((kdf, _etag)) = store.get("kdf").map_err(|e| HostError::Store(e.to_string()))? else {
+            return Ok(None);
+        };
+        let signers = store
+            .get("signers")
+            .map_err(|e| HostError::Store(e.to_string()))?
+            .map(|(b, _etag)| b)
+            .unwrap_or_default();
+        Ok(Some((kdf, signers)))
+    }
+
+    /// Unframe a `[u32-be len][body]…` run (the walk's `bodies_framed`, ascending from genesis) into
+    /// `(revision, body)` pairs — revision `r` is the `r-1`-th body.
+    fn unframe_revisions(framed: &[u8]) -> Result<Vec<(u32, Vec<u8>)>, HostError> {
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        let mut revision = 1u32;
+        while i < framed.len() {
+            let end = i
+                .checked_add(4)
+                .filter(|&e| e <= framed.len())
+                .ok_or_else(|| HostError::Store("truncated framed revision length".into()))?;
+            let len = u32::from_be_bytes(framed[i..end].try_into().expect("4 bytes")) as usize;
+            let body_end = end
+                .checked_add(len)
+                .filter(|&e| e <= framed.len())
+                .ok_or_else(|| HostError::Store("truncated framed revision body".into()))?;
+            out.push((revision, framed[end..body_end].to_vec()));
+            revision += 1;
+            i = body_end;
         }
         Ok(out)
     }
@@ -647,6 +714,111 @@ impl<St: VaultStore> AppCoreHost<St> {
             openom_vault::resolver_from(self.engine, &changed.keyring, &self.retained_revisions(doc)?)?;
         guard.set_membership(resolver)?;
         Ok(RoleChanged { keyring: changed.keyring, demote })
+    }
+
+    /// A joining member's FIRST open: verify the fetched keyring history from genesis against the OOB invite pin
+    /// (`verify_keyring_walk` — fails closed, persists NOTHING on any bad walk / pin mismatch), unlock at the
+    /// verified head BEFORE persisting (F3 — a wrong passphrase leaves no partial state), then persist the
+    /// member context FIRST, retain every revision, and commit the head keyring as the sole commit point (so
+    /// "keyring present" implies "context present" — F6/F7). `trusted_signers` are DERIVED from the verified
+    /// walk, never a webview argument (Fable-F1 / C2). Refuses to re-join a tree already in native custody (the
+    /// re-join guard — Sonnet-F5). `member_kdf_params` is the member's own account KDF (from `provision_member`).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] if already joined or on a store fault; [`HostError::Vault`] on a failed walk / pin
+    /// mismatch; [`HostError::Core`] on a wrong passphrase / member-unlock failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn join_as_member(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        passphrase: &Passphrase,
+        member_kdf_params: &[u8],
+        hops: &[u8],
+        pinned_revision: u32,
+        pinned_hash: &[u8],
+    ) -> Result<MemberUnlocked, HostError> {
+        // Re-join guard: never overwrite an already-established trust relationship (native custody is the trust
+        // root, so an overwrite would let a compromised webview redirect the member to an attacker tree).
+        if self.store.load_keyring(doc).map_err(HostError::Store)?.is_some() {
+            return Err(HostError::Store(format!("already joined {doc:?}; unlock, don't re-join")));
+        }
+        let walk =
+            openom_vault::sharing::verify_keyring_walk(tree_id, hops, pinned_revision, pinned_hash)?;
+        let retained = Self::unframe_revisions(&walk.bodies_framed)?;
+        // Unlock at the verified head BEFORE persisting anything (F3).
+        let m = openom_app_core::unlock_as_member(
+            self.doc_store(doc)?,
+            self.engine,
+            &walk.head_keyring,
+            passphrase,
+            member_kdf_params,
+            tree_id,
+            member_id,
+            &walk.trusted_signers_flat,
+            &fresh_replica()?,
+            walk.revision,
+            &retained,
+            doc.to_string(),
+        )?;
+        // Persist context FIRST, then retention, then the keyring head as the sole commit point (F6/F7).
+        self.save_member_context(doc, member_kdf_params, &walk.trusted_signers_flat)?;
+        for (rev, body) in &retained {
+            self.retain_revision(doc, *rev, body)?;
+        }
+        self.store
+            .commit_keyring(doc, &walk.head_keyring, &m.watermark)
+            .map_err(HostError::Store)?;
+        let did_key = m.did_key.clone();
+        self.register(doc, m.core);
+        Ok(MemberUnlocked { did_key })
+    }
+
+    /// Unlock a SHARED tree as a non-owner member on a device that has already JOINED: load the trusted keyring,
+    /// the member context (kdf + trusted signers), and the anti-rollback floor FROM NATIVE CUSTODY (never a
+    /// webview argument — C2), HPKE-unwrap the member DEKs, and register a ready core carrying its epoch-adopt
+    /// secret + a §B3 resolver over the retained revisions.
+    ///
+    /// # Errors
+    /// [`HostError::NoKeyring`] if the tree was never joined (no keyring / no member context);
+    /// [`HostError::Core`] on a wrong passphrase / unpinned signer / removed member; [`HostError::Store`] on a
+    /// store fault.
+    pub fn unlock_as_member(
+        &self,
+        doc: &str,
+        tree_id: &[u8],
+        member_id: &str,
+        passphrase: &Passphrase,
+    ) -> Result<MemberUnlocked, HostError> {
+        let keyring = self
+            .store
+            .load_keyring(doc)
+            .map_err(HostError::Store)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let (kdf, signers) = self
+            .load_member_context(doc)?
+            .ok_or_else(|| HostError::NoKeyring(doc.to_string()))?;
+        let min_revision = openom_vault::sharing::chain_watermark_floor(
+            &self.store.watermark(doc).map_err(HostError::Store)?,
+        );
+        let m = openom_app_core::unlock_as_member(
+            self.doc_store(doc)?,
+            self.engine,
+            &keyring,
+            passphrase,
+            &kdf,
+            tree_id,
+            member_id,
+            &signers,
+            &fresh_replica()?,
+            min_revision,
+            &self.retained_revisions(doc)?,
+            doc.to_string(),
+        )?;
+        let did_key = m.did_key.clone();
+        self.register(doc, m.core);
+        Ok(MemberUnlocked { did_key })
     }
 
     /// Rebuild `doc`'s engine from its durable local log — call once after [`unlock`](Self::unlock) on open,
@@ -1084,5 +1256,67 @@ mod tests {
             "history survives the promote + demote (no epoch rotation)"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_member_joins_on_a_second_host_writes_and_converges_with_the_owner() {
+        use super::MemberToAdd;
+        let (dir_o, dir_b) = (temp_dir(), temp_dir());
+        let owner_host = AppCoreHost::new(MemStore::default(), &dir_o, EngineKind::Chain);
+        let bob_host = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Chain);
+        let tree_id = [8u8; 16];
+        let owner_pass = Passphrase::new(b"the owner passphrase now".to_vec());
+        let bob_pass = Passphrase::new(b"bob's own passphrase here".to_vec());
+
+        // Bob mints his account on HIS device; the owner admits him as a Maintainer (can commit directly).
+        let bob_acct = bob_host.provision_member(&bob_pass).unwrap();
+        owner_host.provision("t", &tree_id, "acct-owner", &owner_pass).unwrap();
+        let bob_member = MemberToAdd {
+            member_id: "acct-bob".into(),
+            role: "maintainer".into(),
+            author_public_key: bob_acct.author_public_key.clone(),
+            hpke_public_key: bob_acct.hpke_public_key.clone(),
+        };
+        let added = owner_host.add_member("t", &tree_id, "acct-owner", &owner_pass, &bob_member).unwrap();
+
+        // The owner publishes the keyring history; bob pulls it as hops (genesis + shared) + the OOB pin (genesis
+        // hash). The genesis body is in the owner's native retention (revision 1).
+        let genesis = owner_host
+            .retained_revisions("t")
+            .unwrap()
+            .into_iter()
+            .find(|(r, _)| *r == 1)
+            .expect("genesis revision retained")
+            .1;
+        let hops =
+            openom_vault::sharing::frame_keyring_hops(&[genesis.clone(), added.keyring.clone()]);
+        let pin = openom_vault::sharing::chain_keyring_pin(&genesis).unwrap();
+
+        // Bob JOINS on his device (verify walk vs the pin, unlock, establish native custody), then mints + pushes.
+        bob_host
+            .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+            .unwrap();
+        bob_host.assert_anchor("t", "pBob", PERSON).unwrap();
+        bob_host.commit("t").unwrap();
+        let (remote, _folded) = bob_host.sync("t", &[], 0).unwrap();
+
+        // The owner pulls bob's write + folds → converges on the member's ATTRIBUTED collaborator write.
+        owner_host.sync("t", &remote, 0).unwrap();
+        assert!(
+            owner_host.project("t").unwrap().contains("pBob"),
+            "the owner converges on the joined member's attributed write"
+        );
+
+        // Bob can re-open with unlock_as_member (custody-only inputs) + the re-join guard refuses a second join.
+        assert!(bob_host.unlock_as_member("t", &tree_id, "acct-bob", &bob_pass).is_ok(), "re-unlock from custody");
+        assert!(
+            bob_host
+                .join_as_member("t", &tree_id, "acct-bob", &bob_pass, &bob_acct.kdf_params, &hops, 1, &pin)
+                .is_err(),
+            "re-joining an already-joined tree is refused"
+        );
+
+        std::fs::remove_dir_all(&dir_o).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
     }
 }

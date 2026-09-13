@@ -999,7 +999,12 @@ pub fn unlock_as_member(
     min_revision: u32,
     doc: String,
 ) -> Result<OpenResult, JsError> {
-    let u = openom_vault::sharing::unlock_as_member(
+    // Shared rlib construction (crate::unlock_as_member) so this veneer and the native host build the member
+    // core identically — sealer + epoch-adopt secret (OPE-393) + a §B3 resolver AT CONSTRUCTION (never the
+    // accept-all state a pre-setMembership sync would fold forgeries into). Empty retained set here: older
+    // governing revisions Hold (fail-closed) until the worker supplies them via a later setMembership.
+    let m = crate::unlock_as_member(
+        MemoryBlob::new(),
         parse_engine(engine)?,
         keyring,
         &Passphrase::new(passphrase.into_bytes()),
@@ -1009,38 +1014,23 @@ pub fn unlock_as_member(
         trusted_signers,
         replica_id,
         min_revision,
+        &[],
+        doc,
     )
     .map_err(to_js)?;
-    let mut inner = AppCore::new(
-        u.did_key.clone(),
-        u.sealer,
-        Arc::new(MemoryBlob::new()),
-        doc,
-        replica_id,
-    );
-    // Retain the member's epoch-adopt secret so a keyring sync that rotates the write epoch (a removal) can
-    // splice the new epoch DEK into this running core WITHOUT a passphrase (OPE-393). Stays inside the core.
-    inner.set_member_epoch_secret(u.epoch_secret);
-    // A member-unlocked core is a SHARED tree by definition, so install a §B3 resolver AT CONSTRUCTION —
-    // never leave it in the accept-all `membership: None` state where a sync tick before the worker's first
-    // setMembership would fold forgeries. The dag anchor is self-sufficient; the chain gets the head with an
-    // empty retained set (older governing revisions Hold — fail-closed — until the worker supplies them).
-    let resolver =
-        openom_vault::resolver_from(parse_engine(engine)?, keyring, &[]).map_err(to_js)?;
-    inner.set_membership(resolver).map_err(to_js)?;
     Ok(OpenResult {
-        handle: Some(AppCoreHandle { inner }),
+        handle: Some(AppCoreHandle { inner: m.core }),
         keyring: Vec::new(),
         recovery_code: String::new(),
-        did_key: u.did_key,
-        watermark: u.watermark,
+        did_key: m.did_key,
+        watermark: m.watermark,
         needs_reseal: false,
         needs_backfill: false,
         // The member-unlock wrapper (sharing::unlock_as_member) doesn't thread the coverage advisories through
         // yet — the member drives backfill_rrk opportunistically (idempotent) rather than off this flag.
         needs_rrk_backfill: false,
-        // The member's own local lockout signal — the one a malicious coverage hint can't suppress (OPE-299).
-        write_epoch_unreachable: u.write_epoch_unreachable,
+        // A linear chain always reaches its own write epoch on a member unlock (OPE-299).
+        write_epoch_unreachable: false,
     })
 }
 

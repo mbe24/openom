@@ -53,6 +53,9 @@ pub struct WalkedHistory {
     /// Every RAW per-revision body 1..=head, ascending, length-prefix framed (`[u32-be len][bytes]…`) so the
     /// caller unframes + retains each for pre-join attributed-entry verification.
     pub bodies_framed: Vec<u8>,
+    /// The head's authorized signer public keys, concatenated (32 bytes each) — the `trusted_signers` a native
+    /// caller feeds straight to [`unlock_as_member`] without round-tripping through `signers_json` + hex.
+    pub trusted_signers_flat: Vec<u8>,
 }
 
 // --- small helpers (moved verbatim) ----------------------------------------------------------------
@@ -385,12 +388,37 @@ pub fn verify_keyring_walk(
         })
         .collect::<Vec<_>>();
     let signers_json = serde_json::to_string(&signers).map_err(|e| err(e.to_string()))?;
+    let trusted_signers_flat =
+        head.trusted_signers.iter().flat_map(|s| s.public_key.iter().copied()).collect();
     Ok(WalkedHistory {
         revision: head.revision,
         head_keyring: bodies.last().expect("non-empty run").clone(),
         signers_json,
         bodies_framed: frame_length_prefixed(&bodies),
+        trusted_signers_flat,
     })
+}
+
+/// Frame raw chain `Keyring` revision bodies (ascending from genesis, no gaps) as a joiner's hop run —
+/// `[u32-be len][MembershipEnvelope bytes]…`, the exact input [`verify_keyring_walk`] consumes. The outbound
+/// symmetry of the read-side walk: the server stores each revision wrapped, and a joiner pulls them framed.
+#[must_use]
+pub fn frame_keyring_hops(bodies: &[Vec<u8>]) -> Vec<u8> {
+    let wrapped: Vec<Vec<u8>> = bodies
+        .iter()
+        .map(|b| MembershipEnvelope::wrap(EngineKind::Chain, b.clone()).encode())
+        .collect();
+    frame_length_prefixed(&wrapped)
+}
+
+/// The OOB invite pin for a raw chain `Keyring` revision `body` — its `keyring_hash` (32 bytes). The owner
+/// shares this out of band; the joiner binds the verified walk to it in [`verify_keyring_walk`].
+///
+/// # Errors
+/// Returns [`VaultError`] if `body` isn't a decodable chain keyring.
+pub fn chain_keyring_pin(body: &[u8]) -> Result<Vec<u8>, VaultError> {
+    let kr = Keyring::decode(body).map_err(|e| err(format!("bad keyring: {e}")))?;
+    Ok(keyring_hash(&kr).as_slice().to_vec())
 }
 
 /// Frame a raw signed chain `Keyring` revision as the wire `KeyringUpdate` the server's `PUT

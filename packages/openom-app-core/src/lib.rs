@@ -271,6 +271,58 @@ pub fn change_passphrase(
     })
 }
 
+/// The result of [`unlock_as_member`]: a ready member [`AppCore`] (already carrying its epoch-adopt secret and
+/// a §B3 resolver installed at construction) + the author identity + watermark.
+pub struct MemberUnlocked<S: BlobStore> {
+    pub core: AppCore<S>,
+    pub did_key: String,
+    pub watermark: Vec<u8>,
+}
+
+/// Unlock a shared tree as a NON-owner member over `store`: verify against the pinned `trusted_signers` (chain)
+/// / resolve the anchor (dag), HPKE-unwrap the member DEKs with the passphrase + account KDF, and wrap a ready
+/// core that (a) retains the member's epoch-adopt secret so a later write-epoch rotation splices in without a
+/// passphrase (OPE-393) and (b) carries a §B3 resolver AT CONSTRUCTION — never the accept-all state where a
+/// sync before the first membership install would fold forgeries. `keyring` is the trusted member keyring head;
+/// `retained` is the prior-revision set for the look-behind (empty ⇒ older governing revisions Hold, fail-
+/// closed, until supplied); `trusted_signers` is the flat concatenated signer keys (empty for dag).
+///
+/// # Errors
+/// [`CoreError::Vault`] if member unlock fails (wrong passphrase / unpinned signer / removed member) or the
+/// resolver can't be built; [`CoreError`] if installing the resolver faults.
+#[allow(clippy::too_many_arguments)]
+pub fn unlock_as_member<S: BlobStore>(
+    store: S,
+    engine: EngineKind,
+    keyring: &[u8],
+    passphrase: &Passphrase,
+    member_kdf_params: &[u8],
+    tree_id: &[u8],
+    member_id: &str,
+    trusted_signers: &[u8],
+    replica_id: &[u8],
+    min_revision: u32,
+    retained: &[(u32, Vec<u8>)],
+    doc: impl Into<String>,
+) -> Result<MemberUnlocked<S>, CoreError> {
+    let u = openom_vault::sharing::unlock_as_member(
+        engine,
+        keyring,
+        passphrase,
+        member_kdf_params,
+        tree_id,
+        member_id,
+        trusted_signers,
+        replica_id,
+        min_revision,
+    )?;
+    let mut core = AppCore::new(u.did_key.clone(), u.sealer, Arc::new(store), doc, replica_id);
+    core.set_member_epoch_secret(u.epoch_secret);
+    let resolver = openom_vault::resolver_from(engine, keyring, retained)?;
+    core.set_membership(resolver)?;
+    Ok(MemberUnlocked { core, did_key: u.did_key, watermark: u.watermark })
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use openom_crypto::Passphrase;
