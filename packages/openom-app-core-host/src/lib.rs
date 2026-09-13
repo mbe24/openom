@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use openom_app_core::AppCore;
+use openom_app_core::{AppCore, StoredObject};
 use openom_crypto::Passphrase;
 use openom_keyring_api::EngineKind;
 use openom_vault_host::VaultStore;
@@ -222,6 +222,22 @@ impl<St: VaultStore> AppCoreHost<St> {
         self.with_core(doc, |c| Ok(c.project_json()?))
     }
 
+    /// One sync tick against a caller-supplied remote snapshot: mirror the remote's objects into `doc`'s local
+    /// store, fold/adopt them through the §B3 gate, maybe compact (when `compact_k > 0`), and return the
+    /// objects the remote is missing (for the webview/host to PUT). The webview ferries the ciphertext + drives
+    /// the fetch; the DEK, the fold, and the plaintext store stay native (Full-A). Returns `(uploads, folded)`.
+    ///
+    /// # Errors
+    /// [`HostError::NoCore`] if the doc isn't open; [`HostError::Core`] on a store/merge fault.
+    pub fn sync(
+        &self,
+        doc: &str,
+        remote: &[StoredObject],
+        compact_k: u32,
+    ) -> Result<(Vec<StoredObject>, usize), HostError> {
+        self.with_core(doc, |c| Ok(c.sync_against(remote, compact_k)?))
+    }
+
     /// The live core for `doc` (for the ops not yet surfaced as host methods), if it has been
     /// provisioned/unlocked this session.
     pub fn core(&self, doc: &str) -> Option<CoreHandle> {
@@ -356,5 +372,35 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn two_native_hosts_converge_through_a_shared_remote() {
+        // The distributed path, all native: two hosts (two devices of the SAME owner, the keyring distributed
+        // to each native store), one mints + pushes to a shared remote snapshot, the other pulls + folds it.
+        let (dir_a, dir_b) = (temp_dir(), temp_dir());
+        let host_a = AppCoreHost::new(MemStore::default(), &dir_a, EngineKind::Chain);
+        let host_b = AppCoreHost::new(MemStore::default(), &dir_b, EngineKind::Chain);
+        let pass = Passphrase::new(b"correct horse battery staple".to_vec());
+        let tree_id = [4u8; 16];
+
+        host_a.provision("t", &tree_id, "owner", &[20u8; 16], &pass).unwrap();
+        // Device B: same owner, the keyring distributed to B's native store (B unlocks it natively).
+        let keyring = host_a.store().load_keyring("t").unwrap().unwrap();
+        host_b.store().commit_keyring("t", &keyring, &[]).unwrap();
+        host_b.unlock("t", &tree_id, "owner", &[21u8; 16], &pass).unwrap();
+
+        // A mints, commits, and pushes to the shared remote (empty → all of A's objects are uploads).
+        host_a.assert_anchor("t", "pAlice", PERSON).unwrap();
+        host_a.commit("t").unwrap();
+        let (remote, _folded) = host_a.sync("t", &[], 0).unwrap();
+        assert!(!remote.is_empty(), "A has objects to push to the remote");
+
+        // B pulls the remote + folds → converges on A's mint.
+        host_b.sync("t", &remote, 0).unwrap();
+        assert!(host_b.project("t").unwrap().contains("pAlice"), "B converges on A's mint via native sync");
+
+        std::fs::remove_dir_all(&dir_a).ok();
+        std::fs::remove_dir_all(&dir_b).ok();
     }
 }
