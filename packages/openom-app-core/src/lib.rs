@@ -78,6 +78,16 @@ pub struct AppCore<S: BlobStore> {
     member_epoch_secret: Option<openom_vault::sharing::MemberEpochSecret>,
 }
 
+// OPE-429 compile-time guard: `AppCore<S>` must stay `Send + Sync` whenever `S` is, so the native (Tauri)
+// host can hold it in a `Mutex<AppCore>` accessed from Tauri's invoke thread pool. This function is never
+// called — it exists only so the build FAILS if a future field (or a resolver without the `Send + Sync`
+// supertrait) breaks the bound. No-op for the single-threaded wasm worker.
+#[allow(dead_code)]
+fn _assert_app_core_send_sync<S: BlobStore + Send + Sync + 'static>() {
+    const fn is_send_sync<T: Send + Sync>() {}
+    is_send_sync::<AppCore<S>>();
+}
+
 /// This replica's keyspace folder — the raw id as lowercase hex, so a random binary replica id maps to a
 /// valid, injective object-key segment (the sealer keeps the raw bytes for attribution).
 fn replica_key(replica: &[u8]) -> String {

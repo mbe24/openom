@@ -47,7 +47,12 @@ pub enum Governing {
 /// The per-engine seam. `shared` is monotonic (once a tree has been shared it stays shared, so a mid-
 /// session keyring withhold can't downgrade the rule); `resolve` maps an entry's header coordinates to a
 /// [`Governing`].
-pub trait MembershipResolver {
+///
+/// `Send + Sync`: an `AppCore` holding a `Box<dyn MembershipResolver>` must be movable across threads and
+/// guarded by a `Mutex` on the native (Tauri) host, where invokes dispatch on a thread pool. Both impls
+/// (chain/dag resolvers) are plain owned data, so the bound is trivially satisfied and is a no-op for the
+/// single-threaded wasm worker.
+pub trait MembershipResolver: Send + Sync {
     /// Whether the tree has ever been shared (a signature-requiring, multi-member tree).
     fn shared(&self) -> bool;
     /// Resolve the governing membership for an entry sealed under `key_id` with header `governing_ref`.
