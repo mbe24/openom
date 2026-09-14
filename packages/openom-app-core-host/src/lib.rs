@@ -943,6 +943,27 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(MemberUnlocked { did_key })
     }
 
+    /// The current stored CHAIN keyring revision (the anti-rollback floor); `0` when none is stored yet. Lets the
+    /// webview fetch only the SUCCESSORS to adopt on a sync tick (`readKeyring(head + 1)`) — the native
+    /// counterpart to the web worker's `keyringStore.head`. Chain-only: a dag head is an anchor, not a scalar
+    /// revision (its adoption is the separate anchor-merge path).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] if the watermark read fails.
+    pub fn keyring_head(&self, doc: &str) -> Result<u32, HostError> {
+        if self.engine != EngineKind::Chain {
+            // A dag watermark is a concatenated op-id frontier, not a scalar revision — reading its first bytes
+            // as a "head" is meaningless. Refuse (the caller skips the chain keyring-before-data step), matching
+            // sync_keyring's own engine guard.
+            return Err(HostError::Store("keyring_head is chain-only; a dag head is an anchor".into()));
+        }
+        let watermark = self.store.watermark(doc).map_err(HostError::Store)?;
+        if watermark.is_empty() {
+            return Ok(0);
+        }
+        Ok(openom_vault::sharing::chain_watermark_floor(&watermark))
+    }
+
     /// Adopt newer keyring revisions pulled from the network (a member/device keyring sync — CHAIN). Validates
     /// the successor `hops` against the locally-stored anchor (`accept_remote_keyring` — a fork / rollback /
     /// withheld-hop / rogue-signer run is refused and NOTHING persisted), persists the new head + retains each

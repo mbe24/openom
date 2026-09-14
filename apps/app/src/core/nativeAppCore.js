@@ -17,6 +17,7 @@
 // backend is configured (startSync() early-returns local-only), so it never blocks the local flow.
 
 import { makeError, normalizeUnknown } from './errorModel.js';
+import { frameHops } from './sharing.js';
 
 const invoke = () => globalThis.__TAURI__?.core?.invoke;
 
@@ -55,10 +56,14 @@ export function createNativeAppCore() {
   // recorded whenever a doc is opened) + a single-flight sync guard + the once-per-session create-tree gate.
   const transports = new Map();
   const treeKeys = new Map();
+  const treeIds = new Map(); // doc → the RAW 16 tree-id bytes (keyring-before-data needs them, not just the hex key)
   const syncing = new Map();
   const treeEnsured = new Set();
   const reportedFrontier = new Map(); // last pull-frontier reported per doc (change-guard for the GC telemetry)
-  const remember = (docId, treeId) => treeKeys.set(docId, hexKey(treeId));
+  const remember = (docId, treeId) => {
+    treeKeys.set(docId, hexKey(treeId));
+    treeIds.set(docId, treeId);
+  };
 
   // Publish a membership change to the server (OPE-433/434, review C2): the KEYRING channel (the crypto
   // revocation — the server serves the rotated keyring, so a removed member can no longer decrypt new content)
@@ -78,7 +83,10 @@ export function createNativeAppCore() {
       if (advisoryFirst) { await pushAdvisory(); await publishKeyring(); }
       else { await publishKeyring(); await pushAdvisory(); }
     } catch (err) {
-      // The local keyring change stands (native custody is authoritative); a later tick re-publishes.
+      // The local keyring change stands (native custody is authoritative). Tick-driven re-publish is a
+      // still-to-build follow-up (OPE-433): it must derive "unpublished" from local-head > server-head and
+      // walk-publish the missing tail (the single-head putKeyring here can't bridge a >1 gap), plus a CAS
+      // advisory push — NOT the volatile flag this used to carry.
       console.warn('[openom] native membership publish (best-effort) failed', err);
     }
   }
@@ -122,6 +130,7 @@ export function createNativeAppCore() {
     close: (docId) => {
       transports.delete(docId);
       treeKeys.delete(docId);
+      treeIds.delete(docId);
       treeEnsured.delete(docId);
       reportedFrontier.delete(docId);
       return call('core_close', { doc: docId });
@@ -183,11 +192,17 @@ export function createNativeAppCore() {
       await publishAfterMembership(docId, out.demote); // demote: advisory-first; promote: keyring-first
       return { keyring: u8(out.keyring), demote: out.demote };
     },
-    // NOTE (review H1 / OPE-434): the worker's joinAsMember FETCHES the keyring walk itself (transport.readKeyring);
-    // this native version currently expects the caller to pass pre-fetched `hops`. When the join/invite UI lands,
-    // wire the internal fetch here (readKeyring → frame) so the two clients present the same contract.
-    async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, hops, pinnedRevision, pinnedHash }) {
+    // Fetches the keyring genesis-walk itself (transport.readKeyring → frameHops), so this presents the SAME
+    // contract as the web worker's joinAsMember — the caller no longer pre-fetches `hops`. The transport must be
+    // attached for `docId` first (attachTransport). Closes the OPE-434 join hops-fetch parity gap.
+    async joinAsMember({ docId, treeId, memberId, passphrase, memberKdfParams, pinnedRevision, pinnedHash }) {
       remember(docId, treeId);
+      const transport = transports.get(docId);
+      if (!transport) {
+        return Promise.reject(makeError('internal', { cause: `joinAsMember: no transport attached for ${docId}` }));
+      }
+      const { revisions } = await transport.readKeyring(docId, 1); // the full walk from genesis (rev 1)
+      const hops = frameHops((revisions ?? []).map((r) => r.bytes));
       const out = await call('core_join_as_member', {
         doc: docId, treeId: bytes(treeId), memberId, passphrase,
         memberKdfParams: bytes(memberKdfParams), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
@@ -215,10 +230,12 @@ export function createNativeAppCore() {
     // back and PUT it (the snapshot carries the covered GC header). Single-flight; failures degrade to
     // {state:'error'} (the driver treats that as offline), never a crash.
     //
-    // NOT YET PORTED (itemized, not hand-waved), tracked as OPE-433/434: the keyring-before-data step (fetch
-    // newer keyring revisions → core_sync_keyring — needed for a SHARED tree's members to adopt rotations on
-    // sync, and the owner PUBLISH of a produced revision) and the OPE-293 advisory-summary flush. So a SOLO
-    // owner syncs fully here; a shared-over-server tree needs those two. (Pull-frontier telemetry: DONE below.)
+    // The tick does keyring-before-data (adopt newer keyring revisions — chain — before the data fold), so a
+    // shared tree's members adopt rotations on sync like the web. (Dag adoption on the tick is the anchor-merge
+    // path, not wired — a dag keyring_head / core_sync_keyring rejects, caught below.) NOT yet done (OPE-433): the
+    // owner-side tick RE-PUBLISH of unpublished revisions (derive local-head > server-head → walk-publish the tail
+    // + a CAS advisory push). publishAfterMembership handles the after-op publish best-effort; a failed one is not
+    // yet self-healed on the tick.
     async syncNow(docId) {
       const transport = transports.get(docId);
       const treeKey = treeKeys.get(docId);
@@ -231,6 +248,31 @@ export function createNativeAppCore() {
         if (!treeEnsured.has(docId)) {
           try { await transport.createTree(docId); } catch { /* member / already exists */ }
           treeEnsured.add(docId);
+        }
+        // KEYRING-BEFORE-DATA (OPE-434): adopt any newer keyring revisions BEFORE folding data, so a shared
+        // tree's arrivals verify against the CURRENT membership (and a removed member's rotation lands). Chain
+        // only — the host's core_sync_keyring is the chain walk-adopt; a dag tree adopts via the anchor-merge
+        // path (its core_sync_keyring errors, caught here). Best-effort: a failure NEVER fails the data tick
+        // ("reconcile = one tick, never throws"). A solo tree no-ops (readKeyring(head+1) returns nothing).
+        try {
+          const treeId = treeIds.get(docId);
+          if (treeId) {
+            const head = await call('core_keyring_head', { doc: docId });
+            const { revisions } = await transport.readKeyring(docId, head + 1);
+            const successors = (revisions ?? []).filter((r) => r.revision > head);
+            if (successors.length) {
+              await call('core_sync_keyring', {
+                doc: docId, treeId: bytes(treeId), hops: bytes(frameHops(successors.map((s) => s.bytes))),
+              });
+            }
+          }
+        } catch (err) {
+          // A host VERIFICATION refusal (a forked / rolled-back / rogue-signer server run) must SURFACE — folding
+          // data against a stale membership is exactly what keyring-before-data prevents — so re-throw and let the
+          // tick report {state:'error'}. A network error, or the dag engine (keyring_head / core_sync_keyring
+          // reject dag), is benign — swallow and proceed.
+          if (err?.code === 'keyring_verify_failed' || err?.code === 'revision_rollback') throw err;
+          console.warn('[openom] native keyring-before-data (best-effort)', err);
         }
         const localPrefix = `${docId}/`;
         const remotePrefix = `${treeKey}/`;

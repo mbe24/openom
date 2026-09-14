@@ -501,6 +501,13 @@ fn core_sync_keyring(
     state.sync_keyring(&doc, &tree_id, &hops).map_err(e)
 }
 
+/// The current stored chain keyring revision (0 if none) — the webview fetches successors from `head + 1` to
+/// adopt on a sync tick.
+#[tauri::command]
+fn core_keyring_head(state: State<'_, Host>, doc: String) -> Result<u32, String> {
+    state.keyring_head(&doc).map_err(e)
+}
+
 /// One sync tick against a remote snapshot the webview fetched: the host mirrors it into `doc`'s local store,
 /// folds/adopts through the §B3 gate, maybe compacts (when `compact_k > 0`), and returns the objects the remote
 /// is missing (for the webview to PUT) plus how many folded. The webview ferries ciphertext + drives the fetch;
@@ -628,6 +635,7 @@ pub fn run() {
             core_approve_pending,
             core_discard_pending,
             core_sync_keyring,
+            core_keyring_head,
             core_sync,
             blob_put,
             blob_has,
