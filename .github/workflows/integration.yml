@@ -1,0 +1,65 @@
+name: integration
+
+# The server contract suite (openom/tests/api.rs + the storage checksum test) against a LIVE Postgres + MinIO.
+# These are the `#[ignore]`d integration tests the compile/unit jobs never run, so without this gate a
+# client<->server contract regression (the BlobStore-over-HTTP conformance, keyring/access/media/proposals/GC
+# semantics) is only caught by someone running `node scripts/itest.mjs` locally. This runs them on every push/PR.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  server-contract:
+    runs-on: ubuntu-latest
+    env:
+      # Mirrors docker-compose.yml / scripts/itest.mjs, with the stack reached at localhost (published ports).
+      # RUN_MODE=local presets storage=local (MinIO) + auth=dev + the /dev routes the media/log GC tests use;
+      # the S3/DB endpoints still come from the explicit vars below (RUN_MODE never overrides those).
+      RUN_MODE: local
+      DATABASE_URL: postgres://openom:openom@localhost:5432/openom
+      S3_ENDPOINT: http://localhost:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_BUCKET: openom-trees
+      S3_REGION: us-east-1
+      S3_ACCESS_KEY: openom
+      S3_SECRET_KEY: openompw123
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # MinIO can't run as a plain GitHub "service container" — it needs a custom `server /data` command that
+      # service containers don't allow — so bring up the two backing services from the repo's own proven compose
+      # config. ONLY postgres + minio; NOT the `server` service (the tests run the router in-process) and NOT the
+      # profile-gated `lgtm`.
+      - name: Start Postgres + MinIO
+        run: docker compose up -d postgres minio
+
+      - name: Wait for Postgres + MinIO
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T postgres pg_isready -U openom -d openom && break
+            echo "waiting for postgres ($i/30)"; sleep 2
+          done
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:9000/minio/health/ready && echo " minio ready" && break
+            echo "waiting for minio ($i/30)"; sleep 2
+          done
+
+      # No manual migration/bucket step: the first router()/build_state runs sqlx migrations, provisions the dev
+      # account, and ensure_bucket()s openom-trees. --test-threads=1 because the suite shares ONE stack and uses
+      # global GC sweeps (parallel runs make the shared-state assertions flaky — same reason scripts/itest.mjs
+      # serializes). --ignored runs exactly this integration suite (they're the ignored tests in the openom crate).
+      - name: Server contract suite (Postgres + MinIO)
+        run: cargo test -p openom -- --ignored --test-threads=1 --nocapture
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v

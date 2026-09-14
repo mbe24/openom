@@ -2423,27 +2423,32 @@ async fn blob_http_conformance() {
     let oracle = MemoryBlob::new(); // the reference impl the Fs/Memory conformance runs against
 
     // get_missing_is_none → a missing key is 404 (the HTTP analog of `None`).
-    let (s, _, _) = send(&app, get_as(blob("heads/missing"), owner)).await;
+    let (s, _, _) = send(&app, get_as(blob("ptr/missing"), owner)).await;
     assert_eq!(s, StatusCode::NOT_FOUND, "get of a missing key is 404 (None)");
 
     // put_then_get_roundtrips + ETAG PARITY: the managed etag equals what the reference MemoryBlob yields for
     // the same bytes (both are hex(sha256)), so a client reading R2 sees the SAME etag as one reading
     // MemoryBlob/FsBlob — the cross-store etag convention the whole sync layer relies on.
-    let (s, h, _) = send(&app, put_bytes_as(blob("heads/rA"), b"hello", owner, false)).await;
+    // Use a generic `ptr/` key — the OPAQUE pointer path — NOT `heads/`: `heads/{replica}` is deliberately
+    // semantic (head-monotonicity parses its body as an ASCII decimal count, blobs.rs), so opaque bytes there
+    // are a 400 by design. The generic-namespace pointer is what realizes the opaque BlobStore contract.
+    let (s, h, _) = send(&app, put_bytes_as(blob("ptr/rA"), b"hello", owner, false)).await;
     assert_eq!(s, StatusCode::OK, "pointer put (Precondition::Any)");
     let put_etag = etag(&h);
+    // The managed etag arrives as an RFC-quoted HTTP header (`"<hex>"`); the in-process MemoryBlob oracle
+    // yields the bare hex. Compare the unquoted VALUE — that hex is the cross-store convention (both hex(sha256)).
     assert_eq!(
-        put_etag,
-        oracle.put("heads/rA", b"hello", Precondition::Any).unwrap(),
-        "managed etag matches the store-blob reference convention (cross-store parity)"
+        put_etag.trim_matches('"'),
+        oracle.put("ptr/rA", b"hello", Precondition::Any).unwrap(),
+        "managed etag (unquoted) matches the store-blob reference convention (cross-store parity)"
     );
-    let (s, h2, body) = send(&app, get_as(blob("heads/rA"), owner)).await;
+    let (s, h2, body) = send(&app, get_as(blob("ptr/rA"), owner)).await;
     assert_eq!(s, StatusCode::OK, "get roundtrips");
     assert_eq!(body, b"hello", "get returns the put bytes");
     assert_eq!(etag(&h2), put_etag, "get etag matches put etag");
 
     // idempotent_put_same_etag → identical content (Precondition::Any) yields the same etag.
-    let (_, h3, _) = send(&app, put_bytes_as(blob("heads/rA"), b"hello", owner, false)).await;
+    let (_, h3, _) = send(&app, put_bytes_as(blob("ptr/rA"), b"hello", owner, false)).await;
     assert_eq!(etag(&h3), put_etag, "identical content yields the same etag");
 
     // if_absent_creates_then_conflicts → IfAbsent creates; a conflicting IfAbsent 412s carrying the existing
@@ -2473,7 +2478,7 @@ async fn blob_http_conformance() {
     assert_eq!(
         serde_json::from_slice::<Value>(&ball).unwrap()["keys"].as_array().unwrap().len(),
         3,
-        "the empty prefix lists everything (heads/rA + log/rA/0 + log/rA/1)"
+        "the empty prefix lists everything (ptr/rA + log/rA/0 + log/rA/1)"
     );
 
     // if_match_cas + delete_semantics: N/A on this surface, by design. IfMatch has no wire representation — the
