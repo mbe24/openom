@@ -92,9 +92,12 @@ services:
       retries: 12
 
   minio:
-    # quay.io, not Docker Hub: MinIO gated its `minio/minio` Docker Hub repo (anonymous pulls now 401), which
-    # breaks fresh pulls in CI. quay.io/minio/minio is the canonical, anonymously-pullable source.
-    image: quay.io/minio/minio:latest
+    # quay.io, not Docker Hub: MinIO removed the community `minio/minio` from Docker Hub (the successor, AIStor,
+    # is a licensed product); quay.io/minio/minio is the still-anonymously-pullable community image. Because the
+    # community edition is discontinued, PIN a specific frozen RELEASE tag (immutable — MinIO never repoints a
+    # RELEASE.* tag) for reproducibility, rather than a drifting `:latest` on a repo that no longer moves. This is
+    # the exact version the server contract suite is verified against.
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: openom
