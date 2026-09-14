@@ -54,10 +54,12 @@ one app, two shells.
 
 | Workflow | Runs on | Answers |
 | --- | --- | --- |
-| `web.yml` | every push / PR | Do all modules parse and all locales complete? (seconds, no toolchain) |
-| `pages.yml` | push to `main` | Publishes the web app to GitHub Pages |
-| `desktop.yml` | every push / PR | Tauri build on Windows/macOS/Linux + the store-conformance suite |
-| `mobile.yml` | tags / manual | Android APK + unsigned iOS simulator build (on demand — the SDKs are slow) |
+| `web.yml` | push to `main` / PR | Do all modules parse, error codes stay in sync, locales complete, and no `.stack` leak into the UI? (seconds, no toolchain) |
+| `desktop.yml` | push to `main` / PR / manual | Clippy gate (runs first, blocks the matrix), then the Tauri build on Windows/macOS/Linux + the store-conformance suite (MemoryStore ≡ SqliteStore) |
+| `integration.yml` | push to `main` / PR / manual | The server contract suite (`openom/tests/api.rs` + storage checksum) against a live Postgres + MinIO — the `#[ignore]`d tests the unit jobs skip |
+| `pages.yml` | manual | Publishes the web app to GitHub Pages |
+| `mobile.yml` | manual | Android APK + unsigned iOS-simulator build (unsigned `--debug` build-check artifacts — the SDKs are slow, no signing pipeline yet) |
+| `mutants.yml` | manual | Mutation testing (`cargo-mutants`) over the security-critical crypto/keyring/CRDT crates + the pure-core crates — surfaces test gaps a green suite hides |
 
 ## Brand
 
