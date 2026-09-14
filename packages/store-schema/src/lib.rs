@@ -331,6 +331,7 @@ mod tests {
             .query_row("SELECT count(*) FROM pragma_table_info('t') WHERE name = 'old_col'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(cols, 1, "the backup still carries the original (old) schema");
+        drop(old); // release the backup handle before the next reset prunes it (Windows won't delete an open file)
 
         // A second reset keeps only the newest backup (no unbounded accumulation). Clear the just-healed DB
         // first, then re-stale it so the next open triggers another reset.
