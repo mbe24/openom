@@ -1,0 +1,14 @@
+[package]
+name = "store-schema"
+description = "openom — versioned SQLite open: the one place the schema-drift policy lives (user_version + fresh/legacy disambiguation + transactional create; debug self-heal per a reset policy, release fails closed). Shared by the vault and media stores."
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

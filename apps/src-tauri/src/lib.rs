@@ -568,7 +568,21 @@ pub fn run() {
             // drag the anti-rollback watermark with it.
             let dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&dir).ok();
-            let vault = SqliteVaultStore::open(dir.join("vault.sqlite")).expect("open vault store");
+            // Fail-closed surfacing (NOT `.expect`): in a release build SqliteVaultStore::open errors on a schema
+            // mismatch instead of destroying data (store-schema). Turning that into a `.expect` panic would be a
+            // silent crash at boot (release hides the console) — so log an actionable message to stderr/logcat and
+            // abort startup cleanly. A native dialog (tauri-plugin-dialog) is a follow-up.
+            let vault = match SqliteVaultStore::open(dir.join("vault.sqlite")) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[openom] cannot open the vault store: {e}\n\
+                         This tree's local data may have been written by a newer version of the app — please \
+                         update the app. (Dev: remove the app data dir to start fresh.)"
+                    );
+                    return Err(format!("vault store: {e}").into());
+                }
+            };
             let host = AppCoreHost::new(vault, dir.join("docs"), keyring_engine());
             app.manage(Arc::new(host));
             // Media (photos/attachments) lives in per-doc {doc}.media.sqlite files the host opens on demand,

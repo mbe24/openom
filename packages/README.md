@@ -14,7 +14,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
   **Deletion, edit-supersession, and merge metadata are operations, a *separate* channel — never
   claims** (design.data-model-claims.v1.md §8.2 / principle 6). The projection reads the **live
   claim set** and does epistemic resolution only; it does **not** process deletion or supersession —
-  that is the operations/transport layer (`store-log`, `openom-docsync`).
+  that is the operations/transport layer (`openom-docsync` over `store-blob`).
 - **Substrate vs. domain.** The foundations (`format-jcs`, `did`, `format-edtf`,
   `openom-crypto`, `openom-protocol`) know nothing about family trees and must never gain a domain
   dependency. Dependencies point **downward** only.
@@ -44,9 +44,10 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-data-tree** — the claim-model family-tree **engine**: composes `openom-data-crdt` (the fold) + `openom-data-projection` (the read model) into the app's read+write surface; owns the record set + author id, mints op batches for the transport to seal, and projects the read model. Key-less. *(claim model — the app's only family-tree engine; wasm veneer built)*
 
 **Storage / sync** (transport; opaque bytes)
-- **store-blob** — the storage swap seam: content-addressable blobs + per-object CAS, *below* `store-log`'s `DocStore`. The managed (R2) and BYO-dumb (Drive/Dropbox) backends are both just `BlobStore` impls. openom-free.
-- **store-log** — local-first sync backend: per-doc snapshot + append-only update-log, CAS, capability negotiation. Backend/domain/crypto-agnostic.
-- **docsync** — a generic local-first client sync loop (push/pull/compact/bootstrap) over a `DocStore`, abstracted over a merge `Engine` + envelope `Sealer`; the vendored set-union sync-client skeleton. openom-free.
+- **store-blob** — the storage swap seam: content-addressable blobs + per-object CAS. The data channel and the keyring ride on it; the managed (R2) and BYO-dumb (Drive/Dropbox) backends are both just `BlobStore` impls. openom-free.
+- **store-media** — the durable media blob store: a content-addressed (sha256) `SQLite` table for photos/attachments (the Tauri host's local, non-synced cache; the web build keeps them in memory). Bytes are host-sealed under the tree DEK. openom-free.
+- **store-schema** — versioned `SQLite` open: the shared schema-drift policy (`user_version` + fresh/legacy disambiguation; debug self-heal per a reset policy, release fails closed). Used by `openom-vault-host` + `store-media`; holds no schema of its own. openom-free.
+- **docsync** — a generic local-first client sync loop (push/pull/compact/bootstrap) over a `BlobStore`, abstracted over a merge `Engine` + envelope `Sealer`; the vendored set-union sync-client skeleton. openom-free.
 - **openom-docsync** — the client sync loop: seal local deltas to the store, merge peers' deltas back.
 - **openom-sealer** — the client DEK session: a stateful sealer holding the unlocked DEK, sealing/opening envelopes. Engine-free (no keyring dep).
 
@@ -62,7 +63,7 @@ These are the distinctions a newcomer (human or agent) most often gets wrong. Ke
 - **openom-vault-host** — the native (Tauri) key-custody host: keeps Sealer sessions + keyring storage in Rust so the DEK never enters the webview.
 
 **App core** (the web app's single wasm worker)
-- **openom-app-core** — the web app's ONE Rust core, run inside a single Web Worker (wasm). Composes the claim engine (`openom-data-tree`) + the DEK sealer (`openom-sealer` / `openom-vault`) + the docsync loop (`openom-docsync`) over one local durable `store-log` `DocStore`, plus §B3 verify-on-ingest, the self-heal cover reader/writer, and the sharing/member-epoch-adopt marshalling. Keys never cross to JS; the native counterpart is `openom-vault-host` (Tauri).
+- **openom-app-core** — the web app's ONE Rust core, run inside a single Web Worker (wasm). Composes the claim engine (`openom-data-tree`) + the DEK sealer (`openom-sealer` / `openom-vault`) + the docsync loop (`openom-docsync`) over one local durable `store-blob` `BlobStore`, plus §B3 verify-on-ingest, the self-heal cover reader/writer, and the sharing/member-epoch-adopt marshalling. Keys never cross to JS; the native counterpart is `openom-vault-host` (Tauri).
 
 Dependencies point downward across those layers; the full graph is derivable from the `Cargo.toml`s
 (`cargo tree`). *(A generated dependency table belongs here — TODO once the rollout settles.)*

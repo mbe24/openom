@@ -12,6 +12,8 @@ rust-version.workspace = true
 # hashes the plaintext before sealing — so this crate no longer depends on sha2.
 rusqlite = { workspace = true }
 serde = { workspace = true }
+# Versioned open (shared schema-drift policy: debug self-heal / release fail-closed).
+store-schema = { workspace = true }
 
 [lints]
 workspace = true

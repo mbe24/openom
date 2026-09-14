@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
+use store_schema::ResetPolicy;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS blobs (
        hash    TEXT PRIMARY KEY,
@@ -23,6 +24,11 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS blobs (
        bytes   BLOB NOT NULL,
        created INTEGER NOT NULL
      );";
+
+/// The schema version stamped in the DB header (`PRAGMA user_version`). BUMP whenever [`SCHEMA`] changes (the
+/// golden-shape test enforces it). Media is a re-derivable local cache, so on a version mismatch `open` uses
+/// [`ResetPolicy::Recreatable`] — a stale DB is dropped+recreated in DEBUG, and fails closed in release.
+const SCHEMA_VERSION: i64 = 1;
 
 /// One stored blob's metadata (`blob_meta`), mirroring `MemoryBlobStore.meta`'s shape. `size` is the
 /// PLAINTEXT length (recorded at `put`), not the sealed byte count.
@@ -69,11 +75,8 @@ impl MediaStore {
     /// # Errors
     /// Returns an error string if the database can't be opened or the schema can't be applied.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"
-        ))
-        .map_err(|e| e.to_string())?;
+        let conn = store_schema::open_versioned(path.as_ref(), SCHEMA_VERSION, SCHEMA, ResetPolicy::Recreatable)
+            .map_err(|e| e.to_string())?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -213,5 +216,23 @@ mod tests {
         assert!(s.get_sealed("deadbeef").unwrap().is_none());
         assert!(s.meta("deadbeef").unwrap().is_none());
         assert_eq!(s.list().unwrap(), vec!["cafef00d".to_string()], "delete removed only the target");
+    }
+
+    /// Golden-shape tripwire (see the vault store's equivalent): a [`super::SCHEMA`] change breaks this and
+    /// forces updating it together with a [`super::SCHEMA_VERSION`] bump.
+    #[test]
+    fn schema_shape_is_pinned_to_the_version() {
+        let s = MediaStore::open(":memory:").unwrap();
+        let conn = s.conn();
+        let shape = store_schema::schema_shape(&conn).unwrap();
+        assert_eq!(
+            (super::SCHEMA_VERSION, shape.as_str()),
+            (
+                1,
+                "blobs(hash:TEXT nn=0 pk=1, mime:TEXT nn=1 pk=0, w:INTEGER nn=0 pk=0, \
+                 h:INTEGER nn=0 pk=0, size:INTEGER nn=1 pk=0, bytes:BLOB nn=1 pk=0, created:INTEGER nn=1 pk=0)\n"
+            ),
+            "SCHEMA changed: update this golden AND bump SCHEMA_VERSION"
+        );
     }
 }

@@ -31,6 +31,11 @@ jobs:
       - name: Error hygiene
         run: node scripts/check-error-hygiene.mjs
 
+      # Kein Auslieferungs-Build darf `tauri build --debug` nutzen: das brächte den zerstörerischen
+      # Schema-Reset (store-sqlite, nur unter debug_assertions) in ein ausgeliefertes Binary.
+      - name: No debug release build
+        run: node scripts/check-no-debug-build.mjs
+
   # Eigener PARALLELER Job, damit fehlende Uebersetzungen sofort und unabhaengig
   # sichtbar sind — nicht als letzter Schritt hinter den anderen Pruefungen versteckt
   # (die bei einem frueheren Fehler diesen Schritt gar nicht erst erreichen).

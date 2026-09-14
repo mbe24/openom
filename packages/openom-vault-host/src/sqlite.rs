@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
+use store_schema::ResetPolicy;
 
 use crate::VaultStore;
 
@@ -26,33 +27,40 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS keyrings (
        watermark BLOB NOT NULL
      );";
 
+/// The schema version stamped in the DB header (`PRAGMA user_version`). BUMP THIS whenever [`SCHEMA`] changes
+/// (the golden-shape test enforces it). Anti-drift: on a version mismatch, `open` self-heals in DEBUG (renaming
+/// the stale DB to a `.bak` — this store holds the only local wrapped-DEK copy + the anti-rollback watermark, so
+/// it is NEVER destroyed) and FAILS CLOSED in release (errors, touches nothing). See [`store_schema`].
+const SCHEMA_VERSION: i64 = 1;
+
 pub struct SqliteVaultStore {
     conn: Mutex<Connection>,
 }
 
 impl SqliteVaultStore {
-    /// Durable, file-backed (WAL). Use the app data dir on Tauri.
+    /// Durable, file-backed (WAL). Use the app data dir on Tauri. Versioned via [`store_schema::open_versioned`]
+    /// with the [`ResetPolicy::Preserve`] policy (a schema mismatch renames the stale DB to a recoverable `.bak`
+    /// in debug, and fails closed in release — never destroying the keyring/watermark).
     ///
     /// # Errors
-    /// Returns an error string if the database can't be opened or the schema can't be applied.
+    /// Returns an error string if the database can't be opened, or (release) if the on-disk schema version
+    /// doesn't match this build.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
-        conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL;\n PRAGMA synchronous = NORMAL;\n{SCHEMA}"
-        ))
-        .map_err(|e| e.to_string())?;
+        let conn = store_schema::open_versioned(path.as_ref(), SCHEMA_VERSION, SCHEMA, ResetPolicy::Preserve)
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Flüchtig — für Tests.
+    /// Flüchtig — für Tests. No on-disk drift is possible, so it just creates the schema and stamps the version.
     ///
     /// # Errors
     /// Returns an error string if the in-memory database can't be opened or the schema can't be applied.
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        conn.execute_batch(&format!("{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};"))
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -151,5 +159,24 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(path.with_extension(format!("sqlite{suffix}")));
         }
+    }
+
+    /// Golden-shape tripwire: if [`SCHEMA`] changes, this assertion breaks and forces the author to update it —
+    /// AND, deliberately, to bump [`SCHEMA_VERSION`] in the same edit (the pair is asserted together). Compares
+    /// the semantic column shape, not the literal `CREATE TABLE` text, so a pure reformat doesn't trip it.
+    #[test]
+    fn schema_shape_is_pinned_to_the_version() {
+        let s = SqliteVaultStore::in_memory().unwrap();
+        let conn = s.conn();
+        let shape = store_schema::schema_shape(&conn).unwrap();
+        assert_eq!(
+            (SCHEMA_VERSION, shape.as_str()),
+            (
+                1,
+                "keyrings(tree_key:TEXT nn=0 pk=1, bytes:BLOB nn=1 pk=0)\n\
+                 watermarks(tree_key:TEXT nn=0 pk=1, watermark:BLOB nn=1 pk=0)\n"
+            ),
+            "SCHEMA changed: update this golden AND bump SCHEMA_VERSION"
+        );
     }
 }

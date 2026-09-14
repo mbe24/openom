@@ -7,14 +7,16 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# The only dependency the custody seam needs: rusqlite backs the durable SqliteVaultStore (Tauri deployment).
+# The durable SqliteVaultStore (Tauri deployment) is backed by rusqlite, opened through store-schema's versioned
+# open (the shared schema-drift policy: debug self-heal / release fail-closed).
 rusqlite = { workspace = true, optional = true }
+store-schema = { workspace = true, optional = true }
 
 [features]
 default = []
 # The durable SqliteVaultStore for the Tauri host. Off by default so the VaultStore trait + its in-memory test
 # build without SQLite; the Tauri crate turns it on.
-sqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite", "dep:store-schema"]
 
 [lints]
 workspace = true

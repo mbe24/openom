@@ -3867,6 +3867,7 @@ name = "openom-vault-host"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "store-schema",
 ]
 
 [[package]]
@@ -5674,6 +5675,15 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "serde",
+ "store-schema",
+]
+
+[[package]]
+name = "store-schema"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
