@@ -508,6 +508,13 @@ fn core_keyring_head(state: State<'_, Host>, doc: String) -> Result<u32, String>
     state.keyring_head(&doc).map_err(e)
 }
 
+/// Whether `doc` has a stored member context — the reopen path dispatches on this (member vs owner unlock) so one
+/// `unlockCore` covers both roles.
+#[tauri::command]
+fn core_has_member_context(state: State<'_, Host>, doc: String) -> Result<bool, String> {
+    state.has_member_context(&doc).map_err(e)
+}
+
 /// The wrapped `KeyringUpdate` (+ raw body for benign-409 comparison) for one retained chain keyring revision —
 /// the webview walks `server_head + 1 ..= local_head` and PUTs each to republish its produced tail.
 #[tauri::command]
@@ -648,6 +655,7 @@ pub fn run() {
             core_sync_keyring,
             core_keyring_head,
             core_keyring_publish_payload_at,
+            core_has_member_context,
             core_sync,
             blob_put,
             blob_has,

@@ -45,7 +45,7 @@ import { IndexedDbStore } from './indexedDbStore.js';
 import { indexedDbKeyringStore } from './sealer/keyringStore.js';
 import {
   joinAsMember, publishKeyring, syncKeyring as syncKeyringImpl,
-  joinDagAnchor, publishDagAnchor, syncDagAnchor,
+  joinDagAnchor, publishDagAnchor, syncDagAnchor, chainRevision,
 } from './sharing.js';
 import { pushMembershipSummary } from './membershipSummary.js';
 import { MembershipAsserts } from './membershipAsserts.js';
@@ -640,17 +640,20 @@ const api = {
    * Owner admits a member: HPKE-wrap the tree DEK to the joiner's OOB-verified keys, persist the new shared
    * keyring (+ chain per-revision retention), and refresh this core's §B3 resolver so it now verifies peer
    * entries. The owner's running session is unchanged (an add mints no new epoch). `opts`: { passphrase,
-   * treeId, ownerMemberId, minRevision, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine? }.
+   * treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine? }.
    * Returns nothing — the caller re-reads membership via the projection.
    */
   async addMember(
     docId,
-    { passphrase, treeId, ownerMemberId, minRevision = 0, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine = KEYRING_ENGINE },
+    { passphrase, treeId, ownerMemberId, newMemberId, role, memberAuthorPublic, memberHpkePublic, engine = KEYRING_ENGINE },
   ) {
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
     if (!head) throw new Error(`no keyring stored for ${docId}`);
     const eng = head.engine || engine;
+    // Anti-rollback floor = the CURRENT keyring revision (from the stored watermark), computed here rather than
+    // taken from the caller — matching the native host. It used to default to 0 (no floor at all). OPE-443.
+    const minRevision = chainRevision(await loadWatermark(docId));
     const change = wasmAddMember(
       eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision,
       newMemberId, role, memberAuthorPublic, memberHpkePublic,
@@ -691,11 +694,11 @@ const api = {
    * owner's core under the new epoch (the old sealer can no longer sign), and — dag — author a self-heal
    * cover over the removed member's stored history so a fresh replica still verifies it. The rotated keyring
    * is published (chain) and the cover pushed to the data channel (dag). `opts`: { passphrase, treeId,
-   * ownerMemberId, minRevision, removeMemberId, engine? }. Returns nothing — the caller re-reads membership.
+   * ownerMemberId, removeMemberId, engine? }. Returns nothing — the caller re-reads membership.
    */
   async removeMember(
     docId,
-    { passphrase, treeId, ownerMemberId, minRevision = 0, removeMemberId, engine = KEYRING_ENGINE },
+    { passphrase, treeId, ownerMemberId, removeMemberId, engine = KEYRING_ENGINE },
   ) {
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
@@ -713,6 +716,7 @@ const api = {
     if (eng === 'chain' && transportFor(docId)) {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; removal still proceeds */ }
     }
+    const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
     const change = wasmRemoveMember(
       eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, removeMemberId,
     );
@@ -766,11 +770,11 @@ const api = {
    * authority takes effect for verify-on-ingest (a promoted co-owner's signed writes now verify; a demoted
    * one's over-authority writes are rejected — hard on the dag via StrongDemote, and hard on the chain via the
    * OPE-421 look-behind, with compact-before-demote above preserving their pre-demote history). `opts`:
-   * { passphrase, treeId, ownerMemberId, minRevision, targetMemberId, newRole, engine? }.
+   * { passphrase, treeId, ownerMemberId, targetMemberId, newRole, engine? }.
    */
   async changeRole(
     docId,
-    { passphrase, treeId, ownerMemberId, minRevision = 0, targetMemberId, newRole, engine = KEYRING_ENGINE },
+    { passphrase, treeId, ownerMemberId, targetMemberId, newRole, engine = KEYRING_ENGINE },
   ) {
     const c = core(docId);
     const head = await keyringStore().loadHead(docId);
@@ -784,6 +788,7 @@ const api = {
     if (newRole !== 'co-owner' && eng === 'chain' && transportFor(docId)) {
       try { await syncData(c, 1); } catch { /* preserve-history is best-effort; the demote still proceeds */ }
     }
+    const minRevision = chainRevision(await loadWatermark(docId)); // anti-rollback floor = current revision (OPE-443)
     const change = wasmChangeRole(
       eng, head.bytes, passphrase, treeId, ownerMemberId, freshReplica(), minRevision, targetMemberId, newRole,
     );

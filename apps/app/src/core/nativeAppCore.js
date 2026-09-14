@@ -133,9 +133,14 @@ export function createNativeAppCore() {
       return call('core_provision', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
     },
 
+    // ONE reopen entrypoint (matching the web worker's single unlockCore): the host dispatches on stored custody —
+    // a joined device (member context present) reopens via core_unlock_as_member, an owner via core_unlock. The
+    // caller never picks the trust path (the C2 rule: never a webview argument); it's derived from native custody.
     async unlockCore({ passphrase, treeId, memberId, docId }) {
       remember(docId, treeId);
-      const out = await call('core_unlock', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
+      const isMember = await call('core_has_member_context', { doc: docId });
+      const cmd = isMember ? 'core_unlock_as_member' : 'core_unlock';
+      const out = await call(cmd, { doc: docId, treeId: bytes(treeId), memberId, passphrase });
       await call('core_bootstrap', { doc: docId }); // hydrate the durable log (the worker's unlockCore does this)
       return out;
     },
@@ -238,12 +243,6 @@ export function createNativeAppCore() {
         doc: docId, treeId: bytes(treeId), memberId, passphrase,
         memberKdfParams: bytes(memberKdfParams), hops: bytes(hops), pinnedRevision, pinnedHash: bytes(pinnedHash),
       });
-      await call('core_bootstrap', { doc: docId });
-      return out;
-    },
-    async unlockAsMember({ docId, treeId, memberId, passphrase }) {
-      remember(docId, treeId);
-      const out = await call('core_unlock_as_member', { doc: docId, treeId: bytes(treeId), memberId, passphrase });
       await call('core_bootstrap', { doc: docId });
       return out;
     },

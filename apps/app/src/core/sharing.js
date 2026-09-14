@@ -70,7 +70,7 @@ export class JoinError extends Error {
 }
 
 // The revision encoded in the first 4 bytes of a chain watermark (revision‖key_id‖H(DEK), big-endian).
-function chainRevision(watermark) {
+export function chainRevision(watermark) {
   if (!watermark || watermark.length < 4) return 0;
   return new DataView(watermark.buffer, watermark.byteOffset, 4).getUint32(0, false);
 }

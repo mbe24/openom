@@ -974,6 +974,17 @@ impl<St: VaultStore> AppCoreHost<St> {
         Ok(openom_vault::sharing::chain_watermark_floor(&watermark))
     }
 
+    /// Whether native custody holds a MEMBER context for `doc` (the kdf params + trusted signers written at JOIN).
+    /// A reopen dispatches on this: `true` → a joined device reopens via [`unlock_as_member`](Self::unlock_as_member);
+    /// `false` → an owner via [`unlock`](Self::unlock). It's custody metadata (no DEK), so it's probeable BEFORE
+    /// unlock — which is what lets one client-facing `unlockCore` cover both roles without the webview choosing.
+    ///
+    /// # Errors
+    /// [`HostError::Store`] if the member-context store read fails.
+    pub fn has_member_context(&self, doc: &str) -> Result<bool, HostError> {
+        Ok(self.load_member_context(doc)?.is_some())
+    }
+
     /// Adopt newer keyring revisions pulled from the network (a member/device keyring sync — CHAIN). Validates
     /// the successor `hops` against the locally-stored anchor (`accept_remote_keyring` — a fork / rollback /
     /// withheld-hop / rogue-signer run is refused and NOTHING persisted), persists the new head + retains each
