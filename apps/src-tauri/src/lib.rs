@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use openom_app_core_host::{
-    AddedMember, AppCoreHost, BlobData, BlobMeta, MemberAccount, MemberToAdd, MemberUnlocked,
-    PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
+    AddedMember, AppCoreHost, BlobData, BlobMeta, KeyringRevisionPayload, MemberAccount, MemberToAdd,
+    MemberUnlocked, PassphraseChanged, Provisioned, Recovered, RemovedMember, RoleChanged, SyncOut, Unlocked,
 };
 use openom_crypto::{Passphrase, RecoveryCode};
 use openom_keyring_api::EngineKind;
@@ -508,6 +508,17 @@ fn core_keyring_head(state: State<'_, Host>, doc: String) -> Result<u32, String>
     state.keyring_head(&doc).map_err(e)
 }
 
+/// The wrapped `KeyringUpdate` (+ raw body for benign-409 comparison) for one retained chain keyring revision —
+/// the webview walks `server_head + 1 ..= local_head` and PUTs each to republish its produced tail.
+#[tauri::command]
+fn core_keyring_publish_payload_at(
+    state: State<'_, Host>,
+    doc: String,
+    revision: u32,
+) -> Result<KeyringRevisionPayload, String> {
+    state.keyring_publish_payload_at(&doc, revision).map_err(e)
+}
+
 /// One sync tick against a remote snapshot the webview fetched: the host mirrors it into `doc`'s local store,
 /// folds/adopts through the §B3 gate, maybe compacts (when `compact_k > 0`), and returns the objects the remote
 /// is missing (for the webview to PUT) plus how many folded. The webview ferries ciphertext + drives the fetch;
@@ -636,6 +647,7 @@ pub fn run() {
             core_discard_pending,
             core_sync_keyring,
             core_keyring_head,
+            core_keyring_publish_payload_at,
             core_sync,
             blob_put,
             blob_has,

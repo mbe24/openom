@@ -106,6 +106,16 @@ pub struct Provisioned {
     pub did_key: String,
 }
 
+/// One chain keyring revision's publish payload (see [`AppCoreHost::keyring_publish_payload_at`]): the wrapped
+/// `KeyringUpdate` the webview PUTs, plus the raw keyring state it compares against the server's served bytes to
+/// distinguish a benign already-admitted revision from a fork.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyringRevisionPayload {
+    pub update: Vec<u8>,
+    pub body: Vec<u8>,
+}
+
 /// The result of [`AppCoreHost::unlock`] — the core is registered in the host; the caller gets the author
 /// identity + the four advisory repair flags.
 // Four INDEPENDENT repair signals, mirroring the core's `Unlocked` — not a state enum.
@@ -1047,6 +1057,33 @@ impl<St: VaultStore> AppCoreHost<St> {
             EngineKind::Chain => openom_vault::sharing::wrap_chain_keyring_update(&keyring)?,
             EngineKind::Dag => keyring, // the dag PUTs the full self-contained anchor
         })
+    }
+
+    /// The publish payload for a specific RETAINED chain keyring `revision`: the wrapped `KeyringUpdate` to PUT,
+    /// plus the raw keyring state the server stores/serves. The owner-side tick republish walks
+    /// `server_head + 1 ..= local_head` and PUTs each `update` (the server admits only revision == head + 1); on a
+    /// 409 it compares the server's served bytes to `body` to tell a benign already-admitted revision from a fork.
+    /// Chain-only (a dag PUTs the whole anchor, no per-revision walk).
+    ///
+    /// # Errors
+    /// [`HostError::Store`] on a dag engine or a missing retained revision; [`HostError::Vault`] if the body can't
+    /// be wrapped.
+    pub fn keyring_publish_payload_at(
+        &self,
+        doc: &str,
+        revision: u32,
+    ) -> Result<KeyringRevisionPayload, HostError> {
+        if self.engine != EngineKind::Chain {
+            return Err(HostError::Store("keyring_publish_payload_at is chain-only".into()));
+        }
+        let body = self
+            .retained_revisions(doc)?
+            .into_iter()
+            .find(|(r, _)| *r == revision)
+            .map(|(_, b)| b)
+            .ok_or_else(|| HostError::Store(format!("no retained keyring revision {revision}")))?;
+        let update = openom_vault::sharing::wrap_chain_keyring_update(&body)?;
+        Ok(KeyringRevisionPayload { update, body })
     }
 
     /// The advisory membership summary (OPE-293) for `doc` as a JSON string — the coarse `{members, basis}` view

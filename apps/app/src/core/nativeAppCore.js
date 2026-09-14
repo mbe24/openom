@@ -18,6 +18,7 @@
 
 import { makeError, normalizeUnknown } from './errorModel.js';
 import { frameHops } from './sharing.js';
+import { pushMembershipSummary } from './membershipSummary.js';
 
 const invoke = () => globalThis.__TAURI__?.core?.invoke;
 
@@ -72,21 +73,51 @@ export function createNativeAppCore() {
   // the crypto, never less). Both read the NATIVE keyring (never a webview-supplied one). The advisory CAS/
   // generation retry and the PULL side (keyring-before-data adoption on sync) are runtime-verified follow-ups
   // tracked on OPE-433/434.
+  // Byte-array equality (the server's served raw keyring bytes vs our retained body — both plain number arrays).
+  const u8eq = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+
+  // Publish this device's produced CHAIN keyring TAIL: walk server-head+1 .. local-head and PUT each wrapped
+  // revision in ascending single-hop order (the server admits only revision == head+1, so a single-head PUT
+  // can't bridge a >1 gap, and a solo tree's genesis must land before any share can be verified). Idempotent: a
+  // 409 whose served bytes equal ours is benign (already admitted), differing bytes are a fork (surfaced).
+  async function publishKeyringTail(docId) {
+    const transport = transports.get(docId);
+    const localHead = await call('core_keyring_head', { doc: docId }); // chain-only; a dag call rejects → caught by caller
+    if (localHead === 0) return;
+    const serverHead = (await transport.readKeyring(docId, localHead)).head ?? 0;
+    for (let rev = serverHead + 1; rev <= localHead; rev += 1) {
+      const { update, body } = await call('core_keyring_publish_payload_at', { doc: docId, revision: rev });
+      try {
+        await transport.putKeyring(docId, new Uint8Array(update));
+      } catch (e) {
+        if (e?.name === 'ConflictError') {
+          const served = (await transport.readKeyring(docId, rev)).revisions?.[0]?.bytes;
+          if (served && u8eq(Array.from(served), body)) continue; // already admitted with our bytes — benign
+          throw makeError('keyring_verify_failed', { cause: `keyring fork at revision ${rev}` });
+        }
+        throw e;
+      }
+    }
+  }
+
+  // Assert the advisory /access summary under the server's CAS on `generation` (getAccess → PUT → retry-on-409),
+  // via the SAME shared helper the web worker uses (membershipSummary.js) — not the naive no-generation PUT that
+  // 409s on every push after the first.
+  async function pushAdvisory(docId) {
+    const transport = transports.get(docId);
+    const s = JSON.parse(await call('core_membership_summary', { doc: docId }));
+    await pushMembershipSummary(transport, docId, { view: s.members, basis: s.basis });
+  }
+
   async function publishAfterMembership(docId, advisoryFirst) {
     const transport = transports.get(docId);
     if (!transport) return; // local-only: nothing to publish
-    const publishKeyring = async () =>
-      transport.putKeyring(docId, new Uint8Array(await call('core_keyring_publish_payload', { doc: docId })));
-    const pushAdvisory = async () =>
-      transport.putAccess(docId, JSON.parse(await call('core_membership_summary', { doc: docId })));
     try {
-      if (advisoryFirst) { await pushAdvisory(); await publishKeyring(); }
-      else { await publishKeyring(); await pushAdvisory(); }
+      if (advisoryFirst) { await pushAdvisory(docId); await publishKeyringTail(docId); }
+      else { await publishKeyringTail(docId); await pushAdvisory(docId); }
     } catch (err) {
-      // The local keyring change stands (native custody is authoritative). Tick-driven re-publish is a
-      // still-to-build follow-up (OPE-433): it must derive "unpublished" from local-head > server-head and
-      // walk-publish the missing tail (the single-head putKeyring here can't bridge a >1 gap), plus a CAS
-      // advisory push — NOT the volatile flag this used to carry.
+      // The local keyring change stands (native custody is authoritative); the sync tick re-derives it from
+      // local-head > server-head and retries — no durable flag needed.
       console.warn('[openom] native membership publish (best-effort) failed', err);
     }
   }
@@ -230,12 +261,11 @@ export function createNativeAppCore() {
     // back and PUT it (the snapshot carries the covered GC header). Single-flight; failures degrade to
     // {state:'error'} (the driver treats that as offline), never a crash.
     //
-    // The tick does keyring-before-data (adopt newer keyring revisions — chain — before the data fold), so a
-    // shared tree's members adopt rotations on sync like the web. (Dag adoption on the tick is the anchor-merge
-    // path, not wired — a dag keyring_head / core_sync_keyring rejects, caught below.) NOT yet done (OPE-433): the
-    // owner-side tick RE-PUBLISH of unpublished revisions (derive local-head > server-head → walk-publish the tail
-    // + a CAS advisory push). publishAfterMembership handles the after-op publish best-effort; a failed one is not
-    // yet self-healed on the tick.
+    // The tick keeps the keyring in sync BEFORE folding data (chain): if the server is ahead it adopts the
+    // successors (so arrivals verify against the current membership); if this device is ahead it republishes the
+    // missing tail + advisory — both derived from local-head vs server-head in one readKeyring, no marker. So a
+    // shared tree's members adopt rotations AND an owner's first-share / retried publish converge on sync, like
+    // the web. (Dag adoption on the tick is the anchor-merge path, not wired — a dag keyring call rejects, caught.)
     async syncNow(docId) {
       const transport = transports.get(docId);
       const treeKey = treeKeys.get(docId);
@@ -249,21 +279,25 @@ export function createNativeAppCore() {
           try { await transport.createTree(docId); } catch { /* member / already exists */ }
           treeEnsured.add(docId);
         }
-        // KEYRING-BEFORE-DATA (OPE-434): adopt any newer keyring revisions BEFORE folding data, so a shared
-        // tree's arrivals verify against the CURRENT membership (and a removed member's rotation lands). Chain
-        // only — the host's core_sync_keyring is the chain walk-adopt; a dag tree adopts via the anchor-merge
-        // path (its core_sync_keyring errors, caught here). Best-effort: a failure NEVER fails the data tick
-        // ("reconcile = one tick, never throws"). A solo tree no-ops (readKeyring(head+1) returns nothing).
+        // KEYRING sync, derived from local-head vs server-head in ONE readKeyring (chain only — a dag call
+        // rejects, caught below). If the server is AHEAD: adopt its successors BEFORE folding data, so a shared
+        // tree's arrivals verify against the CURRENT membership (keyring-before-data). If WE are ahead (a produced
+        // revision the server hasn't seen — a first share, or an earlier publish that failed): republish the tail
+        // + advisory. Best-effort — a network error / dag never fails the data tick; a host VERIFICATION refusal
+        // does surface (below). A solo, in-sync tree no-ops.
         try {
           const treeId = treeIds.get(docId);
           if (treeId) {
-            const head = await call('core_keyring_head', { doc: docId });
-            const { revisions } = await transport.readKeyring(docId, head + 1);
-            const successors = (revisions ?? []).filter((r) => r.revision > head);
+            const localHead = await call('core_keyring_head', { doc: docId });
+            const walk = await transport.readKeyring(docId, localHead + 1);
+            const serverHead = walk.head ?? 0;
+            const successors = (walk.revisions ?? []).filter((r) => r.revision > localHead);
             if (successors.length) {
               await call('core_sync_keyring', {
                 doc: docId, treeId: bytes(treeId), hops: bytes(frameHops(successors.map((s) => s.bytes))),
               });
+            } else if (localHead > serverHead) {
+              await publishAfterMembership(docId, false); // keyring-first; publishAfterMembership swallows its own errors
             }
           }
         } catch (err) {
