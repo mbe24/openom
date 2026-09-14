@@ -1,13 +1,12 @@
 name: mobile
 
-# Android und iOS. Beide bauen nur auf Anforderung: sie brauchen SDKs, die
-# jeden Lauf teuer machen, und im Alltag aendert sich an ihnen nichts.
-# iOS laeuft ausserdem nur auf macOS-Runnern.
+# Android und iOS — ein OPTIONALER Build-Check, nur manuell (workflow_dispatch). Die SDKs machen jeden Lauf
+# teuer, und es gibt noch keine Release-/Signatur-Pipeline: das hier verifiziert nur, dass die Tauri-Mobile-App
+# baut. Es produziert UNSIGNED --debug-Artefakte (Build-Check / QA), KEINE Store-Releases. iOS nur auf macOS.
+# Wenn die echte, signierte Release-Pipeline kommt, MUSS sie --release nutzen (kein debug_assertions).
 
 on:
   workflow_dispatch:
-  push:
-    tags: ['v*']
 
 jobs:
   android:
@@ -48,7 +47,16 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
-      - name: Build
+      # gen/android is gitignored, so CI starts from a blank slate — scaffold it before building. --nostart keeps
+      # init non-interactive (it does not try to open Android Studio / an emulator wrapper).
+      - name: Initialize Android scaffolding
+        run: pnpm tauri android init --nostart
+        working-directory: apps
+
+      # NOTE: --debug builds with debug_assertions ON, so this APK CONTAINS the dev-only destructive schema-reset
+      # (store-schema). That is fine for a build-verification / QA artifact but this is NOT a store release — the
+      # real signed release pipeline must use --release (no debug_assertions). Hence the artifact name below.
+      - name: Build (debug APK, unsigned)
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/26.1.10909125
         run: pnpm tauri android build --apk --debug
@@ -56,7 +64,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: openom-android
+          name: openom-android-debug
           path: apps/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
@@ -87,8 +95,13 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
-      # Ohne Signaturzertifikat nur bis zum Simulator-Build — mehr braucht
-      # eine Pruefung nicht, und Geheimnisse gehoeren nicht in einen Fork.
+      # gen/apple is gitignored, so CI starts from a blank slate — scaffold it before building.
+      - name: Initialize iOS scaffolding
+        run: pnpm tauri ios init
+        working-directory: apps
+
+      # Ohne Signaturzertifikat nur bis zum Simulator-Build — mehr braucht eine Pruefung nicht, und Geheimnisse
+      # gehoeren nicht in einen Fork. --debug: same caveat as Android — a build-check artifact, not a release.
       - name: Build (simulator, unsigned)
         run: pnpm tauri ios build --target aarch64-sim --debug
         working-directory: apps
