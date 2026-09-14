@@ -1,9 +1,9 @@
 name: mobile
 
-# Android und iOS — ein OPTIONALER Build-Check, nur manuell (workflow_dispatch). Die SDKs machen jeden Lauf
-# teuer, und es gibt noch keine Release-/Signatur-Pipeline: das hier verifiziert nur, dass die Tauri-Mobile-App
-# baut. Es produziert UNSIGNED --debug-Artefakte (Build-Check / QA), KEINE Store-Releases. iOS nur auf macOS.
-# Wenn die echte, signierte Release-Pipeline kommt, MUSS sie --release nutzen (kein debug_assertions).
+# Android and iOS — an OPTIONAL build check, manual only (workflow_dispatch). The SDKs make every run
+# expensive, and there is no release/signing pipeline yet: this only verifies that the Tauri mobile app
+# builds. It produces UNSIGNED --debug artifacts (build-check / QA), NOT store releases. iOS only runs on macOS.
+# When the real, signed release pipeline arrives, it MUST use --release (no debug_assertions).
 
 on:
   workflow_dispatch:
@@ -36,21 +36,23 @@ jobs:
         with:
           version: 11.20.0
 
-      # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
-      # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
+      # Without pnpm-lock.yaml, setup-node will fail with a "cache" error. Once a
+      # lockfile is committed: add "cache: pnpm" here, and use "--frozen-lockfile" below.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
-      # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
+      # No lockfile in the tree — once one is committed, use
+      # --frozen-lockfile here to prevent CI from silently updating dependencies.
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
       # gen/android is gitignored, so CI starts from a blank slate — scaffold it before building. --nostart keeps
       # init non-interactive (it does not try to open Android Studio / an emulator wrapper).
       - name: Initialize Android scaffolding
-        run: pnpm tauri android init --nostart
+        env:
+          CI: "true"
+        run: pnpm tauri android init
         working-directory: apps
 
       # NOTE: --debug builds with debug_assertions ON, so this APK CONTAINS the dev-only destructive schema-reset
@@ -84,24 +86,35 @@ jobs:
         with:
           version: 11.20.0
 
-      # Ohne pnpm-lock.yaml bricht setup-node mit "cache" ab. Sobald ein
-      # Lockfile committet ist: cache: pnpm hier, --frozen-lockfile unten.
+       # Without pnpm-lock.yaml, setup-node will fail if "cache" is enabled. Once a
+       # lockfile is committed: add "cache: pnpm" here, and use "--frozen-lockfile" below.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      # Kein Lockfile im Baum — sobald eines committet ist, gehoert hier
-      # --frozen-lockfile hin, damit CI nicht heimlich aktualisiert.
+      # No lockfile in the repository — once one is committed, use 
+      # --frozen-lockfile here to prevent CI from silently updating dependencies.
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
       # gen/apple is gitignored, so CI starts from a blank slate — scaffold it before building.
       - name: Initialize iOS scaffolding
+        env:
+          CI: "true"
+          NPM_CONFIG_CONFIRM_MODULES_PURGE: "false"
         run: pnpm tauri ios init
         working-directory: apps
 
-      # Ohne Signaturzertifikat nur bis zum Simulator-Build — mehr braucht eine Pruefung nicht, und Geheimnisse
-      # gehoeren nicht in einen Fork. --debug: same caveat as Android — a build-check artifact, not a release.
+      # Without a signing certificate, only build for the simulator — this is enough for a check, and secrets 
+      # do not belong in a fork. --debug: same caveat as Android — a build-check artifact, not a release.
       - name: Build (simulator, unsigned)
-        run: pnpm tauri ios build --target aarch64-sim --debug
+        env:
+          CI: "true"
+          pnpm_config_confirm_modules_purge: "false"
+        run: |
+          # 1. Enforce headless mode directly into the working directory's config file
+          echo "confirm-modules-purge=false" >> .npmrc
+          
+          # 2. Run the Tauri build with explicit CI intent passed down
+          pnpm tauri ios build --target aarch64-sim --debug
         working-directory: apps
