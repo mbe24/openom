@@ -97,24 +97,23 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
         working-directory: apps
 
+      # Tauri's iOS build runs an Xcode "Build Rust Code" script phase that re-invokes `pnpm install`. In Xcode's
+      # non-TTY context that install wants to PURGE node_modules (there's no committed lockfile, so its dep-status
+      # check is unstable) and aborts (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY). Write pnpm's USER-level config
+      # once so that nested install — run from Xcode's own cwd — reads it (an in-cwd .npmrc / a `pnpm_config_*` env
+      # var don't reach it: the env prefix pnpm honors is `npm_config_*`, and the nested cwd isn't apps/).
+      - name: Configure pnpm for headless CI
+        run: pnpm config set confirm-modules-purge false
+
       # gen/apple is gitignored, so CI starts from a blank slate — scaffold it before building.
       - name: Initialize iOS scaffolding
-        env:
-          CI: "true"
-          NPM_CONFIG_CONFIRM_MODULES_PURGE: "false"
         run: pnpm tauri ios init
         working-directory: apps
 
-      # Without a signing certificate, only build for the simulator — this is enough for a check, and secrets 
-      # do not belong in a fork. --debug: same caveat as Android — a build-check artifact, not a release.
+      # Without a signing certificate, only build for the simulator — this is enough for a check, and secrets do
+      # not belong in a fork. --debug: same caveat as Android — a build-check artifact, not a release.
       - name: Build (simulator, unsigned)
         env:
           CI: "true"
-          pnpm_config_confirm_modules_purge: "false"
-        run: |
-          # 1. Enforce headless mode directly into the working directory's config file
-          echo "confirm-modules-purge=false" >> .npmrc
-          
-          # 2. Run the Tauri build with explicit CI intent passed down
-          pnpm tauri ios build --target aarch64-sim --debug
+        run: pnpm tauri ios build --target aarch64-sim --debug
         working-directory: apps
