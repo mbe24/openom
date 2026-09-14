@@ -92,7 +92,9 @@ services:
       retries: 12
 
   minio:
-    image: minio/minio:latest
+    # quay.io, not Docker Hub: MinIO gated its `minio/minio` Docker Hub repo (anonymous pulls now 401), which
+    # breaks fresh pulls in CI. quay.io/minio/minio is the canonical, anonymously-pullable source.
+    image: quay.io/minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: openom
