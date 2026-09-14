@@ -8,6 +8,16 @@
 # allowBuilds: esbuild's postinstall is intentionally skipped — its binary ships
 #   via the optional platform package, so no build step is needed. Declaring it
 #   false acknowledges that, so pnpm 11 does not treat the ignored build as fatal.
+# confirmModulesPurge: Tauri's iOS build runs an Xcode "Build Rust Code" script
+#   phase that re-invokes `pnpm install`. Without a committed lockfile pnpm's
+#   dep-status check is unstable and it decides to PURGE node_modules; in Xcode's
+#   non-TTY context that aborts (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+#   Setting it here (the pnpm-11 config home, read by that nested install because
+#   it runs from apps/) auto-confirms the purge non-interactively. A `pnpm config
+#   set` global write can't hold this key in pnpm 11, and CI/env vars don't reach
+#   the nested process — the committed workspace file does. Drop once a lockfile is
+#   committed (the dep-status check goes stable and the purge stops happening).
+confirmModulesPurge: false
 supportedArchitectures:
   os:
     - win32
