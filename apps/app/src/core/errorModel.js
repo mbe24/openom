@@ -83,3 +83,26 @@ export function normalizeUnknown(e) {
   }
   return internalError(cause);
 }
+
+/**
+ * Dev/diagnostic sink for a caught failure (error-model Tier 1): normalize it to an AppError and log the
+ * DEVELOPER-facing detail — `code`, `domain`, and the dev-only `cause`/`requestId`/`httpStatus` — to the
+ * console, prefixed with `context`. This is the channel that stops a swallowed error from being invisible; the
+ * UI still renders only the friendly, code-keyed message (never `cause`). Returns the normalized AppError so a
+ * caller can both log and render from one call. Safe in the worker and on the main thread (console only, no DOM)
+ * and never throws.
+ * @param {string} context  where it failed, e.g. 'gate' / 'sync' — the console prefix
+ * @param {unknown} e       the caught value
+ */
+export function logError(context, e) {
+  const err = normalizeUnknown(e);
+  try {
+    const detail = { code: err.code, domain: err.domain };
+    if (err.cause != null) detail.cause = err.cause;
+    if (err.requestId != null) detail.requestId = err.requestId;
+    if (err.httpStatus != null) detail.httpStatus = err.httpStatus;
+    // eslint-disable-next-line no-console
+    console.error(`[openom] ${context} failed`, detail);
+  } catch { /* logging must never throw */ }
+  return err;
+}

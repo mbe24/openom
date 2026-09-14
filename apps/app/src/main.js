@@ -10,7 +10,7 @@ import { RemoteStore } from './core/remoteStore.js';
 import { applyTheme, PRESETS } from './core/theme.js';
 import { loadLocale, t, locale, detectLocale, persistLocale } from './core/i18n.js';
 import { errText } from './core/errorText.js';
-import { normalizeUnknown, isAppError } from './core/errorModel.js';
+import { normalizeUnknown, isAppError, logError } from './core/errorModel.js';
 import { stats, search } from './core/queries.js';
 import { h, mount, toast, fullName } from './ui/dom.js';
 import { icons } from './ui/icons.js';
@@ -262,7 +262,9 @@ class App {
       this.showGate('recovery');
     } catch (e) {
       this.gateBusy = false;
-      this.gateError = t('gate-err-create');
+      // Route through gateErr like every other gate flow: log the real cause (Tier 1) and render a code-keyed
+      // message where the catalog covers it, falling back to the create-context copy (Tier 2).
+      this.gateError = this.gateErr(e, 'gate-err-create');
       this.renderGate();
     }
   }
@@ -554,6 +556,7 @@ class App {
   // renders its specific localized message; otherwise (a Tauri invoke, or an unknown throw) the
   // flow-specific fallback.
   gateErr(e, fallbackKey) {
+    logError('gate', e); // Tier 1: the real code/cause to the console — never swallowed, even when the copy is generic
     if (isRollback(e)) return t('gate-err-tampered');
     if (isAppError(e)) return errText(e);
     return t(fallbackKey);
